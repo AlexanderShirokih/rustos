@@ -84,7 +84,7 @@ impl Walk {
         session: &Session<E>,
         descriptor: NodeDescriptor,
     ) -> Result<()> {
-        let listed = session.client().list(descriptor, self.cursor)?.value?;
+        let listed = session.client().list(descriptor, self.cursor)??;
         if listed.count == 0 && !listed.end {
             return Err(FileSystemError::BufferTooSmall.into());
         }

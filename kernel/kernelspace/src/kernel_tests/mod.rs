@@ -1,6 +1,6 @@
 //! Test-mode ядра под `cfg(feature = "kernel-tests")`.
 //!
-//! `kmain` после bootstrap создаёт init-таск и под этой фичей запускает все
+//! `kmain` после bootstrap создаёт начальный процесс и под этой фичей запускает все
 //! зарегистрированные тест-кейсы через `kernel_tests::run_all_tests()`.
 //!
 //! Тестам вендится только консоль для маркеров.
@@ -33,7 +33,7 @@ impl Writer for ConsoleAdapter {
 
 static ADAPTER: Once<ConsoleAdapter> = Once::new();
 
-/// Init-таск под `feature = "kernel-tests"`: спавнит worker-процесс
+/// Начальный процесс под `feature = "kernel-tests"`: спавнит worker-процесс
 /// с приоритетом `highest`, который вызывает [`run`] и выключает машину
 /// через [`crate::power::system_off`].
 pub fn spawn_kernel_tests_process<A>(

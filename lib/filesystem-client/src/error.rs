@@ -17,10 +17,7 @@ pub type Result<T> = core::result::Result<T, Failure>;
 
 impl Failure {
     pub(crate) const fn peer_gone(self) -> bool {
-        matches!(
-            self,
-            Self::Transport(IpcError::PeerClosed | IpcError::SenderGone)
-        )
+        matches!(self, Self::Transport(IpcError::PeerClosed))
     }
 
     pub(crate) const fn name_missing(self) -> bool {

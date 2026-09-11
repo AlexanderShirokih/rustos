@@ -3,9 +3,9 @@
 use core::num::NonZeroU16;
 
 use ipc::{
-    WireTyped, WireValue,
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
     schema::WireType,
-    wire::{HandleSlots, IpcError, MessageBuf, value},
+    wire::{IpcError, MessageBuf, value},
 };
 
 /// Дескриптор открытого узла, в кадре занимает `u32` LE. Действителен только в своей сессии и
@@ -51,19 +51,22 @@ impl NodeDescriptor {
     }
 }
 
-impl<'a> WireValue<'a> for NodeDescriptor {
-    fn write_as_field<const N: usize>(
-        &self,
-        buf: &mut MessageBuf<N>,
-        field_id: u8,
-        _handles: &mut HandleSlots,
-    ) -> Result<(), IpcError> {
+impl<'a, R: ReceivedResources> WireValue<'a, R> for NodeDescriptor {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        Ok(Self(value::decode_u32(data)?))
+    }
+}
+
+impl IntoWireValue for NodeDescriptor {
+    type Read = Self;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
         buf.write_field(field_id, &value::encode_u32(self.0))
     }
 
-    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
-        Ok(Self(value::decode_u32(data)?))
-    }
+    fn relinquish(self) {}
 }
 
 impl WireTyped for NodeDescriptor {
@@ -74,8 +77,8 @@ impl WireTyped for NodeDescriptor {
 #[cfg(test)]
 mod tests {
     use ipc::{
-        WireValue,
-        wire::{FieldCursor, HandleSlots, IpcError, MESSAGE_INLINE_MAX, MessageBuf},
+        IntoWireValue, WireValue,
+        wire::{FieldCursor, IpcError, MessageBuf},
     };
 
     use super::NodeDescriptor;
@@ -83,13 +86,12 @@ mod tests {
     const FIELD_ID: u8 = 1;
 
     fn round_trip(fd: NodeDescriptor) -> Result<NodeDescriptor, IpcError> {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        fd.write_as_field(&mut buf, FIELD_ID, &mut HandleSlots::new())
-            .expect("write ok");
+        let mut buf = MessageBuf::new();
+        fd.write_as_field(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");
-        NodeDescriptor::from_field(field.data, &HandleSlots::new())
+        NodeDescriptor::from_field(field.data, &mut ())
     }
 
     #[test]
@@ -105,7 +107,7 @@ mod tests {
     #[test]
     fn wrong_field_length_is_rejected() {
         assert_eq!(
-            NodeDescriptor::from_field(&[1, 0], &HandleSlots::new()),
+            NodeDescriptor::from_field(&[1, 0], &mut ()),
             Err(IpcError::InvalidValue)
         );
     }

@@ -14,10 +14,8 @@ use capability::{
 use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::IrqLineSpan;
 use ipc::{
-    MessageLen, Transport,
-    wire::{
-        Cap, FLAG_PEER_CLOSE, Header, IpcError as WireError, MESSAGE_INLINE_MAX, MessageBuf, Str,
-    },
+    FrameBytes, Incoming, Listener, ReceivedResources, RecvError, ReplyChannel,
+    wire::{Cap, IpcError as WireError, MESSAGE_INLINE_MAX, Str},
 };
 use klog::{info, warn};
 use memory::{
@@ -27,8 +25,8 @@ use memory::{
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
 use syscall::{IpcBuffer, Timeout, decode_tag, encode_tag};
-use userland::{EntryView, entry_name};
-use userland_image::{ImageDecodeError, ProgramDecodeError, decode};
+use userland::EntryView;
+use userland_image::{ImageDecodeError, ProgramDecodeError, component_name, decode};
 
 use crate::{
     kernel_context::BootDtb,
@@ -94,7 +92,7 @@ pub fn spawn_process(
         .boot_entry()
         .program()
         .map_err(BootstrapSpawnError::Program)?;
-    let name = entry_name(program.path());
+    let name = component_name(program.path());
     let parts =
         user_image_parts_from_entry(&program, user_va_end).map_err(BootstrapSpawnError::Model)?;
     let user_image = parts.image();
@@ -187,17 +185,34 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
     };
 
     let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
-    let transport = KernelPortTransport::new(port.clone(), buffer, table.clone());
+    let listener = KernelPort {
+        port: port.clone(),
+        buffer,
+        table: table.clone(),
+    };
     let mut server = BootstrapServer { table, resources };
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
 
     loop {
-        match bootstrap::dispatch(&mut server, &transport) {
+        let frame = match listener.recv(&mut bytes, Timeout::INFINITE) {
+            Ok(frame) => frame,
             // Сервер не держит сессий по значкам, и убирать ему нечего. Уход значка поэтому
             // приём не прерывает.
-            Ok(()) | Err(WireError::SenderGone) => {}
-            Err(WireError::PeerClosed) => {
-                info!("bootstrap: port closed, exiting");
+            Err(RecvError::SenderGone(_)) => continue,
+            Err(e) => {
+                warn!("bootstrap: receive failed: {:?}", e);
                 return;
+            }
+        };
+        if frame.bytes.is_empty() {
+            info!("bootstrap: port closed, exiting");
+            return;
+        }
+        match bootstrap::dispatch(&mut server, frame) {
+            Ok(()) => {}
+            // Отказ доставки ответа ушедшему вызывателю порт не закрывает.
+            Err(WireError::PeerClosed) => {
+                warn!("bootstrap: reply delivery failed: caller gone");
             }
             Err(e) => {
                 warn!("bootstrap: dispatch failed: {:?}", e);
@@ -207,23 +222,15 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
     }
 }
 
-/// Закрывает bootstrap-port со стороны ядра.
+/// Закрывает bootstrap-port со стороны ядра пустым кадром.
 /// Возврат `Ok` означает, что сервер обработал всё принятое до закрытия.
 pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), KernelIpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(KernelIpcError::BadHandle)?;
 
-    let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
-    frame
-        .write_header(&Header::new(0, 0, FLAG_PEER_CLOSE))
-        .map_err(|_| KernelIpcError::MessageTooBig)?;
-    frame.finish().map_err(|_| KernelIpcError::MessageTooBig)?;
-
+    // Нулевой буфер содержит тег пустого кадра, без байт и без capability.
     let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
-    buffer
-        .with_lock(|buf| store_kernel_buffer(buf, frame.as_bytes(), &[]))
-        .map_err(|_| KernelIpcError::MessageTooBig)?;
 
     let sender = ThreadTransport::new_kernel(buffer, table);
     // Кадр закрытия идёт без значка - у него нет учёта отправителя.
@@ -252,9 +259,10 @@ impl BootstrapServer {
     }
 }
 
-impl bootstrap::Service for BootstrapServer {
+impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
     fn log(
         &mut self,
+        _frame: &BootstrapFrame,
         tag: Str<{ bootstrap_abi::LOG_TAG_MAX }>,
         message: Str<{ bootstrap_abi::LOG_MESSAGE_MAX }>,
     ) {
@@ -265,19 +273,25 @@ impl bootstrap::Service for BootstrapServer {
         }
     }
 
-    fn acquire_irq_control(&mut self) -> Result<Cap<syscall::kind::IrqControl>, u32> {
+    fn acquire_irq_control(
+        &mut self,
+        _frame: &BootstrapFrame,
+    ) -> Result<Cap<syscall::kind::IrqControl>, u32> {
         self.vend(CapabilityTarget::IrqControl(
             self.resources.irq_control.clone(),
         ))
     }
 
-    fn acquire_userland_image(&mut self) -> Result<Cap<syscall::kind::MemoryRegion>, u32> {
+    fn acquire_userland_image(
+        &mut self,
+        _frame: &BootstrapFrame,
+    ) -> Result<Cap<syscall::kind::MemoryRegion>, u32> {
         self.vend(CapabilityTarget::Memory(
             self.resources.image_region.clone(),
         ))
     }
 
-    fn acquire_boot_fdt(&mut self) -> Result<BootFdt, u32> {
+    fn acquire_boot_fdt(&mut self, _frame: &BootstrapFrame) -> Result<BootFdt, u32> {
         let region = self.vend(CapabilityTarget::Memory(self.resources.fdt_region.clone()))?;
 
         Ok(BootFdt {
@@ -288,6 +302,7 @@ impl bootstrap::Service for BootstrapServer {
 
     fn acquire_device_memory(
         &mut self,
+        _frame: &BootstrapFrame,
         index: u32,
     ) -> Result<Cap<syscall::kind::MemoryRegion>, u32> {
         let region = self
@@ -302,12 +317,12 @@ impl bootstrap::Service for BootstrapServer {
 
 fn map_kernel_error(error: KernelIpcError) -> WireError {
     match error {
-        KernelIpcError::ShouldWait => WireError::WouldBlock,
         KernelIpcError::Timeout => WireError::Timeout,
         KernelIpcError::BufferTooSmall => WireError::Truncated,
         KernelIpcError::MessageTooBig => WireError::FrameOverflow,
-        KernelIpcError::SenderGone => WireError::SenderGone,
-        KernelIpcError::PeerClosed
+        KernelIpcError::ShouldWait
+        | KernelIpcError::SenderGone
+        | KernelIpcError::PeerClosed
         | KernelIpcError::BadHandle
         | KernelIpcError::WrongType
         | KernelIpcError::AccessDenied
@@ -319,68 +334,102 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
     }
 }
 
-struct KernelPortTransport {
+struct BootstrapFrame {
+    reply: Option<KernelReply>,
+}
+
+struct KernelReply {
+    reply: Option<Arc<Reply>>,
+    buffer: KernelIpcBuffer,
+    table: Arc<MutexCell<HandleTable>>,
+}
+
+struct KernelPort {
     port: Arc<Port>,
     buffer: KernelIpcBuffer,
     table: Arc<MutexCell<HandleTable>>,
-    pending_reply: MutexCell<Option<Arc<Reply>>>,
 }
 
-impl KernelPortTransport {
-    fn new(port: Arc<Port>, buffer: KernelIpcBuffer, table: Arc<MutexCell<HandleTable>>) -> Self {
-        Self {
-            port,
-            buffer,
-            table,
-            pending_reply: MutexCell::new(None),
-        }
+impl ReceivedResources for BootstrapFrame {
+    type Handle<K: syscall::ObjectKind> = core::convert::Infallible;
+    type Reply = KernelReply;
+
+    fn take_handle<K: syscall::ObjectKind>(&mut self, _index: u8) -> Option<Self::Handle<K>> {
+        None
     }
 
-    fn thread_transport(&self) -> ThreadTransport {
-        ThreadTransport::new_kernel(self.buffer.clone(), self.table.clone())
+    fn reply_channel(handle: Self::Handle<syscall::kind::Reply>) -> Option<KernelReply> {
+        match handle {}
+    }
+
+    fn take_reply(&mut self) -> Option<KernelReply> {
+        self.reply.take()
     }
 }
 
-impl Transport for KernelPortTransport {
-    type Resources = ();
-
-    fn take_resources(&self) {}
-
-    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), WireError> {
-        let Some(reply) = self.pending_reply.with_lock(Option::take) else {
-            warn!("bootstrap: write_message without a pending reply");
-            return Ok(());
-        };
-
+impl ReplyChannel for KernelReply {
+    fn send(mut self, bytes: &[u8], handles: &[u32]) -> Result<(), WireError> {
+        let reply = self.reply.take().ok_or(WireError::PeerClosed)?;
         let delivered = self
             .buffer
             .with_lock(|buf| store_kernel_buffer(buf, bytes, handles))
             .and_then(|()| {
                 reply
-                    .reply(&self.thread_transport())
+                    .reply(&ThreadTransport::new_kernel(
+                        self.buffer.clone(),
+                        self.table.clone(),
+                    ))
                     .map_err(map_kernel_error)
             });
-
-        if let Err(e) = delivered {
-            warn!("bootstrap: reply delivery failed: {:?}", e);
+        if delivered.is_err() {
             reply.cancel();
         }
-        Ok(())
+        delivered
     }
+}
 
-    fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, WireError> {
-        let receiver = self.thread_transport();
+impl Drop for KernelReply {
+    fn drop(&mut self) {
+        if let Some(reply) = self.reply.take() {
+            reply.cancel();
+        }
+    }
+}
+
+impl Listener for KernelPort {
+    type Resources = BootstrapFrame;
+
+    fn recv<'b>(
+        &self,
+        into: &'b mut FrameBytes,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, BootstrapFrame>, RecvError> {
+        let receiver = ThreadTransport::new_kernel(self.buffer.clone(), self.table.clone());
+        let timeout_ns = (wait != Timeout::INFINITE).then_some(wait.raw());
         // Роль получателя держит capability сервера всё время его работы.
-        let reply =
-            port_recv(&self.port, &receiver, runtime(), None, None).map_err(map_kernel_error)?;
-        self.pending_reply.with_lock(|slot| *slot = reply);
-        self.buffer
-            .with_lock(|buf| load_kernel_buffer(buf, bytes, handles))
-    }
-
-    fn wait_readable(&self, _timeout: Timeout) -> Result<(), WireError> {
-        // recv сам блокирует в read_message.
-        Ok(())
+        let reply = match port_recv(&self.port, &receiver, runtime(), timeout_ns, None) {
+            Ok(reply) => reply,
+            Err(KernelIpcError::SenderGone) => {
+                return Err(RecvError::SenderGone(
+                    self.buffer.with_lock(|buf| buf.badge),
+                ));
+            }
+            Err(KernelIpcError::Timeout) => return Err(RecvError::Timeout),
+            Err(_) => return Err(RecvError::Closed),
+        };
+        // Разрушение ресурсов кадра, который не принят, отменяет ответ его вызывателю.
+        let resources = BootstrapFrame {
+            reply: reply.map(|reply| KernelReply {
+                reply: Some(reply),
+                buffer: self.buffer.clone(),
+                table: self.table.clone(),
+            }),
+        };
+        let bytes = self
+            .buffer
+            .with_lock(|buf| load_kernel_buffer(buf, into))
+            .ok_or(RecvError::Discarded)?;
+        Ok(Incoming { bytes, resources })
     }
 }
 
@@ -403,25 +452,13 @@ fn store_kernel_buffer(
     Ok(())
 }
 
-fn load_kernel_buffer(
-    buf: &IpcBuffer,
-    bytes: &mut [u8],
-    handles: &mut [u32],
-) -> Result<MessageLen, WireError> {
+fn load_kernel_buffer<'b>(buf: &IpcBuffer, into: &'b mut FrameBytes) -> Option<&'b [u8]> {
     let decoded = decode_tag(buf.tag);
     if decoded.ncaps > 0 {
-        return Err(WireError::FrameOverflow);
+        return None;
     }
-
     let len = decoded.len.min(buf.data.len());
-    if len > bytes.len() {
-        return Err(WireError::Truncated);
-    }
-
-    let _ = handles;
-    let (Some(target), Some(source)) = (bytes.get_mut(..len), buf.data.get(..len)) else {
-        return Err(WireError::Truncated);
-    };
-    target.copy_from_slice(source);
-    Ok(MessageLen::new(len, 0))
+    let bytes = into.get_mut(..len)?;
+    bytes.copy_from_slice(buf.data.get(..len)?);
+    Some(bytes)
 }

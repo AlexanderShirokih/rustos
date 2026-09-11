@@ -2,7 +2,10 @@
 
 use core::{fmt, marker::PhantomData, mem::ManuallyDrop, num::NonZeroU64};
 
-use ipc::IntoWireHandle;
+use ipc::{
+    IntoWireValue,
+    wire::{Cap, IpcError, MessageBuf},
+};
 use syscall::{Handle, ObjectKind, Rights, kind};
 
 use crate::{
@@ -145,11 +148,15 @@ impl<K: ObjectKind> From<syscall_user::ReceivedHandle<K>> for OwnedHandle<K> {
     }
 }
 
-impl<K: ObjectKind> IntoWireHandle for OwnedHandle<K> {
-    type Kind = K;
+impl<K: ObjectKind> IntoWireValue for OwnedHandle<K> {
+    type Read = Cap<K>;
 
-    fn wire_id(&self) -> u32 {
-        self.handle.raw()
+    fn write_as_field(
+        &self,
+        buf: &mut MessageBuf,
+        field_id: u8,
+    ) -> core::result::Result<(), IpcError> {
+        ipc::IntoWireValue::write_as_field(&Cap::from_handle(self.handle), buf, field_id)
     }
 
     fn relinquish(self) {

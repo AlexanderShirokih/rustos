@@ -1,10 +1,3 @@
-//! Программа-фикстура падающего монтирования представляет собой изменяемое дерево, которое
-//! обращается по невалидному адресу на переносе имени. Ядро завершает виновный процесс
-//! целиком, и rootkeeper наблюдает отказ компонента файловой системы.
-//!
-//! Перенос выбран за то, что сервер зовёт его только по запросу клиента: `unlink` он вызывает
-//! ещё и откатом неудавшегося `open` с `CREATE`.
-
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
@@ -13,23 +6,25 @@ runtime::process_heap!();
 
 extern crate alloc;
 
-use core::panic::PanicInfo;
+use core::{convert::Infallible, panic::PanicInfo};
 
-use component_startup::{ReceivedStartup, component_manifest};
+use component_startup::component_manifest;
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
-use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
+use filesystem_abi::{
+    DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system, namespace_admin,
+};
 use filesystem_server::{Error, Result as ServerResult, serve};
-use kernel_objects::{Port, kind};
-use runtime::{log_fmt, thread_exit};
-use syscall::{Handle, USER_VA_END};
+use runtime::{log_fmt, process_exit};
+use syscall::{Handle, USER_VA_END, kind};
 
 const LOG_TAG: &str = "crashfs";
 
+const FAILED_EXIT_CODE: u64 = 1;
+
 component_manifest! {
     struct CrashFileSystemStartup {
-        exports: { service: "FileSystem" },
-        establishes_sessions: true,
-        slots: {},
+        requirements: { namespace: session(namespace_admin::Protocol) },
+        exports: [file_system::Protocol],
     }
 }
 
@@ -146,33 +141,27 @@ fn kill_process_by_fault() -> ! {
     unsafe {
         unmapped.read_volatile();
     }
-    thread_exit(1)
+    process_exit(FAILED_EXIT_CODE)
 }
 
-/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
-    match run(startup) {
-        Ok(()) => thread_exit(0),
-        Err(error) => {
-            log_fmt(format_args!("stopped: {error}"));
-            thread_exit(1)
-        }
-    }
+pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
+    let Err(error) = run(parent);
+    log_fmt(format_args!("stopped: {error}"));
+    process_exit(FAILED_EXIT_CODE)
 }
 
-fn run(startup: Handle<kind::Port>) -> ServerResult<()> {
-    let ReceivedStartup { log, resources } =
-        CrashFileSystemStartup::receive(Port::from_handle(startup)).map_err(|_| Error::Start)?;
+fn run(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
+    let started = CrashFileSystemStartup::start(parent).map_err(|_| Error::Start)?;
     let backend = |_| {
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),
         })
     };
     serve(
-        log,
-        resources.startup,
-        resources.service,
+        started.log,
+        parent,
+        started.requirements.namespace,
         None,
         LOG_TAG,
         backend,
@@ -182,5 +171,5 @@ fn run(startup: Handle<kind::Port>) -> ServerResult<()> {
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     log_fmt(format_args!("panic: {info}"));
-    thread_exit(1)
+    process_exit(FAILED_EXIT_CODE)
 }

@@ -4,12 +4,6 @@ version = 1
 source = "user/testrunner/system.toml"
 path = "/boot/testrunner/plan"
 
-[stage1]
-source = "user/testrunner/stage1.toml"
-
-[[mount_tables]]
-source = "user/testrunner/namespace.toml"
-
 [[programs]]
 package = "testrunner"
 bin = "testrunner"
@@ -20,11 +14,6 @@ boot = true
 package = "testrunner"
 bin = "spawn-fixture"
 path = "/boot/spawn-fixture"
-
-[[programs]]
-package = "testrunner"
-bin = "startup-fixture"
-path = "/boot/startup-fixture"
 
 [[programs]]
 package = "testrunner"
@@ -48,33 +37,13 @@ path = "/boot/log-client-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "namespace-consumer-fixture"
-path = "/boot/namespace-consumer-fixture"
-
-[[programs]]
-package = "testrunner"
 bin = "filesystem-client-fixture"
 path = "/boot/filesystem-client-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "filesystem-consumer-fixture"
-path = "/boot/filesystem-consumer-fixture"
-
-[[programs]]
-package = "testrunner"
-bin = "directory-consumer-fixture"
-path = "/boot/directory-consumer-fixture"
-
-[[programs]]
-package = "testrunner"
-bin = "control-consumer-fixture"
-path = "/boot/control-consumer-fixture"
-
-[[programs]]
-package = "testrunner"
-bin = "supervisor-consumer-fixture"
-path = "/boot/supervisor-consumer-fixture"
+bin = "scope-consumer-fixture"
+path = "/boot/scope-consumer-fixture"
 
 [[programs]]
 package = "testrunner"
@@ -83,28 +52,68 @@ path = "/boot/unresponsive-filesystem"
 
 [[programs]]
 package = "testrunner"
-bin = "managed-startup-fixture"
-path = "/boot/managed-startup-fixture"
-
-[[programs]]
-package = "testrunner"
-bin = "managed-startup-hung"
-path = "/boot/managed-startup-hung"
-
-[[programs]]
-package = "testrunner"
 bin = "managed-startup-closed"
 path = "/boot/managed-startup-closed"
 
 [[programs]]
 package = "testrunner"
-bin = "startup-ownership-fixture"
-path = "/boot/startup-ownership-fixture"
+bin = "budget-holder-fixture"
+path = "/boot/budget-holder-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "startup-stale-buffer-fixture"
-path = "/boot/startup-stale-buffer-fixture"
+bin = "device-forwarding-fixture"
+path = "/boot/device-forwarding-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "irq-fixture"
+path = "/boot/irq-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "refusal-probe-fixture"
+path = "/boot/refusal-probe-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "log-duplicate-fixture"
+path = "/boot/log-duplicate-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "failing-fixture"
+path = "/boot/failing-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "idle-export-fixture"
+path = "/boot/idle-export-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "export-fixture"
+path = "/boot/export-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "helper-panic-fixture"
+path = "/boot/helper-panic-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "two-requirements-fixture"
+path = "/boot/two-requirements-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "probe-importer-fixture"
+path = "/boot/probe-importer-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "child-steps-fixture"
+path = "/boot/child-steps-fixture"
 
 [[programs]]
 package = "testrunner"
@@ -113,13 +122,18 @@ path = "/boot/handle-table-full-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "crash-filesystem"
-path = "/boot/crash-filesystem"
+bin = "start-handle-forward-fixture"
+path = "/boot/start-handle-forward-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "spare-filesystem"
-path = "/boot/spare-filesystem"
+bin = "answer-exhaustion-fixture"
+path = "/boot/answer-exhaustion-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "crash-filesystem"
+path = "/boot/crash-filesystem"
 
 [[programs]]
 package = "driver-pl031"
@@ -128,10 +142,6 @@ path = "/boot/driver-pl031"
 [[programs]]
 package = "namespace-router"
 path = "/boot/namespace-router"
-
-[[programs]]
-package = "init"
-path = "/boot/init"
 
 [[programs]]
 package = "filesystem-ramfs"
@@ -150,7 +160,7 @@ path = "/boot/testrunner/empty"
 source = "user/testrunner/assets/empty.txt"
 
 [[files]]
-path = "/boot/directory-consumer-fixture/sample"
+path = "/boot/scope-consumer-fixture/sample"
 source = "user/testrunner/assets/area.txt"
 
 [[programs]]

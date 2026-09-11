@@ -64,7 +64,6 @@ mod tests {
     use std::{format, string::String};
 
     use ipc::wire::Str;
-    use ipc_test::MockEnd;
 
     use super::{LOG_MESSAGE_MAX, LOG_TAG_MAX, log};
 
@@ -73,15 +72,20 @@ mod tests {
         pub(crate) last: Option<String>,
     }
 
-    impl log::Service for Sink {
-        fn write(&mut self, tag: Str<'_, { LOG_TAG_MAX }>, message: Str<'_, { LOG_MESSAGE_MAX }>) {
+    impl<F: ipc::ReceivedResources> log::Service<F> for Sink {
+        fn write(
+            &mut self,
+            _frame: &F,
+            tag: Str<'_, { LOG_TAG_MAX }>,
+            message: Str<'_, { LOG_MESSAGE_MAX }>,
+        ) {
             self.last = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
         }
     }
 
     #[test]
     fn write_round_trip() {
-        let (client_end, server_end) = MockEnd::pair();
+        let (client_end, server_end) = ipc_test::pair();
         let client = log::Client::new(client_end);
         client
             .write(
@@ -91,13 +95,15 @@ mod tests {
             .expect("log write");
 
         let mut sink = Sink::default();
-        log::dispatch(&mut sink, &server_end).expect("dispatch ok");
+        server_end
+            .serve(|frame| log::dispatch(&mut sink, frame))
+            .expect("dispatch ok");
         assert_eq!(sink.last.as_deref(), Some("[relay] log line"));
     }
 
     #[test]
     fn empty_tag_round_trips() {
-        let (client_end, server_end) = MockEnd::pair();
+        let (client_end, server_end) = ipc_test::pair();
         let client = log::Client::new(client_end);
         client
             .write(
@@ -107,13 +113,15 @@ mod tests {
             .expect("log write");
 
         let mut sink = Sink::default();
-        log::dispatch(&mut sink, &server_end).expect("dispatch ok");
+        server_end
+            .serve(|frame| log::dispatch(&mut sink, frame))
+            .expect("dispatch ok");
         assert_eq!(sink.last.as_deref(), Some("[] untagged"));
     }
 
     #[test]
     fn message_at_the_bound_round_trips() {
-        let (client_end, server_end) = MockEnd::pair();
+        let (client_end, server_end) = ipc_test::pair();
         let client = log::Client::new(client_end);
         let message = "m".repeat(LOG_MESSAGE_MAX);
         client
@@ -124,7 +132,9 @@ mod tests {
             .expect("log write");
 
         let mut sink = Sink::default();
-        log::dispatch(&mut sink, &server_end).expect("dispatch ok");
+        server_end
+            .serve(|frame| log::dispatch(&mut sink, frame))
+            .expect("dispatch ok");
         assert_eq!(sink.last.expect("logged").len(), 8 + LOG_MESSAGE_MAX);
     }
 }

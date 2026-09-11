@@ -3,17 +3,31 @@ version = 1
 [[components]]
 executable = "namespace-router"
 memory_limit = "8M"
-startup_timeout = "2s"
-on_failure = "restart 2 then halt"
+restarts = 2
 
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-startup_timeout = "2s"
-on_failure = "halt"
+scope = { namespace = "/" }
 
 [[components]]
-executable = "init"
+executable = "filesystem-ramfs"
+memory_limit = "4M"
+scope = { namespace = "/tmp" }
+
+[[components]]
+executable = "driver-pl031"
+memory_limit = "1M"
+restarts = 2
+
+[[components]]
+executable = "calculator"
+memory_limit = "1M"
+restarts = 2
+
+[[components]]
+executable = "demo"
 memory_limit = "2M"
-startup_timeout = "2s"
-on_failure = "halt"
+restarts = 2
+bind = { area = "filesystem-imagefs" }
+scope = { area = "/boot/demo" }

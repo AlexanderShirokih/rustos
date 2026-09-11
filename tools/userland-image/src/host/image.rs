@@ -7,7 +7,7 @@ use super::{build::BuiltEntry, files::LoadedFile, program::validate_program};
 
 const _: () = assert!(PATH_MAX == USERLAND_ENTRY_PATH_CAPACITY);
 
-pub(crate) fn validate_image_path(path: &str) -> Result<()> {
+pub(super) fn validate_image_path(path: &str) -> Result<()> {
     filesystem_abi::Path::new(path).map_err(|_| {
         anyhow!(
             "image path '{path}' must be absolute and at most {PATH_MAX} bytes, \
@@ -172,7 +172,7 @@ mod tests {
     use std::path::PathBuf;
 
     use userland::{EntryView, SegmentPermissions};
-    use userland_image::{BOOT_STAGE_ONE_DIRECTORY, decode};
+    use userland_image::decode;
 
     use super::{
         super::{build::BuiltSegment, program::ResolvedProgram},
@@ -267,12 +267,6 @@ mod tests {
             err.to_string(),
             "image path '/boot/rootkeeper/motdé' must be ASCII"
         );
-    }
-
-    #[test]
-    fn a_qualified_instance_name_holds_as_a_stage_one_record_path() {
-        validate_image_path(&format!("{BOOT_STAGE_ONE_DIRECTORY}/foo::helper"))
-            .expect("a qualified instance name holds as an image record path");
     }
 
     #[test]

@@ -49,7 +49,7 @@ ipc::protocol! {
         /// округляется вверх до страницы, нулевой либо превышающий потолок сервера - `NoSpace`.
         /// Сессия получает буфер один раз, повторный вызов - `AlreadyExists`. Регион остаётся за
         /// сервером, и закрытие сессии отзывает выданную capability.
-        call fn acquire_buffer(size: u32) -> Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
+        call fn acquire_buffer(size: u32) -> own Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
 
         /// Открывает узел по пути внутри монтирования. `mode` задаёт режим доступа дескриптора,
         /// `flags` - действия над деревом имён. Дескриптор держит узел до `close` и адресует тот
@@ -137,7 +137,7 @@ ipc::protocol! {
         /// `ReadOnly`.
         call fn create_backed(
             path: ipc::wire::Str<{ PATH_MAX }>,
-            region: Cap<syscall::kind::MemoryRegion>,
+            own region: ipc::wire::Cap<syscall::kind::MemoryRegion>,
             size: u64,
         ) -> Result<u32, FileSystemError>;
 
@@ -149,7 +149,7 @@ ipc::protocol! {
         /// пределом этой ёмкости отвечают `NoSpace`.
         call fn backing_memory(
             fd: NodeDescriptor,
-        ) -> Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
+        ) -> own Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
 
         /// Отдаёт capability свежей сессии, корнем которой становится узел `path`. Путь
         /// отсчитывается от корня вызванной сессии, и окно производной сессии только сужается.
@@ -158,7 +158,7 @@ ipc::protocol! {
         /// Дескрипторы и буфер данных у производной сессии свои.
         call fn open_root(
             path: ipc::wire::Str<{ PATH_MAX }>,
-        ) -> Result<ipc::wire::Cap<syscall::kind::Port>, FileSystemError>;
+        ) -> own Result<ipc::wire::Session<crate::file_system::Protocol>, FileSystemError>;
     }
 }
 
@@ -172,11 +172,7 @@ mod tests {
         vec::Vec,
     };
 
-    use ipc::{
-        Transport,
-        wire::{Cap, Str},
-    };
-    use ipc_test::MockEnd;
+    use ipc::wire::{Cap, Str};
 
     use super::{
         AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind,
@@ -185,7 +181,8 @@ mod tests {
 
     const BUFFER_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x11);
     const BACKING_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x22);
-    const SCOPED_CAP: Cap<syscall::kind::Port> = cap(0x33);
+    const SCOPED_SESSION: ipc::wire::Session<file_system::Protocol> =
+        ipc::wire::Session::from_handle(cap(0x33));
     const IMPORT_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x44);
     const READ_COUNT: u32 = 512;
     const DONE: u32 = 0;
@@ -274,11 +271,13 @@ mod tests {
         }
     }
 
-    impl file_system::Service for Recorder {
+    impl file_system::Service<ipc_test::MockResources> for Recorder {
         fn acquire_buffer(
             &mut self,
+            _frame: &ipc_test::MockResources,
             size: u32,
-        ) -> Result<Cap<syscall::kind::MemoryRegion>, FileSystemError> {
+        ) -> impl ipc::IntoWireValue<Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>>
+        {
             self.record(Call::AcquireBuffer { size });
             if size == 0 {
                 return Err(FileSystemError::NoSpace);
@@ -288,6 +287,7 @@ mod tests {
 
         fn open(
             &mut self,
+            _frame: &ipc_test::MockResources,
             path: Str<'_, { PATH_MAX }>,
             mode: AccessMode,
             flags: OpenFlags,
@@ -300,13 +300,18 @@ mod tests {
             Ok(OPENED)
         }
 
-        fn close(&mut self, fd: NodeDescriptor) -> Result<u32, FileSystemError> {
+        fn close(
+            &mut self,
+            _frame: &ipc_test::MockResources,
+            fd: NodeDescriptor,
+        ) -> Result<u32, FileSystemError> {
             self.record(Call::Close { fd });
             Ok(DONE)
         }
 
         fn read(
             &mut self,
+            _frame: &ipc_test::MockResources,
             fd: NodeDescriptor,
             offset: u64,
             len: u32,
@@ -317,6 +322,7 @@ mod tests {
 
         fn write(
             &mut self,
+            _frame: &ipc_test::MockResources,
             fd: NodeDescriptor,
             offset: u64,
             len: u32,
@@ -325,23 +331,38 @@ mod tests {
             Ok(WRITTEN)
         }
 
-        fn set_size(&mut self, fd: NodeDescriptor, size: u64) -> Result<u32, FileSystemError> {
+        fn set_size(
+            &mut self,
+            _frame: &ipc_test::MockResources,
+            fd: NodeDescriptor,
+            size: u64,
+        ) -> Result<u32, FileSystemError> {
             self.record(Call::SetSize { fd, size });
             Ok(DONE)
         }
 
-        fn stat(&mut self, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
+        fn stat(
+            &mut self,
+            _frame: &ipc_test::MockResources,
+            fd: NodeDescriptor,
+        ) -> Result<NodeInfo, FileSystemError> {
             self.record(Call::Stat { fd });
             Ok(NODE_INFO)
         }
 
-        fn list(&mut self, fd: NodeDescriptor, from: DirCursor) -> Result<Listed, FileSystemError> {
+        fn list(
+            &mut self,
+            _frame: &ipc_test::MockResources,
+            fd: NodeDescriptor,
+            from: DirCursor,
+        ) -> Result<Listed, FileSystemError> {
             self.record(Call::List { fd, from });
             Ok(LISTED)
         }
 
         fn rename(
             &mut self,
+            _frame: &ipc_test::MockResources,
             from: Str<'_, { PATH_MAX }>,
             to: Str<'_, { PATH_MAX }>,
         ) -> Result<u32, FileSystemError> {
@@ -354,6 +375,7 @@ mod tests {
 
         fn unlink(
             &mut self,
+            _frame: &ipc_test::MockResources,
             path: Str<'_, { PATH_MAX }>,
             expected: NodeKind,
         ) -> Result<u32, FileSystemError> {
@@ -366,6 +388,7 @@ mod tests {
 
         fn create_backed(
             &mut self,
+            _frame: &ipc_test::MockResources,
             path: Str<'_, { PATH_MAX }>,
             region: Cap<syscall::kind::MemoryRegion>,
             size: u64,
@@ -380,20 +403,25 @@ mod tests {
 
         fn backing_memory(
             &mut self,
+            _frame: &ipc_test::MockResources,
             fd: NodeDescriptor,
-        ) -> Result<Cap<syscall::kind::MemoryRegion>, FileSystemError> {
+        ) -> impl ipc::IntoWireValue<Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>>
+        {
             self.record(Call::BackingMemory { fd });
             Ok(BACKING_CAP)
         }
 
         fn open_root(
             &mut self,
+            _frame: &ipc_test::MockResources,
             path: Str<'_, { PATH_MAX }>,
-        ) -> Result<Cap<syscall::kind::Port>, FileSystemError> {
+        ) -> impl ipc::IntoWireValue<
+            Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
+        > {
             self.record(Call::OpenRoot {
                 path: path.as_str().to_string(),
             });
-            Ok(SCOPED_CAP)
+            Ok(SCOPED_SESSION)
         }
     }
 
@@ -404,8 +432,10 @@ mod tests {
         }
     }
 
-    fn with_service<R>(body: impl FnOnce(&file_system::Client<MockEnd>) -> R) -> (R, Vec<Call>) {
-        let (client_end, server_end) = MockEnd::pair();
+    fn with_service<R>(
+        body: impl FnOnce(&file_system::Client<ipc_test::MockChannel>) -> R,
+    ) -> (R, Vec<Call>) {
+        let (client_end, server_end) = ipc_test::pair();
         let client = file_system::Client::new(client_end);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let result = thread::scope(|scope| {
@@ -413,11 +443,7 @@ mod tests {
                 calls: Arc::clone(&calls),
             };
             scope.spawn(move || {
-                while server_end.wait_readable(ipc::Timeout::INFINITE).is_ok() {
-                    if file_system::dispatch(&mut service, &server_end).is_err() {
-                        break;
-                    }
-                }
+                let _ = server_end.serve_all(|frame| file_system::dispatch(&mut service, frame));
             });
             let result = body(&client);
             drop(client);
@@ -430,44 +456,106 @@ mod tests {
         (result, calls)
     }
 
-    #[test]
-    fn acquire_buffer_round_trip() {
-        let (mut result, calls) =
-            with_service(|client| client.acquire_buffer(4096).expect("call ok"));
-        assert_eq!(result.value, Ok(BUFFER_CAP));
-        assert_eq!(result.claim(BUFFER_CAP), Some(BUFFER_CAP));
-        // Повторный запрос той же capability ответ уже не находит.
-        assert_eq!(result.claim(BUFFER_CAP), None);
-        assert_eq!(calls, [Call::AcquireBuffer { size: 4096 }]);
+    fn path(text: &str) -> Str<'_, PATH_MAX> {
+        Str::new(text).expect("path within bound")
     }
 
+    /// Каждая операция доносит свои параметры до метода сервиса и возвращает его ответ.
     #[test]
-    fn domain_error_round_trips_as_fs_error() {
-        let (result, calls) = with_service(|client| client.acquire_buffer(0).expect("call ok"));
-        assert_eq!(result.value, Err(FileSystemError::NoSpace));
-        assert_eq!(calls, [Call::AcquireBuffer { size: 0 }]);
-    }
-
-    #[test]
-    fn open_round_trip() {
+    fn every_operation_carries_its_parameters_and_answer() {
         let flags = OpenFlags::CREATE | OpenFlags::EXCLUSIVE;
-        let (result, calls) = with_service(|client| {
-            client
-                .open(
-                    Str::new("/data/sample").expect("path within bound"),
-                    AccessMode::ReadWrite,
-                    flags,
-                )
-                .expect("call ok")
+        let from = DirCursor::from_raw(2);
+        let (answers, calls) = with_service(|client| {
+            [
+                client.acquire_buffer(4096).map(|buffer| buffer.map(|_| 0)),
+                client.acquire_buffer(0).map(|buffer| buffer.map(|_| 0)),
+                client
+                    .open(path("/data/sample"), AccessMode::ReadWrite, flags)
+                    .map(|opened| opened.map(|opened| opened.size as u32)),
+                client.close(FD),
+                client.read(FD, 1024, 4096),
+                client
+                    .write(FD, u64::MAX, 12)
+                    .map(|written| written.map(|written| written.count)),
+                client.set_size(FD, 8192),
+                client
+                    .stat(FD)
+                    .map(|info| info.map(|info| info.size as u32)),
+                client
+                    .list(FD, from)
+                    .map(|listed| listed.map(|listed| listed.count)),
+                client.rename(path("/store/a"), path("/store/b")),
+                client.unlink(path("/store/a"), NodeKind::File),
+                client.backing_memory(FD).map(|backing| backing.map(|_| 0)),
+                client.create_backed(path("/store/shared"), IMPORT_CAP, 123),
+                client
+                    .open_root(path("/window"))
+                    .map(|scoped| scoped.map(|_| 0)),
+            ]
+            .map(|answer| answer.expect("call ok"))
         });
-        assert_eq!(result.value, Ok(OPENED));
+
+        assert_eq!(
+            answers,
+            [
+                Ok(0),
+                Err(FileSystemError::NoSpace),
+                Ok(OPENED.size as u32),
+                Ok(DONE),
+                Ok(READ_COUNT),
+                Ok(WRITTEN.count),
+                Ok(DONE),
+                Ok(NODE_INFO.size as u32),
+                Ok(LISTED.count),
+                Ok(DONE),
+                Ok(DONE),
+                Ok(0),
+                Ok(DONE),
+                Ok(0),
+            ]
+        );
         assert_eq!(
             calls,
-            [Call::Open {
-                path: "/data/sample".to_string(),
-                mode: AccessMode::ReadWrite,
-                flags,
-            }]
+            [
+                Call::AcquireBuffer { size: 4096 },
+                Call::AcquireBuffer { size: 0 },
+                Call::Open {
+                    path: "/data/sample".to_string(),
+                    mode: AccessMode::ReadWrite,
+                    flags,
+                },
+                Call::Close { fd: FD },
+                Call::Read {
+                    fd: FD,
+                    offset: 1024,
+                    len: 4096,
+                },
+                Call::Write {
+                    fd: FD,
+                    offset: u64::MAX,
+                    len: 12,
+                },
+                Call::SetSize { fd: FD, size: 8192 },
+                Call::Stat { fd: FD },
+                Call::List { fd: FD, from },
+                Call::Rename {
+                    from: "/store/a".to_string(),
+                    to: "/store/b".to_string(),
+                },
+                Call::Unlink {
+                    path: "/store/a".to_string(),
+                    expected: NodeKind::File,
+                },
+                Call::BackingMemory { fd: FD },
+                Call::CreateBacked {
+                    path: "/store/shared".to_string(),
+                    region: IMPORT_CAP.raw().get(),
+                    size: 123,
+                },
+                Call::OpenRoot {
+                    path: "/window".to_string(),
+                },
+            ]
         );
     }
 
@@ -483,161 +571,13 @@ mod tests {
                 )
                 .expect("call ok")
         });
-        assert_eq!(result.value, Ok(OPENED));
+        assert_eq!(result, Ok(OPENED));
         assert_eq!(
             calls,
             [Call::Open {
                 path,
                 mode: AccessMode::Read,
                 flags: OpenFlags::NONE,
-            }]
-        );
-    }
-
-    #[test]
-    fn close_round_trip() {
-        let (result, calls) = with_service(|client| client.close(FD).expect("call ok"));
-        assert_eq!(result.value, Ok(DONE));
-        assert_eq!(calls, [Call::Close { fd: FD }]);
-    }
-
-    #[test]
-    fn read_round_trip() {
-        let (result, calls) = with_service(|client| client.read(FD, 1024, 4096).expect("call ok"));
-        assert_eq!(result.value, Ok(READ_COUNT));
-        assert_eq!(
-            calls,
-            [Call::Read {
-                fd: FD,
-                offset: 1024,
-                len: 4096,
-            }]
-        );
-    }
-
-    #[test]
-    fn write_round_trip() {
-        let (result, calls) =
-            with_service(|client| client.write(FD, u64::MAX, 12).expect("call ok"));
-        assert_eq!(result.value, Ok(WRITTEN));
-        assert_eq!(
-            calls,
-            [Call::Write {
-                fd: FD,
-                offset: u64::MAX,
-                len: 12,
-            }]
-        );
-    }
-
-    #[test]
-    fn set_size_round_trip() {
-        let (result, calls) = with_service(|client| client.set_size(FD, 8192).expect("call ok"));
-        assert_eq!(result.value, Ok(DONE));
-        assert_eq!(calls, [Call::SetSize { fd: FD, size: 8192 }]);
-    }
-
-    #[test]
-    fn stat_round_trip() {
-        let (result, calls) = with_service(|client| client.stat(FD).expect("call ok"));
-        assert_eq!(result.value, Ok(NODE_INFO));
-        assert_eq!(calls, [Call::Stat { fd: FD }]);
-    }
-
-    #[test]
-    fn list_round_trip() {
-        let from = DirCursor::from_raw(2);
-        let (result, calls) = with_service(|client| client.list(FD, from).expect("call ok"));
-        assert_eq!(result.value, Ok(LISTED));
-        assert_eq!(calls, [Call::List { fd: FD, from }]);
-    }
-
-    #[test]
-    fn rename_round_trip() {
-        let (result, calls) = with_service(|client| {
-            client
-                .rename(
-                    Str::new("/store/a").expect("path within bound"),
-                    Str::new("/store/b").expect("path within bound"),
-                )
-                .expect("call ok")
-        });
-        assert_eq!(result.value, Ok(DONE));
-        assert_eq!(
-            calls,
-            [Call::Rename {
-                from: "/store/a".to_string(),
-                to: "/store/b".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn unlink_round_trip() {
-        let (result, calls) = with_service(|client| {
-            client
-                .unlink(
-                    Str::new("/store/a").expect("path within bound"),
-                    NodeKind::File,
-                )
-                .expect("call ok")
-        });
-        assert_eq!(result.value, Ok(DONE));
-        assert_eq!(
-            calls,
-            [Call::Unlink {
-                path: "/store/a".to_string(),
-                expected: NodeKind::File,
-            }]
-        );
-    }
-
-    #[test]
-    fn backing_memory_round_trip() {
-        let (mut result, calls) =
-            with_service(|client| client.backing_memory(FD).expect("call ok"));
-        assert_eq!(result.value, Ok(BACKING_CAP));
-        assert_eq!(result.claim(BACKING_CAP), Some(BACKING_CAP));
-        assert_eq!(result.claim(BACKING_CAP), None);
-        assert_eq!(calls, [Call::BackingMemory { fd: FD }]);
-    }
-
-    #[test]
-    fn create_backed_round_trip() {
-        let (result, calls) = with_service(|client| {
-            client
-                .create_backed(
-                    Str::new("/store/shared").expect("path within bound"),
-                    IMPORT_CAP,
-                    123,
-                )
-                .expect("call ok")
-        });
-        assert_eq!(result.value, Ok(DONE));
-        assert_eq!(
-            calls,
-            [Call::CreateBacked {
-                path: "/store/shared".to_string(),
-                region: IMPORT_CAP.raw().get(),
-                size: 123,
-            }]
-        );
-    }
-
-    #[test]
-    fn open_root_round_trip() {
-        let (mut result, calls) = with_service(|client| {
-            client
-                .open_root(Str::new("/window").expect("path within bound"))
-                .expect("call ok")
-        });
-        assert_eq!(result.value, Ok(SCOPED_CAP));
-        assert_eq!(result.claim(SCOPED_CAP), Some(SCOPED_CAP));
-        assert_eq!(result.claim(SCOPED_CAP), None);
-        assert_eq!(
-            calls,
-            [Call::OpenRoot {
-                path: "/window".to_string(),
             }]
         );
     }

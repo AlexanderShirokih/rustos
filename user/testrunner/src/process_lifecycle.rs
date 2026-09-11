@@ -122,21 +122,21 @@ fn closing_the_last_child_capability_removes_the_child() {
 
 #[kernel_test]
 fn removing_a_holder_removes_the_processes_it_held() {
-    let supervisor = Fixture::spawn();
+    let holder = Fixture::spawn();
     let (child_process, child_port) = Fixture::spawn().into_parts();
 
     // Капа передаётся переносом. Дубликат - производная нашей корневой капы, и её
     // закрытие отзывает дубликат напрямую, минуя каскад.
     let child_cap = child_process.into_raw().raw();
     kernel_tests::kassert_eq!(
-        supervisor.request_status(OP_HOLD_CAP, 0, &[child_cap]),
+        holder.request_status(OP_HOLD_CAP, 0, &[child_cap]),
         REPLY_OK
     );
 
-    let (supervisor_process, supervisor_port) = supervisor.into_parts();
-    drop(supervisor_process);
+    let (holder_process, holder_port) = holder.into_parts();
+    drop(holder_process);
 
-    assert_fixture_removed(&supervisor_port);
+    assert_fixture_removed(&holder_port);
     assert_fixture_removed(&child_port);
 }
 

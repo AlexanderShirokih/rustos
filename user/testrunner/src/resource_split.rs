@@ -17,11 +17,11 @@ use crate::{
     },
 };
 
-const CHILD_PAGES: u64 = 2;
+const CHILD_BYTES: u64 = 8 * 1024;
 
 const DEPTH_CEILING: usize = 8;
 
-const FIXTURE_SLACK_PAGES: u64 = 64;
+const FIXTURE_SLACK_BYTES: u64 = 256 * 1024;
 
 const OVERSIZE_FACTOR: u64 = 4;
 
@@ -58,7 +58,7 @@ fn closing_the_derived_resource_returns_its_budget() {
     // Бюджет исходного ресурса конечен. Цикл сходится, только если закрытие
     // производного возвращает страницы.
     for _ in 0..64 {
-        let child = parent.split(CHILD_PAGES).expect("split");
+        let child = parent.split(CHILD_BYTES).expect("split");
         let region = child
             .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
             .expect("region within the derived budget");
@@ -69,8 +69,8 @@ fn closing_the_derived_resource_returns_its_budget() {
 
 #[kernel_test]
 fn child_started_with_a_resource_is_metered_by_it() {
-    let metered = Fixture::spawn_with_slack(FIXTURE_SLACK_PAGES);
-    let oversized = metered.budget_pages() * OVERSIZE_FACTOR;
+    let metered = Fixture::spawn_with_slack(FIXTURE_SLACK_BYTES);
+    let oversized = metered.budget_bytes().div_ceil(USERLAND_PAGE_SIZE) * OVERSIZE_FACTOR;
 
     // Потомок на ресурсе родителя запрос проводит. Он упирается в корневой
     // бюджет, которому такой размер по силам.
@@ -162,7 +162,24 @@ fn granted_resource_rights_shrink_to_the_passing_handle() {
 }
 
 #[kernel_test]
-fn split_of_zero_pages_is_rejected() {
+fn a_split_of_one_byte_takes_a_whole_page() {
+    let origin = Resource::self_resource().expect("self metering resource");
+    let parent = origin.split(1).expect("one byte budget");
+
+    let child = parent.split(1).expect("split of the whole budget");
+    kernel_tests::kassert!(matches!(
+        parent.split(1).err(),
+        Some(kernel_objects::Error::Syscall(
+            SyscallError::ResourceExhausted
+        ))
+    ));
+
+    drop(child);
+    kernel_tests::kassert!(parent.split(1).is_ok());
+}
+
+#[kernel_test]
+fn split_of_zero_bytes_is_rejected() {
     let parent = Resource::self_resource().expect("self metering resource");
 
     kernel_tests::kassert!(matches!(

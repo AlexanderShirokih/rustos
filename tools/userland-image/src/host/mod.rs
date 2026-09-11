@@ -14,18 +14,17 @@ use std::{
 
 use anyhow::{Context, Result};
 
-pub(crate) use self::image::validate_image_path;
 pub use self::{build::UserlandTarget, files::ExtraFile};
 use self::{
     build::build_program,
     files::collect_files,
     image::assemble_userland_image,
     program::resolve_programs,
-    records::{compile_mount_table_record, compile_stage_records},
+    records::compile_plan_record,
     source::load_manifest,
     workspace::{load_workspace_metadata, userland_workspace},
 };
-use crate::plan::{PlanProgram, StageInstances};
+use crate::plan::PlanProgram;
 
 /// Переменная окружения, передаваемая сборке каждой программы образа.
 #[derive(Clone, Copy, Debug)]
@@ -78,20 +77,8 @@ pub fn build_userland(
             manifest: &entry.manifest,
         })
         .collect();
-    let instances = if let Some(plan) = &manifest.plan {
-        let stages = compile_stage_records(
-            project_root,
-            plan,
-            manifest.stage1.as_ref(),
-            &built_programs,
-        )?;
-        files.extend(stages.records);
-        stages.instances
-    } else {
-        StageInstances::default()
-    };
-    for table in &manifest.mount_tables {
-        files.push(compile_mount_table_record(project_root, table, &instances)?);
+    if let Some(plan) = &manifest.plan {
+        files.push(compile_plan_record(project_root, plan, &built_programs)?);
     }
 
     let blob = assemble_userland_image(&built_entries, &files)?;

@@ -7,13 +7,10 @@ use bootstrap_abi::bootstrap;
 use kernel_objects::{MemoryRegion, Port, Process, Resource, Result};
 use runtime::{PortTransport, Timeout};
 use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
-use userland_image::{component_name, decode};
-use userland_loader::{launch_entry_retained, load_entry};
+use userland_image::{DecodedProgram, component_name, decode};
+use userland_loader::load_entry;
 
-use crate::{
-    fixture_protocol::{OP_WRITE_SLOT, encode_request},
-    ipc_raw,
-};
+use crate::{composition::image, fixture_protocol::encode_request, ipc_raw};
 
 const REQUEST_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Бюджет ожидания завершения потомка.
@@ -23,24 +20,12 @@ const FIXTURE_ENTRY: &str = "/boot/port-fixture/program";
 
 const FIXTURE_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 
-const FIXTURE_LEASE_BADGE: NonZeroU64 = NonZeroU64::new(2).expect("lease badge is non-zero");
-
-const LEASE_START_PROBE: u64 = 0xC0DE;
-
-/// Путь запуска фикстуры.
-pub enum Launch {
-    /// Вызывающий создаёт порт и передаёт его серверную сторону стартовым хэндлом.
-    Bootstrap,
-    /// Загрузчик создаёт порт, а клиентскую сторону минтит под lease-значком.
-    Leased,
-}
-
 /// Метеринг спавнимой фикстуры.
 pub enum Metering<'a> {
     /// Ресурс родителя.
     Inherited,
-    /// Отделённый бюджет: страницы сегментов образа плюс запас на собственные
-    /// аллокации фикстуры.
+    /// Отделённый бюджет: сегменты образа, округлённые до страницы образа, плюс запас
+    /// в байтах на собственные аллокации фикстуры.
     SplitWithSlack(u64),
     /// Готовый ресурс вызывающего. Он задаёт права капы потомка.
     Provided(&'a Resource),
@@ -50,52 +35,44 @@ pub enum Metering<'a> {
 pub struct Fixture {
     process: Process,
     port: Port,
-    budget_pages: Option<u64>,
+    budget_bytes: Option<u64>,
 }
 
 impl Fixture {
     /// Спавнит фикстуру на метеринг-ресурсе родителя.
     pub fn spawn() -> Self {
-        Self::spawn_metered_by(&Metering::Inherited, &Launch::Bootstrap)
-            .expect("spawn port fixture")
+        Self::spawn_metered_by(&Metering::Inherited).expect("spawn port fixture")
     }
 
-    /// Спавнит фикстуру retained-запуском загрузчика.
-    pub fn spawn_leased() -> Self {
-        Self::spawn_metered_by(&Metering::Inherited, &Launch::Leased).expect("spawn port fixture")
-    }
-
-    /// Спавнит фикстуру на отделённом от родителя бюджете: страницы сегментов
-    /// её образа плюс `slack_pages` на её собственные аллокации.
-    pub fn spawn_with_slack(slack_pages: u64) -> Self {
-        Self::try_spawn_with_slack(slack_pages).expect("spawn port fixture")
+    /// Спавнит фикстуру на отделённом от родителя бюджете: сегменты её образа,
+    /// округлённые до страницы образа, плюс `slack_bytes` на её собственные аллокации.
+    pub fn spawn_with_slack(slack_bytes: u64) -> Self {
+        Self::try_spawn_with_slack(slack_bytes).expect("spawn port fixture")
     }
 
     /// То же, что [`spawn_with_slack`](Self::spawn_with_slack), но отказ
     /// загрузки образа возвращается вызывающему.
-    pub fn try_spawn_with_slack(slack_pages: u64) -> Result<Self> {
-        Self::spawn_metered_by(&Metering::SplitWithSlack(slack_pages), &Launch::Bootstrap)
+    pub fn try_spawn_with_slack(slack_bytes: u64) -> Result<Self> {
+        Self::spawn_metered_by(&Metering::SplitWithSlack(slack_bytes))
     }
 
     /// Спавнит фикстуру на ресурсе вызывающего.
     pub fn spawn_on(resource: &Resource) -> Self {
-        Self::spawn_metered_by(&Metering::Provided(resource), &Launch::Bootstrap)
-            .expect("spawn port fixture")
+        Self::spawn_metered_by(&Metering::Provided(resource)).expect("spawn port fixture")
     }
 
-    /// Отделённый под потомка бюджет в страницах.
-    pub fn budget_pages(&self) -> u64 {
-        self.budget_pages
+    /// Отделённый под потомка бюджет в байтах.
+    pub fn budget_bytes(&self) -> u64 {
+        self.budget_bytes
             .expect("fixture spawned on a split budget")
     }
 
-    fn spawn_metered_by(metering: &Metering<'_>, launch: &Launch) -> Result<Self> {
-        let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-        let mut response = client
+    fn spawn_metered_by(metering: &Metering<'_>) -> Result<Self> {
+        let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+        let cap = client
             .acquire_userland_image()
-            .expect("acquire_userland_image call");
-        let capability = response.value.expect("vend ok");
-        let cap = response.claim(capability).expect("capability owner");
+            .expect("acquire_userland_image call")
+            .expect("vend ok");
 
         let region = MemoryRegion::from(cap);
         let mapping = region.map_full_read_only().expect("map image read-only");
@@ -106,7 +83,7 @@ impl Fixture {
             .program()
             .expect("fixture record carries a program");
 
-        let mut budget_pages = None;
+        let mut budget_bytes = None;
         let own_resource;
         // Капа-источник производного ресурса остаётся действительной до конца загрузки. Её
         // закрытие отзывает производную капу раньше, чем та оплатит сегменты.
@@ -117,49 +94,26 @@ impl Fixture {
                 own_resource = Resource::self_resource().expect("self metering resource");
                 &own_resource
             }
-            Metering::SplitWithSlack(slack_pages) => {
-                let pages = image_pages(&program) + slack_pages;
-                budget_pages = Some(pages);
+            Metering::SplitWithSlack(slack_bytes) => {
+                let bytes = image_bytes(&program) + slack_bytes;
+                budget_bytes = Some(bytes);
                 split_parent = Resource::self_resource().expect("self metering resource");
-                own_resource = split_parent.split(pages).expect("split the child budget");
+                own_resource = split_parent.split(bytes).expect("split the child budget");
                 &own_resource
             }
         };
-        let (process, port) = match launch {
-            Launch::Bootstrap => {
-                let service = Port::create_service(Some(FIXTURE_SESSION_BADGE))?;
-                (
-                    load_entry(
-                        &program,
-                        Some(component_name(FIXTURE_ENTRY)),
-                        resource,
-                        service.server,
-                    )?,
-                    service.client,
-                )
-            }
-            Launch::Leased => {
-                let initialized = launch_entry_retained(
-                    &program,
-                    Some(component_name(FIXTURE_ENTRY)),
-                    resource,
-                    Some(FIXTURE_LEASE_BADGE),
-                    |startup| {
-                        ipc_raw::write_frame(
-                            &encode_request(OP_WRITE_SLOT, LEASE_START_PROBE),
-                            &[],
-                        );
-                        startup.call(REQUEST_TIMEOUT)
-                    },
-                )?;
-                (initialized.process, initialized.startup)
-            }
-        };
+        let service = Port::create_service(Some(FIXTURE_SESSION_BADGE))?;
+        let process = load_entry(
+            &program,
+            component_name(FIXTURE_ENTRY),
+            resource,
+            service.server,
+        )?;
 
         Ok(Self {
             process,
-            port,
-            budget_pages,
+            port: service.client,
+            budget_bytes,
         })
     }
 
@@ -199,9 +153,28 @@ impl Fixture {
     }
 }
 
-fn image_pages<'a, E: EntryView<'a>>(program: &E) -> u64 {
+fn image_bytes<'a, E: EntryView<'a>>(program: &E) -> u64 {
     program
         .segments()
-        .map(|segment| segment.mem_size().div_ceil(USERLAND_PAGE_SIZE))
+        .map(|segment| segment.mem_size().next_multiple_of(USERLAND_PAGE_SIZE))
         .sum()
+}
+
+pub(crate) fn program(path: &str) -> DecodedProgram<'static> {
+    image()
+        .entries()
+        .expect("userland image decodes")
+        .entry(path)
+        .expect("image carries the entry")
+        .program()
+        .expect("image entry is a program")
+}
+
+pub(crate) fn spawn_entry(path: &str, start: Port) -> Process {
+    let resource = Resource::self_resource().expect("self metering resource");
+    load_entry(&program(path), component_name(path), &resource, start).expect("spawn from image")
+}
+
+pub(crate) fn process_bytes<'a, E: EntryView<'a>>(program: &E) -> u64 {
+    image_bytes(program) + program.stack_size().next_multiple_of(USERLAND_PAGE_SIZE)
 }

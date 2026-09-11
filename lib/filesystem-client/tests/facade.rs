@@ -27,10 +27,10 @@ use filesystem_abi::{
 };
 use filesystem_client::{Environment, Failure, FileSystem, SharedRegion};
 use ipc::{
-    MessageLen, Timeout, Transport,
-    wire::{Cap, HEADER_SIZE, IpcError, Str},
+    Channel, FrameBytes, Incoming, Listener, Timeout,
+    wire::{Cap, HEADER_SIZE, IpcError, MESSAGE_INLINE_MAX, Str},
 };
-use ipc_test::{MockEnd, MockResources};
+use ipc_test::{MockChannel, MockListener, MockResources};
 use syscall::{Handle, ObjectKind, kind};
 
 const BUFFER_SIZE: u32 = 4096;
@@ -58,7 +58,7 @@ struct Mount {
 
 struct World {
     mounts: Vec<Mount>,
-    sessions: Mutex<BTreeMap<u32, MockEnd>>,
+    sessions: Mutex<BTreeMap<u32, MockChannel>>,
     buffers: Mutex<BTreeMap<u32, Shared>>,
     resolved: Mutex<Vec<String>>,
     pair_root_len: Mutex<Option<u32>>,
@@ -197,36 +197,40 @@ impl World {
             .is_some_and(|(filesystem, tail)| filesystem.tree().contains_key(&tail))
     }
 
-    fn session_end(self: &Arc<Self>, path: &str) -> MockEnd {
+    fn session_end(self: &Arc<Self>, path: &str) -> MockChannel {
         let (filesystem, root) = self.covering(path).expect("a mount covers the path");
         self.session_end_in(Arc::clone(filesystem), root)
     }
 
-    fn session_end_in(self: &Arc<Self>, filesystem: Arc<Filesystem>, root: String) -> MockEnd {
-        let (client, server) = MockEnd::pair();
+    fn session_end_in(self: &Arc<Self>, filesystem: Arc<Filesystem>, root: String) -> MockChannel {
+        let (client, server) = ipc_test::pair();
         let world = Arc::clone(self);
         thread::spawn(move || serve_session(&world, filesystem, root, &server));
         client
     }
 
-    fn session(self: &Arc<Self>, filesystem: Arc<Filesystem>, root: String) -> Cap<kind::Port> {
+    fn session(
+        self: &Arc<Self>,
+        filesystem: Arc<Filesystem>,
+        root: String,
+    ) -> ipc::wire::Session<file_system::Protocol> {
         let cap = self.cap();
         let end = self.session_end_in(filesystem, root);
         self.sessions
             .lock()
             .expect("mutex not poisoned")
             .insert(cap.raw().get(), end);
-        cap
+        ipc::wire::Session::from_handle(cap)
     }
 }
 
 struct TrackedEnd {
-    end: MockEnd,
+    end: MockChannel,
     world: Arc<World>,
 }
 
 impl TrackedEnd {
-    fn new(world: &Arc<World>, end: MockEnd) -> Self {
+    fn new(world: &Arc<World>, end: MockChannel) -> Self {
         world.transports.fetch_add(1, Ordering::SeqCst);
         Self {
             end,
@@ -241,33 +245,31 @@ impl Drop for TrackedEnd {
     }
 }
 
-impl Transport for TrackedEnd {
+impl Channel for TrackedEnd {
     type Resources = MockResources;
 
-    fn take_resources(&self) -> MockResources {
-        let resources = self.end.take_resources();
+    fn send(&self, bytes: &[u8], handles: &[u32], wait: Timeout) -> Result<(), IpcError> {
+        self.end.send(bytes, handles, wait)
+    }
+
+    fn call<'b>(
+        &self,
+        bytes: &[u8],
+        handles: &[u32],
+        reply: &'b mut FrameBytes,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, MockResources>, IpcError> {
+        let mut answer = self.end.call(bytes, handles, reply, wait)?;
         if self.world.claims_fail.load(Ordering::SeqCst) {
             // Ответ назвал capability, которой кадр не доставил.
-            return MockResources::default();
+            answer.resources = MockResources::default();
         }
-        resources
-    }
-
-    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
-        self.end.write_message(bytes, handles)
-    }
-
-    fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError> {
-        let mut len = self.end.read_message(bytes, handles)?;
         if self.world.truncates_pair.load(Ordering::SeqCst) {
             // Обрезанный после заголовка ответ не даёт декодировать агрегат пары.
-            len.bytes = len.bytes.min(HEADER_SIZE + TRUNCATED_BODY);
+            let len = answer.bytes.len().min(HEADER_SIZE + TRUNCATED_BODY);
+            answer.bytes = &answer.bytes[..len];
         }
-        Ok(len)
-    }
-
-    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
-        self.end.wait_readable(timeout)
+        Ok(answer)
     }
 }
 
@@ -281,6 +283,34 @@ struct SessionServer {
 }
 
 impl SessionServer {
+    fn root_session(
+        &mut self,
+        path: Str<'_, { PATH_MAX }>,
+    ) -> Result<ipc::wire::Session<file_system::Protocol>, FileSystemError> {
+        if self.world.scoping_fails.load(Ordering::SeqCst) {
+            return Err(FileSystemError::NotFound);
+        }
+        let full = self.full(path.as_str());
+        match self.filesystem.tree().get(&full) {
+            Some(Node::Directory) => {}
+            Some(Node::File(_)) => return Err(FileSystemError::NotADirectory),
+            None => return Err(FileSystemError::NotFound),
+        }
+        Ok(self.world.session(Arc::clone(&self.filesystem), full))
+    }
+
+    fn buffer_capability(&mut self, size: u32) -> Cap<kind::MemoryRegion> {
+        let shared: Shared = Arc::new(Mutex::new(std::vec![0; size as usize]));
+        let cap = self.world.cap();
+        self.world
+            .buffers
+            .lock()
+            .expect("mutex not poisoned")
+            .insert(cap.raw().get(), Arc::clone(&shared));
+        self.buffer = Some(shared);
+        cap
+    }
+
     fn full(&self, path: &str) -> String {
         if self.root == ROOT {
             return String::from(path);
@@ -323,21 +353,18 @@ impl SessionServer {
     }
 }
 
-impl file_system::Service for SessionServer {
-    fn acquire_buffer(&mut self, size: u32) -> Result<Cap<kind::MemoryRegion>, FileSystemError> {
-        let shared: Shared = Arc::new(Mutex::new(std::vec![0; size as usize]));
-        let cap = self.world.cap();
-        self.world
-            .buffers
-            .lock()
-            .expect("mutex not poisoned")
-            .insert(cap.raw().get(), Arc::clone(&shared));
-        self.buffer = Some(shared);
-        Ok(cap)
+impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
+    fn acquire_buffer(
+        &mut self,
+        _frame: &F,
+        size: u32,
+    ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+        Ok::<_, FileSystemError>(self.buffer_capability(size))
     }
 
     fn open(
         &mut self,
+        _frame: &F,
         path: Str<'_, { PATH_MAX }>,
         _mode: AccessMode,
         flags: OpenFlags,
@@ -385,7 +412,7 @@ impl file_system::Service for SessionServer {
         })
     }
 
-    fn close(&mut self, fd: NodeDescriptor) -> Result<u32, FileSystemError> {
+    fn close(&mut self, _frame: &F, fd: NodeDescriptor) -> Result<u32, FileSystemError> {
         self.open
             .remove(&fd.raw())
             .ok_or(FileSystemError::BadDescriptor)?;
@@ -393,7 +420,13 @@ impl file_system::Service for SessionServer {
         Ok(0)
     }
 
-    fn read(&mut self, fd: NodeDescriptor, offset: u64, len: u32) -> Result<u32, FileSystemError> {
+    fn read(
+        &mut self,
+        _frame: &F,
+        fd: NodeDescriptor,
+        offset: u64,
+        len: u32,
+    ) -> Result<u32, FileSystemError> {
         self.world.reads.fetch_add(1, Ordering::SeqCst);
         self.transfer()?;
         let path = self.path_of(fd)?;
@@ -417,6 +450,7 @@ impl file_system::Service for SessionServer {
 
     fn write(
         &mut self,
+        _frame: &F,
         fd: NodeDescriptor,
         offset: u64,
         len: u32,
@@ -448,11 +482,16 @@ impl file_system::Service for SessionServer {
         })
     }
 
-    fn set_size(&mut self, _fd: NodeDescriptor, _size: u64) -> Result<u32, FileSystemError> {
+    fn set_size(
+        &mut self,
+        _frame: &F,
+        _fd: NodeDescriptor,
+        _size: u64,
+    ) -> Result<u32, FileSystemError> {
         Err(FileSystemError::NotSupported)
     }
 
-    fn stat(&mut self, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
+    fn stat(&mut self, _frame: &F, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
         let path = self.path_of(fd)?;
         let tree = self.filesystem.tree();
         let node = tree.get(&path).ok_or(FileSystemError::NotFound)?.clone();
@@ -462,7 +501,12 @@ impl file_system::Service for SessionServer {
         })
     }
 
-    fn list(&mut self, fd: NodeDescriptor, from: DirCursor) -> Result<Listed, FileSystemError> {
+    fn list(
+        &mut self,
+        _frame: &F,
+        fd: NodeDescriptor,
+        from: DirCursor,
+    ) -> Result<Listed, FileSystemError> {
         let path = self.path_of(fd)?;
         let tree = self.filesystem.tree();
         if tree.get(&path) != Some(&Node::Directory) {
@@ -506,6 +550,7 @@ impl file_system::Service for SessionServer {
 
     fn rename(
         &mut self,
+        _frame: &F,
         from: Str<'_, { PATH_MAX }>,
         to: Str<'_, { PATH_MAX }>,
     ) -> Result<u32, FileSystemError> {
@@ -519,6 +564,7 @@ impl file_system::Service for SessionServer {
 
     fn unlink(
         &mut self,
+        _frame: &F,
         path: Str<'_, { PATH_MAX }>,
         expected: NodeKind,
     ) -> Result<u32, FileSystemError> {
@@ -553,8 +599,9 @@ impl file_system::Service for SessionServer {
 
     fn create_backed(
         &mut self,
+        _frame: &F,
         _path: Str<'_, { PATH_MAX }>,
-        _region: Cap<kind::MemoryRegion>,
+        _region: F::Handle<kind::MemoryRegion>,
         _size: u64,
     ) -> Result<u32, FileSystemError> {
         Err(FileSystemError::NotSupported)
@@ -562,25 +609,19 @@ impl file_system::Service for SessionServer {
 
     fn backing_memory(
         &mut self,
+        _frame: &F,
         _fd: NodeDescriptor,
-    ) -> Result<Cap<kind::MemoryRegion>, FileSystemError> {
-        Err(FileSystemError::NotSupported)
+    ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+        Err::<Cap<kind::MemoryRegion>, _>(FileSystemError::NotSupported)
     }
 
     fn open_root(
         &mut self,
+        _frame: &F,
         path: Str<'_, { PATH_MAX }>,
-    ) -> Result<Cap<kind::Port>, FileSystemError> {
-        if self.world.scoping_fails.load(Ordering::SeqCst) {
-            return Err(FileSystemError::NotFound);
-        }
-        let full = self.full(path.as_str());
-        match self.filesystem.tree().get(&full) {
-            Some(Node::Directory) => {}
-            Some(Node::File(_)) => return Err(FileSystemError::NotADirectory),
-            None => return Err(FileSystemError::NotFound),
-        }
-        Ok(self.world.session(Arc::clone(&self.filesystem), full))
+    ) -> impl ipc::IntoWireValue<Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>>
+    {
+        self.root_session(path)
     }
 }
 
@@ -588,28 +629,8 @@ struct Router {
     world: Arc<World>,
 }
 
-impl namespace::Service for Router {
-    fn resolve(&mut self, path: Str<'_, { PATH_MAX }>) -> Result<Cap<kind::Port>, FileSystemError> {
-        self.world
-            .resolved
-            .lock()
-            .expect("mutex not poisoned")
-            .push(String::from(path.as_str()));
-        let (filesystem, root) = self
-            .world
-            .covering(path.as_str())
-            .ok_or(FileSystemError::NotFound)?;
-        // Окно открывается на узле монтирования, и `open_root` не каталога даёт
-        // `NotADirectory`.
-        match filesystem.tree().get(&root) {
-            Some(Node::Directory) => {}
-            Some(Node::File(_)) => return Err(FileSystemError::NotADirectory),
-            None => return Err(FileSystemError::NotFound),
-        }
-        Ok(self.world.session(Arc::clone(filesystem), root))
-    }
-
-    fn resolve_pair(
+impl Router {
+    fn resolved_pair(
         &mut self,
         from: Str<'_, { PATH_MAX }>,
         to: Str<'_, { PATH_MAX }>,
@@ -662,6 +683,50 @@ impl namespace::Service for Router {
             root_len,
         })
     }
+
+    fn resolved_session(
+        &mut self,
+        path: Str<'_, { PATH_MAX }>,
+    ) -> Result<ipc::wire::Session<file_system::Protocol>, FileSystemError> {
+        self.world
+            .resolved
+            .lock()
+            .expect("mutex not poisoned")
+            .push(String::from(path.as_str()));
+        let (filesystem, root) = self
+            .world
+            .covering(path.as_str())
+            .ok_or(FileSystemError::NotFound)?;
+        // Окно открывается на узле монтирования, и `open_root` не каталога даёт
+        // `NotADirectory`.
+        match filesystem.tree().get(&root) {
+            Some(Node::Directory) => {}
+            Some(Node::File(_)) => return Err(FileSystemError::NotADirectory),
+            None => return Err(FileSystemError::NotFound),
+        }
+        Ok(self.world.session(Arc::clone(filesystem), root))
+    }
+}
+
+impl<F: ipc::ReceivedResources> namespace::Service<F> for Router {
+    fn resolve(
+        &mut self,
+        _frame: &F,
+        path: Str<'_, { PATH_MAX }>,
+        reply: namespace::resolve::Reply<F::Reply>,
+    ) {
+        let _ = reply.send(self.resolved_session(path));
+    }
+
+    fn resolve_pair(
+        &mut self,
+        _frame: &F,
+        from: Str<'_, { PATH_MAX }>,
+        to: Str<'_, { PATH_MAX }>,
+        reply: namespace::resolve_pair::Reply<F::Reply>,
+    ) {
+        let _ = reply.send(self.resolved_pair(from, to));
+    }
 }
 
 struct TestEnvironment {
@@ -673,13 +738,16 @@ impl Environment for TestEnvironment {
     type Transport = TrackedEnd;
     type Region = TestBuffer;
 
-    fn connect(&self, port: Cap<kind::Port>) -> Result<TrackedEnd, FileSystemError> {
+    fn connect(
+        &self,
+        session: ipc::wire::Session<file_system::Protocol>,
+    ) -> Result<TrackedEnd, FileSystemError> {
         let end = self
             .world
             .sessions
             .lock()
             .expect("mutex not poisoned")
-            .remove(&port.raw().get())
+            .remove(&session.into_handle().raw().get())
             .ok_or(FileSystemError::NoSession)?;
         Ok(TrackedEnd::new(&self.world, end))
     }
@@ -731,7 +799,12 @@ impl SharedRegion for TestBuffer {
     }
 }
 
-fn serve_session(world: &Arc<World>, filesystem: Arc<Filesystem>, root: String, end: &MockEnd) {
+fn serve_session(
+    world: &Arc<World>,
+    filesystem: Arc<Filesystem>,
+    root: String,
+    end: &MockListener,
+) {
     let mut server = SessionServer {
         world: Arc::clone(world),
         filesystem,
@@ -740,11 +813,12 @@ fn serve_session(world: &Arc<World>, filesystem: Arc<Filesystem>, root: String, 
         open: BTreeMap::new(),
         next_descriptor: 1,
     };
-    while end.wait_readable(Timeout::INFINITE).is_ok() {
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    while let Ok(frame) = end.recv(&mut bytes, Timeout::INFINITE) {
         if world.poison.swap(false, Ordering::SeqCst) {
             return;
         }
-        if file_system::dispatch(&mut server, end).is_err() {
+        if file_system::dispatch(&mut server, frame).is_err() {
             return;
         }
     }
@@ -800,16 +874,12 @@ fn file(text: &str) -> Node {
 }
 
 fn routed(world: &Arc<World>) -> FileSystem<TestEnvironment> {
-    let (client, server) = MockEnd::pair();
+    let (client, server) = ipc_test::pair();
     let mut router = Router {
         world: Arc::clone(world),
     };
     thread::spawn(move || {
-        while server.wait_readable(Timeout::INFINITE).is_ok() {
-            if namespace::dispatch(&mut router, &server).is_err() {
-                return;
-            }
-        }
+        let _ = server.serve_all(|frame| namespace::dispatch(&mut router, frame));
     });
     FileSystem::routed_with_environment(
         TestEnvironment {

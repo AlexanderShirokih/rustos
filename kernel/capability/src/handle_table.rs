@@ -1186,6 +1186,18 @@ mod tests {
     }
 
     #[test]
+    fn a_start_handle_without_transfer_still_holds_its_badge() {
+        let root = port_handle(Rights::DUPLICATE | Rights::TRANSFER | Rights::WRITE);
+        let badged = root
+            .duplicate(Rights::TRANSFER | Rights::WRITE, 0x42)
+            .unwrap();
+
+        let start = badged.without_transfer();
+        assert_eq!(start.badge(), 0x42);
+        assert_eq!(start.rights(), Rights::WRITE);
+    }
+
+    #[test]
     fn duplicate_badge_rebadge_rejected() {
         let mut table = HandleTable::new();
         let rights = Rights::DUPLICATE | Rights::READ;

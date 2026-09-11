@@ -30,7 +30,6 @@ members = [
     "lib/filesystem",
     "lib/filesystem-abi",
     "lib/filesystem-client",
-    "lib/supervisor-abi",
     "lib/userland",
     "lib/userland-image",
 ]
@@ -102,7 +101,6 @@ drivers-common-aarch64 = { path = "kernel/drivers-common-aarch64" }
 kernelspace = { path = "kernel/kernelspace" }
 capability = { path = "kernel/capability" }
 scheduler = { path = "kernel/scheduler" }
-supervisor-abi = { path = "lib/supervisor-abi" }
 syscall = { path = "lib/syscall" }
 syscall-kernel = { path = "kernel/syscall" }
 syscall-user = { path = "lib/syscall-user" }

@@ -1,9 +1,9 @@
 //! Доменная ошибка контракта: закрытый набор исходов, в кадре - дискриминант `u16` LE.
 
 use ipc::{
-    WireTyped, WireValue,
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
     schema::WireType,
-    wire::{ENUM_DISCRIMINANT_WIDTH, HandleSlots, IpcError, MessageBuf, value},
+    wire::{ENUM_DISCRIMINANT_WIDTH, IpcError, MessageBuf, value},
 };
 
 /// Причина отказа файловой операции.
@@ -95,19 +95,22 @@ impl FileSystemError {
     }
 }
 
-impl<'a> WireValue<'a> for FileSystemError {
-    fn write_as_field<const N: usize>(
-        &self,
-        buf: &mut MessageBuf<N>,
-        field_id: u8,
-        _handles: &mut HandleSlots,
-    ) -> Result<(), IpcError> {
+impl<'a, R: ReceivedResources> WireValue<'a, R> for FileSystemError {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        Self::from_discriminant(value::decode_discriminant(data)?).ok_or(IpcError::InvalidValue)
+    }
+}
+
+impl IntoWireValue for FileSystemError {
+    type Read = Self;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
         buf.write_field(field_id, &value::encode_discriminant(self.discriminant()))
     }
 
-    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
-        Self::from_discriminant(value::decode_discriminant(data)?).ok_or(IpcError::InvalidValue)
-    }
+    fn relinquish(self) {}
 }
 
 impl WireTyped for FileSystemError {
@@ -117,8 +120,8 @@ impl WireTyped for FileSystemError {
 #[cfg(test)]
 mod tests {
     use ipc::{
-        WireValue,
-        wire::{FieldCursor, HandleSlots, IpcError, MESSAGE_INLINE_MAX, MessageBuf, value},
+        IntoWireValue, WireValue,
+        wire::{FieldCursor, IpcError, MessageBuf, value},
     };
 
     use super::{FileSystemError, VARIANTS};
@@ -126,22 +129,17 @@ mod tests {
     const FIELD_ID: u8 = 1;
 
     fn round_trip(error: FileSystemError) -> Result<FileSystemError, IpcError> {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        error
-            .write_as_field(&mut buf, FIELD_ID, &mut HandleSlots::new())
-            .expect("write ok");
+        let mut buf = MessageBuf::new();
+        error.write_as_field(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");
         assert_eq!(field.id, FIELD_ID);
-        FileSystemError::from_field(field.data, &HandleSlots::new())
+        FileSystemError::from_field(field.data, &mut ())
     }
 
     fn decode(discriminant: u16) -> Result<FileSystemError, IpcError> {
-        FileSystemError::from_field(
-            &value::encode_discriminant(discriminant),
-            &HandleSlots::new(),
-        )
+        FileSystemError::from_field(&value::encode_discriminant(discriminant), &mut ())
     }
 
     #[test]
@@ -171,11 +169,11 @@ mod tests {
     #[test]
     fn wrong_field_length_is_rejected() {
         assert_eq!(
-            FileSystemError::from_field(&[1], &HandleSlots::new()),
+            FileSystemError::from_field(&[1], &mut ()),
             Err(IpcError::InvalidValue)
         );
         assert_eq!(
-            FileSystemError::from_field(&[1, 0, 0], &HandleSlots::new()),
+            FileSystemError::from_field(&[1, 0, 0], &mut ()),
             Err(IpcError::InvalidValue)
         );
     }

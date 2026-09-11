@@ -1,33 +1,33 @@
 //! Компонент композиции на стандартной библиотеке спрашивает время у драйвера RTC.
 //!
-//! Программа сама принимает стартовую транзакцию, тем же объявлением, что и программа без
-//! стандартной библиотеки. Библиотека отдаёт ей одноразовый стартовый handle и принимает
-//! лог-сессию набора под `stdout` и `stderr`.
+//! Программа запрашивает сессию `rtc` у родителя тем же объявлением, что и программа без
+//! стандартной библиотеки.
 
 use std::process;
 
 use component_startup::component_manifest;
-use kernel_objects::PortTransport;
 use rtc_abi::rtc;
 
 const NO_STARTUP_EXIT_CODE: i32 = 1;
+const RTC_CALL_FAILED_EXIT_CODE: i32 = 2;
 
 component_manifest! {
     struct ClockStartup {
-        slots: { rtc: service(protocol = "Rtc") },
+        requirements: { rtc: session(rtc::Protocol) },
     }
 }
 
 fn main() {
-    // До установки лог-сессии вывод не доходит до журнала, поэтому процесс называет отказ
-    // приёма кодом выхода.
-    let Ok(startup) = component_startup_std::receive(ClockStartup::receive) else {
+    // Без журнала вывод `println!` теряется, и отказ старта передаётся кодом выхода.
+    let Ok(requirements) = component_startup_std::start(ClockStartup::start) else {
         process::exit(NO_STARTUP_EXIT_CODE);
     };
 
-    let clock = rtc::Client::new(PortTransport::client(&startup.rtc));
-    match clock.now() {
-        Ok(response) => println!("rtc reads {}", response.value),
-        Err(error) => println!("rtc call failed: {error:?}"),
+    match requirements.rtc.client().now() {
+        Ok(seconds) => println!("rtc reads {seconds}"),
+        Err(error) => {
+            println!("rtc call failed: {error:?}");
+            process::exit(RTC_CALL_FAILED_EXIT_CODE);
+        }
     }
 }

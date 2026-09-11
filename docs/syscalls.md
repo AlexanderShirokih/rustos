@@ -319,7 +319,8 @@ Process-вызовы создают процесс, возвращают handle 
 
 `ProcessStart` создаёт первый поток процесса и возвращает handle на него.
 `bootstrap_handle` (x3) — HandleId обязательного стартового хэндла-канала из таблицы loader-процесса.
-Ядро изымает его из caller-таблицы (`TRANSFER`) и устанавливает в child-таблицу.
+Ядро изымает его из caller-таблицы (`TRANSFER`) и устанавливает в child-таблицу без права
+`TRANSFER`. Значок и остальные права handle сохраняются.
 `priority` (x4) задаёт нижними 8 битами приоритет потока, а биты [8..)
 зарезервированы и обязаны быть нулевыми. `entry_pc` (x1) и `user_sp` (x2)
 записываются в стартовый user-контекст первого потока. `resource_h` (x5) задаёт
@@ -357,13 +358,13 @@ Process-вызовы создают процесс, возвращают handle 
 Пример: создатель процесса делегирует наблюдение за ним стороннему процессу через производную capability.
 
 ```rust
-// сторона создателя (process_h - handle на дочерний процесс; report_h - port к supervisor)
+// сторона создателя (process_h - handle на дочерний процесс; report_h - port к наблюдателю)
 let wait_h = handle_duplicate(process_h, Rights::READ | Rights::TRANSFER, 0)?;
 let ipc = ipc_buffer_addr() as *mut IpcBuffer;
 write_cap_frame(ipc, wait_h);
 port_send(report_h, PORT_TIMEOUT_INFINITE);
 
-// --- сторона supervisor (monitor_h - тот же port) ---
+// --- сторона наблюдателя (monitor_h - тот же port) ---
 port_recv(monitor_h, PORT_TIMEOUT_INFINITE);
 let monitored_h = read_cap_frame(ipc).expect("peer transferred wait_h");
 
@@ -613,7 +614,7 @@ port_send(peer_h, PORT_TIMEOUT_INFINITE);
 Драйвер фреймбуфера выбирает профиль перед маппингом окна:
 
 ```rust
-let window_h = /* device-окно из стартовой транзакции компонента */;
+let window_h = /* device-окно из ответа на требование mmio */;
 let framebuffer_h = memory_with_profile(window_h, 1 /* WriteCombining */)?;
 let va = memory_map(framebuffer_h, size, 0 /* ReadWrite */);
 ```
@@ -657,14 +658,16 @@ Bootstrap-канала. Делегируется он через `TRANSFER`/`DUP
 - при срабатывании ядро синхронно маскирует линию и поднимает `SIGNALED` (для уровневой линии это обязательно — иначе interrupt storm);
 - обслужив устройство, драйвер вызывает `IrqAck(irq_line_h)`: снимает latch `SIGNALED` и размаскирует линию. 
 
-Закрытие `IrqLine`-хендла (или завершение процесса) отвязывает линию и отключает её на контроллере.
+Закрытие последнего хендла `IrqLine` отвязывает линию и отключает её на
+контроллере.
 
 ## MMIO
 
 Доступ к регистрам устройства — memory-капа поверх **физического**
 диапазона (`RegionKind::Physical`). Ядро выдаёт капу через
 Bootstrap-канал (`acquire_device_memory(index)`, см.
-[userland.md](userland.md)), супервизор раздаёт её драйверу.
+[userland.md](userland.md)), rootkeeper выдаёт её драйверу по его требованию
+`mmio`.
 
 - `MemoryRegionInspect` отдаёт размер региона (primary) и его физическую базу
   `base_pa` (secondary, для корреляции с FDT-узлом устройства);

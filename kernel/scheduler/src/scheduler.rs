@@ -1806,6 +1806,7 @@ where
                 capability::IpcError::BadHandle,
             ));
         };
+        let handle = handle.without_transfer();
         let mut rejected = DrainedHandles::empty();
         child_table.with_lock(|tbl| tbl.commit_reserved(reservation, handle, &mut rejected));
         self.deferred_handles.push_drained(rejected);

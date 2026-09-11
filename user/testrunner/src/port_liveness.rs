@@ -11,18 +11,16 @@ use core::{
 };
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::{Error, MemoryRegion, Port, Process, Reply, Resource, Result, kind};
+use kernel_objects::{Error, Port, Reply, Result, kind};
 use kernel_tests::kernel_test;
 use runtime::{
     PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call,
     port_send, spawn,
 };
 use syscall::{Handle, Rights, SyscallError};
-use userland_image::{component_name, decode};
-use userland_loader::load_entry;
 
 use crate::{
-    fixture::Fixture,
+    fixture::{Fixture, spawn_entry},
     fixture_protocol::{OP_WRITE_SLOT, REPLY_OK},
 };
 
@@ -70,26 +68,6 @@ fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
         Some(Error::Syscall(SyscallError::SenderGone))
     ));
     kernel_tests::kassert_eq!(received_badge(), badge);
-}
-
-fn spawn_image_entry(path: &str, start: Port) -> Process {
-    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let mut response = client
-        .acquire_userland_image()
-        .expect("acquire_userland_image call");
-    let capability = response.value.expect("vend ok");
-    let cap = response.claim(capability).expect("capability owner");
-    let region = MemoryRegion::from(cap);
-    let mapping = region.map_full_read_only().expect("map image read-only");
-    let image = decode(mapping.as_bytes()).expect("decode acquired image");
-    let program = image
-        .entry(path)
-        .expect("image carries the entry")
-        .program()
-        .expect("entry record carries a program");
-    let resource = Resource::self_resource().expect("self metering resource");
-    load_entry(&program, Some(component_name(path)), &resource, start)
-        .expect("spawn entry from image")
 }
 
 static REFUSED_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
@@ -150,7 +128,7 @@ fn badge_departs_when_the_client_process_dies() {
     let client = port
         .duplicate(Rights::WRITE | Rights::TRANSFER, Some(DYING_CLIENT_BADGE))
         .expect("mint client capability");
-    let process = spawn_image_entry("/boot/badge-client/program", client);
+    let process = spawn_entry("/boot/badge-client/program", client);
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
     kernel_tests::kassert_eq!(received_badge(), DYING_CLIENT_BADGE.get());
@@ -282,7 +260,7 @@ fn kernel_server_serves_past_a_departed_badge() {
     session.close().expect("close badged bootstrap capability");
 
     // Cast встречается с получателем, поэтому его успех означает живого сервера.
-    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
+    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
     client
         .log_str(
             "port-liveness",

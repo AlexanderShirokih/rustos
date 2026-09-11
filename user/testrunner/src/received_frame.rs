@@ -1,5 +1,5 @@
 //! E2E владения ресурсами доставленного кадра из EL0: главный поток принимает кадры рабочего
-//! потока и проверяет судьбу их capability и незавершённого ответа.
+//! потока и проверяет судьбу их capability, канала ответа и долга ответа.
 //!
 //! Каждая доставляемая capability выведена из порта под своим значком
 //! ([`Watched`]), и её закрытие видно отказом приёма на
@@ -11,18 +11,16 @@ use core::{
 };
 
 use ipc::{
-    Transport as _,
-    wire::{Cap, IpcError},
+    Channel as _, Incoming, Listener, ReceivedResources as _, RecvError, ReplyChannel as _,
+    wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf},
 };
-use kernel_objects::{Port, ReceivedFrame, Signal, kind};
+use kernel_objects::{Delivery, Port, ReceivedHandle, Resource, SessionTransport, Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, Priority, Timeout, spawn};
 use syscall::{Handle, kind as object_kind};
+use userland_loader::load_entry;
 
-use crate::{
-    fixture_frames::{launch_entry, send_raw_frame},
-    watched_capability::Watched,
-};
+use crate::{fixture::program, watched_capability::Watched};
 
 const STACK_SIZE: u64 = 0x4000;
 
@@ -30,6 +28,7 @@ const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(10);
 const IDLE_TIMEOUT: Timeout = Timeout::from_millis(200);
+const ABANDON_DELAY: Timeout = Timeout::from_secs(1);
 
 const FIRST_BADGE: NonZeroU64 = NonZeroU64::new(0x81).expect("badge is non-zero");
 const SECOND_BADGE: NonZeroU64 = NonZeroU64::new(0x82).expect("badge is non-zero");
@@ -44,20 +43,27 @@ const OUTCOME_REFUSED: i64 = 2;
 const OUTCOME_TIMEOUT: i64 = 3;
 
 ipc::protocol! {
-    /// Контракт пробы владения: кадр с capability, кадр без ответа и ответ с capability.
+    /// Контракт пробы владения: кадр с capability, ответ значением и capability, долг ответа.
     pub mod frame_probe {
         name = "FrameProbe";
 
         /// Передаёт capability односторонним кадром.
-        cast fn hand(capability: Cap<object_kind::Port>);
+        cast fn hand(own capability: ipc::wire::Cap<object_kind::Port>);
 
         /// Запрашивает ответ значением.
-        call fn echo(value: u32) -> u32;
+        call(defer) fn echo(value: u32) -> u32;
 
         /// Запрашивает capability ответом.
-        call fn request() -> Cap<object_kind::Port>;
+        call(defer) fn request() -> own ipc::wire::Cap<object_kind::Port>;
+
+        /// Передаёт долг ответа на `echo` другому держателю.
+        cast fn forward(own caller: ipc::Reply<u32>);
     }
 }
+
+type EchoReply = frame_probe::echo::Reply<ReceivedHandle<object_kind::Reply>>;
+
+type RequestReply = frame_probe::request::Reply<ReceivedHandle<object_kind::Reply>>;
 
 fn port_of(raw: u32) -> Option<Port> {
     core::num::NonZeroU32::new(raw)
@@ -79,21 +85,45 @@ struct TamperedReply {
 
 #[derive(Default)]
 struct Probe {
-    handed: Option<Cap<kind::Port>>,
+    handed: Option<Port>,
+    nested: Option<Handle<kind::Port>>,
+    nested_answer: Option<Port>,
     vended: Option<Port>,
+    keep: bool,
+    kept_echo: Option<EchoReply>,
+    kept_request: Option<RequestReply>,
+    forwarded: Option<bool>,
 }
 
-impl frame_probe::Service for Probe {
-    fn hand(&mut self, capability: Cap<kind::Port>) {
-        self.handed = Some(capability);
+impl frame_probe::Service<Delivery> for Probe {
+    fn hand(&mut self, _frame: &Delivery, capability: ReceivedHandle<kind::Port>) {
+        if let Some(nested) = self.nested {
+            let client =
+                frame_probe::Client::new(PortTransport::new(nested)).with_wait(CALL_TIMEOUT);
+            let answer = client.request().expect("nested call answered");
+            self.nested_answer = Some(Port::from(answer));
+        }
+        self.handed = Some(Port::from(capability));
     }
 
-    fn echo(&mut self, value: u32) -> u32 {
-        value
+    fn echo(&mut self, _frame: &Delivery, value: u32, reply: EchoReply) {
+        if self.keep {
+            self.kept_echo = Some(reply);
+        } else {
+            let _ = reply.send(value);
+        }
     }
 
-    fn request(&mut self) -> impl ipc::IntoWireHandle<Kind = kind::Port> {
-        self.vended.take().expect("capability of the answer")
+    fn request(&mut self, _frame: &Delivery, reply: RequestReply) {
+        if self.keep {
+            self.kept_request = Some(reply);
+        } else {
+            let _ = reply.send(self.vended.take().expect("capability of the answer"));
+        }
+    }
+
+    fn forward(&mut self, _frame: &Delivery, caller: ipc::Reply<u32, ReceivedHandle<kind::Reply>>) {
+        self.forwarded = Some(caller.send(PROBE_VALUE).is_ok());
     }
 }
 
@@ -115,7 +145,7 @@ impl Exchange {
     }
 
     fn client(&self) -> frame_probe::Client<PortTransport> {
-        frame_probe::Client::new(PortTransport::client(self.port)).with_wait(CALL_TIMEOUT)
+        frame_probe::Client::new(PortTransport::new(self.port)).with_wait(CALL_TIMEOUT)
     }
 
     fn capability(&self) -> Port {
@@ -130,6 +160,15 @@ impl Exchange {
         };
         self.outcome.store(outcome, SeqCst);
     }
+}
+
+fn serve_one<L: Listener, T>(
+    listener: &L,
+    wait: Timeout,
+    handle: impl FnOnce(Incoming<'_, L::Resources>) -> T,
+) -> Result<T, RecvError> {
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    listener.recv(&mut bytes, wait).map(handle)
 }
 
 unsafe fn exchange_of(arg: usize) -> &'static Exchange {
@@ -149,11 +188,33 @@ extern "C" fn hand_worker(arg: usize) -> u32 {
 extern "C" fn echo_worker(arg: usize) -> u32 {
     // SAFETY: см. `exchange_of`.
     let exchange = unsafe { exchange_of(arg) };
+    exchange.store(exchange.client().echo(PROBE_VALUE));
+    0
+}
+
+extern "C" fn session_echo_worker(arg: usize) -> u32 {
+    // SAFETY: см. `exchange_of`.
+    let exchange = unsafe { exchange_of(arg) };
+    let session = SessionTransport::new(Port::from_handle(exchange.port));
     exchange.store(
-        exchange
-            .client()
-            .echo(PROBE_VALUE)
-            .map(|response| response.value),
+        frame_probe::Client::new(session)
+            .with_wait(CALL_TIMEOUT)
+            .echo(PROBE_VALUE),
+    );
+    0
+}
+
+extern "C" fn holder_worker(arg: usize) -> u32 {
+    // SAFETY: см. `exchange_of`.
+    let exchange = unsafe { exchange_of(arg) };
+    let transport = PortTransport::new(exchange.port);
+    let mut probe = Probe::default();
+    let dispatched = serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    });
+    exchange.outcome.store(
+        i64::from(matches!(dispatched, Ok(Ok(()))) && probe.forwarded == Some(true)),
+        SeqCst,
     );
     0
 }
@@ -161,35 +222,50 @@ extern "C" fn echo_worker(arg: usize) -> u32 {
 extern "C" fn vending_worker(arg: usize) -> u32 {
     // SAFETY: см. `exchange_of`.
     let exchange = unsafe { exchange_of(arg) };
-    let transport = PortTransport::server(exchange.port);
+    let transport = PortTransport::new(exchange.port);
     let mut probe = Probe {
-        handed: None,
         vended: Some(exchange.capability()),
+        ..Probe::default()
     };
-    let answered = transport
-        .wait_readable(RECV_TIMEOUT)
-        .and_then(|()| frame_probe::dispatch(&mut probe, &transport));
-    exchange.outcome.store(i64::from(answered.is_ok()), SeqCst);
+    let answered = serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    });
+    exchange
+        .outcome
+        .store(i64::from(matches!(answered, Ok(Ok(())))), SeqCst);
     0
 }
 
 extern "C" fn undelivered_vendor(arg: usize) -> u32 {
     // SAFETY: см. `exchange_of`.
     let exchange = unsafe { exchange_of(arg) };
-    let transport = PortTransport::server(exchange.port);
+    let transport = PortTransport::new(exchange.port);
     let mut probe = Probe {
-        handed: None,
-        vended: Some(exchange.capability()),
+        keep: true,
+        ..Probe::default()
     };
-    let undelivered = transport
-        .wait_readable(RECV_TIMEOUT)
-        .and_then(|()| frame_probe::dispatch(&mut probe, &transport));
-    let answered = transport
-        .wait_readable(RECV_TIMEOUT)
-        .and_then(|()| frame_probe::dispatch(&mut probe, &transport));
-    exchange
-        .outcome
-        .store(i64::from(undelivered.is_err() && answered.is_ok()), SeqCst);
+    let kept = serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    });
+    let Some(debt) = probe.kept_request.take() else {
+        exchange.outcome.store(0, SeqCst);
+        return 0;
+    };
+    if let Ok(parking) = Port::create() {
+        let _ = parking.recv(ABANDON_DELAY);
+    }
+    let undelivered = debt.send(exchange.capability());
+
+    probe.keep = false;
+    let answered = serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    });
+    exchange.outcome.store(
+        i64::from(
+            matches!(kept, Ok(Ok(()))) && undelivered.is_err() && matches!(answered, Ok(Ok(()))),
+        ),
+        SeqCst,
+    );
     0
 }
 
@@ -197,42 +273,37 @@ extern "C" fn tampered_reply_worker(arg: usize) -> u32 {
     // SAFETY: главный поток сохраняет аргумент до завершения рабочего потока через join.
     let exchange = unsafe { &*(arg as *const TamperedReply) };
     let capability = port_of(exchange.capability).expect("reply capability");
-    let transport = PortTransport::server(exchange.port);
-    transport
-        .wait_readable(RECV_TIMEOUT)
+    let transport = PortTransport::new(exchange.port);
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    let Incoming {
+        bytes: request,
+        mut resources,
+        ..
+    } = transport
+        .recv(&mut bytes, RECV_TIMEOUT)
         .expect("request delivered");
-    let _request = ReceivedFrame::take(&transport).expect("request resources");
-    let mut bytes = [0; ipc::wire::MESSAGE_INLINE_MAX];
-    let mut handles = [0; ipc::wire::MESSAGE_MAX_HANDLES];
-    let len = transport
-        .read_message(&mut bytes, &mut handles)
-        .expect("request read");
-    let request = ipc::wire::Header::decode(&bytes[..len.bytes]).expect("request header");
-    let mut reply = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
-    reply
-        .write_header(&ipc::wire::Header::new(
-            request.ordinal,
-            request.txid,
-            ipc::wire::FLAG_RESPONSE,
-        ))
-        .expect("reply header");
+    let channel = resources
+        .take_reply()
+        .expect("reply channel of the request");
+    let header = Header::split(request).expect("request header").header;
+    let mut reply = MessageBuf::new();
+    reply.write_header(&header).expect("reply header");
     if exchange.scalar {
         reply
             .write_field(1, &PROBE_VALUE.to_le_bytes())
             .expect("scalar reply");
     }
     reply.finish().expect("reply body");
-    transport
-        .write_message(reply.as_bytes(), &[capability.as_raw().raw()])
+    channel
+        .send(reply.as_bytes(), &[capability.as_raw().raw()])
         .expect("reply delivered");
     let _ = capability.into_raw();
     0
 }
 
-/// Кадр отдаёт capability одному владельцу. Повторное извлечение её не выдаёт, а завершение
-/// кадра владельца не трогает.
+/// Capability кадра принадлежит параметру обработчика, и завершение кадра её не трогает.
 #[kernel_test]
-fn a_frame_hands_its_capability_to_one_owner_only() {
+fn a_frame_hands_its_capability_to_the_parameter() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
     let exchange = Exchange::with_capability(service.client.as_raw(), watched.deliver());
@@ -244,64 +315,21 @@ fn a_frame_hands_its_capability_to_one_owner_only() {
     )
     .expect("spawn worker");
 
-    let transport = PortTransport::server(&service.server);
-    transport
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame delivered");
-    let mut received = ReceivedFrame::take(&transport).expect("delivered frame is owned");
+    let transport = PortTransport::new(&service.server);
     let mut probe = Probe::default();
-    frame_probe::dispatch(&mut probe, &transport).expect("frame dispatched");
-    let handed = probe.handed.expect("the frame carried a capability");
-    let owned = received.claim(handed).expect("the capability has an owner");
-    let again = received.claim(handed);
-    drop(received);
+    serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("frame delivered")
+    .expect("frame dispatched");
+    let owned = probe.handed.take().expect("the capability has an owner");
 
-    kernel_tests::kassert!(again.is_none());
     watched.assert_alive();
     drop(owned);
     watched.assert_closed();
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
     kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), 1);
-}
-
-/// Приём, отказавший до доставки, прав на прежнее содержимое IPC-буфера не даёт.
-#[kernel_test]
-fn a_refused_receive_leaves_the_previous_capability_alone() {
-    let service = Port::create_service(None).expect("port create");
-    let watched = Watched::create(FIRST_BADGE);
-    let exchange = Exchange::with_capability(service.client.as_raw(), watched.deliver());
-    let worker = spawn(
-        hand_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
-
-    let transport = PortTransport::server(&service.server);
-    transport
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame delivered");
-    let mut received = ReceivedFrame::take(&transport).expect("delivered frame is owned");
-    let mut probe = Probe::default();
-    frame_probe::dispatch(&mut probe, &transport).expect("frame dispatched");
-    let owned = received
-        .claim(probe.handed.expect("the frame carried a capability"))
-        .expect("the capability has an owner");
-    drop(received);
-
-    // Второй кадр не приходит, и отказ приёма оставляет в буфере capability первого.
-    let refused = transport.wait_readable(IDLE_TIMEOUT);
-    let after_refusal = ReceivedFrame::take(&transport);
-
-    kernel_tests::kassert_eq!(refused, Err(IpcError::Timeout));
-    kernel_tests::kassert!(after_refusal.is_none());
-    watched.assert_alive();
-    drop(owned);
-    watched.assert_closed();
-
-    worker.join(JOIN_TIMEOUT).expect("worker joins");
 }
 
 /// Вложенный IPC перезаписывает буфер потока, а принятый набор не меняет.
@@ -329,27 +357,18 @@ fn a_nested_call_does_not_change_the_received_set() {
     )
     .expect("spawn vendor");
 
-    let transport = PortTransport::server(&service.server);
-    transport
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame delivered");
-    let mut received = ReceivedFrame::take(&transport).expect("delivered frame is owned");
-    let mut probe = Probe::default();
-    frame_probe::dispatch(&mut probe, &transport).expect("frame dispatched");
-    let carried = probe.handed.expect("the frame carried a capability");
-
-    // Обработка первого кадра ещё идёт, а вложенный вызов приносит свою capability.
-    let nested_client = frame_probe::Client::new(PortTransport::client(nested.client.as_raw()))
-        .with_wait(CALL_TIMEOUT);
-    let mut answer = nested_client.request().expect("nested call answered");
-    let vended = answer.value;
-    let nested_owned = Port::from(answer.claim(vended).expect("the answer has an owner"));
-
-    let owned = received
-        .claim(carried)
-        .expect("the capability has an owner");
-    drop(answer);
-    drop(received);
+    let transport = PortTransport::new(&service.server);
+    let mut probe = Probe {
+        nested: Some(nested.client.as_raw()),
+        ..Probe::default()
+    };
+    serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("frame delivered")
+    .expect("frame dispatched");
+    let owned = probe.handed.take().expect("the capability has an owner");
+    let nested_owned = probe.nested_answer.take().expect("the answer has an owner");
 
     handed.assert_alive();
     answered.assert_alive();
@@ -376,12 +395,8 @@ fn an_unanswered_frame_refuses_its_caller() {
     )
     .expect("spawn worker");
 
-    let transport = PortTransport::server(&service.server);
-    transport
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame delivered");
-    // Кадр уходит без разбора и без ответа, а его завершение будит вызывающего.
-    drop(ReceivedFrame::take(&transport).expect("delivered frame is owned"));
+    let transport = PortTransport::new(&service.server);
+    serve_one(&transport, RECV_TIMEOUT, |frame| drop(frame)).expect("frame delivered");
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
     kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_REFUSED);
@@ -400,55 +415,18 @@ fn an_answered_frame_does_not_close_its_reply_twice() {
     )
     .expect("spawn worker");
 
-    let transport = PortTransport::server(&service.server);
-    transport
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame delivered");
-    let received = ReceivedFrame::take(&transport).expect("delivered frame is owned");
+    let transport = PortTransport::new(&service.server);
     let mut probe = Probe::default();
-    frame_probe::dispatch(&mut probe, &transport).expect("frame answered");
-    // Ответ снял reply с таблицы, и освобождённый слот занимает следующий объект.
+    serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("frame delivered")
+    .expect("frame answered");
     let signal = Signal::create().expect("signal after the answer");
-    drop(received);
 
     kernel_tests::kassert!(signal.notify_all().is_ok());
     worker.join(JOIN_TIMEOUT).expect("worker joins");
     kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
-}
-
-/// Отказавший клиентский вызов доставки не оставляет, и capability прежнего ответа жива.
-#[kernel_test]
-fn a_refused_call_delivers_nothing_to_its_client() {
-    let nested = Port::create_service(None).expect("port create");
-    let answered = Watched::create(FIRST_BADGE);
-    let vending = Exchange::with_capability(nested.server.as_raw(), answered.deliver());
-    let vendor = spawn(
-        vending_worker,
-        core::ptr::from_ref(&vending) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn vendor");
-
-    let client = frame_probe::Client::new(PortTransport::client(nested.client.as_raw()))
-        .with_wait(CALL_TIMEOUT);
-    let mut answer = client.request().expect("call answered");
-    let vended = answer.value;
-    let owned = Port::from(answer.claim(vended).expect("the answer has an owner"));
-    drop(answer);
-    vendor.join(JOIN_TIMEOUT).expect("vendor joins");
-
-    // Второй вызов встречной стороны не застаёт и не получает ни ответа, ни доставки.
-    let client = frame_probe::Client::new(client.into_transport()).with_wait(IDLE_TIMEOUT);
-    let refused = client.echo(PROBE_VALUE).map(|response| response.value);
-    let transport = client.into_transport();
-    let after_refusal = ReceivedFrame::take(&transport);
-
-    kernel_tests::kassert_eq!(refused, Err(IpcError::Timeout));
-    kernel_tests::kassert!(after_refusal.is_none());
-    answered.assert_alive();
-    drop(owned);
-    answered.assert_closed();
 }
 
 /// Приём, отказавший после переноса capability, оставляет её закрытой. Откат этого переноса
@@ -456,14 +434,32 @@ fn a_refused_call_delivers_nothing_to_its_client() {
 #[kernel_test]
 fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
     let watched = Watched::create(FIRST_BADGE);
+    let service = Port::create_service(None).expect("port create");
+    let resource = Resource::self_resource().expect("self metering resource");
+    let _fixture = load_entry(
+        &program(TABLE_FULL_ENTRY),
+        TABLE_FULL_NAME,
+        &resource,
+        service.server,
+    )
+    .expect("table fixture loads");
 
+    let mut frame = MessageBuf::new();
+    frame
+        .write_header(&Header::new(frame_probe::hand::ORDINAL))
+        .expect("frame header");
+    frame.finish().expect("frame finished");
+    let carried = watched.deliver();
+    let mut reply = [0u8; MESSAGE_INLINE_MAX];
     // Таблица фикстуры принимает capability кадра последним свободным слотом, и reply-объекту
     // вызова места уже не остаётся.
-    let _fixture = launch_entry(TABLE_FULL_ENTRY, TABLE_FULL_NAME, |transport| {
-        send_raw_frame(&transport, 1, alloc::vec![watched.deliver().erase()])?;
-        let _ = transport.wait_readable(CALL_TIMEOUT);
-        Ok(())
-    });
+    let _ = PortTransport::new(service.client.as_raw()).call(
+        frame.as_bytes(),
+        &[carried.as_raw().raw()],
+        &mut reply,
+        CALL_TIMEOUT,
+    );
+    let _ = carried.into_raw();
 
     watched.assert_closed();
 }
@@ -485,7 +481,7 @@ fn a_client_decode_failure_closes_its_reply_capabilities() {
         Priority::new(1),
     )
     .expect("spawn reply worker");
-    let client = frame_probe::Client::new(PortTransport::client(service.client.as_raw()))
+    let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
     let answer = client.request();
     kernel_tests::kassert!(matches!(answer, Err(IpcError::MissingField)));
@@ -510,17 +506,17 @@ fn a_scalar_reply_closes_extra_capabilities() {
         Priority::new(1),
     )
     .expect("spawn reply worker");
-    let client = frame_probe::Client::new(PortTransport::client(service.client.as_raw()))
+    let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
-    let answer = client.echo(PROBE_VALUE).expect("scalar answer").value;
+    let answer = client.echo(PROBE_VALUE).expect("scalar answer");
     kernel_tests::kassert_eq!(answer, PROBE_VALUE);
     watched.assert_closed();
     worker.join(JOIN_TIMEOUT).expect("reply worker joins");
 }
 
-/// Разобранный ответ, у которого capability не забрали, закрывает её вместе с собой.
+/// Прочитанный ответ владеет capability и закрывает её вместе с собой.
 #[kernel_test]
-fn an_unclaimed_reply_capability_closes_with_its_answer() {
+fn a_dropped_answer_closes_its_capability() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
     let vending = Exchange::with_capability(service.server.as_raw(), watched.deliver());
@@ -532,7 +528,7 @@ fn an_unclaimed_reply_capability_closes_with_its_answer() {
     )
     .expect("spawn vendor");
 
-    let client = frame_probe::Client::new(PortTransport::client(service.client.as_raw()))
+    let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
     let answer = client.request().expect("answered");
     watched.assert_alive();
@@ -557,23 +553,193 @@ fn an_undelivered_answer_closes_the_capability_it_vended() {
     )
     .expect("spawn vendor");
 
-    // У одностороннего кадра запроса нет reply-объекта, и доставить ответ на него некуда.
-    let transport = PortTransport::client(service.client.as_raw()).with_send_timeout(CALL_TIMEOUT);
-    let mut request = ipc::wire::MessageBuf::<{ ipc::wire::MESSAGE_INLINE_MAX }>::new();
-    request
-        .write_header(&ipc::wire::Header::new(frame_probe::request::ORDINAL, 0, 0))
-        .expect("request header");
-    request.finish().expect("request body");
-    transport
-        .write_message(request.as_bytes(), &[])
-        .expect("request delivered");
+    let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
+        .with_wait(IDLE_TIMEOUT);
+    let abandoned = client.request();
+    let client = client.with_wait(CALL_TIMEOUT);
+    let answered = client.echo(PROBE_VALUE);
 
-    // Следующий корректный вызов обслужен тем же получателем: первый кадр он уже отпустил.
-    let client = frame_probe::Client::new(transport).with_wait(CALL_TIMEOUT);
-    let answered = client.echo(PROBE_VALUE).map(|response| response.value);
+    kernel_tests::kassert!(matches!(abandoned, Err(IpcError::Timeout)));
     kernel_tests::kassert_eq!(answered, Ok(PROBE_VALUE));
     watched.assert_closed();
-
     vendor.join(JOIN_TIMEOUT).expect("vendor joins");
     kernel_tests::kassert_eq!(vending.outcome.load(SeqCst), 1);
+}
+
+#[kernel_test]
+fn a_kept_debt_is_answered_after_its_frame() {
+    let service = Port::create_service(None).expect("port create");
+    let exchange = Exchange::new(service.client.as_raw());
+    let worker = spawn(
+        echo_worker,
+        core::ptr::from_ref(&exchange) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn worker");
+
+    let transport = PortTransport::new(&service.server);
+    let mut probe = Probe {
+        keep: true,
+        ..Probe::default()
+    };
+    serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("frame delivered")
+    .expect("frame dispatched");
+    let debt = probe.kept_echo.take().expect("the debt is kept");
+    let idle = serve_one(&transport, IDLE_TIMEOUT, |frame| drop(frame));
+
+    debt.send(PROBE_VALUE).expect("the kept debt is answered");
+
+    kernel_tests::kassert_eq!(idle, Err(RecvError::Timeout));
+    worker.join(JOIN_TIMEOUT).expect("worker joins");
+    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
+}
+
+#[kernel_test]
+fn a_forwarded_debt_is_answered_by_its_new_holder() {
+    let service = Port::create_service(None).expect("port create");
+    let holder_port = Port::create_service(None).expect("holder port create");
+    let exchange = Exchange::new(service.client.as_raw());
+    let holding = Exchange::new(holder_port.server.as_raw());
+    let worker = spawn(
+        echo_worker,
+        core::ptr::from_ref(&exchange) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn worker");
+    let holder = spawn(
+        holder_worker,
+        core::ptr::from_ref(&holding) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn holder");
+
+    let transport = PortTransport::new(&service.server);
+    let mut probe = Probe {
+        keep: true,
+        ..Probe::default()
+    };
+    serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("frame delivered")
+    .expect("frame dispatched");
+    let debt = probe.kept_echo.take().expect("the debt is kept");
+
+    frame_probe::Client::new(PortTransport::new(holder_port.client.as_raw()))
+        .with_wait(CALL_TIMEOUT)
+        .forward(debt)
+        .expect("the debt is forwarded");
+
+    worker.join(JOIN_TIMEOUT).expect("worker joins");
+    holder.join(JOIN_TIMEOUT).expect("holder joins");
+    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    kernel_tests::kassert_eq!(holding.outcome.load(SeqCst), 1);
+}
+
+#[kernel_test]
+fn an_unsent_forward_keeps_the_debt_with_its_holder() {
+    let service = Port::create_service(None).expect("port create");
+    let absent = Port::create_service(None).expect("port without a receiver");
+    let first = Exchange::new(service.client.as_raw());
+    let second = Exchange::new(service.client.as_raw());
+    let first_worker = spawn(
+        echo_worker,
+        core::ptr::from_ref(&first) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn first worker");
+
+    let transport = PortTransport::new(&service.server);
+    let mut probe = Probe {
+        keep: true,
+        ..Probe::default()
+    };
+    serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("frame delivered")
+    .expect("frame dispatched");
+    let debt = probe.kept_echo.take().expect("the debt is kept");
+
+    let refused = frame_probe::Client::new(PortTransport::new(absent.client.as_raw()))
+        .with_wait(IDLE_TIMEOUT)
+        .forward(debt)
+        .expect_err("nobody receives the forward");
+    kernel_tests::kassert_eq!(refused.error, IpcError::Timeout);
+    refused
+        .value
+        .send(PROBE_VALUE)
+        .expect("the holder answers its debt");
+    first_worker.join(JOIN_TIMEOUT).expect("first worker joins");
+
+    let second_worker = spawn(
+        echo_worker,
+        core::ptr::from_ref(&second) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn second worker");
+    probe.keep = false;
+    serve_one(&transport, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("next frame delivered")
+    .expect("next frame answered");
+
+    second_worker
+        .join(JOIN_TIMEOUT)
+        .expect("second worker joins");
+    kernel_tests::kassert_eq!(first.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    kernel_tests::kassert_eq!(second.outcome.load(SeqCst), OUTCOME_ANSWERED);
+}
+
+#[kernel_test]
+fn an_owning_transport_carries_both_sides_of_a_session() {
+    let service = Port::create_service(None).expect("port create");
+    let exchange = Exchange::new(service.client.into_raw());
+    let worker = spawn(
+        session_echo_worker,
+        core::ptr::from_ref(&exchange) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn worker");
+
+    let session = SessionTransport::new(service.server);
+    let mut probe = Probe::default();
+    serve_one(&session, RECV_TIMEOUT, |frame| {
+        frame_probe::dispatch(&mut probe, frame)
+    })
+    .expect("frame delivered")
+    .expect("frame answered");
+
+    worker.join(JOIN_TIMEOUT).expect("worker joins");
+    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
+}
+
+#[kernel_test]
+fn a_dropped_owning_transport_refuses_its_caller() {
+    let service = Port::create_service(None).expect("port create");
+    let exchange = Exchange::new(service.client.into_raw());
+    let worker = spawn(
+        session_echo_worker,
+        core::ptr::from_ref(&exchange) as usize,
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn worker");
+
+    // Порт теряет единственного получателя, и вызов, припаркованный либо следующий, получает
+    // отказ.
+    drop(SessionTransport::new(service.server));
+
+    worker.join(JOIN_TIMEOUT).expect("worker joins");
+    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_REFUSED);
 }

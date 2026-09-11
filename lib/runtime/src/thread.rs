@@ -13,7 +13,6 @@ use crate::{
     heap::{alloc, dealloc},
     svc::{
         handle_close, process_self, signal_wait_one, thread_create, thread_exit, thread_exit_code,
-        thread_terminate,
     },
     tls::run_destructors,
 };
@@ -108,15 +107,6 @@ pub unsafe fn release_stack(stack: NonNull<u8>, stack_bytes: usize) {
     unsafe { dealloc(stack.as_ptr(), stack_bytes, STACK_ALIGN) };
 }
 
-/// Снимает поток `sibling` и уходит из текущего кодом `exit_code`.
-///
-/// Процесс уходит вместе со своим последним потоком: `ProcessTerminate` на собственный
-/// процесс ядро отвергает.
-pub fn exit_with_sibling(sibling: Handle<kind::Thread>, exit_code: u32) -> ! {
-    let _ = thread_terminate(sibling, u64::from(exit_code));
-    thread_exit(u64::from(exit_code))
-}
-
 struct SpawnPayload {
     entry: extern "C" fn(usize) -> u32,
     arg: usize,
@@ -207,7 +197,6 @@ unsafe impl Send for JoinHandle {}
 unsafe impl Sync for JoinHandle {}
 
 impl JoinHandle {
-    /// Handle потока. Его принимает [`exit_with_sibling`].
     pub const fn handle(&self) -> Handle<kind::Thread> {
         self.thread
     }
@@ -217,15 +206,6 @@ impl JoinHandle {
         let observed = signal_wait_one(self.thread, SIGNALED, timeout);
         if observed < 0 {
             return Err(SyscallError::from_return(observed).unwrap_or(SyscallError::Canceled));
-        }
-        Ok(())
-    }
-
-    /// Снимает поток кодом `exit_code`.
-    pub fn terminate(&self, exit_code: u32) -> Result<(), SyscallError> {
-        let observed = thread_terminate(self.thread, u64::from(exit_code));
-        if observed < 0 {
-            return Err(SyscallError::from_return(observed).unwrap_or(SyscallError::BadHandle));
         }
         Ok(())
     }

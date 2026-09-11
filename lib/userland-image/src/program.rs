@@ -96,9 +96,7 @@ impl<'a> Iterator for DecodedSegments<'a> {
     }
 }
 
-/// Разбирает программу из байт `data`, называя её путём `path`. Длины сегментов проверяются
-/// по фактическому срезу, и байты за концом программы разбору не мешают.
-pub fn decode_program<'a>(
+pub(crate) fn decode_program<'a>(
     path: &'a str,
     data: &'a [u8],
 ) -> Result<DecodedProgram<'a>, ProgramDecodeError> {

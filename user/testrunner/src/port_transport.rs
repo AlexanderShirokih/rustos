@@ -1,25 +1,41 @@
-//! E2E чтения значка отправителя серверной стороной `PortTransport`:
-//! клиент шлёт по кадру через заклеймённую и незаклеймённую копии port-хэндла,
-//! сервер читает `peer_badge` сразу после приёма.
+//! E2E `PortTransport`: значок отправителя в ресурсах принятого кадра, срок односторонней
+//! отправки и отказ вызова, чей ответ не уместился у вызывающего. Клиент шлёт по кадру через
+//! заклеймённую и незаклеймённую копии port-хэндла.
 
 use core::{
     num::{NonZeroU32, NonZeroU64},
     sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst},
 };
 
-use ipc::{Transport, wire::IpcError};
-use kernel_objects::Port;
+use ipc::{
+    IntoWireValue, Listener as _,
+    wire::{Cap, IpcError, MESSAGE_INLINE_MAX},
+};
+use kernel_objects::{Delivery, Port};
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, Priority, Timeout, spawn};
-use syscall::Rights;
+use syscall::{Rights, kind};
 
-use crate::startup_fixture_protocol::startup_fixture;
+use crate::{
+    answer_exhaustion_protocol::{EXHAUSTED_EXIT_CODE, answer_exhaustion},
+    fixture::spawn_entry,
+};
+
+const ANSWER_EXHAUSTION_FIXTURE: &str = "/boot/answer-exhaustion-fixture/program";
 
 const STACK_SIZE: u64 = 0x4000;
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 const BADGE: NonZeroU64 = NonZeroU64::new(0x00C0_FFEE).expect("badge is non-zero");
+
+ipc::protocol! {
+    pub mod cast_probe {
+        name = "CastProbe";
+
+        cast fn hand(value: u64);
+    }
+}
 
 static BADGED_RAW: AtomicU64 = AtomicU64::new(0);
 static PLAIN_RAW: AtomicU64 = AtomicU64::new(0);
@@ -63,17 +79,18 @@ fn server_reads_badge_of_receiving_handle() {
 
     let client = spawn(badge_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
 
-    // Значки снимаются в локальные переменные до проверок. Провал kassert
-    // логирует строку, а это port_send, перезаписывающий буфер.
-    let server = PortTransport::server(port.as_raw());
-    server
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame from badged copy");
-    let badged_seen = server.peer_badge();
-    server
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame from unbadged copy");
-    let plain_seen = server.peer_badge();
+    let server = PortTransport::new(port.as_raw());
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    let badged_seen = server
+        .recv(&mut bytes, RECV_TIMEOUT)
+        .expect("frame from badged copy")
+        .resources
+        .badge;
+    let plain_seen = server
+        .recv(&mut bytes, RECV_TIMEOUT)
+        .expect("frame from unbadged copy")
+        .resources
+        .badge;
 
     kernel_tests::kassert_eq!(badged_seen, BADGE.get());
     kernel_tests::kassert_eq!(plain_seen, 0);
@@ -87,22 +104,41 @@ fn server_reads_badge_of_receiving_handle() {
 #[kernel_test]
 fn client_cast_timeout_when_receiver_stays_open_without_recv() {
     let service = Port::create_service(None).expect("port create");
-    let default = PortTransport::client(service.client.as_raw());
-    kernel_tests::kassert_eq!(default.send_timeout(), Timeout::INFINITE);
+    let client = cast_probe::Client::new(PortTransport::new(service.client.as_raw()))
+        .with_wait(Timeout::POLL);
 
-    let bounded = PortTransport::client(service.client.as_raw()).with_send_timeout(Timeout::POLL);
-    kernel_tests::kassert_eq!(bounded.send_timeout(), Timeout::POLL);
-    let client = startup_fixture::Client::new(bounded);
-
-    kernel_tests::kassert_eq!(client.start(7), Err(IpcError::Timeout));
+    kernel_tests::kassert_eq!(client.hand(7), Err(IpcError::Timeout));
 }
 
 #[kernel_test]
 fn client_cast_reports_peer_close_when_receiver_closes_before_recv() {
     let service = Port::create_service(None).expect("port create");
-    let bounded = PortTransport::client(service.client.as_raw()).with_send_timeout(Timeout::POLL);
+    let client = cast_probe::Client::new(PortTransport::new(service.client.as_raw()))
+        .with_wait(Timeout::POLL);
     drop(service.server);
 
-    let client = startup_fixture::Client::new(bounded);
-    kernel_tests::kassert_eq!(client.start(7), Err(IpcError::PeerClosed));
+    kernel_tests::kassert_eq!(client.hand(7), Err(IpcError::PeerClosed));
+}
+
+impl answer_exhaustion::Service<Delivery> for Option<Port> {
+    fn request(&mut self, _frame: &Delivery) -> impl IntoWireValue<Read = Cap<kind::Port>> {
+        self.take().expect("capability of the answer")
+    }
+}
+
+#[kernel_test]
+fn client_call_reports_resource_exhaustion_when_the_answer_does_not_fit() {
+    let service = Port::create_service(None).expect("port create");
+    let process = spawn_entry(ANSWER_EXHAUSTION_FIXTURE, service.client);
+
+    let mut answer = Some(Port::create().expect("capability of the answer"));
+    let transport = PortTransport::new(service.server.as_raw());
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    let frame = transport
+        .recv(&mut bytes, RECV_TIMEOUT)
+        .expect("call of the fixture");
+    let _ = answer_exhaustion::dispatch(&mut answer, frame);
+
+    process.join(JOIN_TIMEOUT).expect("fixture exits");
+    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), EXHAUSTED_EXIT_CODE);
 }

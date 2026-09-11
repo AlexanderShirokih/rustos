@@ -1,11 +1,17 @@
-//! Поглощение хэндлов в `Process::start` на ошибочном пути из EL0: процесс без
-//! загруженного образа отвергает `start`, переданный по значению хэндл
-//! закрывается обёрткой (его `Drop`) ровно один раз, не утекая.
+//! `Process::start` из EL0. На ошибочном пути процесс без загруженного образа отвергает
+//! `start`, и переданный по значению хэндл закрывается обёрткой (его `Drop`) ровно один раз,
+//! не утекая. Запущенный процесс получает стартовый хэндл без права передачи.
 
-use kernel_objects::{Process, Signal, ThreadEntry, kind};
+use kernel_objects::{Error, Port, Process, Signal, ThreadEntry, kind};
 use kernel_tests::kernel_test;
-use runtime::{Priority, handle_close, signal_set};
-use syscall::{Handle, SIGNALED, SyscallError, WakeCount};
+use runtime::{Priority, Timeout, handle_close, signal_set};
+use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
+
+use crate::fixture::spawn_entry;
+
+const FORWARD_FIXTURE: &str = "/boot/start-handle-forward-fixture/program";
+const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
+const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 fn is_closed(handle: Handle<kind::Signal>) -> bool {
     signal_set(handle, SIGNALED, 0, WakeCount::None) == SyscallError::BadHandle.as_return_value()
@@ -33,5 +39,25 @@ fn start_error_closes_passed_handles() {
     kernel_tests::kassert_eq!(
         handle_close(stale),
         SyscallError::BadHandle.as_return_value()
+    );
+}
+
+#[kernel_test]
+fn a_started_process_cannot_pass_its_start_handle_on() {
+    let port = Port::create().expect("port create");
+    let start = port
+        .duplicate(Rights::WRITE | Rights::TRANSFER, None)
+        .expect("client copy of the port");
+    let process = spawn_entry(FORWARD_FIXTURE, start);
+
+    kernel_tests::kassert!(matches!(
+        port.recv(RECV_TIMEOUT),
+        Err(Error::Syscall(SyscallError::AccessDenied))
+    ));
+
+    process.join(JOIN_TIMEOUT).expect("fixture exits");
+    kernel_tests::kassert_eq!(
+        process.exit_code().expect("exit code"),
+        SyscallError::AccessDenied as u32
     );
 }

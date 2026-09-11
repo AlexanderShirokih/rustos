@@ -18,15 +18,6 @@ pub(super) struct ImageManifest {
     #[serde(default)]
     pub(super) files: Vec<ImageFile>,
     pub(super) plan: Option<ImagePlan>,
-    pub(super) stage1: Option<ImageStageOne>,
-    #[serde(default)]
-    pub(super) mount_tables: Vec<ImageMountTable>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ImageMountTable {
-    pub(super) source: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,12 +26,6 @@ pub(super) struct ImagePlan {
     pub(super) source: PathBuf,
     #[serde(default = "default_plan_path")]
     pub(super) path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ImageStageOne {
-    pub(super) source: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,18 +76,6 @@ pub(super) fn parse_manifest(src: &str) -> Result<ImageManifest> {
         !manifest.programs.is_empty(),
         "userland image manifest must contain at least one [[programs]] item"
     );
-    // Ступень 1 связывается с экспортёрами ступени 0 по имени экземпляра, и дерево имён
-    // прививается сессиями компонентов: без плана называть их нечем.
-    if manifest.plan.is_none() {
-        ensure!(
-            manifest.stage1.is_none(),
-            "userland image manifest sets [stage1] without [plan]"
-        );
-        ensure!(
-            manifest.mount_tables.is_empty(),
-            "userland image manifest sets [[mount_tables]] without [plan]"
-        );
-    }
     Ok(manifest)
 }
 
@@ -163,37 +136,6 @@ mod tests {
         assert_eq!(
             manifest.files[0].source,
             PathBuf::from("user/rootkeeper/assets/**/*.txt")
-        );
-    }
-
-    const BOOT_PROGRAM: &str = "version = 1\n\
-         \n\
-         [[programs]]\n\
-         package = \"rootkeeper\"\n\
-         path = \"/boot/rootkeeper\"\n\
-         boot = true\n";
-
-    #[test]
-    fn manifest_rejects_stage_one_without_a_plan() {
-        let err = parse_manifest(&format!(
-            "{BOOT_PROGRAM}\n[stage1]\nsource = \"user/stage1.toml\"\n"
-        ))
-        .expect_err("stage 1 without a plan must fail");
-        assert_eq!(
-            err.to_string(),
-            "userland image manifest sets [stage1] without [plan]"
-        );
-    }
-
-    #[test]
-    fn manifest_rejects_a_mount_table_without_a_plan() {
-        let err = parse_manifest(&format!(
-            "{BOOT_PROGRAM}\n[[mount_tables]]\nsource = \"user/mounts.toml\"\n"
-        ))
-        .expect_err("a mount table without a plan must fail");
-        assert_eq!(
-            err.to_string(),
-            "userland image manifest sets [[mount_tables]] without [plan]"
         );
     }
 

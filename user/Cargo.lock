@@ -31,7 +31,6 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "component-startup-std",
- "kernel-objects",
  "rtc-abi",
  "userland-build",
 ]
@@ -58,6 +57,7 @@ dependencies = [
  "component-abi",
  "ipc",
  "kernel-objects",
+ "log-abi",
  "syscall",
 ]
 
@@ -140,8 +140,8 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "filesystem",
+ "filesystem-abi",
  "filesystem-server",
- "kernel-objects",
  "runtime",
  "syscall",
  "userland-build",
@@ -153,8 +153,8 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "filesystem",
+ "filesystem-abi",
  "filesystem-server",
- "kernel-objects",
  "runtime",
  "syscall",
  "userland-build",
@@ -165,10 +165,12 @@ name = "filesystem-server"
 version = "0.1.0"
 dependencies = [
  "component-abi",
+ "component-startup",
  "filesystem",
  "filesystem-abi",
  "ipc",
  "kernel-objects",
+ "log-abi",
  "runtime",
  "spin",
  "syscall",
@@ -182,21 +184,6 @@ dependencies = [
  "component-startup",
  "component-startup-std",
  "userland-build",
-]
-
-[[package]]
-name = "init"
-version = "0.1.0"
-dependencies = [
- "component-startup",
- "filesystem-abi",
- "ipc",
- "kernel-objects",
- "runtime",
- "supervisor-abi",
- "syscall",
- "userland-build",
- "userland-image",
 ]
 
 [[package]]
@@ -258,6 +245,7 @@ name = "managed-component"
 version = "0.1.0"
 dependencies = [
  "component-abi",
+ "component-startup",
  "ipc",
  "kernel-objects",
  "runtime",
@@ -312,8 +300,6 @@ dependencies = [
  "log-relay",
  "managed-component",
  "runtime",
- "spin",
- "supervisor-abi",
  "syscall",
  "userland-build",
  "userland-image",
@@ -360,14 +346,6 @@ dependencies = [
  "kernel-objects",
  "syscall",
  "userland-build",
-]
-
-[[package]]
-name = "supervisor-abi"
-version = "0.1.0"
-dependencies = [
- "ipc",
- "syscall",
 ]
 
 [[package]]
@@ -419,7 +397,6 @@ dependencies = [
  "collections",
  "component-abi",
  "component-startup",
- "device-resolver",
  "filesystem",
  "filesystem-abi",
  "filesystem-server",
@@ -433,7 +410,6 @@ dependencies = [
  "rtc-abi",
  "runtime",
  "spin",
- "supervisor-abi",
  "syscall",
  "test-harness-qemu",
  "userland",
@@ -463,7 +439,7 @@ version = "0.1.0"
 name = "userland-image"
 version = "0.1.0"
 dependencies = [
- "syscall",
+ "component-abi",
  "userland",
 ]
 

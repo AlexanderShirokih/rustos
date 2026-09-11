@@ -16,7 +16,7 @@ pub fn default_rights_for(obj: &CapabilityTarget) -> Rights {
         // - IrqControl: WRITE гейтит минт IrqLine, READ для инспекции,
         //   DUPLICATE/TRANSFER для делегирования вниз (как Resource);
         // - IrqLine: READ для ожидания (через as_waitable), WRITE гейтит ack,
-        //   DUPLICATE/TRANSFER чтобы супервизор отдал линию драйверу.
+        //   DUPLICATE/TRANSFER для передачи линии драйверу.
         CapabilityTarget::Signal(_)
         | CapabilityTarget::Process(_)
         | CapabilityTarget::Thread(_)
@@ -53,8 +53,8 @@ pub fn default_rights_for(obj: &CapabilityTarget) -> Rights {
             Rights::READ | Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE
         }
 
-        // Reply: WRITE гейтит сам reply; TRANSFER даёт делегировать
-        // ответ другому серверу. Не дублируется.
+        // Reply: WRITE гейтит сам reply, TRANSFER - его передачу. Ответ один,
+        // и DUPLICATE не даётся.
         CapabilityTarget::Reply(_) => Rights::WRITE | Rights::TRANSFER,
     }
 }

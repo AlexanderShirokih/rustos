@@ -1,17 +1,12 @@
-//! Потоковый транспорт ipc-контрактов поверх SPSC-кольца ([`SpscRing`]) в
-//! разделяемой памяти и `Signal` для park/wake.
+//! Однонаправленный поток кадров поверх SPSC-кольца ([`SpscRing`]) в разделяемой памяти и
+//! `Signal` для park/wake.
 //!
-//! `RingTransport` - однонаправленное соединение producer->consumer над одним
-//! общим кольцом и одним "data"-сигналом, которым producer будит уснувший
-//! consumer. Роль задаётся при конструировании
-//! ([`RingTransport::producer`] / [`RingTransport::consumer`]).
-//!
-//! Запись не блокируется. При полном кольце возвращается `WouldBlock`.
-//! Capability через кольцо не передаются - `write_message` с непустым
-//! handle-вектором отвергается, `read_message` отдаёт ноль хэндлов.
+//! [`RingProducer`] кладёт кадры в кольцо и будит потребителя, [`RingConsumer`] извлекает их и
+//! спит на том же "data"-сигнале, пока кольцо пусто. Запись не блокируется, и на полном кольце
+//! возвращает [`RingError::Full`]. Capability через кольцо не передаются.
 
 use collections::{PopOutcome, PushOutcome, RingError, SpscRing};
-use ipc::{MessageLen, Transport, wire::IpcError};
+use ipc::wire::IpcError;
 use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount, kind};
 
 use crate::{
@@ -19,116 +14,76 @@ use crate::{
     svc::{signal_set, signal_wait_one},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Producer,
-    Consumer,
-}
-
-/// Потоковый транспорт ipc-контракта поверх SPSC-кольца в shared memory.
-pub struct RingTransport {
+/// Пишущий конец кольца.
+pub struct RingProducer {
     ring: SpscRing,
     data: Handle<kind::Signal>,
-    role: Role,
 }
 
-impl RingTransport {
-    /// Producer-конец пишет кадры в кольцо и будит consumer.
+/// Читающий конец кольца.
+pub struct RingConsumer {
+    ring: SpscRing,
+    data: Handle<kind::Signal>,
+}
+
+impl RingProducer {
+    /// Пишущий конец над кольцом `ring`, будящий потребителя сигналом `data`.
     #[must_use]
-    pub fn producer(ring: SpscRing, data: Handle<kind::Signal>) -> Self {
+    pub fn new(ring: SpscRing, data: BorrowedHandle<'_, kind::Signal>) -> Self {
         Self {
             ring,
-            data,
-            role: Role::Producer,
+            data: data.as_raw(),
         }
     }
 
-    /// Producer-конец по заимствованному "data"-сигналу переадресует к
-    /// [`RingTransport::producer`], беря сырой хэндл из заимствования.
-    #[must_use]
-    pub fn producer_signal(ring: SpscRing, data: BorrowedHandle<'_, kind::Signal>) -> Self {
-        Self::producer(ring, data.as_raw())
-    }
-
-    /// Consumer-конец читает кадры из кольца и спит на "data"-сигнале.
-    #[must_use]
-    pub fn consumer(ring: SpscRing, data: Handle<kind::Signal>) -> Self {
-        Self {
-            ring,
-            data,
-            role: Role::Consumer,
+    /// Кладёт кадр в кольцо. `Full` - в кольце нет свободного слота, `TooLarge` - кадр длиннее
+    /// слота.
+    pub fn push(&self, frame: &[u8]) -> Result<(), RingError> {
+        let PushOutcome { wake_consumer } = self.ring.try_push(frame)?;
+        // Потребителя будит только кадр, опубликованный в пустое кольцо. Под нагрузкой кольцо
+        // непусто, и syscall не нужен.
+        if wake_consumer {
+            signal_set(self.data, SIGNALED, 0, WakeCount::One);
         }
+        Ok(())
     }
 }
 
-impl Transport for RingTransport {
-    type Resources = ();
+impl RingConsumer {
+    /// Читающий конец над кольцом `ring`, спящий на сигнале `data`. Сброс сигнала требует
+    /// `Rights::WRITE`.
+    #[must_use]
+    pub fn new(ring: SpscRing, data: Handle<kind::Signal>) -> Self {
+        Self { ring, data }
+    }
 
-    fn take_resources(&self) {}
-
-    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
-        if !handles.is_empty() {
-            return Err(IpcError::FrameOverflow);
-        }
-
-        match self.role {
-            Role::Producer => match self.ring.try_push(bytes) {
-                Ok(PushOutcome { wake_consumer }) => {
-                    // Consumer будим только когда на момент публикации других
-                    // кадров не осталось. Под нагрузкой кольцо непусто, поэтому
-                    // syscall не нужен.
-                    if wake_consumer {
-                        signal_set(self.data, SIGNALED, 0, WakeCount::One);
-                    }
-                    Ok(())
-                }
-                Err(RingError::TooLarge) => Err(IpcError::FrameOverflow),
-                // Полное кольцо - backpressure вызывающему; `Empty` недостижим.
-                Err(RingError::Full | RingError::Empty) => Err(IpcError::WouldBlock),
-            },
-            // Однонаправленное кольцо: consumer-конец не пишет.
-            Role::Consumer => Err(IpcError::PeerClosed),
+    /// Извлекает кадр в `into`, ожидая его не дольше `timeout`, и отдаёт его длину.
+    /// `Truncated` - буфер короче кадра, `Timeout` - кадр не пришёл в срок, `PeerClosed` -
+    /// отказ операции над сигналом.
+    pub fn pop(&self, into: &mut [u8], timeout: Timeout) -> Result<usize, IpcError> {
+        loop {
+            match self.ring.try_pop(into) {
+                Ok(PopOutcome { len, .. }) => return Ok(len),
+                Err(RingError::Empty) => self.park(timeout)?,
+                Err(RingError::TooLarge | RingError::Full) => return Err(IpcError::Truncated),
+            }
         }
     }
 
-    fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError> {
-        let _ = handles;
-        match self.role {
-            Role::Consumer => match self.ring.try_pop(bytes) {
-                Ok(PopOutcome { len, .. }) => Ok(MessageLen::new(len, 0)),
-                Err(RingError::Empty) => Err(IpcError::WouldBlock),
-                // Буфер короче кадра; `Full` недостижим.
-                Err(RingError::TooLarge | RingError::Full) => Err(IpcError::Truncated),
-            },
-            Role::Producer => Err(IpcError::WouldBlock),
+    fn park(&self, timeout: Timeout) -> Result<(), IpcError> {
+        // Сигнал сбрасывается до повторной проверки кольца. Производитель публикует кадр до
+        // установки сигнала, поэтому кадр между проверкой и сбросом не теряется. Отказ сброса
+        // возвращается вызывающему, иначе оставшийся SIGNALED крутил бы цикл без сна.
+        if signal_set(self.data, 0, SIGNALED, WakeCount::None) < 0 {
+            return Err(IpcError::PeerClosed);
         }
-    }
-
-    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
-        match self.role {
-            Role::Consumer => loop {
-                if !self.ring.is_empty() {
-                    return Ok(());
-                }
-                // Чистим "data" (нужны права WRITE) и перечитываем кольцо перед
-                // сном: producer публикует кадр до set, поэтому recheck-after-clear
-                // не даёт проспать кадр, запушенный между check и clear. Провал
-                // clear пробрасываем, иначе оставшийся SIGNALED крутил бы busy-spin.
-                if signal_set(self.data, 0, SIGNALED, WakeCount::None) < 0 {
-                    return Err(IpcError::PeerClosed);
-                }
-                if !self.ring.is_empty_before_park() {
-                    return Ok(());
-                }
-                let r = signal_wait_one(self.data, SIGNALED, timeout);
-                if r == SYSCALL_RETURN_TIMEOUT {
-                    return Err(IpcError::Timeout);
-                }
-                if r < 0 {
-                    return Err(IpcError::PeerClosed);
-                }
-            },
-            Role::Producer => Ok(()),
+        if !self.ring.is_empty_before_park() {
+            return Ok(());
+        }
+        match signal_wait_one(self.data, SIGNALED, timeout) {
+            SYSCALL_RETURN_TIMEOUT => Err(IpcError::Timeout),
+            r if r < 0 => Err(IpcError::PeerClosed),
+            _ => Ok(()),
         }
     }
 }

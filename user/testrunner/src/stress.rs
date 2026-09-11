@@ -732,10 +732,10 @@ impl Pool {
     }
 }
 
-fn remaining_pages() -> Result<u64, Error> {
-    // Бисекция по `split`: он отрезает объявленное число страниц и возвращает
-    // их закрытием производного ресурса. Замер страниц не расходует и
-    // измеряемую величину не двигает.
+fn remaining_budget() -> Result<u64, Error> {
+    // Бисекция по `split`: он отрезает не меньше объявленного числа байт и
+    // возвращает их закрытием производного ресурса. Замер не расходует бюджет и
+    // не двигает измеряемую величину.
     let resource = Resource::self_resource()?;
     let mut attainable = 0;
     let mut refused = 1;
@@ -852,8 +852,8 @@ fn report(context: fmt::Arguments<'_>, failure: StepFailure) -> ! {
 
 fn measure(context: fmt::Arguments<'_>) -> u64 {
     // Нехватка остатка на само снятие величины - то же расхождение.
-    match remaining_pages() {
-        Ok(pages) => pages,
+    match remaining_budget() {
+        Ok(budget) => budget,
         Err(error) => kernel_tests::macros::fail(
             format_args!("stress {context}: budget probe refused ({error:?})"),
             file!(),
@@ -877,20 +877,20 @@ pub(crate) fn log_pass(seed: u64) {
     });
 }
 
-fn log_base(pages: u64) {
+fn log_base(budget: u64) {
     kernel_tests::runner::with_writer(|writer| {
         let mut output = kernel_tests::runner::FmtAdapter::new(writer);
-        let _ = writeln!(output, "[STRESS-BASE: budget={pages}]");
+        let _ = writeln!(output, "[STRESS-BASE: budget={budget}]");
     });
 }
 
-fn log_epoch(seed: u64, epoch: u64, pages: u64) {
+fn log_epoch(seed: u64, epoch: u64, budget: u64) {
     kernel_tests::runner::with_writer(|writer| {
         let mut output = kernel_tests::runner::FmtAdapter::new(writer);
         // Форму маркера разбирает xtask, считая отчитавшиеся эпохи прогона.
         let _ = writeln!(
             output,
-            "[STRESS-EPOCH: seed={seed} epoch={epoch} budget={pages}]"
+            "[STRESS-EPOCH: seed={seed} epoch={epoch} budget={budget}]"
         );
     });
 }
@@ -908,12 +908,12 @@ fn port_signal_lifecycle_stress() {
         log_seed(seed, plan.steps);
         for epoch in 0..epochs {
             run_epoch(seed, epoch, plan.epoch_length(epoch));
-            let pages = measure(format_args!("seed={seed} epoch={epoch}"));
+            let budget = measure(format_args!("seed={seed} epoch={epoch}"));
             kernel_tests::kassert!(
-                pages == base,
-                "stress seed={seed} epoch={epoch}: budget base={base} now={pages}"
+                budget == base,
+                "stress seed={seed} epoch={epoch}: budget base={base} now={budget}"
             );
-            log_epoch(seed, epoch, pages);
+            log_epoch(seed, epoch, budget);
         }
         log_pass(seed);
     }

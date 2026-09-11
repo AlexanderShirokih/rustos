@@ -121,7 +121,7 @@ fn tag() -> &'static str {
 
 fn client() -> Option<log::Client<PortTransport>> {
     let handle = crate::restore(SESSION.load(Ordering::Acquire))?;
-    Some(log::Client::new(PortTransport::client(handle)))
+    Some(log::Client::new(PortTransport::new(handle)))
 }
 
 /// Best-effort строка в журнал. До стартового кадра - no-op.

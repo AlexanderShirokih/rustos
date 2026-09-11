@@ -10,7 +10,7 @@ publish.workspace = true
 alloc = []
 
 [dependencies]
-syscall = { workspace = true }
+component-abi = { workspace = true }
 userland = { workspace = true }
 
 [lints]

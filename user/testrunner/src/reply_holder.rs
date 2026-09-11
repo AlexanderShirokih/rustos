@@ -10,9 +10,6 @@ use kernel_objects::{Port, kind};
 use runtime::{Timeout, thread_exit};
 use syscall::Handle;
 
-/// Программа-фикстура принимает запрос и уходит, не ответив на него.
-/// `thread_exit` не разматывает стек, и reply-хэндл остаётся в таблице
-/// процесса до её разрушения.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(service: Handle<kind::Port>) -> ! {
     let port = Port::from_handle(service);

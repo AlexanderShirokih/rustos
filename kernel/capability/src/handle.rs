@@ -214,6 +214,13 @@ impl Capability {
         })
     }
 
+    /// Та же capability без права [`Rights::TRANSFER`]. Значок и остальные права сохраняются.
+    #[must_use]
+    pub fn without_transfer(mut self) -> Self {
+        self.rights &= !Rights::TRANSFER;
+        self
+    }
+
     /// Создаёт capability на объект `target`, выведенный из объекта этой капы,
     /// узлом-потомком. Отзыв источника отзывает и производную.
     ///

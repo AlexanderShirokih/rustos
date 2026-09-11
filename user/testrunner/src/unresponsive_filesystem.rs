@@ -6,86 +6,58 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_abi::{SESSION_SCOPE_MAX, SessionError};
-use component_startup::{ReceivedStartup, component_manifest};
-use ipc::{
-    Transport as _,
-    wire::{Cap, Str},
-};
-use kernel_objects::{Port, kind};
-use runtime::{PortTransport, thread_exit};
-use syscall::{Handle, Rights, Timeout};
+use component_abi::component_startup as startup_contract;
+use component_startup::{component_manifest, session};
+use filesystem_abi::{file_system, namespace_admin};
+use ipc::wire::IpcError;
+use kernel_objects::{Port, Session};
+use runtime::{PortTransport, process_exit};
+use syscall::{Handle, Rights, Timeout, kind};
 
-struct SessionlessAdmin {
-    service: Port,
-    vended: Option<Port>,
-}
+const NAMESPACE_REQUIREMENT: &str = "namespace";
+
+const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct UnresponsiveFileSystemStartup {
-        exports: { service: "FileSystem" },
-        establishes_sessions: true,
-        slots: {},
+        requirements: { namespace: session(namespace_admin::Protocol) },
     }
 }
 
-impl component_abi::component_startup::Service for SessionlessAdmin {
-    fn begin(&mut self, _log: Cap<kind::Port>, _export_count: u16, _slot_count: u16) {}
-
-    fn export(&mut self, _capability: Cap<kind::Port>) {}
-
-    fn slot(&mut self, _capability: Cap<kind::Any>) {}
-
-    fn open_session(
-        &mut self,
-        _export: u16,
-        _scope: Str<'_, SESSION_SCOPE_MAX>,
-    ) -> Result<Cap<kind::Port>, SessionError> {
-        let session = self
-            .service
-            .duplicate(Rights::WRITE | Rights::TRANSFER, None)
-            .map_err(|_| SessionError::NoSpace)?;
-        let cap = Cap::from_handle(session.as_raw());
-        self.vended = Some(session);
-        Ok(cap)
-    }
-}
-
-/// Программа-фикстура зависшей файловой системы принимает стартовую транзакцию и
-/// перестаёт отвечать.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
-    let Ok(ReceivedStartup { log, resources }) =
-        UnresponsiveFileSystemStartup::receive(Port::from_handle(startup))
-    else {
-        thread_exit(1)
+pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
+    let Ok(started) = UnresponsiveFileSystemStartup::start(parent) else {
+        process_exit(FAILED_EXIT_CODE)
     };
-    drop(log);
-    let UnresponsiveFileSystemStartup { startup, service } = resources;
-    let transport = PortTransport::server(startup.borrow());
-    let _ = transport.wait_readable(Timeout::INFINITE);
-    let mut admin = SessionlessAdmin {
-        service,
-        vended: None,
+    drop(started.log);
+    let Ok(service) = Port::create() else {
+        process_exit(FAILED_EXIT_CODE)
     };
-    let delivered = component_abi::component_startup::dispatch(&mut admin, &transport).is_ok();
-    if let Some(session) = admin.vended.take() {
-        if delivered {
-            let _ = session.into_raw();
-        } else {
-            let _ = session.close();
+
+    let client = startup_contract::Client::new(PortTransport::new(parent));
+    let mut admin = started.requirements.namespace;
+    loop {
+        let Ok(copy) = service.duplicate(Rights::WRITE | Rights::TRANSFER, None) else {
+            process_exit(FAILED_EXIT_CODE)
+        };
+        let filesystem = Session::<file_system::Protocol>::from_handle(copy);
+        if !matches!(admin.client().mount(filesystem), Err(IpcError::PeerClosed)) {
+            break;
+        }
+        match session::<namespace_admin::Protocol>(&client, NAMESPACE_REQUIREMENT) {
+            Ok(Ok(renewed)) => admin = renewed,
+            _ => break,
         }
     }
 
-    // Парковка идёт без кадров. У свежего порта нет отправителей, и приём не вернётся никогда.
     let Ok(parking) = Port::create() else {
-        thread_exit(1)
+        process_exit(FAILED_EXIT_CODE)
     };
     let _ = parking.recv(Timeout::INFINITE);
-    thread_exit(0)
+    process_exit(FAILED_EXIT_CODE)
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
-    thread_exit(1)
+    process_exit(FAILED_EXIT_CODE)
 }

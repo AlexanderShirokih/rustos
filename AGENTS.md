@@ -24,7 +24,7 @@
 | [`docs/port.md`](docs/port.md)                 | Семантика `Port`: рандеву, значки, живость сторон         |
 | [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap            |
 | [`docs/concurrency.md`](docs/concurrency.md)   | Синхронизация потоков процесса: futex, `Mutex`, `Condvar` |
-| [`docs/rootkeeper.md`](docs/rootkeeper.md)     | Супервизор: план композиции, слоты, ступени загрузки      |
+| [`docs/rootkeeper.md`](docs/rootkeeper.md)     | Rootkeeper: план загрузки, запуск и перезапуск записей    |
 | [`docs/smp.md`](docs/smp.md)                   | Многопроцессорность: подъём ядер, per-CPU состояние, локи |
 | [`docs/filesystem.md`](docs/filesystem.md)     | Файловая подсистема: маршрутизатор имён, серверы, сессии  |
 

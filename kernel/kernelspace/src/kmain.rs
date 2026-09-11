@@ -41,8 +41,8 @@ pub enum BootError {
     InterruptsUnavailable(drivers_common::BootServicesError),
     /// Не удалось поднять планировщик.
     Scheduler(BootstrapSchedulerError),
-    /// Не удалось создать init-поток.
-    InitProcess(scheduler::SpawnError),
+    /// Не удалось создать поток начального процесса.
+    InitialProcess(scheduler::SpawnError),
     /// Первый поток не выбрался, и запускать планировщику нечего.
     NoRunnableThread,
 }
@@ -60,11 +60,11 @@ impl Display for BootError {
             BootError::InterruptsUnavailable(e) => {
                 write!(
                     f,
-                    "InterruptsService is unavailable after driver init: {e:?}"
+                    "InterruptsService is unavailable after driver initialization: {e:?}"
                 )
             }
             BootError::Scheduler(e) => write!(f, "scheduler bootstrap failed: {e}"),
-            BootError::InitProcess(e) => write!(f, "init process spawn failed: {e:?}"),
+            BootError::InitialProcess(e) => write!(f, "initial process spawn failed: {e:?}"),
             BootError::NoRunnableThread => f.write_str("no runnable thread to start"),
         }
     }
@@ -75,16 +75,16 @@ fn boot_failure(error: &BootError) -> ! {
     power::system_off(BOOT_FAILURE_EXIT_CODE)
 }
 
-/// Платформо-независимая точка входа ядра. После полного bootstrap вызывает `init_task` под
-/// замаскированными IRQ - задача обязана зарегистрировать первый спавн-thread
-/// (например, через [`Scheduler::spawn`]) и вернуть управление.
+/// Платформо-независимая точка входа ядра. После полного bootstrap вызывает
+/// `spawn_initial_process` под замаскированными IRQ - задача обязана зарегистрировать первый
+/// спавн-thread (например, через [`Scheduler::spawn`]) и вернуть управление.
 /// Дальше kmain отдаёт CPU scheduler-у через [`Scheduler::start`].
 pub fn kmain<A, F>(
     driver_scanner: EmbeddedDriversScanner,
     context: &mut KernelContext,
     kout: &BufferedWriter,
     scheduler_config: SchedulerConfig,
-    init_task: F,
+    spawn_initial_process: F,
 ) -> !
 where
     A: ArchContext,
@@ -93,7 +93,13 @@ where
         &mut KernelContext,
     ) -> Result<(), scheduler::SpawnError>,
 {
-    match boot::<A, F>(driver_scanner, context, kout, scheduler_config, init_task) {
+    match boot::<A, F>(
+        driver_scanner,
+        context,
+        kout,
+        scheduler_config,
+        spawn_initial_process,
+    ) {
         // Infallible не имеет значений: ветка нужна только для исчерпывающего match.
         Ok(never) => match never {},
         Err(error) => {
@@ -109,7 +115,7 @@ fn boot<A, F>(
     context: &mut KernelContext,
     kout: &BufferedWriter,
     scheduler_config: SchedulerConfig,
-    init_task: F,
+    spawn_initial_process: F,
 ) -> Result<core::convert::Infallible, BootError>
 where
     A: ArchContext,
@@ -136,7 +142,7 @@ where
     let scheduler =
         bootstrap_scheduler::<A>(context, scheduler_config).map_err(BootError::Scheduler)?;
 
-    init_task(&scheduler, context).map_err(BootError::InitProcess)?;
+    spawn_initial_process(&scheduler, context).map_err(BootError::InitialProcess)?;
 
     // Подъём идёт последним. Стартующий CPU настраивает свой интерфейс
     // контроллера прерываний и сразу входит в планировщик, поэтому к этому

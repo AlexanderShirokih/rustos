@@ -4,7 +4,6 @@
 use filesystem_abi::{
     APPEND_OFFSET, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, Opened, Written,
 };
-use ipc::wire::IpcError;
 use syscall::kind;
 
 use crate::{
@@ -101,8 +100,7 @@ impl<E: Environment> OpenNode<E> {
         let count = self
             .session
             .client()
-            .read(self.descriptor, self.position, requested)?
-            .value?;
+            .read(self.descriptor, self.position, requested)??;
         let count = usize::try_from(count).unwrap_or(0).min(chunk.len());
         if let Some(head) = chunk.get_mut(..count) {
             self.session.region().read_at(0, head)?;
@@ -116,8 +114,7 @@ impl<E: Environment> OpenNode<E> {
         let written = self
             .session
             .client()
-            .write(self.descriptor, self.position, requested)?
-            .value?;
+            .write(self.descriptor, self.position, requested)??;
         Ok(usize::try_from(written.count).unwrap_or(0).min(chunk.len()))
     }
 
@@ -141,23 +138,20 @@ impl<E: Environment> OpenNode<E> {
         Ok(self
             .session
             .client()
-            .write(self.descriptor, APPEND_OFFSET, len)?
-            .value?)
+            .write(self.descriptor, APPEND_OFFSET, len)??)
     }
 
     /// Метаданные узла на сервере сейчас. Значения [`kind`](Self::kind) и [`size`](Self::size)
     /// остаются от открытия.
     pub fn metadata(&self) -> Result<NodeInfo> {
-        Ok(self.session.client().stat(self.descriptor)?.value?)
+        Ok(self.session.client().stat(self.descriptor)??)
     }
 
     /// Capability региона, на котором лежит содержимое узла. Права выводятся из режима открытия.
     /// После выдачи длина узла за ёмкость региона не растёт. Пустой узел и файловая система без
     /// такого региона возвращают `NotSupported`.
     pub fn backing_memory(&self) -> Result<E::Handle<kind::MemoryRegion>> {
-        let mut response = self.session.client().backing_memory(self.descriptor)?;
-        let capability = response.value?;
-        Ok(response.claim(capability).ok_or(IpcError::InvalidValue)?)
+        Ok(self.session.client().backing_memory(self.descriptor)??)
     }
 
     /// Обход каталога с начала перечисления.

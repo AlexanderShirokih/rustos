@@ -19,16 +19,17 @@ const _: () = assert!(
 
 use bootstrap_abi::DeviceWindow;
 use io::mmio::Mmio;
-use syscall::{MemoryAccess, MemoryProfile, SIGNALED, SyscallError, Timeout, UserMemFlags, kind};
+use syscall::{MemoryAccess, MemoryProfile, SyscallError, UserMemFlags, kind};
 
 use crate::{
     error::{Error, Result, unit, value},
     handle::OwnedHandle,
-    object::Signal,
     svc,
 };
 
-const SPLIT_RETRY_TURN: Timeout = Timeout::from_millis(5);
+const fn budget_pages(budget_bytes: u64) -> u64 {
+    budget_bytes.div_ceil(syscall::PAGE_SIZE as u64)
+}
 
 const WORD: usize = mem::size_of::<u64>();
 
@@ -145,39 +146,14 @@ impl OwnedHandle<kind::Resource> {
         Ok(Self::from_handle(handle))
     }
 
-    /// Выделяет `budget_pages` страниц бюджета в отдельный `Resource` с тем же
-    /// физдиапазоном и потолком доступа. Страницы возвращаются исходному
-    /// ресурсу, когда производный уходит.
-    pub fn split(&self, budget_pages: u64) -> Result<Self> {
-        svc::resource_split(self.as_raw(), budget_pages)
+    /// Отрезает от бюджета ресурса не меньше `budget_bytes` байт в отдельный
+    /// `Resource` с тем же физическим диапазоном и потолком доступа. Размер
+    /// округляется вверх до целой страницы, и исходный ресурс теряет округлённый
+    /// размер до ухода производного. Нулевой `budget_bytes` даёт `InvalidArgument`.
+    pub fn split(&self, budget_bytes: u64) -> Result<Self> {
+        svc::resource_split(self.as_raw(), budget_pages(budget_bytes))
             .map(Self::from_handle)
             .map_err(Error::Syscall)
-    }
-
-    /// Выделяет `budget_pages` страниц, повторяя попытку до `timeout`, пока
-    /// бюджета не хватает. Исчерпание срока возвращает `Timeout`.
-    ///
-    /// Страницы ушедшего поддерева возвращаются позже наблюдаемого завершения
-    /// его процессов.
-    pub fn split_when_available(&self, budget_pages: u64, timeout: Timeout) -> Result<Self> {
-        match self.split(budget_pages) {
-            Err(Error::Syscall(SyscallError::ResourceExhausted)) => {}
-            outcome => return outcome,
-        }
-
-        let turn = Signal::create()?;
-        for _ in 1..timeout.raw() / SPLIT_RETRY_TURN.raw() {
-            match turn.wait(SIGNALED, SPLIT_RETRY_TURN) {
-                Err(Error::Syscall(SyscallError::Timeout)) => {}
-                Err(error) => return Err(error),
-                Ok(_) => return Err(Error::Syscall(SyscallError::Canceled)),
-            }
-            match self.split(budget_pages) {
-                Err(Error::Syscall(SyscallError::ResourceExhausted)) => {}
-                outcome => return outcome,
-            }
-        }
-        Err(Error::Syscall(SyscallError::Timeout))
     }
 
     /// Создаёт регион с Virtual backing размера `size_bytes` и маской `access`.
@@ -639,5 +615,22 @@ mod tests {
         assert_eq!(mapping.zero_at(0, BUFFER_BYTES), Ok(()));
 
         assert_eq!(buffer.0, [0; BUFFER_BYTES]);
+    }
+
+    #[test]
+    fn a_budget_rounds_up_to_whole_pages() {
+        let page = syscall::PAGE_SIZE as u64;
+
+        assert_eq!(budget_pages(0), 0);
+        assert_eq!(budget_pages(1), 1);
+        assert_eq!(budget_pages(page), 1);
+        assert_eq!(budget_pages(page + 1), 2);
+    }
+
+    #[test]
+    fn the_largest_budget_converts_without_overflow() {
+        let page = syscall::PAGE_SIZE as u64;
+
+        assert_eq!(budget_pages(u64::MAX), u64::MAX / page + 1);
     }
 }

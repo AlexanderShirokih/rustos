@@ -1,4 +1,4 @@
-//! Стенд стандартной библиотеки. Программу запускает `testrunner` управляемым компонентом.
+//! Стенд стандартной библиотеки. Программу запускает тестовый родитель `testrunner`.
 //!
 //! Проверки идут обычными `assert!`. Провал завершает программу паникой, её сообщение уходит
 //! в журнал через `stderr`, а вызывающий получает ненулевой код выхода. Успех - код ноль.
@@ -28,9 +28,7 @@ use kernel_objects::Port;
 use syscall::{Handle, Rights};
 
 component_manifest! {
-    struct SelftestStartup {
-        slots: {},
-    }
+    struct SelftestStartup {}
 }
 
 mod local {
@@ -46,9 +44,9 @@ mod local {
 }
 
 fn main() {
-    let startup = startup_set_reaches_the_program();
+    let _startup = startup_set_reaches_the_program();
     the_start_handle_is_handed_out_once();
-    an_owned_handle_closes_its_capability(&startup);
+    an_owned_handle_closes_its_capability();
     heap_serves_growing_collections();
     monotonic_clock_moves_forward();
     mutex_hands_out_exclusive_access();
@@ -62,10 +60,8 @@ fn main() {
 }
 
 fn startup_set_reaches_the_program() -> SelftestStartup {
-    // Приём и есть проверка, потому что он сверяет состав набора с объявлением манифеста и
-    // ставит лог-сессию, по которой идёт вывод остальных проверок.
-    component_startup_std::receive(SelftestStartup::receive)
-        .expect("composition hands out the startup set")
+    // Старт ставит журнал, по которому идёт вывод остальных проверок.
+    component_startup_std::start(SelftestStartup::start).expect("the parent answers the start")
 }
 
 fn the_start_handle_is_handed_out_once() {
@@ -75,11 +71,11 @@ fn the_start_handle_is_handed_out_once() {
     );
 }
 
-fn an_owned_handle_closes_its_capability(startup: &SelftestStartup) {
-    let spare = startup
-        .startup
+fn an_owned_handle_closes_its_capability() {
+    let port = Port::create().expect("the port is created");
+    let spare = port
         .duplicate(Rights::WRITE, None)
-        .expect("the startup port duplicates");
+        .expect("the port duplicates");
     let raw = spare.as_raw().raw();
     drop(into_std_handle(spare));
 

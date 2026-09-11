@@ -9,14 +9,13 @@
     clippy::std_instead_of_core
 )]
 
-use ipc::wire::{FieldCursor, HEADER_SIZE, Header, value};
+use ipc::wire::{FieldCursor, FrameParts, Header, value};
 use libfuzzer_sys::fuzz_target;
 
 const FIELD_LIMIT: usize = 256;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = Header::decode(data);
-    let Some(body) = data.get(HEADER_SIZE..) else {
+    let Ok(FrameParts { body, .. }) = Header::split(data) else {
         return;
     };
 

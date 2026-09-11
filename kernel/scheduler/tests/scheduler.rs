@@ -1294,7 +1294,8 @@ fn loader_table_with_handle() -> (
 
 #[test]
 fn start_user_process_creates_thread_and_marks_loader_state() {
-    use capability::{UserStartSpec, UserThreadEntry};
+    use capability::{Capability, HandleTable, Rights, UserStartSpec, UserThreadEntry};
+    use collections::LockCell;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1321,6 +1322,19 @@ fn start_user_process_creates_thread_and_marks_loader_state() {
     };
     let thread = handle.start_user_process(&process, spec).expect("start ok");
     assert!(!thread.terminated());
+
+    let pid = scheduler.process_id_for(&process).expect("child pid");
+    let child_table = scheduler
+        .process_handle_table(pid)
+        .expect("child handle table");
+    let start_id = HandleTable::new()
+        .reserve_slot()
+        .expect("reserve first slot")
+        .handle_id();
+    let rights = child_table
+        .with_lock(|tbl| tbl.get(start_id, Rights::NONE).map(Capability::rights))
+        .expect("start handle in the child table");
+    assert_eq!(rights, Rights::READ);
 }
 
 struct SchedulerLockProbe {

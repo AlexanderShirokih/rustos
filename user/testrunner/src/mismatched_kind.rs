@@ -9,10 +9,10 @@
 use core::sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst};
 
 use ipc::{
-    IntoWireHandle as _, Transport as _,
-    wire::{Cap, HandleSlots, Header, MESSAGE_INLINE_MAX, MessageBuf},
+    Channel as _, IntoWireValue as _, Listener as _,
+    wire::{Header, MESSAGE_INLINE_MAX, MessageBuf},
 };
-use kernel_objects::{Port, ReceivedFrame, Signal, kind};
+use kernel_objects::{Delivery, OwnedHandle, Port, ReceivedHandle, Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, Priority, Timeout, handle_close, port_send, spawn};
 use syscall::{Handle, Rights, SyscallError};
@@ -32,7 +32,7 @@ ipc::protocol! {
         name = "KindProbe";
 
         /// Принимает порт односторонним кадром.
-        cast fn hand(capability: Cap<syscall::kind::Port>);
+        cast fn hand(own capability: ipc::wire::Cap<syscall::kind::Port>);
 
         /// Запрашивает ответ значением.
         call fn echo(value: u32) -> u32;
@@ -41,15 +41,15 @@ ipc::protocol! {
 
 #[derive(Default)]
 struct Probe {
-    handed: Option<Cap<kind::Port>>,
+    handed: Option<OwnedHandle<kind::Port>>,
 }
 
-impl kind_probe::Service for Probe {
-    fn hand(&mut self, capability: Cap<kind::Port>) {
-        self.handed = Some(capability);
+impl kind_probe::Service<Delivery> for Probe {
+    fn hand(&mut self, _frame: &Delivery, capability: ReceivedHandle<kind::Port>) {
+        self.handed = Some(OwnedHandle::from(capability));
     }
 
-    fn echo(&mut self, value: u32) -> u32 {
+    fn echo(&mut self, _frame: &Delivery, value: u32) -> u32 {
         value
     }
 }
@@ -75,21 +75,19 @@ extern "C" fn sending_worker(arg: usize) -> u32 {
             .map(Handle::from_abi)
             .expect("signal capability present"),
     );
-    let transport = PortTransport::client(port_of(exchange.client.load(SeqCst)))
-        .with_send_timeout(SEND_TIMEOUT);
+    let transport = PortTransport::new(port_of(exchange.client.load(SeqCst)));
 
     // Кадр собран вручную, потому что сгенерированный клиент не пропускает чужой вид в это поле.
-    let mut frame = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-    let mut handles = HandleSlots::new();
+    let mut frame = MessageBuf::new();
     let built = frame
-        .write_header(&Header::new(kind_probe::hand::ORDINAL, 0, 0))
-        .and_then(|()| signal.write_as_field(&mut frame, ipc::wire::FIELD_ID_MIN, &mut handles))
+        .write_header(&Header::new(kind_probe::hand::ORDINAL))
+        .and_then(|()| signal.write_as_field(&mut frame, ipc::wire::FIELD_ID_MIN))
         .and_then(|()| frame.finish());
     if built.is_err() {
         exchange.sent.store(-1, SeqCst);
         return 0;
     }
-    let sent = transport.write_message(frame.as_bytes(), handles.as_slice());
+    let sent = transport.send(frame.as_bytes(), frame.handles(), SEND_TIMEOUT);
     if sent.is_ok() {
         // Ядро забрало запись у отправителя вместе с кадром.
         signal.relinquish();
@@ -98,8 +96,7 @@ extern "C" fn sending_worker(arg: usize) -> u32 {
 
     let answered = kind_probe::Client::new(transport)
         .with_wait(CALL_TIMEOUT)
-        .echo(PROBE_VALUE)
-        .map(|response| response.value);
+        .echo(PROBE_VALUE);
     exchange
         .answered
         .store(i64::from(answered == Ok(PROBE_VALUE)), SeqCst);
@@ -129,16 +126,14 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     )
     .expect("spawn worker");
 
-    let transport = PortTransport::server(&service.server);
-    transport
-        .wait_readable(RECV_TIMEOUT)
-        .expect("frame delivered");
-    let mut received = ReceivedFrame::take(&transport).expect("delivered frame is owned");
+    let transport = PortTransport::new(&service.server);
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
     let mut probe = Probe::default();
-    kind_probe::dispatch(&mut probe, &transport).expect("frame dispatched");
-    let handed = probe.handed.expect("the frame carried a capability");
-    let owned = received.claim(handed).expect("the capability has an owner");
-    drop(received);
+    let frame = transport
+        .recv(&mut bytes, RECV_TIMEOUT)
+        .expect("frame delivered");
+    kind_probe::dispatch(&mut probe, frame).expect("frame dispatched");
+    let owned = probe.handed.take().expect("the capability has an owner");
 
     // Декодирование и claim прошли, потому что вид поля их не проверяет. Операция порта
     // над записью сигнала отказывает в ядре.
@@ -156,11 +151,10 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     );
 
     // Следующий корректный запрос обслуживает тот же живой получатель.
-    transport
-        .wait_readable(RECV_TIMEOUT)
+    let frame = transport
+        .recv(&mut bytes, RECV_TIMEOUT)
         .expect("next request delivered");
-    let _next = ReceivedFrame::take(&transport).expect("next request resources");
-    kind_probe::dispatch(&mut probe, &transport).expect("next request answered");
+    kind_probe::dispatch(&mut probe, frame).expect("next request answered");
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
     kernel_tests::kassert_eq!(exchange.sent.load(SeqCst), 1);

@@ -3,35 +3,25 @@ version = 1
 [[components]]
 executable = "namespace-router"
 memory_limit = "2M"
-startup_timeout = "2s"
-on_failure = "restart 2 then halt"
+restarts = 2
 
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-startup_timeout = "2s"
-on_failure = "halt"
+scope = { namespace = "/" }
 
 [[components]]
 executable = "unresponsive-filesystem"
 memory_limit = "1M"
-startup_timeout = "2s"
-on_failure = "halt"
+scope = { namespace = "/stuck" }
 
 [[components]]
-executable = "spare-filesystem"
+executable = "filesystem-ramfs"
+name = "spare-filesystem"
 memory_limit = "4M"
-startup_timeout = "2s"
-on_failure = "halt"
+scope = { namespace = "/spare" }
 
 [[components]]
-executable = "filesystem-consumer-fixture"
-memory_limit = "2M"
-startup_timeout = "2s"
-on_failure = "detach"
-
-[[components]]
-executable = "init"
-memory_limit = "2M"
-startup_timeout = "2s"
-on_failure = "halt"
+executable = "filesystem-ramfs"
+memory_limit = "4M"
+scope = { namespace = "/tmp" }

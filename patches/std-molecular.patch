@@ -395,7 +395,7 @@ diff -ruN a/std/src/sys/stdio/mod.rs b/std/src/sys/stdio/mod.rs
 diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 --- a/std/src/sys/stdio/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/stdio/molecular.rs	2026-08-10 18:37:47.249583975 +0000
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,136 @@
 +use runtime::log;
 +use syscall_user::ipc::wire::IpcError;
 +
@@ -502,8 +502,7 @@ diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 +
 +fn map_ipc_error(error: IpcError) -> io::Error {
 +    let kind = match error {
-+        IpcError::PeerClosed | IpcError::SenderGone => io::ErrorKind::BrokenPipe,
-+        IpcError::WouldBlock => io::ErrorKind::WouldBlock,
++        IpcError::PeerClosed => io::ErrorKind::BrokenPipe,
 +        IpcError::Timeout => io::ErrorKind::TimedOut,
 +        IpcError::ResourceExhausted | IpcError::TooManyHandles => io::ErrorKind::QuotaExceeded,
 +        IpcError::FrameOverflow => io::ErrorKind::InvalidInput,

@@ -1,9 +1,0 @@
-version = 1
-
-[[mounts]]
-path = "/"
-instance = "filesystem-imagefs"
-
-[[mounts]]
-path = "/tmp"
-instance = "filesystem-ramfs"

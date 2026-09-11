@@ -1,10 +1,5 @@
-//! Принимает стартовую транзакцию по стартовому handle стандартной библиотеки и переводит
-//! capability во владеющие типы `std`.
-//!
-//! Стартовый handle одноразовый и принадлежит платформенному слою `std`.
-//! `receive` берёт этот handle у платформенного слоя, вызывает приёмник объявления
-//! `component_manifest!`, сам устанавливает лог-сессию компонента в `std` и возвращает
-//! программе остальные ресурсы.
+//! Старт компонента по стартовому handle стандартной библиотеки и перевод capability во
+//! владеющие типы `std`.
 //!
 //! Владеющие типы программы и стандартной библиотеки объявлены в разных копиях графа.
 //! `into_std_handle` переводит capability в тип `std`.
@@ -16,26 +11,32 @@
 
 use std::os::molecular;
 
-use component_startup::{Port, ReceivedStartup, StartupError};
+use component_startup::{
+    Handle, IpcError, LOG_REQUIREMENT, Startup, StartupError, StartupFailure, kind,
+};
 
 mod handle;
 
 pub use handle::into_std_handle;
 
-/// Принимает стартовую транзакцию по одноразовому стартовому handle стандартной библиотеки,
-/// отдаёт стандартной библиотеке лог-сессию компонента и возвращает программе остальные
-/// ресурсы.
-///
-/// `receive` - приёмник из объявления `component_startup::component_manifest!`.
-pub fn receive<T>(
-    receive: impl FnOnce(Port) -> Result<ReceivedStartup<T>, StartupError>,
+/// Запрашивает требования функцией `start` манифеста по стартовому handle `std` и передаёт
+/// журнал в `std`. Без стартового handle функция возвращает отказ требования журнала с
+/// `IpcError::PeerClosed`.
+pub fn start<T>(
+    start: impl FnOnce(Handle<kind::Port>) -> Result<Startup<T>, StartupError>,
 ) -> Result<T, StartupError> {
-    let startup = molecular::take_start_handle().ok_or(StartupError::MissingStartHandle)?;
-    // Стартовый handle стандартной библиотеки содержит только номер записи. Вид порта задан
-    // контрактом стартовой транзакции, и здесь он применяется к принятой записи.
-    let startup = Port::from_handle(component_startup::Handle::from_abi(startup.into_raw()));
+    // Стартовая сессия нужна до конца процесса, и её handle не закрывается.
+    let parent = molecular::take_start_handle()
+        .map(molecular::OwnedHandle::into_raw)
+        .ok_or(StartupError {
+            requirement: LOG_REQUIREMENT,
+            failure: StartupFailure::Ipc(IpcError::PeerClosed),
+        })?;
 
-    let received = receive(startup)?;
-    molecular::install_log(into_std_handle(received.log));
-    Ok(received.resources)
+    let started = start(Handle::from_abi(parent))?;
+    if let Some(log) = started.log {
+        molecular::install_log(into_std_handle(log.into_handle()));
+    }
+
+    Ok(started.requirements)
 }

@@ -27,20 +27,22 @@ use core::{fmt::Write as _, panic::PanicInfo};
 
 use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap};
 use io::writer::Writer;
-use ipc::wire::IpcError;
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, process_exit};
 use spin::{Mutex, Once};
 use syscall::{Handle, kind};
 
 mod address_space_isolation;
+mod answer_exhaustion_protocol;
+mod child_steps_protocol;
 mod clock;
+mod composition;
+mod device_forwarding_protocol;
 mod filesystem;
 mod filesystem_bench;
 mod filesystem_scope;
 mod filesystem_stress;
 mod fixture;
-mod fixture_frames;
 mod fixture_protocol;
 mod futex;
 mod heap;
@@ -51,15 +53,15 @@ mod irq_provision;
 mod load_entry;
 mod log_fixture_protocol;
 mod log_relay;
-mod managed_fixture_protocol;
-mod managed_startup;
 mod memory_capability_target;
 mod memory_share;
 mod mismatched_kind;
 mod owned_handle;
+mod parent;
 mod port;
 mod port_liveness;
 mod port_transport;
+mod probe_protocol;
 mod process_handles;
 mod process_lifecycle;
 mod process_start;
@@ -73,8 +75,6 @@ mod signal;
 mod simd_state;
 mod smp_stress;
 mod spawn_from_image;
-mod startup_fixture_protocol;
-mod startup_ownership;
 mod startup_port;
 mod std_rt;
 mod std_selftest;
@@ -135,8 +135,6 @@ fn flush_line(state: &mut LogBuffer) {
 const LOG_TAG: &str = "testrunner";
 
 fn send_log_frame(payload: &[u8]) {
-    const SEND_RETRY_LIMIT: usize = 1024;
-
     let Ok(text) = core::str::from_utf8(payload) else {
         return;
     };
@@ -144,14 +142,7 @@ fn send_log_frame(payload: &[u8]) {
     let Some(&handle) = BOOTSTRAP_HANDLE.get() else {
         return;
     };
-    let client = bootstrap::Client::new(PortTransport::client(handle));
-
-    for _ in 0..SEND_RETRY_LIMIT {
-        match client.log_str(LOG_TAG, text) {
-            Err(IpcError::WouldBlock) => core::hint::spin_loop(),
-            _ => return,
-        }
-    }
+    let _ = bootstrap::Client::new(PortTransport::new(handle)).log_str(LOG_TAG, text);
 }
 
 pub(crate) fn bootstrap_handle() -> Handle<kind::Port> {
@@ -210,7 +201,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     let _ = write!(buf, "[TEST-PANIC] {info}");
     send_log_frame(&buf.bytes[..buf.len]);
     log_relay::shutdown_relays();
-    // Прогон держит сервисные потоки, и снятия одного паникующего процессу мало:
-    // init ждёт завершения всего процесса.
+    // Ядро выключает машину по завершении всего процесса, а прогон держит сервисные потоки.
+    // Поэтому паника завершает процесс, а не только паникующий поток.
     process_exit(1)
 }

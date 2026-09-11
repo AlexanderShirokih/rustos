@@ -38,7 +38,6 @@ style-tool = { path = "style" }
 component-abi = { path = "../lib/component-abi" }
 filesystem-abi = { path = "../lib/filesystem-abi" }
 ipc = { path = "../lib/ipc" }
-supervisor-abi = { path = "../lib/supervisor-abi" }
 syscall = { path = "../lib/syscall" }
 userland = { path = "../lib/userland" }
 userland-image = { path = "../lib/userland-image" }

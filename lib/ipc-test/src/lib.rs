@@ -1,8 +1,10 @@
-//! Объявляет [`MockEnd`] - реализацию [`Transport`] на хосте для тестов IPC-контрактов.
+//! Объявляет хостовый канал для тестов IPC-контрактов: клиентскую сторону [`MockChannel`] и
+//! серверную [`MockListener`].
 //!
-//! [`MockEnd::pair`] отдаёт два связанных конца канала. Кадры между ними идут очередью под
-//! мьютексом, а ожидание готовности снимает condvar. Тест разводит стороны контракта по
-//! потокам и берёт ресурсы принятого кадра набором [`MockResources`].
+//! [`pair`] отдаёт две стороны одного канала. Кадры встают в очередь под мьютексом, а ожидание
+//! снимает condvar. Тест разводит стороны контракта по потокам и берёт ресурсы принятого кадра
+//! набором [`MockResources`]. Кадр вызова приходит с каналом ответа [`MockReply`], ответ которого
+//! получает ждущий вызыватель.
 
 #![allow(
     clippy::expect_used,
@@ -14,303 +16,458 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use ipc::{
-    MessageLen, ReceivedResources, Timeout, Transport,
-    wire::{Cap, HandleSlots, IpcError},
+    Channel, FrameBytes, Incoming, IntoWireValue, Listener, ReceivedResources, RecvError,
+    ReplyChannel, Timeout,
+    wire::{Cap, IpcError, MessageBuf},
 };
 use syscall::{Handle, ObjectKind, kind};
 
-/// Capability последнего принятого кадра как символические значения. [`Cap`] владения не
-/// держит, и невостребованное значение host-mock просто отбрасывает. Вид результата задаёт
-/// вид поля контракта, а фактический объект ядра мок не проверяет.
+/// Capability принятого кадра как символические значения по слотам. [`Cap`] владения не
+/// держит, и невостребованное значение мок просто отбрасывает. Вид результата задаёт вид поля
+/// контракта, а фактический объект ядра мок не проверяет.
 #[derive(Debug, Default)]
 pub struct MockResources {
-    handles: Vec<Cap<kind::Any>>,
+    handles: Vec<Option<u32>>,
+    reply: Option<MockReply>,
 }
 
 impl ReceivedResources for MockResources {
     type Handle<K: ObjectKind> = Cap<K>;
+    type Reply = MockReply;
 
-    fn claim<K: ObjectKind>(&mut self, cap: Cap<K>) -> Option<Cap<K>> {
-        let erased = cap.erase();
-        self.handles
+    fn take_handle<K: ObjectKind>(&mut self, index: u8) -> Option<Cap<K>> {
+        let raw = self.handles.get_mut(usize::from(index))?.take()?;
+        let id = core::num::NonZeroU32::new(raw)?;
+        Some(Cap::from_handle(Handle::from_abi(id)))
+    }
+
+    fn reply_channel(handle: Cap<kind::Reply>) -> Option<MockReply> {
+        let mut forwarded = lock(&FORWARDED);
+        let index = forwarded
             .iter()
-            .position(|&handle| handle == erased)
-            .map(|index| {
-                self.handles.remove(index);
-                cap
-            })
+            .position(|(id, _)| *id == handle.raw().get())?;
+        let (_, slot) = forwarded.swap_remove(index);
+        Some(MockReply { slot: Some(slot) })
     }
 
-    fn retain_decoded(&mut self, slots: &HandleSlots) {
-        self.handles.retain(|cap| slots.decoded(cap.raw().get()));
+    fn take_reply(&mut self) -> Option<MockReply> {
+        self.reply.take()
     }
+}
+
+/// Канал ответа одному вызову.
+///
+/// Разрушение неотправленного канала отменяет ответ, и вызыватель получает `PeerClosed`. Запись
+/// канала полем кадра регистрирует его под новым номером capability, начиная с `0x8000_0000`,
+/// выше номеров, которые назначают тесты. Получатель кадра читает из этого поля тот же канал.
+pub struct MockReply {
+    slot: Option<Arc<Slot>>,
+}
+
+impl MockReply {
+    fn settle(&mut self, outcome: Answer) -> Result<(), IpcError> {
+        let slot = self.slot.take().ok_or(IpcError::PeerClosed)?;
+        let mut answer = lock(&slot.answer);
+        if !matches!(*answer, Answer::Waiting) {
+            return Err(IpcError::PeerClosed);
+        }
+        *answer = outcome;
+        drop(answer);
+        slot.settled.notify_all();
+        Ok(())
+    }
+}
+
+impl ReplyChannel for MockReply {
+    fn send(mut self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
+        self.settle(Answer::Sent(Frame::new(bytes, handles, None)))
+    }
+}
+
+impl IntoWireValue for MockReply {
+    type Read = Cap<kind::Reply>;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
+        let slot = self.slot.as_ref().ok_or(IpcError::PeerClosed)?;
+        let id = NEXT_FORWARDED.fetch_add(1, Ordering::Relaxed);
+        lock(&FORWARDED).push((id, Arc::clone(slot)));
+        buf.write_handle(field_id, id)
+    }
+
+    fn relinquish(mut self) {
+        self.slot = None;
+    }
+}
+
+impl Drop for MockReply {
+    fn drop(&mut self) {
+        let _ = self.settle(Answer::Refused);
+    }
+}
+
+impl core::fmt::Debug for MockReply {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MockReply")
+            .field("pending", &self.slot.is_some())
+            .finish()
+    }
+}
+
+/// Клиентская сторона хостового канала.
+///
+/// `send` ставит кадр в очередь и получателя не ждёт. `call` ставит кадр вместе с каналом ответа
+/// и ждёт ответа в пределах срока. По истечении срока кадр вызова остаётся в очереди, как кадр,
+/// принятый сервером до истечения, и ответ на него получает `PeerClosed`.
+pub struct MockChannel {
+    port: Arc<Port>,
+}
+
+/// Серверная сторона хостового канала.
+///
+/// `recv` ждёт кадр в пределах срока. Когда все клиентские стороны разрушены, а очередь пуста,
+/// `recv` отвечает `Closed`. Разрушение серверной стороны отвергает кадры очереди и дальнейшие
+/// отправки с `PeerClosed`.
+pub struct MockListener {
+    port: Arc<Port>,
+}
+
+/// Создаёт связанную пару сторон одного канала.
+#[must_use]
+pub fn pair() -> (MockChannel, MockListener) {
+    let port = Arc::new(Port {
+        queue: Mutex::new(Queue {
+            frames: VecDeque::new(),
+            senders: 1,
+            listening: true,
+        }),
+        readable: Condvar::new(),
+    });
+    (
+        MockChannel {
+            port: Arc::clone(&port),
+        },
+        MockListener { port },
+    )
+}
+
+impl MockChannel {
+    fn enqueue(&self, frame: Frame) -> Result<(), IpcError> {
+        let mut queue = lock(&self.port.queue);
+        if !queue.listening {
+            return Err(IpcError::PeerClosed);
+        }
+        queue.frames.push_back(frame);
+        drop(queue);
+        self.port.readable.notify_all();
+        Ok(())
+    }
+}
+
+impl Clone for MockChannel {
+    fn clone(&self) -> Self {
+        lock(&self.port.queue).senders += 1;
+        Self {
+            port: Arc::clone(&self.port),
+        }
+    }
+}
+
+impl Drop for MockChannel {
+    fn drop(&mut self) {
+        lock(&self.port.queue).senders -= 1;
+        self.port.readable.notify_all();
+    }
+}
+
+impl Channel for MockChannel {
+    type Resources = MockResources;
+
+    fn send(&self, bytes: &[u8], handles: &[u32], _wait: Timeout) -> Result<(), IpcError> {
+        self.enqueue(Frame::new(bytes, handles, None))
+    }
+
+    fn call<'b>(
+        &self,
+        bytes: &[u8],
+        handles: &[u32],
+        reply: &'b mut FrameBytes,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, MockResources>, IpcError> {
+        let slot = Arc::new(Slot {
+            answer: Mutex::new(Answer::Waiting),
+            settled: Condvar::new(),
+        });
+        self.enqueue(Frame::new(bytes, handles, Some(Arc::clone(&slot))))?;
+
+        let deadline = Deadline::after(wait);
+        let mut answer = lock(&slot.answer);
+        while matches!(*answer, Answer::Waiting) {
+            let Some(left) = deadline.left() else {
+                *answer = Answer::Abandoned;
+                return Err(IpcError::Timeout);
+            };
+            answer = slot
+                .settled
+                .wait_timeout(answer, left)
+                .expect("condvar wait")
+                .0;
+        }
+        match core::mem::replace(&mut *answer, Answer::Abandoned) {
+            Answer::Sent(frame) => Ok(frame.deliver(reply)),
+            _ => Err(IpcError::PeerClosed),
+        }
+    }
+}
+
+impl MockListener {
+    /// Принимает один кадр без срока и передаёт его `handle`.
+    ///
+    /// # Panics
+    ///
+    /// Отказ приёма.
+    pub fn serve<T>(&self, handle: impl FnOnce(Incoming<'_, MockResources>) -> T) -> T {
+        let mut bytes = [0u8; ipc::wire::MESSAGE_INLINE_MAX];
+        handle(
+            self.recv(&mut bytes, Timeout::INFINITE)
+                .expect("a frame arrives"),
+        )
+    }
+
+    /// Передаёт `handle` кадры по одному, пока канал не закроется либо `handle` не откажет.
+    ///
+    /// # Errors
+    ///
+    /// Отказ `handle`.
+    ///
+    /// # Panics
+    ///
+    /// Отказ приёма, кроме закрытия канала.
+    pub fn serve_all<E>(
+        &self,
+        mut handle: impl FnMut(Incoming<'_, MockResources>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut bytes = [0u8; ipc::wire::MESSAGE_INLINE_MAX];
+        loop {
+            match self.recv(&mut bytes, Timeout::INFINITE) {
+                Ok(frame) => handle(frame)?,
+                Err(RecvError::Closed) => return Ok(()),
+                Err(error) => panic!("receive failed: {error:?}"),
+            }
+        }
+    }
+}
+
+impl Drop for MockListener {
+    fn drop(&mut self) {
+        let mut queue = lock(&self.port.queue);
+        queue.listening = false;
+        let frames = core::mem::take(&mut queue.frames);
+        drop(queue);
+        // Каналы ответа кадров очереди разрушаются, и их вызыватели получают `PeerClosed`.
+        drop(frames);
+    }
+}
+
+impl Listener for MockListener {
+    type Resources = MockResources;
+
+    fn recv<'b>(
+        &self,
+        into: &'b mut FrameBytes,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, MockResources>, RecvError> {
+        let deadline = Deadline::after(wait);
+        let mut queue = lock(&self.port.queue);
+        loop {
+            if let Some(frame) = queue.frames.pop_front() {
+                drop(queue);
+                return Ok(frame.deliver(into));
+            }
+            if queue.senders == 0 {
+                return Err(RecvError::Closed);
+            }
+            let left = deadline.left().ok_or(RecvError::Timeout)?;
+            queue = self
+                .port
+                .readable
+                .wait_timeout(queue, left)
+                .expect("condvar wait")
+                .0;
+        }
+    }
+}
+
+static FORWARDED: Mutex<Vec<(u32, Arc<Slot>)>> = Mutex::new(Vec::new());
+
+static NEXT_FORWARDED: AtomicU32 = AtomicU32::new(0x8000_0000);
+
+struct Port {
+    queue: Mutex<Queue>,
+    readable: Condvar,
+}
+
+struct Queue {
+    frames: VecDeque<Frame>,
+    senders: usize,
+    listening: bool,
+}
+
+struct Slot {
+    answer: Mutex<Answer>,
+    settled: Condvar,
+}
+
+enum Answer {
+    Waiting,
+    Sent(Frame),
+    Refused,
+    Abandoned,
 }
 
 struct Frame {
     bytes: Vec<u8>,
     handles: Vec<u32>,
+    reply: Option<MockReply>,
 }
 
-struct Pipe {
-    frames: VecDeque<Frame>,
-    sender_open: bool,
-    receiver_open: bool,
-}
-
-struct Shared {
-    pipe: Mutex<Pipe>,
-    readable: Condvar,
-}
-
-impl Shared {
-    fn open() -> Arc<Self> {
-        Arc::new(Self {
-            pipe: Mutex::new(Pipe {
-                frames: VecDeque::new(),
-                sender_open: true,
-                receiver_open: true,
-            }),
-            readable: Condvar::new(),
-        })
-    }
-}
-
-/// Один конец host-mock канала. Записанный кадр встаёт в очередь второго конца, а чтение
-/// снимает кадр, записанный вторым концом.
-///
-/// `wait_readable` с [`Timeout::POLL`] возвращает `Timeout` на пустой очереди, любой другой
-/// срок блокирует поток до кадра либо до закрытия. Закрытие конца отдаёт второму
-/// `PeerClosed`. Запись отвергается сразу, чтение - после того, как очередь опустеет.
-pub struct MockEnd {
-    outbox: Arc<Shared>,
-    inbox: Arc<Shared>,
-    received: Mutex<MockResources>,
-}
-
-impl MockEnd {
-    /// Создаёт связанную пару концов: запись на одном видна в чтении другого.
-    #[must_use]
-    pub fn pair() -> (MockEnd, MockEnd) {
-        let ab = Shared::open();
-        let ba = Shared::open();
-        let a = MockEnd {
-            outbox: Arc::clone(&ab),
-            inbox: Arc::clone(&ba),
-            received: Mutex::default(),
-        };
-        let b = MockEnd {
-            outbox: ba,
-            inbox: ab,
-            received: Mutex::default(),
-        };
-        (a, b)
-    }
-}
-
-impl Drop for MockEnd {
-    fn drop(&mut self) {
-        self.outbox
-            .pipe
-            .lock()
-            .expect("mutex not poisoned")
-            .sender_open = false;
-        self.outbox.readable.notify_all();
-        self.inbox
-            .pipe
-            .lock()
-            .expect("mutex not poisoned")
-            .receiver_open = false;
-    }
-}
-
-impl Transport for MockEnd {
-    type Resources = MockResources;
-
-    fn take_resources(&self) -> MockResources {
-        core::mem::take(&mut *self.received.lock().expect("received resources mutex"))
-    }
-
-    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
-        let mut pipe = self.outbox.pipe.lock().expect("mutex not poisoned");
-        if !pipe.receiver_open {
-            return Err(IpcError::PeerClosed);
-        }
-        pipe.frames.push_back(Frame {
+impl Frame {
+    fn new(bytes: &[u8], handles: &[u32], reply: Option<Arc<Slot>>) -> Self {
+        Self {
             bytes: bytes.to_vec(),
             handles: handles.to_vec(),
-        });
-        drop(pipe);
-        self.outbox.readable.notify_all();
-        Ok(())
-    }
-
-    fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError> {
-        let mut pipe = self.inbox.pipe.lock().expect("mutex not poisoned");
-        let Some(frame) = pipe.frames.pop_front() else {
-            return if pipe.sender_open {
-                Err(IpcError::WouldBlock)
-            } else {
-                Err(IpcError::PeerClosed)
-            };
-        };
-        if frame.bytes.len() > bytes.len() || frame.handles.len() > handles.len() {
-            // Кадр не помещается. Он возвращается в очередь без потери.
-            pipe.frames.push_front(frame);
-            return Err(IpcError::Truncated);
-        }
-        bytes[..frame.bytes.len()].copy_from_slice(&frame.bytes);
-        handles[..frame.handles.len()].copy_from_slice(&frame.handles);
-        self.received
-            .lock()
-            .expect("received resources mutex")
-            .handles = frame
-            .handles
-            .iter()
-            .filter_map(|&raw| {
-                core::num::NonZeroU32::new(raw)
-                    .map(|id| Cap::from_handle(Handle::<kind::Any>::from_abi(id)))
-            })
-            .collect();
-        Ok(MessageLen::new(frame.bytes.len(), frame.handles.len()))
-    }
-
-    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
-        // Ненулевой timeout трактуется как ожидание до готовности или закрытия.
-        let mut pipe = self.inbox.pipe.lock().expect("mutex not poisoned");
-        loop {
-            if !pipe.frames.is_empty() {
-                return Ok(());
-            }
-            if !pipe.sender_open {
-                return Err(IpcError::PeerClosed);
-            }
-            if timeout == Timeout::POLL {
-                return Err(IpcError::Timeout);
-            }
-            pipe = self.inbox.readable.wait(pipe).expect("condvar wait");
+            reply: reply.map(|slot| MockReply { slot: Some(slot) }),
         }
     }
+
+    fn deliver(self, into: &mut FrameBytes) -> Incoming<'_, MockResources> {
+        let len = self.bytes.len();
+        into[..len].copy_from_slice(&self.bytes);
+        Incoming {
+            bytes: &into[..len],
+            resources: MockResources {
+                handles: self.handles.into_iter().map(Some).collect(),
+                reply: self.reply,
+            },
+        }
+    }
+}
+
+struct Deadline(Option<Instant>);
+
+impl Deadline {
+    fn after(wait: Timeout) -> Self {
+        Self((wait != Timeout::INFINITE).then(|| Instant::now() + Duration::from_nanos(wait.raw())))
+    }
+
+    fn left(&self) -> Option<Duration> {
+        match self.0 {
+            None => Some(Duration::MAX),
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero()),
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("mutex not poisoned")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+
     use ipc::{
-        MessageLen, Timeout, Transport,
-        wire::{
-            FieldCursor, HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf,
-            value::{decode_u16, encode_u16},
-        },
+        Channel, Listener, ReceivedResources, RecvError, ReplyChannel, Timeout,
+        wire::{Cap, IpcError, MESSAGE_INLINE_MAX},
     };
+    use syscall::{Handle, kind};
 
-    use super::MockEnd;
-
-    const ORDINAL: u64 = 0x0102_0304_0506_0708;
-    const TXID: u32 = 0x1112_1314;
+    use super::pair;
 
     #[test]
-    fn write_a_read_b() {
-        let (a, b) = MockEnd::pair();
-        a.write_message(&[1, 2, 3], &[7]).expect("write ok");
-        let mut bytes = [0u8; 8];
-        let mut handles = [0u32; 4];
-        let len = b.read_message(&mut bytes, &mut handles).expect("read ok");
-        assert_eq!(len, MessageLen::new(3, 1));
-        assert_eq!(&bytes[..len.bytes], &[1, 2, 3]);
-        assert_eq!(&handles[..len.handles], &[7]);
+    fn a_call_waits_for_the_answer_of_its_reply_channel() {
+        let (client, server) = pair();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                server.serve(|mut frame| {
+                    assert_eq!(frame.bytes, [1, 2]);
+                    let reply = frame.resources.take_reply().expect("a call brings a reply");
+                    reply.send(&[3], &[7]).expect("the caller waits");
+                });
+            });
+            let mut answer = [0u8; MESSAGE_INLINE_MAX];
+            let mut frame = client
+                .call(&[1, 2], &[], &mut answer, Timeout::INFINITE)
+                .expect("answered");
+            assert_eq!(frame.bytes, [3]);
+            assert_eq!(
+                frame.resources.take_handle::<kind::Port>(0),
+                Some(Cap::from_handle(Handle::from_abi(
+                    core::num::NonZeroU32::new(7).expect("non-zero")
+                )))
+            );
+        });
     }
 
     #[test]
-    fn empty_queue_would_block() {
-        let (a, _b) = MockEnd::pair();
-        let mut bytes = [0u8; 8];
-        let mut handles = [0u32; 4];
+    fn a_dropped_reply_channel_refuses_its_caller() {
+        let (client, server) = pair();
+        thread::scope(|scope| {
+            scope.spawn(|| server.serve(|frame| drop(frame)));
+            let mut answer = [0u8; MESSAGE_INLINE_MAX];
+            assert_eq!(
+                client
+                    .call(&[1], &[], &mut answer, Timeout::INFINITE)
+                    .map(|frame| frame.bytes.len()),
+                Err(IpcError::PeerClosed)
+            );
+        });
+    }
+
+    #[test]
+    fn a_one_way_frame_brings_no_reply_channel() {
+        let (client, server) = pair();
+        client.send(&[1], &[], Timeout::POLL).expect("queued");
+        server.serve(|mut frame| assert!(frame.resources.take_reply().is_none()));
+    }
+
+    #[test]
+    fn the_answer_to_a_timed_out_call_is_refused() {
+        let (client, server) = pair();
+        let mut answer = [0u8; MESSAGE_INLINE_MAX];
         assert_eq!(
-            a.read_message(&mut bytes, &mut handles),
-            Err(IpcError::WouldBlock)
+            client
+                .call(&[1], &[], &mut answer, Timeout::POLL)
+                .map(|frame| frame.bytes.len()),
+            Err(IpcError::Timeout)
         );
+        server.serve(|mut frame| {
+            let reply = frame.resources.take_reply().expect("a call brings a reply");
+            assert_eq!(reply.send(&[2], &[]), Err(IpcError::PeerClosed));
+        });
     }
 
     #[test]
-    fn wait_readable_times_out_then_succeeds() {
-        let (a, b) = MockEnd::pair();
-        assert_eq!(a.wait_readable(Timeout::POLL), Err(IpcError::Timeout));
-        b.write_message(&[1], &[]).expect("write ok");
-        assert_eq!(a.wait_readable(Timeout::POLL), Ok(()));
-    }
-
-    #[test]
-    fn peer_close_drains_then_reports_closed() {
-        let (a, b) = MockEnd::pair();
-        a.write_message(&[1, 2], &[]).expect("write ok");
-        drop(a);
-        let mut bytes = [0u8; 8];
-        let mut handles = [0u32; 4];
-        // Поставленный до закрытия кадр ещё читается.
-        let len = b
-            .read_message(&mut bytes, &mut handles)
-            .expect("drained ok");
-        assert_eq!(len.bytes, 2);
-        // После опустошения закрытие наблюдается.
-        assert_eq!(
-            b.read_message(&mut bytes, &mut handles),
-            Err(IpcError::PeerClosed)
-        );
-        assert_eq!(b.wait_readable(Timeout::POLL), Err(IpcError::PeerClosed));
-    }
-
-    #[test]
-    fn write_to_closed_peer_reports_closed() {
-        let (a, b) = MockEnd::pair();
-        drop(b);
-        assert_eq!(a.write_message(&[1], &[]), Err(IpcError::PeerClosed));
-    }
-
-    #[test]
-    fn read_rejects_buffer_too_small() {
-        let (a, b) = MockEnd::pair();
-        a.write_message(&[1, 2, 3, 4], &[]).expect("write ok");
-        let mut bytes = [0u8; 2];
-        let mut handles = [0u32; 4];
-        assert_eq!(
-            b.read_message(&mut bytes, &mut handles),
-            Err(IpcError::Truncated)
-        );
-        // Кадр не потерян. С достаточным буфером он читается.
-        let mut big = [0u8; 8];
-        let len = b.read_message(&mut big, &mut handles).expect("read ok");
-        assert_eq!(len.bytes, 4);
-    }
-
-    #[test]
-    fn full_frame_round_trip_through_mock() {
-        // Сторона A собирает кадр (заголовок + поле), пишет; B читает и разбирает.
-        let (a, b) = MockEnd::pair();
-        let mut frame = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        frame
-            .write_header(&Header::new(ORDINAL, TXID, 0))
-            .expect("header ok");
-        frame.write_field(1, &encode_u16(0xABCD)).expect("field ok");
-        frame.finish().expect("finish ok");
-        a.write_message(frame.as_bytes(), &[]).expect("write ok");
-
+    fn the_listener_closes_once_its_channels_are_gone_and_the_queue_is_drained() {
+        let (client, server) = pair();
+        client.send(&[1], &[], Timeout::POLL).expect("queued");
+        drop(client);
+        server.serve(|frame| assert_eq!(frame.bytes, [1]));
         let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        let mut handles = [0u32; 4];
-        let len = b.read_message(&mut bytes, &mut handles).expect("read ok");
-        assert_eq!(len.handles, 0);
-
-        let received = &bytes[..len.bytes];
-        let header = Header::decode(received).expect("header decode");
-        assert_eq!(header.ordinal, ORDINAL);
-        assert_eq!(header.txid, TXID);
-
-        let mut cursor = FieldCursor::new(&received[HEADER_SIZE..]);
-        let field = cursor.next_field().expect("ok").expect("present");
-        assert_eq!(field.id, 1);
-        assert_eq!(decode_u16(field.data), Ok(0xABCD));
-        assert_eq!(cursor.next_field().expect("ok"), None);
+        assert_eq!(
+            server
+                .recv(&mut bytes, Timeout::INFINITE)
+                .map(|frame| frame.bytes.len()),
+            Err(RecvError::Closed)
+        );
     }
 }

@@ -1,24 +1,12 @@
-//! Держит инкарнацию компонента композиции: её процесс, резерв бюджета и startup-порт.
+//! Сторона родителя протокола `ComponentStartup`.
 //!
-//! [`ManagedComponent`] владеет одной инкарнацией. Метод `launch` поднимает процесс по
-//! программе `EntryView` и отправляет ему стартовый кадр, `stop` завершает процесс,
-//! `observe_exit` забирает код выхода. Состояние инкарнации названо [`ManagedStatus`], отказ -
-//! [`ManagedFailure`].
-//!
-//! [`ComponentRoots`] держит порты экспортов компонента на стороне supervisor, а
-//! [`RunningComponent`] - клиентскую сторону его startup-порта.
-//! [`ComponentSlots`] копит capability слотов до отправки. [`launch_component`] собирает эти
-//! части в один подъём.
-//!
-//! Уход [`ManagedComponent`] из области видимости завершает живой процесс.
+//! [`Children`] запускает дочерние компоненты и хранит отложенные ответы на их запросы.
+//! Родитель сам решает, перезапускать ли компонент.
 
 #![no_std]
 
-mod component;
-mod roots;
+extern crate alloc;
 
-pub use component::{
-    BoundedStartupTransport, ManagedComponent, ManagedFailure, ManagedStartupError, ManagedStatus,
-    RunningComponent,
-};
-pub use roots::{ComponentRoots, ComponentSlots, launch_component};
+mod children;
+
+pub use children::{Children, Departure, GrantError, Outcome, Status};

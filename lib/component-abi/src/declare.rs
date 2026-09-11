@@ -10,140 +10,156 @@
 #[macro_export]
 macro_rules! __component_manifest_record {
     (
-        exports = [$($export:literal),*]
-        establishes = [$($establishes:literal)?]
-        slots { $($kind:ident $(($($parameter:tt)*))?),* }
+        exports = [$($export:path),*]
+        requirements { $($requirement:ident: $kind:ident $(($($parameter:tt)*))?),* }
     ) => {
         const _: () = {
-            const SLOTS: &[$crate::SlotDeclaration] = &[$(
-                $crate::__component_manifest_record!(@slot $kind $(($($parameter)*))?)
+            const REQUIREMENTS: &[$crate::RequirementDeclaration] = &[$(
+                $crate::__component_manifest_record!(@requirement $requirement $kind $(($($parameter)*))?)
             ),*];
-            const EXPORTS: &[&str] = &[$($export),*];
-            const ESTABLISHES_SESSIONS: bool =
-                $crate::__component_manifest_record!(@establishes $($establishes)?);
-            const RECORD_LEN: usize = $crate::manifest_len(SLOTS, EXPORTS);
+            const EXPORTS: &[&str] = &[$($crate::__component_manifest_record!(@export $export)),*];
+            const RECORD_LEN: usize = $crate::manifest_len(REQUIREMENTS, EXPORTS);
 
-            // Секцию читает сборщик образа из ELF программы, и кладёт её только сборка под
-            // таргет системы: на хосте образ не собирается, а имя секции там своё.
             #[cfg_attr(
                 target_os = "molecular",
                 unsafe(link_section = ".component.manifest")
             )]
             #[used]
-            static MANIFEST: [u8; RECORD_LEN] =
-                $crate::encode_manifest(SLOTS, EXPORTS, ESTABLISHES_SESSIONS);
+            static MANIFEST: [u8; RECORD_LEN] = $crate::encode_manifest(REQUIREMENTS, EXPORTS);
         };
     };
-    (@establishes) => { false };
-    (@establishes $establishes:literal) => { $establishes };
-    (@slot userland) => { $crate::SlotDeclaration::userland() };
-    (@slot irq(compatible = [$($compatible:literal),+ $(,)?])) => {
-        $crate::SlotDeclaration::irq(&[$($compatible),+], 0)
+    (@export $protocol:path) => {
+        <$protocol as $crate::__Protocol>::ID
     };
-    (@slot irq(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)) => {
-        $crate::SlotDeclaration::irq(&[$($compatible),+], $resource)
+    (@requirement log $($declaration:tt)*) => {
+        compile_error!("`log` is the name reserved for the log its parent serves")
     };
-    (@slot mmio(compatible = [$($compatible:literal),+ $(,)?])) => {
-        $crate::SlotDeclaration::mmio(&[$($compatible),+], 0)
+    (@requirement $name:ident region) => {
+        $crate::RequirementDeclaration::region(stringify!($name))
     };
-    (@slot mmio(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)) => {
-        $crate::SlotDeclaration::mmio(&[$($compatible),+], $resource)
+    (@requirement $name:ident irq(compatible = [$($compatible:literal),+ $(,)?])) => {
+        $crate::RequirementDeclaration::irq(stringify!($name), &[$($compatible),+], 0)
     };
-    (@slot service(protocol = $protocol:literal)) => {
-        $crate::SlotDeclaration::service(&[$protocol])
+    (
+        @requirement $name:ident
+        irq(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)
+    ) => {
+        $crate::RequirementDeclaration::irq(stringify!($name), &[$($compatible),+], $resource)
     };
-    (@slot service(protocol = $protocol:literal, instance = $instance:literal)) => {
-        $crate::SlotDeclaration::service(&[$protocol, $instance])
+    (@requirement $name:ident mmio(compatible = [$($compatible:literal),+ $(,)?])) => {
+        $crate::RequirementDeclaration::mmio(stringify!($name), &[$($compatible),+], 0)
     };
-    (@slot directory(instance = $instance:literal)) => {
-        $crate::SlotDeclaration::directory(&[$instance])
+    (
+        @requirement $name:ident
+        mmio(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)
+    ) => {
+        $crate::RequirementDeclaration::mmio(stringify!($name), &[$($compatible),+], $resource)
     };
-    (@slot supervisor) => { $crate::SlotDeclaration::supervisor() };
+    (@requirement $name:ident session($protocol:path)) => {
+        $crate::RequirementDeclaration::session(stringify!($name), <$protocol as $crate::__Protocol>::ID)
+    };
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        COMPONENT_MANIFEST_SECTION, SlotKind, decode_manifest, encode_manifest, manifest_len,
+        COMPONENT_MANIFEST_SECTION, RequirementKind, decode_manifest, encode_manifest, manifest_len,
     };
 
     const NO_EXPORTS: &[&str] = &[];
-    const TWO_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
 
-    const FILE_SYSTEM_SLOTS: &[crate::SlotDeclaration] = &[crate::SlotDeclaration::userland()];
-    const FILE_SYSTEM_LEN: usize = manifest_len(FILE_SYSTEM_SLOTS, NO_EXPORTS);
+    ipc::protocol! {
+        mod file_system {
+            name = "FileSystem";
+        }
+    }
 
-    const NAMED_SLOTS: &[crate::SlotDeclaration] = &[crate::__component_manifest_record!(
-        @slot service(protocol = "FileSystem", instance = "ramfs")
-    )];
-    const NAMED_LEN: usize = manifest_len(NAMED_SLOTS, NO_EXPORTS);
+    ipc::protocol! {
+        mod namespace_admin {
+            name = "NamespaceAdmin";
+        }
+    }
 
-    const ADMIN_SLOTS: &[crate::SlotDeclaration] = &[crate::__component_manifest_record!(
-        @slot service(protocol = "NamespaceAdmin", instance = "namespace-router")
-    )];
-    const ADMIN_LEN: usize = manifest_len(ADMIN_SLOTS, TWO_EXPORTS);
+    const TYPED_REQUIREMENTS: &[crate::RequirementDeclaration] =
+        &[crate::__component_manifest_record!(
+            @requirement files session(file_system::Protocol)
+        )];
+    const TYPED_LEN: usize = manifest_len(TYPED_REQUIREMENTS, NO_EXPORTS);
 
-    const DEVICE_SLOTS: &[crate::SlotDeclaration] = &[
-        crate::__component_manifest_record!(@slot irq(compatible = ["arm,pl031", "arm,primecell"])),
-        crate::__component_manifest_record!(@slot mmio(compatible = ["arm,pl031"], resource = 1)),
+    const LITERAL_REQUIREMENTS: &[crate::RequirementDeclaration] =
+        &[crate::RequirementDeclaration::session(
+            "files",
+            "FileSystem",
+        )];
+
+    const TYPED_EXPORTS: &[&str] = &[
+        crate::__component_manifest_record!(@export file_system::Protocol),
+        crate::__component_manifest_record!(@export namespace_admin::Protocol),
     ];
-    const DEVICE_LEN: usize = manifest_len(DEVICE_SLOTS, NO_EXPORTS);
+    const EXPORTS_LEN: usize = manifest_len(&[], TYPED_EXPORTS);
+
+    const REQUIREMENTS: &[crate::RequirementDeclaration] = &[
+        crate::__component_manifest_record!(@requirement line irq(compatible = ["arm,pl031", "arm,primecell"])),
+        crate::__component_manifest_record!(@requirement window mmio(compatible = ["arm,pl031"], resource = 1)),
+        crate::__component_manifest_record!(@requirement image region),
+    ];
+    const REQUIREMENTS_LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
 
     crate::__component_manifest_record! {
-        exports = ["FileSystem"]
-        establishes = [true]
-        slots { userland }
+        exports = [file_system::Protocol]
+        requirements { image: region, admin: session(namespace_admin::Protocol) }
     }
 
     #[test]
-    fn a_named_service_slot_declares_its_protocol_and_instance() {
-        let bytes: [u8; NAMED_LEN] = encode_manifest(NAMED_SLOTS, NO_EXPORTS, false);
+    fn a_session_requirement_carries_the_id_of_its_protocol() {
+        let typed: [u8; TYPED_LEN] = encode_manifest(TYPED_REQUIREMENTS, NO_EXPORTS);
+        let literal: [u8; TYPED_LEN] = encode_manifest(LITERAL_REQUIREMENTS, NO_EXPORTS);
 
-        let manifest = decode_manifest(&bytes).expect("record decodes");
-        let slot = manifest.slots().next().expect("service slot");
-        assert_eq!(slot.kind(), SlotKind::Service);
+        assert_eq!(typed, literal);
+        let manifest = decode_manifest(&typed).expect("record decodes");
+        let requirement = manifest.requirements().next().expect("session requirement");
+        assert_eq!(requirement.kind(), RequirementKind::Session);
         assert_eq!(
-            slot.names().collect::<std::vec::Vec<_>>(),
-            ["FileSystem", "ramfs"]
+            requirement.names().collect::<std::vec::Vec<_>>(),
+            [<file_system::Protocol as ipc::Protocol>::ID]
         );
     }
 
     #[test]
-    fn a_declaration_encodes_every_export_in_its_order() {
-        let bytes: [u8; ADMIN_LEN] = encode_manifest(ADMIN_SLOTS, TWO_EXPORTS, false);
+    fn a_declaration_names_an_export_by_the_id_of_its_protocol() {
+        let bytes: [u8; EXPORTS_LEN] = encode_manifest(&[], TYPED_EXPORTS);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         assert_eq!(
             manifest.exports().collect::<std::vec::Vec<_>>(),
-            ["Namespace", "NamespaceAdmin"]
+            [
+                <file_system::Protocol as ipc::Protocol>::ID,
+                <namespace_admin::Protocol as ipc::Protocol>::ID
+            ]
         );
-        let slot = manifest.slots().next().expect("service slot");
-        assert_eq!(slot.kind(), SlotKind::Service);
+    }
+
+    #[test]
+    fn a_declaration_names_every_requirement_by_its_field_in_the_order_of_the_declaration() {
+        let bytes: [u8; REQUIREMENTS_LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS);
+
+        let manifest = decode_manifest(&bytes).expect("record decodes");
+        let requirements: std::vec::Vec<_> = manifest
+            .requirements()
+            .map(|requirement| (requirement.name(), requirement.kind()))
+            .collect();
         assert_eq!(
-            slot.names().collect::<std::vec::Vec<_>>(),
-            ["NamespaceAdmin", "namespace-router"]
+            requirements,
+            [
+                ("line", RequirementKind::Irq),
+                ("window", RequirementKind::Mmio),
+                ("image", RequirementKind::Region)
+            ]
         );
     }
 
     #[test]
-    fn a_device_declaration_keeps_the_order_of_its_slots() {
-        let bytes: [u8; DEVICE_LEN] = encode_manifest(DEVICE_SLOTS, NO_EXPORTS, false);
-
-        let manifest = decode_manifest(&bytes).expect("record decodes");
-        let kinds: std::vec::Vec<SlotKind> = manifest.slots().map(|slot| slot.kind()).collect();
-        assert_eq!(kinds, [SlotKind::Irq, SlotKind::Mmio]);
-    }
-
-    #[test]
-    fn a_declaration_without_exports_encodes_its_slots() {
-        // Имя секции макрос пишет литералом: `link_section` берёт только его.
+    fn the_declared_section_is_the_manifest_section() {
         assert_eq!(COMPONENT_MANIFEST_SECTION, ".component.manifest");
-        let bytes: [u8; FILE_SYSTEM_LEN] = encode_manifest(FILE_SYSTEM_SLOTS, NO_EXPORTS, false);
-
-        let manifest = decode_manifest(&bytes).expect("record decodes");
-        assert_eq!(manifest.export_count(), 0);
-        assert_eq!(manifest.exports().count(), 0);
-        let slot = manifest.slots().next().expect("userland slot");
-        assert_eq!(slot.kind(), SlotKind::Userland);
     }
 }

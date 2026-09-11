@@ -14,6 +14,7 @@ doctest = false
 [dependencies]
 kernel-objects = { workspace = true }
 component-abi = { workspace = true }
+component-startup = { workspace = true }
 ipc = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }

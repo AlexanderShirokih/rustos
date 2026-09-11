@@ -4,9 +4,9 @@
 use core::ops::BitOr;
 
 use ipc::{
-    WireTyped, WireValue,
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
     schema::WireType,
-    wire::{HandleSlots, IpcError, MessageBuf, value},
+    wire::{IpcError, MessageBuf, value},
 };
 
 /// Набор флагов открытия, в кадре занимает `u32` LE. Биты вне набора кадр переносит как есть.
@@ -44,19 +44,22 @@ impl BitOr for OpenFlags {
     }
 }
 
-impl<'a> WireValue<'a> for OpenFlags {
-    fn write_as_field<const N: usize>(
-        &self,
-        buf: &mut MessageBuf<N>,
-        field_id: u8,
-        _handles: &mut HandleSlots,
-    ) -> Result<(), IpcError> {
+impl<'a, R: ReceivedResources> WireValue<'a, R> for OpenFlags {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        Ok(Self(value::decode_u32(data)?))
+    }
+}
+
+impl IntoWireValue for OpenFlags {
+    type Read = Self;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
         buf.write_field(field_id, &value::encode_u32(self.0))
     }
 
-    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
-        Ok(Self(value::decode_u32(data)?))
-    }
+    fn relinquish(self) {}
 }
 
 impl WireTyped for OpenFlags {
@@ -67,8 +70,8 @@ impl WireTyped for OpenFlags {
 #[cfg(test)]
 mod tests {
     use ipc::{
-        WireValue,
-        wire::{FieldCursor, HandleSlots, IpcError, MESSAGE_INLINE_MAX, MessageBuf, value},
+        IntoWireValue, WireValue,
+        wire::{FieldCursor, IpcError, MessageBuf, value},
     };
 
     use super::OpenFlags;
@@ -83,14 +86,12 @@ mod tests {
     ];
 
     fn round_trip(flags: OpenFlags) -> Result<OpenFlags, IpcError> {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        flags
-            .write_as_field(&mut buf, FIELD_ID, &mut HandleSlots::new())
-            .expect("write ok");
+        let mut buf = MessageBuf::new();
+        flags.write_as_field(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");
-        OpenFlags::from_field(field.data, &HandleSlots::new())
+        OpenFlags::from_field(field.data, &mut ())
     }
 
     fn union() -> OpenFlags {
@@ -125,8 +126,7 @@ mod tests {
 
     #[test]
     fn bits_outside_the_set_survive_the_wire() {
-        let flags = OpenFlags::from_field(&value::encode_u32(1 << 31), &HandleSlots::new())
-            .expect("decode ok");
+        let flags = OpenFlags::from_field(&value::encode_u32(1 << 31), &mut ()).expect("decode ok");
         assert!(!flags.contains(OpenFlags::CREATE));
         assert_eq!(round_trip(flags), Ok(flags));
     }
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn wrong_field_length_is_rejected() {
         assert_eq!(
-            OpenFlags::from_field(&[1, 0], &HandleSlots::new()),
+            OpenFlags::from_field(&[1, 0], &mut ()),
             Err(IpcError::InvalidValue)
         );
     }

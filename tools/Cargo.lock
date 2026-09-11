@@ -690,14 +690,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "supervisor-abi"
-version = "0.1.0"
-dependencies = [
- "ipc",
- "syscall",
-]
-
-[[package]]
 name = "syn"
 version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,7 +826,7 @@ version = "0.1.0"
 name = "userland-image"
 version = "0.1.0"
 dependencies = [
- "syscall",
+ "component-abi",
  "userland",
 ]
 
@@ -848,7 +840,6 @@ dependencies = [
  "object",
  "serde",
  "serde_json",
- "supervisor-abi",
  "syscall",
  "tempfile",
  "toml",

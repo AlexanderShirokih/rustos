@@ -7,7 +7,7 @@ use alloc::{
 
 use filesystem_abi::{
     AccessMode, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened, Path,
-    SEPARATOR, namespace,
+    SEPARATOR, file_system, namespace,
 };
 use ipc::{
     Timeout,
@@ -183,13 +183,13 @@ impl<E: Environment> FileSystem<E> {
             Sessions::Routed { namespace, .. } => namespace,
         };
 
-        let mut response = namespace.resolve_pair(route::wire(from)?, route::wire(to)?)?;
-        let pair = response.value?;
-        // Корень проверяется до переноса capability: непринятая сессия уходит с кадром ответа.
+        let pair = namespace.resolve_pair(route::wire(from)?, route::wire(to)?)??;
         let (from, to) = scoped(from, to, pair.root_len)?;
-        let session = response.claim(pair.session).ok_or(IpcError::InvalidValue)?;
-
-        rename_in(&Session::establish(environment, session, *wait)?, from, to)
+        rename_in(
+            &Session::establish(environment, pair.session, *wait)?,
+            from,
+            to,
+        )
     }
 
     fn remove_node(&mut self, path: Path<'_>, expected: NodeKind) -> Result<()> {
@@ -280,11 +280,9 @@ fn opened_window<E: Environment>(window: Option<&Window<E>>) -> Result<&Session<
 fn resolve<E: Environment>(
     namespace: &namespace::Client<E::Transport>,
     directory: Path<'_>,
-) -> Result<E::Handle<kind::Port>> {
+) -> Result<ipc::wire::Session<file_system::Protocol, E::Handle<kind::Port>>> {
     let path = Str::new(directory.as_str()).ok_or(FileSystemError::InvalidPath)?;
-    let mut response = namespace.resolve(path)?;
-    let capability = response.value?;
-    Ok(response.claim(capability).ok_or(IpcError::InvalidValue)?)
+    Ok(namespace.resolve(path)??)
 }
 
 fn scoped<'a, 'b>(from: Path<'a>, to: Path<'b>, root_len: u32) -> Result<(Path<'a>, Path<'b>)> {
@@ -307,8 +305,7 @@ fn scoped<'a, 'b>(from: Path<'a>, to: Path<'b>, root_len: u32) -> Result<(Path<'
 fn rename_in<E: Environment>(session: &Session<E>, from: Path<'_>, to: Path<'_>) -> Result<()> {
     session
         .client()
-        .rename(route::wire(from)?, route::wire(to)?)?
-        .value?;
+        .rename(route::wire(from)?, route::wire(to)?)??;
     Ok(())
 }
 
@@ -321,15 +318,9 @@ fn open_owned<E: Environment>(
     wait: Timeout,
 ) -> Result<OpenNode<E>> {
     let (directory, leaf) = route::split_scope(within)?;
-    let mut response = session.client().open_root(route::wire(directory)?)?;
-    let capability = response.value?;
-    let scoped = response.claim(capability).ok_or(IpcError::InvalidValue)?;
-
+    let scoped = session.client().open_root(route::wire(directory)?)??;
     let scoped = Session::establish(environment, scoped, wait)?;
-    let opened = scoped
-        .client()
-        .open(route::wire(leaf)?, mode, flags)?
-        .value?;
+    let opened = scoped.client().open(route::wire(leaf)?, mode, flags)??;
     Ok(OpenNode::new(scoped, opened))
 }
 
@@ -396,8 +387,7 @@ fn open_in<E: Environment>(
 ) -> Result<Opened> {
     Ok(session
         .client()
-        .open(route::wire(path)?, AccessMode::Read, flags)?
-        .value?)
+        .open(route::wire(path)?, AccessMode::Read, flags)??)
 }
 
 fn close_in<E: Environment>(session: &Session<E>, descriptor: NodeDescriptor) {
@@ -405,10 +395,7 @@ fn close_in<E: Environment>(session: &Session<E>, descriptor: NodeDescriptor) {
 }
 
 fn unlink<E: Environment>(session: &Session<E>, path: Path<'_>, expected: NodeKind) -> Result<()> {
-    session
-        .client()
-        .unlink(route::wire(path)?, expected)?
-        .value?;
+    session.client().unlink(route::wire(path)?, expected)??;
     Ok(())
 }
 

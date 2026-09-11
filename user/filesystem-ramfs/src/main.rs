@@ -7,44 +7,39 @@
 
 runtime::process_heap!();
 
-use core::panic::PanicInfo;
+use core::{convert::Infallible, panic::PanicInfo};
 
-use component_startup::{ReceivedStartup, component_manifest};
+use component_startup::component_manifest;
 use filesystem::RamFileSystem;
+use filesystem_abi::{file_system, namespace_admin};
 use filesystem_server::{Error, Result, serve};
-use kernel_objects::Port;
-use runtime::{log_fmt, thread_exit};
+use runtime::{log_fmt, process_exit};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "ramfs";
 
+const FAILED_EXIT_CODE: u64 = 1;
+
 component_manifest! {
     struct RamFileSystemStartup {
-        exports: { service: "FileSystem" },
-        establishes_sessions: true,
-        slots: {},
+        requirements: { namespace: session(namespace_admin::Protocol) },
+        exports: [file_system::Protocol],
     }
 }
 
-/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
-    match run(startup) {
-        Ok(()) => thread_exit(0),
-        Err(error) => {
-            log_fmt(format_args!("stopped: {error}"));
-            thread_exit(1)
-        }
-    }
+pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
+    let Err(error) = run(parent);
+    log_fmt(format_args!("stopped: {error}"));
+    process_exit(FAILED_EXIT_CODE)
 }
 
-fn run(startup: Handle<kind::Port>) -> Result<()> {
-    let ReceivedStartup { log, resources } =
-        RamFileSystemStartup::receive(Port::from_handle(startup)).map_err(|_| Error::Start)?;
+fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
+    let started = RamFileSystemStartup::start(parent).map_err(|_| Error::Start)?;
     serve(
-        log,
-        resources.startup,
-        resources.service,
+        started.log,
+        parent,
+        started.requirements.namespace,
         None,
         LOG_TAG,
         |_| Ok(RamFileSystem::new()),
@@ -54,5 +49,5 @@ fn run(startup: Handle<kind::Port>) -> Result<()> {
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     log_fmt(format_args!("panic: {info}"));
-    thread_exit(1)
+    process_exit(FAILED_EXIT_CODE)
 }

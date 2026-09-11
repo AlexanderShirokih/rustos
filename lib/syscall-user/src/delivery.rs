@@ -3,21 +3,20 @@
 use core::{fmt, mem::ManuallyDrop};
 
 use ipc::{
-    ReceivedResources,
-    wire::{Cap, HandleSlots},
+    IntoWireValue, ReceivedResources,
+    wire::{Cap, IpcError, MessageBuf},
 };
 use syscall::{Handle, IPC_BUFFER_MAX_CAPS, ObjectKind, kind};
 
 use crate::handle_close;
 
-/// Ресурсы доставленного кадра. Незавершённым reply владеет транспорт.
+/// Ресурсы доставленного кадра: значок, capability и канал ответа встречного вызова.
+/// Невзятые закрываются вместе со значением.
 #[derive(Debug, Default)]
 pub struct Delivery {
     /// Значок порт-handle отправителя, `0` у незаклеймённого.
     pub badge: u64,
-    /// Reply-handle кадра, `Some` только у встречного `call`. Значение здесь дублирует
-    /// запись транспорта, и закрывает reply транспорт.
-    pub reply: Option<Handle<kind::Reply>>,
+    reply: Option<ReceivedHandle<kind::Reply>>,
     caps: [Option<ReceivedHandle<kind::Any>>; IPC_BUFFER_MAX_CAPS],
 }
 
@@ -36,7 +35,7 @@ impl Delivery {
     ) -> Self {
         Self {
             badge,
-            reply,
+            reply: reply.map(|handle| ReceivedHandle { handle }),
             caps: caps.map(|cap| cap.map(|handle| ReceivedHandle { handle })),
         }
     }
@@ -44,33 +43,21 @@ impl Delivery {
 
 impl ReceivedResources for Delivery {
     type Handle<K: ObjectKind> = ReceivedHandle<K>;
+    type Reply = ReceivedHandle<kind::Reply>;
 
-    fn claim<K: ObjectKind>(&mut self, cap: Cap<K>) -> Option<ReceivedHandle<K>> {
-        // Поиск по проверенному id и take выполняются до передачи владения, поэтому найденный
-        // владелец отдаёт свою запись ровно один раз.
-        let owned = self
-            .caps
-            .iter_mut()
-            .find(|slot| {
-                slot.as_ref()
-                    .is_some_and(|owned| owned.handle.as_nonzero() == cap.raw())
-            })
-            .and_then(Option::take)?;
-        let _ = ManuallyDrop::new(owned);
+    fn take_handle<K: ObjectKind>(&mut self, index: u8) -> Option<ReceivedHandle<K>> {
+        let any = self.caps.get_mut(usize::from(index))?.take()?;
         Some(ReceivedHandle {
-            handle: cap.as_handle(),
+            handle: Handle::from_abi(any.into_raw().as_nonzero()),
         })
     }
 
-    fn retain_decoded(&mut self, slots: &HandleSlots) {
-        for place in &mut self.caps {
-            if place
-                .as_ref()
-                .is_some_and(|owned| !slots.decoded(owned.handle.raw()))
-            {
-                *place = None;
-            }
-        }
+    fn reply_channel(handle: ReceivedHandle<kind::Reply>) -> Option<ReceivedHandle<kind::Reply>> {
+        Some(handle)
+    }
+
+    fn take_reply(&mut self) -> Option<ReceivedHandle<kind::Reply>> {
+        self.reply.take()
     }
 }
 
@@ -79,6 +66,18 @@ impl<K: ObjectKind> ReceivedHandle<K> {
     /// такой handle - обязанность нового владельца.
     pub fn into_raw(self) -> Handle<K> {
         ManuallyDrop::new(self).handle
+    }
+}
+
+impl<K: ObjectKind> IntoWireValue for ReceivedHandle<K> {
+    type Read = Cap<K>;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
+        ipc::IntoWireValue::write_as_field(&Cap::from_handle(self.handle), buf, field_id)
+    }
+
+    fn relinquish(self) {
+        let _ = self.into_raw();
     }
 }
 

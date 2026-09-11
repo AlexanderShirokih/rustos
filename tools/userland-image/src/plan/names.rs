@@ -1,5 +1,4 @@
 use anyhow::{Result, ensure};
-use filesystem_abi::NAME_MAX;
 use syscall::MAX_PROCESS_NAME_LEN;
 
 use super::source::ComponentEntry;
@@ -23,7 +22,7 @@ pub(super) fn resolve_names<'a>(entries: &[&'a ComponentEntry]) -> Result<Vec<&'
     Ok(names)
 }
 
-pub(crate) fn validate_name(name: &str) -> Result<()> {
+fn validate_name(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty(),
         "boot plan component name must not be empty"
@@ -32,22 +31,12 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
         name.is_ascii() && !name.contains('/'),
         "boot plan component name '{name}' must be ASCII without '/'"
     );
-    // Именем экземпляра зовётся его процесс. Имя длиннее ёмкости `ProcessCreate`
-    // не поднялось бы на устройстве.
+    // Имя экземпляра становится именем его процесса, а `ProcessCreate` отвергает имя длиннее
+    // `MAX_PROCESS_NAME_LEN`.
     ensure!(
         name.len() <= MAX_PROCESS_NAME_LEN,
         "boot plan component name '{name}' is longer than \
          {MAX_PROCESS_NAME_LEN} bytes, which a process name holds"
-    );
-    Ok(())
-}
-
-pub(super) fn validate_record_name(name: &str) -> Result<()> {
-    // Компонент ступени 1 назван записью образа, и её имя - один компонент пути.
-    ensure!(
-        name.len() <= NAME_MAX,
-        "stage 1 component name '{name}' is longer than {NAME_MAX} bytes, \
-         which an image record name holds"
     );
     Ok(())
 }

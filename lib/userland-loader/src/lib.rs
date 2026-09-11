@@ -1,11 +1,7 @@
 //! Загрузка программы из её [`EntryView`] в новый процесс из userspace.
 //!
-//! [`load_entry`] минтит свежие регионы под сегменты, копирует в них байты,
-//! собирает дескриптор образа и стартует процесс через `ProcessCreate`/
-//! `ProcessLoadImage`/`ProcessStart`. Ошибка после `ProcessCreate` завершает
-//! пустой процесс служебным кодом и конечным ожиданием. [`launch_entry`]
-//! добавляет стандартный startup-порт и отправляет через него стартовый кадр.
-//! Источник байт абстрагирован за `EntryView`.
+//! [`load_entry`] создаёт процесс программы в регионах, оплаченных ресурсом вызывающего, и
+//! передаёт ему одну начальную capability. Отказ после создания процесса завершает процесс.
 
 #![no_std]
 #![allow(unsafe_code)]
@@ -13,102 +9,21 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::num::NonZeroU64;
 
 use kernel_objects::{
-    Error, Mapping, MemoryRegion, OwnedHandle, Port, Process, Resource, Result, Signal, ThreadEntry,
+    Error, Mapping, MemoryRegion, OwnedHandle, Process, Resource, Result, ThreadEntry,
 };
 use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags};
 use syscall::{
-    SEGMENT_ABI_VERSION, SIGNALED, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
+    SEGMENT_ABI_VERSION, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
     encode_image_desc, encode_segment,
 };
-use userland::{
-    EntryView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, entry_name, user_vm_window,
-};
+use userland::{EntryView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, user_vm_window};
 
 const STARTUP_FAILURE_EXIT_CODE: u32 = 1;
-const STARTUP_CLEANUP_TIMEOUT: Timeout = Timeout::from_secs(5);
-const CREATED_PROCESS_REAP_TURN: Timeout = Timeout::from_millis(1);
-
-struct PendingLaunch {
-    process: Option<Process>,
-    startup: Option<Port>,
-}
 
 struct PendingProcess {
     process: Option<Process>,
-}
-
-/// Процесс с завершённой startup-транзакцией и сохранённым клиентским портом.
-#[derive(Debug)]
-pub struct InitializedProcess {
-    /// Запущенный процесс.
-    pub process: Process,
-    /// Клиентская сторона startup-протокола.
-    pub startup: Port,
-}
-
-impl PendingLaunch {
-    fn finish<E>(
-        self,
-        send: impl FnOnce(&Port) -> core::result::Result<(), E>,
-    ) -> core::result::Result<Process, E>
-    where
-        E: From<Error>,
-    {
-        // Клиентская сторона порта уходит вместе с результатом, и стартовый кадр закрывает
-        // её как одноразовую.
-        self.retain(send).map(|initialized| initialized.process)
-    }
-
-    fn retain<E>(
-        mut self,
-        send: impl FnOnce(&Port) -> core::result::Result<(), E>,
-    ) -> core::result::Result<InitializedProcess, E>
-    where
-        E: From<Error>,
-    {
-        if let Err(error) = send(self.startup()?) {
-            return match self.rollback() {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(E::from(cleanup)),
-            };
-        }
-        let process = self.take_process()?;
-        let startup = self.take_startup()?;
-        Ok(InitializedProcess { process, startup })
-    }
-
-    fn take_startup(&mut self) -> Result<Port> {
-        self.startup.take().ok_or_else(state_taken)
-    }
-
-    fn startup(&self) -> Result<&Port> {
-        self.startup.as_ref().ok_or_else(state_taken)
-    }
-
-    fn take_process(&mut self) -> Result<Process> {
-        self.process.take().ok_or_else(state_taken)
-    }
-
-    fn rollback(mut self) -> Result<()> {
-        self.startup = None;
-        let Some(process) = self.process.as_ref() else {
-            return Ok(());
-        };
-        terminate_and_join(process)?;
-        self.process = None;
-        Ok(())
-    }
-}
-
-impl Drop for PendingLaunch {
-    fn drop(&mut self) {
-        if let Some(process) = self.process.as_ref() {
-            let _ = process.terminate(STARTUP_FAILURE_EXIT_CODE);
-        }
-    }
 }
 
 impl PendingProcess {
@@ -138,7 +53,6 @@ impl PendingProcess {
             return Ok(());
         };
         terminate_and_join(process)?;
-        confirm_created_process_reaped()?;
         self.process = None;
         Ok(())
     }
@@ -158,76 +72,17 @@ fn state_taken() -> Error {
 
 fn terminate_and_join(process: &Process) -> Result<()> {
     process.terminate(STARTUP_FAILURE_EXIT_CODE)?;
-    process.join(STARTUP_CLEANUP_TIMEOUT)
-}
-
-fn confirm_created_process_reaped() -> Result<()> {
-    let timer = Signal::create()?;
-    match timer.wait(SIGNALED, CREATED_PROCESS_REAP_TURN) {
-        Err(Error::Syscall(SyscallError::Timeout)) => Ok(()),
-        Err(error) => Err(error),
-        Ok(_) => Err(Error::Syscall(SyscallError::Canceled)),
-    }
-}
-
-/// Загружает `entry`, отправляет startup-кадр через одноразовый порт и
-/// возвращает процесс.
-///
-/// Ошибка callback завершает потомка синхронным `terminate`/`join` с конечным
-/// сроком. Отказ этого пути заменяет исходную ошибку callback.
-pub fn launch_entry<'a, V: EntryView<'a>, E: From<Error>>(
-    entry: &V,
-    name: Option<&str>,
-    resource: &Resource,
-    startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
-) -> core::result::Result<Process, E> {
-    prepare_launch(entry, name, resource, None)
-        .map_err(E::from)?
-        .finish(startup)
-}
-
-/// Загружает `entry`, отправляет startup-кадр и возвращает процесс с
-/// сохранённой клиентской стороной порта под значком `badge`.
-///
-/// Значок делает исчезновение вызывающего наблюдаемым, и потомок, оставшийся без
-/// его держателей, получает `SenderGone` очередным приёмом на этом порту. Без значка
-/// уход вызывающего для потомка ничем не отличается от прочих отправителей.
-/// Ошибка callback проходит тот же cleanup, что и у [`launch_entry`].
-pub fn launch_entry_retained<'a, V: EntryView<'a>, E: From<Error>>(
-    entry: &V,
-    name: Option<&str>,
-    resource: &Resource,
-    badge: Option<NonZeroU64>,
-    startup: impl FnOnce(&Port) -> core::result::Result<(), E>,
-) -> core::result::Result<InitializedProcess, E> {
-    prepare_launch(entry, name, resource, badge)
-        .map_err(E::from)?
-        .retain(startup)
-}
-
-fn prepare_launch<'a, V: EntryView<'a>>(
-    entry: &V,
-    name: Option<&str>,
-    resource: &Resource,
-    badge: Option<NonZeroU64>,
-) -> Result<PendingLaunch> {
-    let startup = Port::create_service(badge)?;
-    let process = load_entry(entry, name, resource, startup.server)?;
-    Ok(PendingLaunch {
-        process: Some(process),
-        startup: Some(startup.client),
-    })
+    process.join(Timeout::POLL)
 }
 
 /// Загружает `entry` в новый процесс и стартует его первый поток.
 ///
 /// Сегменты копируются в свежие приватные регионы. `resource` оплачивает их и
-/// становится метеринг-ресурсом потомка. `name` называет процесс, а без имени
-/// он зовётся по записи программы. `initial` - начальная capability. `Ok`
-/// означает, что хэндл передан потомку.
+/// становится метеринг-ресурсом потомка. `name` называет процесс. `initial` -
+/// начальная capability. `Ok` означает, что хэндл передан потомку.
 pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
     entry: &E,
-    name: Option<&str>,
+    name: &str,
     resource: &Resource,
     initial: OwnedHandle<K>,
 ) -> Result<Process> {
@@ -302,7 +157,6 @@ pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
         user_vm_size: window.end - window.start,
     };
 
-    let name = name.unwrap_or_else(|| entry_name(entry.path()));
     let pending = PendingProcess::new(Process::create(name)?);
     if let Err(error) = pending.process()?.load_image(&encode_image_desc(&desc)) {
         return pending.fail(error);

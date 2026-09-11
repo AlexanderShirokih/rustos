@@ -205,7 +205,8 @@ pub enum SyscallOp {
     ///
     /// Требует `Rights::WRITE` на `process_handle`, `Rights::TRANSFER` на
     /// `bootstrap_handle` и `Rights::WRITE | Rights::DUPLICATE` на `resource_handle`.
-    /// `bootstrap_handle` уходит из таблицы вызывающего в таблицу потомка. Нулевой
+    /// `bootstrap_handle` уходит из таблицы вызывающего в таблицу потомка без права
+    /// `Rights::TRANSFER`, значок и остальные права сохраняются. Нулевой
     /// `resource_handle` отдаёт потомку метеринг-ресурс вызывающего с правами гранта
     /// вызывающего, ненулевой - права самого `resource_handle`.
     /// Возвращает handle на свежий `ThreadObject`.

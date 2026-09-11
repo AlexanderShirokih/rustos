@@ -13,6 +13,7 @@ bench = false
 component-abi = { workspace = true }
 ipc = { workspace = true }
 kernel-objects = { workspace = true }
+log-abi = { workspace = true }
 syscall = { workspace = true }
 
 [lints]

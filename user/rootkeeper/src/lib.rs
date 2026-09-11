@@ -1,21 +1,16 @@
-//! Поднимает композицию образа и держит её до завершения критического компонента.
+//! Поднимает композицию образа и служит родителем её записей.
 //!
-//! [`supervise`] принимает handle bootstrap-порта, который программа получает от ядра, и
-//! возвращает [`Stopped`] - код, которым ядро гасит машину. Отказ подъёма назван
-//! [`BootFailure`], нехватка ресурса композиции - [`BudgetFailure`], несобранный слот -
-//! [`SlotFailure`].
-//!
-//! Лог-сессии компонентов сводит модуль [`relay`]: сток журнала остаётся в этом процессе,
-//! компоненту достаётся сессия под своим значком.
+//! [`run`] принимает handle bootstrap-порта от ядра и возвращает код завершения процесса
+//! [`Stopped`].
 #![no_std]
 
 extern crate alloc;
 
-mod extension;
+mod devices;
 pub mod relay;
 mod system;
 
 pub use system::{
-    BootFailure, BudgetFailure, Component, Definition, LogSessions, RootSystem, SHUTDOWN_EXIT_CODE,
-    STOP_TIMEOUT, SlotFailure, Stopped, Supervised, SystemImage, supervise,
+    BUDGET_RETURN_TIMEOUT, BootFailure, BudgetFailure, ImporterRefusal, ImporterRequirement,
+    RootSystem, Stopped, SystemImage, run, turn,
 };

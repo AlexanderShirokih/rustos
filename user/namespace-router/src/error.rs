@@ -2,7 +2,7 @@
 
 use core::fmt::{Display, Formatter, Result as FmtResult};
 
-use component_startup::StartupError;
+use component_startup::{StartupError, StartupFailure};
 use ipc::wire::IpcError;
 use syscall::SyscallError;
 
@@ -30,7 +30,7 @@ impl Display for Error {
         match self {
             Self::Runtime(error) => write!(formatter, "runtime error {error:?}"),
             Self::Ipc(error) => write!(formatter, "ipc error {error:?}"),
-            Self::Start => formatter.write_str("no start frame"),
+            Self::Start => formatter.write_str("start refused"),
         }
     }
 }
@@ -47,17 +47,11 @@ impl From<SyscallError> for Error {
     }
 }
 
-impl From<IpcError> for Error {
-    fn from(error: IpcError) -> Self {
-        Self::Ipc(error)
-    }
-}
-
 impl From<StartupError> for Error {
     fn from(error: StartupError) -> Self {
-        match error {
-            StartupError::Transport(error) => Self::Ipc(error),
-            _ => Self::Start,
+        match error.failure {
+            StartupFailure::Ipc(error) => Self::Ipc(error),
+            StartupFailure::Session(_) | StartupFailure::Resource(_) => Self::Start,
         }
     }
 }

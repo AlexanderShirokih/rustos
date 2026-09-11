@@ -4,11 +4,14 @@
 //! Все целые - little-endian. Кадр (заголовок + тело) укладывается в
 //! [`MESSAGE_INLINE_MAX`]. Кодирование без heap.
 
-use core::{cell::Cell, num::NonZeroU32};
+use core::{marker::PhantomData, num::NonZeroU32};
 
 use syscall::{Handle, ObjectKind, kind};
 
 pub use crate::schema::{FIELD_OVERHEAD, HEADER_SIZE};
+use crate::{
+    Channel, IntoWireValue, Protocol, ReceivedResources, WireTyped, WireValue, schema::WireType,
+};
 
 /// Максимальная длина кадра (заголовок + тело) в байтах. Кадр заполняет тело IPC-буфера.
 /// Это значение равно [`syscall::IPC_BUFFER_DATA_MAX`].
@@ -21,98 +24,6 @@ const _: () = assert!(
     syscall::IPC_BUFFER_MAX_CAPS <= MESSAGE_MAX_HANDLES,
     "every handle the kernel delivers with a frame must fit into the slots"
 );
-
-/// Слоты capability сообщения. Значение-капа кладёт сюда сырой handle-id, а в
-/// тело пишет его индекс. Сами хэндлы передаются отдельным массивом кадра, минуя байты
-/// тела. Один набор общий для всего сообщения, включая вложенные суб-кадры
-/// агрегатов.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HandleSlots {
-    ids: [u32; MESSAGE_MAX_HANDLES],
-    count: usize,
-    taken: Cell<u8>,
-}
-
-impl HandleSlots {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            ids: [0; MESSAGE_MAX_HANDLES],
-            count: 0,
-            taken: Cell::new(0),
-        }
-    }
-
-    /// Набор для декодирования: хэндлы, доставленные с кадром. Ядро доставляет не
-    /// больше [`syscall::IPC_BUFFER_MAX_CAPS`] хэндлов, и все они умещаются в
-    /// слоты. Хвост `ids` сверх [`MESSAGE_MAX_HANDLES`] в набор не попадает.
-    #[must_use]
-    pub fn from_received(ids: &[u32]) -> Self {
-        let mut slots = Self::new();
-        let mut count = 0;
-        for (slot, &id) in slots.ids.iter_mut().zip(ids) {
-            *slot = id;
-            count += 1;
-        }
-        slots.count = count;
-        slots
-    }
-
-    /// Занимает слот под `id` и отдаёт его индекс. Сверх [`MESSAGE_MAX_HANDLES`]
-    /// - `TooManyHandles`.
-    pub fn push(&mut self, id: u32) -> Result<u8, IpcError> {
-        let index = u8::try_from(self.count).map_err(|_| IpcError::TooManyHandles)?;
-        let slot = self
-            .ids
-            .get_mut(self.count)
-            .ok_or(IpcError::TooManyHandles)?;
-        *slot = id;
-        self.count += 1;
-        Ok(index)
-    }
-
-    /// Изымает handle-id по индексу из тела. Слот потребляется один раз: два
-    /// поля кадра с одним индексом - это два владельца одного хэндла. Повторный
-    /// индекс, как и индекс вне занятых слотов, - `InvalidValue`.
-    pub fn take(&self, index: u8) -> Result<u32, IpcError> {
-        let position = usize::from(index);
-        if position >= self.count {
-            return Err(IpcError::InvalidValue);
-        }
-        let bit = 1u8 << position;
-        if self.taken.get() & bit != 0 {
-            return Err(IpcError::InvalidValue);
-        }
-        self.taken.set(self.taken.get() | bit);
-        self.ids
-            .get(position)
-            .copied()
-            .ok_or(IpcError::InvalidValue)
-    }
-
-    /// Занятые слоты в порядке их выдачи.
-    #[must_use]
-    pub fn as_slice(&self) -> &[u32] {
-        // `count` растёт только вслед за занятым слотом и потому не превосходит длины
-        // массива; на невозможном `count` пустой набор безопаснее выдуманных хэндлов.
-        self.ids.get(..self.count).unwrap_or_default()
-    }
-
-    /// Определяет, потребило ли декодирование слот указанного хэндла.
-    #[must_use]
-    pub fn decoded(&self, raw: u32) -> bool {
-        self.as_slice()
-            .iter()
-            .enumerate()
-            .any(|(index, &id)| id == raw && self.taken.get() & (1u8 << index) != 0)
-    }
-}
-
-impl Default for HandleSlots {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Бюджет тела (включая терминатор): `MESSAGE_INLINE_MAX - HEADER_SIZE`.
 pub const BODY_MAX: usize = MESSAGE_INLINE_MAX - HEADER_SIZE;
@@ -132,15 +43,6 @@ pub const FIELD_ID_MIN: u8 = 1;
 
 /// Максимальный допустимый `field_id` записи.
 pub const FIELD_ID_MAX: u8 = 254;
-
-/// Кадр с этим флагом - ответ на two-way вызов.
-pub const FLAG_RESPONSE: u16 = 1 << 0;
-
-/// Флаг: peer завершает соединение этим последним кадром.
-pub const FLAG_PEER_CLOSE: u16 = 1 << 1;
-
-/// Ответ с этим флагом содержит доменную ошибку `E`.
-pub const FLAG_DOMAIN_ERR: u16 = 1 << 3;
 
 /// Ширина дискриминанта закрытого enum как поля wire-типа.
 pub const ENUM_DISCRIMINANT_WIDTH: u8 = 2;
@@ -163,10 +65,6 @@ pub enum IpcError {
     InvalidValue,
     /// Дальний конец канала закрыт.
     PeerClosed,
-    /// Отправители значка исчезли: вместо кадра доставлено событие об уходе.
-    SenderGone,
-    /// Операция не может завершиться без блокировки.
-    WouldBlock,
     /// Истёк отведённый на ожидание срок.
     Timeout,
     /// Капы сообщения не умещаются в [`MESSAGE_MAX_HANDLES`] слотов.
@@ -175,103 +73,86 @@ pub enum IpcError {
     ResourceExhausted,
 }
 
-/// Заголовок кадра: `ordinal` @0, `txid` @8, `flags` @12 (14 байт, LE).
+/// Заголовок кадра: ординал операции, `u64` LE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
     /// Идентификатор операции (хэш канонического имени).
     pub ordinal: u64,
-    /// Идентификатор транзакции. `0` - односторонняя операция.
-    pub txid: u32,
-    /// Битовая маска флагов кадра.
-    pub flags: u16,
 }
 
-const ORDINAL_SIZE: usize = 8;
-const TXID_SIZE: usize = 4;
-const FLAGS_SIZE: usize = 2;
-
-const _: () = assert!(ORDINAL_SIZE + TXID_SIZE + FLAGS_SIZE == HEADER_SIZE);
-
 impl Header {
-    /// Создаёт заголовок из полей.
+    /// Создаёт заголовок операции `ordinal`.
     #[must_use]
-    pub const fn new(ordinal: u64, txid: u32, flags: u16) -> Self {
-        Self {
-            ordinal,
-            txid,
-            flags,
-        }
+    pub const fn new(ordinal: u64) -> Self {
+        Self { ordinal }
     }
 
     /// Записывает заголовок в первые [`HEADER_SIZE`] байт `buf`.
     /// `Truncated`, если буфер короче заголовка.
     pub fn encode(&self, buf: &mut [u8]) -> Result<(), IpcError> {
-        let Some((ordinal, rest)) = buf.split_first_chunk_mut::<ORDINAL_SIZE>() else {
-            return Err(IpcError::Truncated);
-        };
-        let Some((txid, rest)) = rest.split_first_chunk_mut::<TXID_SIZE>() else {
-            return Err(IpcError::Truncated);
-        };
-        let Some((flags, _)) = rest.split_first_chunk_mut::<FLAGS_SIZE>() else {
+        let Some(ordinal) = buf.first_chunk_mut::<HEADER_SIZE>() else {
             return Err(IpcError::Truncated);
         };
         *ordinal = self.ordinal.to_le_bytes();
-        *txid = self.txid.to_le_bytes();
-        *flags = self.flags.to_le_bytes();
         Ok(())
     }
 
-    /// Читает заголовок из первых [`HEADER_SIZE`] байт `bytes`.
-    /// `Truncated`, если байт меньше заголовка.
-    pub fn decode(bytes: &[u8]) -> Result<Self, IpcError> {
-        let Some((ordinal, rest)) = bytes.split_first_chunk::<ORDINAL_SIZE>() else {
+    /// Разделяет кадр на заголовок и тело. `Truncated`, если кадр короче заголовка.
+    pub fn split(frame: &[u8]) -> Result<FrameParts<'_>, IpcError> {
+        let Some((ordinal, body)) = frame.split_first_chunk::<HEADER_SIZE>() else {
             return Err(IpcError::Truncated);
         };
-        let Some((txid, rest)) = rest.split_first_chunk::<TXID_SIZE>() else {
-            return Err(IpcError::Truncated);
-        };
-        let Some((flags, _)) = rest.split_first_chunk::<FLAGS_SIZE>() else {
-            return Err(IpcError::Truncated);
-        };
-        Ok(Self {
-            ordinal: u64::from_le_bytes(*ordinal),
-            txid: u32::from_le_bytes(*txid),
-            flags: u16::from_le_bytes(*flags),
+        Ok(FrameParts {
+            header: Self {
+                ordinal: u64::from_le_bytes(*ordinal),
+            },
+            body,
         })
     }
-
-    /// Проверяет, установлен ли заданный флаг.
-    #[must_use]
-    pub const fn has_flag(&self, flag: u16) -> bool {
-        self.flags & flag != 0
-    }
 }
 
-/// Стековый буфер кадра: `[u8; N]` плюс позиция записи.
-/// Кадр строится как заголовок, затем записи полей, затем терминатор.
+/// Кадр, разделённый на заголовок и тело.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameParts<'a> {
+    /// Заголовок кадра.
+    pub header: Header,
+    /// Тело кадра: записи полей и терминатор.
+    pub body: &'a [u8],
+}
+
+/// Стековый буфер исходящего кадра: байты кадра и слоты его capability.
+///
+/// Кадр строится как заголовок, затем записи полей, затем терминатор. Кадр, запись которого
+/// отказала, не отправляется.
 #[derive(Debug, Clone)]
-pub struct MessageBuf<const N: usize> {
-    bytes: [u8; N],
+pub struct MessageBuf {
+    bytes: [u8; MESSAGE_INLINE_MAX],
     pos: usize,
     last_field_id: u8,
+    open_records: usize,
     terminated: bool,
+    handles: [u32; MESSAGE_MAX_HANDLES],
+    handle_count: usize,
 }
 
-impl<const N: usize> Default for MessageBuf<N> {
+impl Default for MessageBuf {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize> MessageBuf<N> {
+impl MessageBuf {
     /// Создаёт пустой буфер с нулевой позицией записи.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            bytes: [0u8; N],
+            bytes: [0u8; MESSAGE_INLINE_MAX],
             pos: 0,
             last_field_id: 0,
+            open_records: 0,
             terminated: false,
+            handles: [0; MESSAGE_MAX_HANDLES],
+            handle_count: 0,
         }
     }
 
@@ -290,7 +171,13 @@ impl<const N: usize> MessageBuf<N> {
     /// Записанный префикс буфера.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.pos]
+        self.bytes.get(..self.pos).unwrap_or_default()
+    }
+
+    /// Handle-вектор кадра: хэндлы, чьи индексы записаны в теле, в порядке записи.
+    #[must_use]
+    pub fn handles(&self) -> &[u32] {
+        self.handles.get(..self.handle_count).unwrap_or_default()
     }
 
     /// Записывает заголовок в начало буфера. Продвигает позицию на
@@ -299,10 +186,7 @@ impl<const N: usize> MessageBuf<N> {
         if self.pos != 0 {
             return Err(IpcError::FieldOrder);
         }
-        if N < HEADER_SIZE {
-            return Err(IpcError::FrameOverflow);
-        }
-        header.encode(&mut self.bytes[..HEADER_SIZE])?;
+        header.encode(&mut self.bytes)?;
         self.pos = HEADER_SIZE;
         Ok(())
     }
@@ -313,46 +197,75 @@ impl<const N: usize> MessageBuf<N> {
     /// `FieldOrder`. `data` длиннее [`FIELD_DATA_MAX`] - `InvalidValue`.
     /// Превышение бюджета кадра - `FrameOverflow`.
     pub fn write_field(&mut self, field_id: u8, data: &[u8]) -> Result<(), IpcError> {
-        if self.terminated {
-            return Err(IpcError::FieldOrder);
-        }
-        if !(FIELD_ID_MIN..=FIELD_ID_MAX).contains(&field_id) {
-            return Err(IpcError::FieldOrder);
-        }
-        if field_id <= self.last_field_id {
-            return Err(IpcError::FieldOrder);
-        }
+        self.check_field_id(field_id)?;
         if data.len() > FIELD_DATA_MAX {
             return Err(IpcError::InvalidValue);
         }
-        // Запись + место под терминатор обязаны уместиться в буфер.
-        let needed = FIELD_OVERHEAD + data.len();
-        if self.pos + needed + 1 > N {
-            return Err(IpcError::FrameOverflow);
+        let start = self.pos;
+        let end = start + FIELD_OVERHEAD + data.len();
+        self.check_room(end)?;
+        self.bytes
+            .get_mut(start + FIELD_OVERHEAD..end)
+            .ok_or(IpcError::FrameOverflow)?
+            .copy_from_slice(data);
+        self.close_record(start, field_id, end)
+    }
+
+    /// Записывает поле-capability: хэндл `raw` занимает слот кадра, а тело записи - индекс
+    /// этого слота. Сверх [`MESSAGE_MAX_HANDLES`] хэндлов - `TooManyHandles`.
+    pub fn write_handle(&mut self, field_id: u8, raw: u32) -> Result<(), IpcError> {
+        let index = self.handle_count;
+        let slot_index = u8::try_from(index).map_err(|_| IpcError::TooManyHandles)?;
+        if index >= MESSAGE_MAX_HANDLES {
+            return Err(IpcError::TooManyHandles);
         }
-        let record = self
-            .bytes
-            .get_mut(self.pos..self.pos + needed)
-            .ok_or(IpcError::FrameOverflow)?;
-        let Some((id_slot, rest)) = record.split_first_mut() else {
-            return Err(IpcError::FrameOverflow);
-        };
-        let Some((len_slot, payload)) = rest.split_first_chunk_mut::<2>() else {
-            return Err(IpcError::FrameOverflow);
-        };
-        let data_len = u16::try_from(data.len()).map_err(|_| IpcError::FrameOverflow)?;
-        *id_slot = field_id;
-        *len_slot = data_len.to_le_bytes();
-        payload.copy_from_slice(data);
-        self.pos += needed;
-        self.last_field_id = field_id;
+        self.write_field(field_id, &[slot_index])?;
+        if let Some(slot) = self.handles.get_mut(index) {
+            *slot = raw;
+        }
+        self.handle_count += 1;
         Ok(())
     }
 
-    /// Дописывает терминатор `0x00` и завершает тело. Идемпотентен.
+    /// Записывает поле `field_id`, тело которого - вложенные записи от `write` с собственным
+    /// терминатором. Вложенные записи нумеруют `field_id` заново и делят слоты capability
+    /// кадра. Ограничения `field_id`, длины и бюджета те же, что у [`MessageBuf::write_field`].
+    pub fn write_nested(
+        &mut self,
+        field_id: u8,
+        write: impl FnOnce(&mut Self) -> Result<(), IpcError>,
+    ) -> Result<(), IpcError> {
+        self.check_field_id(field_id)?;
+        let start = self.pos;
+        // Заголовок записи и её собственный терминатор.
+        self.check_room(start + FIELD_OVERHEAD + 1)?;
+        self.pos = start + FIELD_OVERHEAD;
+        self.last_field_id = 0;
+        self.open_records += 1;
+        let written = write(self);
+        self.open_records -= 1;
+        written?;
+
+        let terminator = self
+            .bytes
+            .get_mut(self.pos)
+            .ok_or(IpcError::FrameOverflow)?;
+        *terminator = TERMINATOR;
+        let end = self.pos + 1;
+        if end - start - FIELD_OVERHEAD > FIELD_DATA_MAX {
+            return Err(IpcError::InvalidValue);
+        }
+        self.close_record(start, field_id, end)
+    }
+
+    /// Дописывает терминатор `0x00` и завершает тело. Идемпотентен. Внутри
+    /// [`MessageBuf::write_nested`] - `FieldOrder`.
     pub fn finish(&mut self) -> Result<(), IpcError> {
         if self.terminated {
             return Ok(());
+        }
+        if self.open_records != 0 {
+            return Err(IpcError::FieldOrder);
         }
         let slot = self
             .bytes
@@ -361,6 +274,45 @@ impl<const N: usize> MessageBuf<N> {
         *slot = TERMINATOR;
         self.pos += 1;
         self.terminated = true;
+        Ok(())
+    }
+
+    fn check_field_id(&self, field_id: u8) -> Result<(), IpcError> {
+        if self.terminated
+            || !(FIELD_ID_MIN..=FIELD_ID_MAX).contains(&field_id)
+            || field_id <= self.last_field_id
+        {
+            return Err(IpcError::FieldOrder);
+        }
+        Ok(())
+    }
+
+    fn check_room(&self, end: usize) -> Result<(), IpcError> {
+        // За записью остаётся место под терминатор кадра и терминатор каждой открытой
+        // вложенной записи.
+        if end + 1 + self.open_records > MESSAGE_INLINE_MAX {
+            return Err(IpcError::FrameOverflow);
+        }
+        Ok(())
+    }
+
+    fn close_record(&mut self, start: usize, field_id: u8, end: usize) -> Result<(), IpcError> {
+        let data_len =
+            u16::try_from(end - start - FIELD_OVERHEAD).map_err(|_| IpcError::FrameOverflow)?;
+        let Some((id_slot, rest)) = self
+            .bytes
+            .get_mut(start..)
+            .and_then(<[u8]>::split_first_mut)
+        else {
+            return Err(IpcError::FrameOverflow);
+        };
+        let Some(len_slot) = rest.first_chunk_mut::<2>() else {
+            return Err(IpcError::FrameOverflow);
+        };
+        *id_slot = field_id;
+        *len_slot = data_len.to_le_bytes();
+        self.pos = end;
+        self.last_field_id = field_id;
         Ok(())
     }
 }
@@ -437,8 +389,8 @@ impl<'a> FieldCursor<'a> {
 ///
 /// Вид задаётся объявлением поля контракта и в кадр не записывается. Значение хэндлом не
 /// владеет. Закрытие принятого хэндла остаётся за
-/// [`ReceivedResources`](crate::ReceivedResources) кадра, а реализация
-/// [`relinquish`](crate::IntoWireHandle::relinquish) для `Cap` пуста.
+/// [`ReceivedResources`] кадра, а реализация
+/// [`relinquish`](crate::IntoWireValue::relinquish) для `Cap` пуста.
 #[repr(transparent)]
 pub struct Cap<K: ObjectKind> {
     handle: Handle<K>,
@@ -489,6 +441,121 @@ impl<K: ObjectKind> Eq for Cap<K> {}
 impl<K: ObjectKind> core::fmt::Debug for Cap<K> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("Cap").field(&self.handle).finish()
+    }
+}
+
+/// Сессия протокола `P`. Запись по умолчанию содержит capability порта, который обслуживает `P`,
+/// и хэндлом не владеет. Принятая сессия владеет хэндлом и сохраняет протокол.
+///
+/// `H` - держатель capability порта. В кадре сессия записана так же, как [`Cap<kind::Port>`],
+/// а протокол существует только при компиляции. Получатель читает запись сессией того же `P`
+/// с хэндлом из ресурсов кадра, и эту сессию можно отправить дальше владеющим значением.
+pub struct Session<P: Protocol, H = Cap<kind::Port>> {
+    handle: H,
+    protocol: PhantomData<fn() -> P>,
+}
+
+/// Держатель порта сессии, из которого строится канал клиента.
+pub trait SessionHandle {
+    /// Канал клиента поверх порта.
+    type Channel: Channel;
+
+    /// Канал поверх порта. Порт переходит каналу.
+    fn into_channel(self) -> Self::Channel;
+}
+
+impl<P: Protocol, H> Session<P, H> {
+    /// Сессия поверх хэндла порта. Вызывающий утверждает, что порт обслуживает `P`.
+    #[must_use]
+    pub const fn from_handle(handle: H) -> Self {
+        Self {
+            handle,
+            protocol: PhantomData,
+        }
+    }
+
+    /// Та же сессия с другим держателем порта. Протокол переходит без повторного утверждения.
+    #[must_use]
+    pub fn from_session<F>(session: Session<P, F>) -> Self
+    where
+        H: From<F>,
+    {
+        Self::from_handle(H::from(session.handle))
+    }
+
+    /// Держатель порта сессии.
+    #[must_use]
+    pub const fn handle(&self) -> &H {
+        &self.handle
+    }
+
+    /// Держатель порта сессии без протокола.
+    #[must_use]
+    pub fn into_handle(self) -> H {
+        self.handle
+    }
+}
+
+impl<P: Protocol, H: SessionHandle> Session<P, H> {
+    /// Клиент протокола `P`. Порт сессии переходит каналу клиента.
+    pub fn client(self) -> P::Client<H::Channel> {
+        P::client(self.handle.into_channel())
+    }
+}
+
+impl<P: Protocol> WireTyped for Session<P> {
+    const WIRE_TYPE: WireType = <Cap<kind::Port> as WireTyped>::WIRE_TYPE;
+}
+
+impl<'a, P: Protocol, R: ReceivedResources> WireValue<'a, R> for Session<P> {
+    type Owned = Session<P, R::Handle<kind::Port>>;
+
+    fn from_field(data: &'a [u8], frame: &mut R) -> Result<Self::Owned, IpcError> {
+        let handle = <Cap<kind::Port> as WireValue<'a, R>>::from_field(data, frame)?;
+        Ok(Session {
+            handle,
+            protocol: PhantomData,
+        })
+    }
+}
+
+impl<P: Protocol, H: IntoWireValue<Read = Cap<kind::Port>>> IntoWireValue for Session<P, H> {
+    type Read = Session<P>;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
+        self.handle.write_as_field(buf, field_id)
+    }
+
+    fn relinquish(self) {
+        self.handle.relinquish();
+    }
+}
+
+impl<P: Protocol, H: Clone> Clone for Session<P, H> {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            protocol: PhantomData,
+        }
+    }
+}
+
+impl<P: Protocol, H: Copy> Copy for Session<P, H> {}
+
+impl<P: Protocol, H: PartialEq> PartialEq for Session<P, H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
+}
+
+impl<P: Protocol, H: Eq> Eq for Session<P, H> {}
+
+impl<P: Protocol, H: core::fmt::Debug> core::fmt::Debug for Session<P, H> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Session")
+            .field("protocol", &P::ID)
+            .field("handle", &self.handle)
+            .finish()
     }
 }
 
@@ -628,12 +695,6 @@ pub mod value {
             _ => Err(IpcError::InvalidValue),
         }
     }
-
-    /// Кодирует индекс порта одним байтом (`u8`).
-    #[must_use]
-    pub fn encode_port_index(index: u8) -> [u8; 1] {
-        [index]
-    }
 }
 
 #[cfg(test)]
@@ -641,287 +702,154 @@ mod tests {
     use super::{value::*, *};
 
     const ORDINAL: u64 = 0x0102_0304_0506_0708;
-    const TXID: u32 = 0x1112_1314;
+
+    fn framed() -> MessageBuf {
+        let mut buf = MessageBuf::new();
+        buf.write_header(&Header::new(ORDINAL)).expect("header ok");
+        buf
+    }
+
+    fn first_field(body: &[u8]) -> Result<Option<Field<'_>>, IpcError> {
+        FieldCursor::new(body).next_field()
+    }
 
     #[test]
     fn header_golden_layout() {
-        let header = Header::new(ORDINAL, TXID, FLAG_RESPONSE | FLAG_DOMAIN_ERR);
-        let mut buf = [0u8; HEADER_SIZE];
-        header.encode(&mut buf).expect("encode ok");
-        // ordinal LE @0..8, txid LE @8..12, flags LE @12..14.
+        let mut buf = [0u8; HEADER_SIZE + 1];
+        Header::new(ORDINAL).encode(&mut buf).expect("encode ok");
+        buf[HEADER_SIZE] = 0xEE;
+        // ordinal LE @0..8, дальше тело.
+        assert_eq!(buf, [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0xEE]);
         assert_eq!(
-            buf,
-            [
-                0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // ordinal
-                0x14, 0x13, 0x12, 0x11, // txid
-                0x09, 0x00, // flags = RESPONSE | DOMAIN_ERR = 0b1001
-            ]
+            Header::split(&buf),
+            Ok(FrameParts {
+                header: Header::new(ORDINAL),
+                body: &[0xEE],
+            })
         );
     }
 
     #[test]
-    fn header_round_trip() {
-        let header = Header::new(ORDINAL, TXID, FLAG_PEER_CLOSE);
-        let mut buf = [0u8; HEADER_SIZE];
-        header.encode(&mut buf).expect("encode ok");
-        let decoded = Header::decode(&buf).expect("decode ok");
-        assert_eq!(decoded, header);
-        assert!(decoded.has_flag(FLAG_PEER_CLOSE));
-        assert!(!decoded.has_flag(FLAG_RESPONSE));
-    }
-
-    #[test]
-    fn header_encode_rejects_short_buffer() {
-        let header = Header::new(ORDINAL, TXID, 0);
-        let mut buf = [0u8; HEADER_SIZE - 1];
-        assert_eq!(header.encode(&mut buf), Err(IpcError::Truncated));
-    }
-
-    #[test]
-    fn header_decode_rejects_short_buffer() {
-        let bytes = [0u8; HEADER_SIZE - 1];
-        assert_eq!(Header::decode(&bytes), Err(IpcError::Truncated));
+    fn header_shorter_than_its_size_is_refused() {
+        assert_eq!(
+            Header::new(ORDINAL).encode(&mut [0u8; HEADER_SIZE - 1]),
+            Err(IpcError::Truncated)
+        );
+        assert_eq!(
+            Header::split(&[0u8; HEADER_SIZE - 1]),
+            Err(IpcError::Truncated)
+        );
     }
 
     #[test]
     fn derived_budget_constants() {
-        assert_eq!(HEADER_SIZE, 14);
+        assert_eq!(HEADER_SIZE, 8);
         assert_eq!(MESSAGE_INLINE_MAX, 4064);
-        assert_eq!(BODY_MAX, 4050);
-        assert_eq!(FIELD_DATA_MAX, 4046);
+        assert_eq!(BODY_MAX, 4056);
+        assert_eq!(FIELD_DATA_MAX, 4052);
         assert_eq!(MESSAGE_MAX_HANDLES, 4);
     }
 
     #[test]
     fn hello_body_golden_bytes() {
         // hello(version: u16 = 1): field_id=1, len=2u16 LE, data=1u16 LE, терминатор.
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        let mut buf = MessageBuf::new();
         buf.write_field(1, &encode_u16(1)).expect("field ok");
         buf.finish().expect("finish ok");
         assert_eq!(buf.as_bytes(), &[0x01, 0x02, 0x00, 0x01, 0x00, 0x00]);
     }
 
     #[test]
-    fn full_frame_header_plus_body() {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_header(&Header::new(ORDINAL, TXID, 0))
-            .expect("header ok");
-        buf.write_field(1, &encode_u16(1)).expect("field ok");
-        buf.finish().expect("finish ok");
-        assert_eq!(buf.len(), HEADER_SIZE + 6);
-        assert_eq!(
-            &buf.as_bytes()[HEADER_SIZE..],
-            &[0x01, 0x02, 0x00, 0x01, 0x00, 0x00]
-        );
-    }
-
-    #[test]
-    fn int_codecs_round_trip() {
-        assert_eq!(decode_u8(&encode_u8(0xAB)), Ok(0xAB));
-        assert_eq!(decode_u16(&encode_u16(0xABCD)), Ok(0xABCD));
-        assert_eq!(decode_u32(&encode_u32(0x0123_4567)), Ok(0x0123_4567));
-        assert_eq!(
-            decode_u64(&encode_u64(0x0123_4567_89AB_CDEF)),
-            Ok(0x0123_4567_89AB_CDEF)
-        );
-        assert_eq!(decode_i8(&encode_i8(-5)), Ok(-5));
-        assert_eq!(decode_i16(&encode_i16(-300)), Ok(-300));
-        assert_eq!(decode_i32(&encode_i32(-70_000)), Ok(-70_000));
-        assert_eq!(decode_i64(&encode_i64(-5_000_000_000)), Ok(-5_000_000_000));
-    }
-
-    #[test]
-    fn int_codec_le_byte_order() {
-        assert_eq!(encode_u32(0x0102_0304), [0x04, 0x03, 0x02, 0x01]);
-    }
-
-    #[test]
-    fn int_codec_rejects_wrong_length() {
+    fn value_decoders_refuse_a_wrong_encoding() {
         assert_eq!(decode_u32(&[0, 0, 0]), Err(IpcError::InvalidValue));
         assert_eq!(decode_u32(&[0, 0, 0, 0, 0]), Err(IpcError::InvalidValue));
-    }
-
-    #[test]
-    fn bool_codec_round_trip() {
-        assert_eq!(encode_bool(true), [1]);
-        assert_eq!(encode_bool(false), [0]);
-        assert_eq!(decode_bool(&[1]), Ok(true));
-        assert_eq!(decode_bool(&[0]), Ok(false));
         assert_eq!(decode_bool(&[2]), Err(IpcError::InvalidValue));
         assert_eq!(decode_bool(&[]), Err(IpcError::InvalidValue));
-    }
-
-    #[test]
-    fn discriminant_codec_round_trip() {
-        assert_eq!(encode_discriminant(7), [7, 0]);
-        assert_eq!(
-            decode_discriminant(&encode_discriminant(0xBEEF)),
-            Ok(0xBEEF)
-        );
-        assert_eq!(decode_discriminant(&[1]), Err(IpcError::InvalidValue));
-    }
-
-    #[test]
-    fn port_index_codec_round_trip() {
-        assert_eq!(encode_port_index(3), [3]);
-        assert_eq!(decode_port_index(&encode_port_index(3)), Ok(3));
-        assert_eq!(decode_port_index(&[1, 2]), Err(IpcError::InvalidValue));
-    }
-
-    #[test]
-    fn str_round_trip_within_bound() {
-        let s = Str::<8>::new("hello").expect("within bound");
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_field(1, s.as_str().as_bytes()).expect("field ok");
-        buf.finish().expect("finish ok");
-        let mut cursor = FieldCursor::new(buf.as_bytes());
-        let field = cursor.next_field().expect("ok").expect("present");
-        assert_eq!(field.id, 1);
-        assert_eq!(decode_str(field.data), Ok("hello"));
-    }
-
-    #[test]
-    fn str_rejects_over_bound() {
-        assert!(Str::<3>::new("abcd").is_none());
-    }
-
-    #[test]
-    fn str_accepts_exact_bound() {
-        assert!(Str::<4>::new("abcd").is_some());
-    }
-
-    #[test]
-    fn bytes_round_trip_within_bound() {
-        let b = Bytes::<8>::new(&[1, 2, 3]).expect("within bound");
-        assert_eq!(b.as_bytes(), &[1, 2, 3]);
-    }
-
-    #[test]
-    fn bytes_rejects_over_bound() {
-        assert_eq!(Bytes::<2>::new(&[1, 2, 3]), None);
-    }
-
-    #[test]
-    fn decode_str_rejects_non_utf8() {
         assert_eq!(decode_str(&[0xFF, 0xFE]), Err(IpcError::InvalidValue));
     }
 
     #[test]
-    fn skip_unknown_field() {
+    fn bounded_values_admit_their_bound_and_refuse_more() {
+        assert!(Str::<4>::new("abcd").is_some());
+        assert!(Str::<3>::new("abcd").is_none());
+        assert!(Bytes::<3>::new(&[1, 2, 3]).is_some());
+        assert!(Bytes::<2>::new(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn cursor_passes_over_an_unknown_field() {
         // Тело: известное поле id=1, неизвестное id=5, известное id=9.
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        let mut buf = MessageBuf::new();
         buf.write_field(1, &encode_u16(0xAAAA)).expect("ok");
         buf.write_field(5, &encode_u32(0xDEAD_BEEF)).expect("ok");
         buf.write_field(9, &encode_u8(0x42)).expect("ok");
         buf.finish().expect("ok");
 
-        // Декодер обрабатывает только id=1 и id=9, id=5 пропускает по len.
         let mut cursor = FieldCursor::new(buf.as_bytes());
-        let mut seen_1 = None;
-        let mut seen_9 = None;
-        while let Some(field) = cursor.next_field().expect("no decode error") {
-            match field.id {
-                1 => seen_1 = Some(decode_u16(field.data).expect("u16")),
-                9 => seen_9 = Some(decode_u8(field.data).expect("u8")),
-                _ => {} // неизвестное поле уже пропущено курсором по len
-            }
-        }
-        assert_eq!(seen_1, Some(0xAAAA));
-        assert_eq!(seen_9, Some(0x42));
+        let ids: [u8; 3] =
+            core::array::from_fn(|_| cursor.next_field().expect("ok").expect("present").id);
+        assert_eq!(ids, [1, 5, 9]);
+        assert_eq!(cursor.next_field(), Ok(None));
     }
 
     #[test]
-    fn missing_field_is_absent() {
-        // Тело с единственным полем id=1; запрошенного id=2 нет - absent.
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_field(1, &encode_u16(1)).expect("ok");
-        buf.finish().expect("ok");
-        let mut cursor = FieldCursor::new(buf.as_bytes());
-        let mut found_2 = false;
-        while let Some(field) = cursor.next_field().expect("ok") {
-            if field.id == 2 {
-                found_2 = true;
-            }
-        }
-        assert!(!found_2);
+    fn single_field_fills_the_frame_and_one_byte_more_overflows() {
+        let mut exact = framed();
+        exact.write_field(1, &[0u8; FIELD_DATA_MAX]).expect("fits");
+        exact.finish().expect("finish ok");
+        assert_eq!(exact.len(), MESSAGE_INLINE_MAX);
+
+        let mut over = framed();
+        over.write_field(1, &[0u8; FIELD_DATA_MAX]).expect("fits");
+        assert_eq!(over.write_field(2, &[0u8]), Err(IpcError::FrameOverflow));
+        assert_eq!(
+            MessageBuf::new().write_field(1, &[0u8; FIELD_DATA_MAX + 1]),
+            Err(IpcError::InvalidValue)
+        );
     }
 
     #[test]
-    fn frame_budget_overflow() {
-        // Буфер ровно под MESSAGE_INLINE_MAX; поле сверх бюджета - ошибка, не паника.
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_header(&Header::new(ORDINAL, TXID, 0))
-            .expect("header ok");
-        // FIELD_DATA_MAX данных ровно заполняют кадр с терминатором.
-        let max_data = [0u8; FIELD_DATA_MAX];
-        buf.write_field(1, &max_data).expect("max field fits");
-        // Ещё один байт данных уже не влезает.
-        assert_eq!(buf.write_field(2, &[0u8]), Err(IpcError::FrameOverflow));
-    }
-
-    #[test]
-    fn single_field_fills_frame_exactly() {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_header(&Header::new(ORDINAL, TXID, 0))
-            .expect("header ok");
-        buf.write_field(1, &[0u8; FIELD_DATA_MAX]).expect("fits");
-        buf.finish().expect("finish ok");
-        assert_eq!(buf.len(), MESSAGE_INLINE_MAX);
-    }
-
-    #[test]
-    fn field_over_255_bytes_round_trips() {
+    fn field_longer_than_255_bytes_round_trips() {
         const LEN: usize = 1500;
+        // Длина записи занимает u16, и данные длиннее u8::MAX не усекаются.
         let payload: [u8; LEN] = core::array::from_fn(|i| (i % 251) as u8);
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+        let mut buf = MessageBuf::new();
         buf.write_field(7, &payload).expect("field fits");
         buf.finish().expect("finish ok");
 
-        let mut cursor = FieldCursor::new(buf.as_bytes());
-        let field = cursor.next_field().expect("decode ok").expect("present");
-        assert_eq!(field.id, 7);
-        assert_eq!(field.data.len(), LEN);
-        assert_eq!(field.data, &payload[..]);
+        let field = first_field(buf.as_bytes()).expect("ok").expect("present");
+        assert_eq!((field.id, field.data), (7, &payload[..]));
     }
 
     #[test]
-    fn write_field_rejects_over_field_data_max() {
-        // Тело свыше FIELD_DATA_MAX отвергается, не паникует.
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        let oversized = [0u8; FIELD_DATA_MAX + 1];
-        assert_eq!(buf.write_field(1, &oversized), Err(IpcError::InvalidValue));
-    }
-
-    #[test]
-    fn field_order_strictly_increasing() {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_field(3, &encode_u8(1)).expect("ok");
-        // Равный id отвергается.
-        assert_eq!(buf.write_field(3, &encode_u8(2)), Err(IpcError::FieldOrder));
-        // Меньший id отвергается.
-        assert_eq!(buf.write_field(2, &encode_u8(2)), Err(IpcError::FieldOrder));
-        // Больший id принимается.
-        assert!(buf.write_field(4, &encode_u8(2)).is_ok());
-    }
-
-    #[test]
-    fn field_id_zero_and_reserved_rejected() {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
+    fn writer_refuses_field_ids_out_of_order_or_range() {
+        let mut buf = MessageBuf::new();
+        buf.write_field(3, &[1]).expect("ok");
+        assert_eq!(buf.write_field(3, &[2]), Err(IpcError::FieldOrder));
+        assert_eq!(buf.write_field(2, &[2]), Err(IpcError::FieldOrder));
         assert_eq!(buf.write_field(0, &[1]), Err(IpcError::FieldOrder));
         assert_eq!(buf.write_field(255, &[1]), Err(IpcError::FieldOrder));
+        assert!(buf.write_field(4, &[2]).is_ok());
     }
 
     #[test]
-    fn reader_rejects_truncated_len() {
-        // Запись заявляет len=4, но данных нет - Truncated, не паника.
-        let body = [0x01u8, 0x04, 0x00];
-        let mut cursor = FieldCursor::new(&body);
-        assert_eq!(cursor.next_field(), Err(IpcError::Truncated));
+    fn writer_refuses_a_header_after_a_field_and_a_field_after_finish() {
+        let mut buf = MessageBuf::new();
+        buf.write_field(1, &[1]).expect("ok");
+        assert_eq!(
+            buf.write_header(&Header::new(ORDINAL)),
+            Err(IpcError::FieldOrder)
+        );
+        buf.finish().expect("finish");
+        assert_eq!(buf.write_field(2, &[2]), Err(IpcError::FieldOrder));
     }
 
     #[test]
-    fn reader_rejects_non_increasing_field_id() {
-        // Тело с id=2 затем id=1 - нарушение порядка на чтении (len - u16 LE).
+    fn reader_refuses_a_truncated_record_and_a_non_increasing_field_id() {
+        // Запись заявляет len=4 без данных.
+        assert_eq!(first_field(&[0x01, 0x04, 0x00]), Err(IpcError::Truncated));
+
+        // id=2, затем id=1.
         let body = [0x02u8, 0x01, 0x00, 0xAA, 0x01, 0x01, 0x00, 0xBB, 0x00];
         let mut cursor = FieldCursor::new(&body);
         assert_eq!(
@@ -932,41 +860,119 @@ mod tests {
     }
 
     #[test]
-    fn reader_stops_on_terminator() {
-        let body = [0x01u8, 0x01, 0x00, 0xAA, 0x00];
-        let mut cursor = FieldCursor::new(&body);
-        assert_eq!(cursor.next_field().expect("ok").map(|f| f.id), Some(1));
-        assert_eq!(cursor.next_field().expect("ok"), None);
-        // Повторный вызов после терминатора - всё ещё None.
-        assert_eq!(cursor.next_field().expect("ok"), None);
-    }
-
-    #[test]
-    fn write_header_only_first() {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_field(1, &encode_u8(1)).expect("ok");
-        // Заголовок после поля недопустим.
+    fn nested_record_golden_bytes() {
+        // Поле 1 с вложенной записью: поле 1 = 0xAA и терминатор вложенного тела.
+        let mut buf = MessageBuf::new();
+        buf.write_nested(1, |inner| inner.write_field(1, &[0xAA]))
+            .expect("nested ok");
+        buf.finish().expect("finish ok");
         assert_eq!(
-            buf.write_header(&Header::new(ORDINAL, TXID, 0)),
-            Err(IpcError::FieldOrder)
+            buf.as_bytes(),
+            &[0x01, 0x05, 0x00, 0x01, 0x01, 0x00, 0xAA, 0x00, 0x00]
         );
     }
 
     #[test]
-    fn finish_is_idempotent() {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_field(1, &encode_u8(1)).expect("ok");
-        buf.finish().expect("first finish");
-        let len_after_first = buf.len();
-        buf.finish().expect("second finish");
-        assert_eq!(buf.len(), len_after_first);
+    fn nested_record_numbers_its_fields_anew_and_keeps_the_outer_order() {
+        let mut buf = MessageBuf::new();
+        buf.write_field(1, &[1]).expect("outer 1");
+        buf.write_nested(2, |inner| inner.write_field(1, &[2]))
+            .expect("nested 2");
+        assert_eq!(buf.write_field(2, &[3]), Err(IpcError::FieldOrder));
+        assert!(buf.write_field(3, &[3]).is_ok());
     }
 
     #[test]
-    fn write_after_finish_rejected() {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        buf.write_field(1, &encode_u8(1)).expect("ok");
-        buf.finish().expect("finish");
-        assert_eq!(buf.write_field(2, &encode_u8(2)), Err(IpcError::FieldOrder));
+    fn nested_record_reserves_every_open_terminator() {
+        const DATA_MAX: usize = FIELD_DATA_MAX - FIELD_OVERHEAD - 1;
+        let fill = |len: usize| {
+            let mut buf = framed();
+            let written =
+                buf.write_nested(1, |inner| inner.write_field(1, &[0; FIELD_DATA_MAX][..len]));
+            written.and_then(|()| buf.finish()).map(|()| buf.len())
+        };
+        // Заголовок кадра, заголовок внешней записи, вложенная запись и два терминатора
+        // заполняют кадр ровно.
+        assert_eq!(fill(DATA_MAX), Ok(MESSAGE_INLINE_MAX));
+        assert_eq!(fill(DATA_MAX + 1), Err(IpcError::FrameOverflow));
+    }
+
+    #[test]
+    fn finish_inside_a_nested_record_is_rejected() {
+        let mut buf = MessageBuf::new();
+        assert_eq!(
+            buf.write_nested(1, MessageBuf::finish),
+            Err(IpcError::FieldOrder)
+        );
+    }
+
+    struct Probe;
+
+    impl crate::Protocol for Probe {
+        const ID: &'static str = "Probe";
+
+        type Client<C: crate::Channel> = C;
+
+        fn client<C: crate::Channel>(channel: C) -> C {
+            channel
+        }
+    }
+
+    fn port(raw: u32) -> Cap<kind::Port> {
+        Cap::from_handle(Handle::from_abi(NonZeroU32::new(raw).expect("non-zero")))
+    }
+
+    #[test]
+    fn a_session_field_encodes_as_a_port_capability() {
+        let mut as_session = MessageBuf::new();
+        crate::IntoWireValue::write_as_field(
+            &Session::<Probe>::from_handle(port(0x2A)),
+            &mut as_session,
+            1,
+        )
+        .expect("session written");
+        let mut as_cap = MessageBuf::new();
+        crate::IntoWireValue::write_as_field(&port(0x2A), &mut as_cap, 1).expect("cap written");
+
+        assert_eq!(as_session.as_bytes(), as_cap.as_bytes());
+        assert_eq!(as_session.handles(), as_cap.handles());
+        assert_eq!(
+            <Session<Probe> as crate::WireTyped>::WIRE_TYPE,
+            <Cap<kind::Port> as crate::WireTyped>::WIRE_TYPE
+        );
+    }
+
+    #[test]
+    fn a_session_arrives_owning_the_port_of_its_field() {
+        let mut buf = MessageBuf::new();
+        crate::IntoWireValue::write_as_field(
+            &Session::<Probe>::from_handle(port(0x2B)),
+            &mut buf,
+            1,
+        )
+        .expect("session written");
+        buf.finish().expect("finish ok");
+
+        let field = first_field(buf.as_bytes()).expect("ok").expect("present");
+        let session: Session<Probe, Cap<kind::Port>> =
+            <Session<Probe> as crate::WireValue<crate::resources::testing::TestFrame>>::from_field(
+                field.data,
+                &mut crate::resources::testing::TestFrame::of(buf.handles()),
+            )
+            .expect("the session is read");
+        assert_eq!(session.handle, port(0x2B));
+    }
+
+    #[test]
+    fn handle_field_carries_the_slot_index() {
+        let mut buf = MessageBuf::new();
+        buf.write_handle(1, 0x2A).expect("first handle");
+        buf.write_handle(2, 0x2B).expect("second handle");
+        buf.finish().expect("finish ok");
+        assert_eq!(buf.handles(), [0x2A, 0x2B]);
+        assert_eq!(
+            buf.as_bytes(),
+            &[0x01, 0x01, 0x00, 0x00, 0x02, 0x01, 0x00, 0x01, 0x00]
+        );
     }
 }

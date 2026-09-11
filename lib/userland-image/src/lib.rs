@@ -1,8 +1,8 @@
 //! Читает и пишет формат `userland.img`: таблицу записей образа, блоб программы и запись
 //! плана загрузочной композиции.
 //!
-//! [`decode`] разбирает образ, [`decode_program`] - блоб одной программы, [`decode_plan`] -
-//! план композиции. Разбор идёт без аллокации, разобранное ссылается прямо в исходные байты.
+//! [`decode`] разбирает образ и блобы его программ, [`decode_plan`] - план композиции. Разбор
+//! идёт без аллокации, разобранное ссылается прямо в исходные байты.
 //!
 //! Под фичей `alloc` открываются кодировщики `encode`, `encode_program` и `encode_plan`,
 //! которыми сборка на host собирает образ.
@@ -28,10 +28,12 @@ pub use image::{
     USERLAND_IMAGE_VERSION, decode,
 };
 pub use plan::{
-    BOOT_PLAN_MAGIC, BOOT_PLAN_PATH, BOOT_PLAN_VERSION, BOOT_STAGE_ONE_DIRECTORY, BootPlan,
-    COMPONENT_PROGRAM_NAME, OnExhausted, PlanComponent, PlanComponents, PlanDecodeError,
-    PlanDevice, PlanNames, PlanSlots, SlotSource, component_name, decode_plan,
+    BOOT_PLAN_MAGIC, BOOT_PLAN_PATH, BOOT_PLAN_VERSION, BootPlan, COMPONENT_PROGRAM_NAME,
+    PlanComponent, PlanComponents, PlanDecodeError, PlanDevice, PlanNames, PlanRequirement,
+    PlanRequirements, RequirementSource, component_name, decode_plan,
 };
 #[cfg(any(test, feature = "alloc"))]
-pub use plan_builder::{ComponentSpec, DeviceSpec, PlanEncodeError, SlotSpec, encode_plan};
-pub use program::{DecodedProgram, ProgramDecodeError, USERLAND_PROGRAM_MAGIC, decode_program};
+pub use plan_builder::{
+    ComponentSpec, DeviceSpec, PlanEncodeError, RequirementSourceSpec, RequirementSpec, encode_plan,
+};
+pub use program::{DecodedProgram, ProgramDecodeError, USERLAND_PROGRAM_MAGIC};

@@ -1,13 +1,5 @@
-//! Контракты компонента композиции: стартовая транзакция, установление сессий и запись
-//! манифеста в программе.
-//!
-//! Единственным портом супервизора компонент принимает [`component_startup`]: транзакцией
-//! приходят лог-сессия, серверные стороны портов его экспортов и по capability на каждый
-//! слот, а после транзакции по тому же порту супервизор запрашивает сессию названного
-//! экспорта. Принятое транзакцией собрано в [`StartedComponent`].
-//!
-//! Запись манифеста компонента лежит в секции [`COMPONENT_MANIFEST_SECTION`] собранной
-//! программы. Раскладку записи читает [`decode_manifest`]. Вид слота назван [`SlotKind`].
+//! Протокол [`component_startup`], которым компонент получает ресурсы от родителя, и манифест
+//! компонента в секции [`COMPONENT_MANIFEST_SECTION`] его исполняемого файла.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -26,10 +18,11 @@ mod declare;
 mod manifest;
 mod startup;
 
+#[doc(hidden)]
+pub use ipc::Protocol as __Protocol;
 pub use manifest::{
-    COMPONENT_MANIFEST_HEADER_SIZE, COMPONENT_MANIFEST_MAGIC, COMPONENT_MANIFEST_SECTION,
-    COMPONENT_MANIFEST_VERSION, COMPONENT_SLOT_HEADER_SIZE, ComponentManifest, ManifestDecodeError,
-    ManifestNames, ManifestSlot, ManifestSlots, SlotDeclaration, SlotKind, decode_manifest,
-    encode_manifest, manifest_len,
+    COMPONENT_MANIFEST_SECTION, ComponentManifest, ManifestDecodeError, ManifestNames,
+    ManifestRequirement, ManifestRequirements, RequirementDeclaration, RequirementKind,
+    decode_manifest, encode_manifest, manifest_len,
 };
 pub use startup::*;

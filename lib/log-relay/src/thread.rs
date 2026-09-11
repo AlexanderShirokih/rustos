@@ -3,9 +3,10 @@
 use core::num::NonZeroU64;
 
 use ipc::wire::MESSAGE_INLINE_MAX;
-use kernel_objects::{Port, Result};
+use kernel_objects::{Port, Result, Session};
+use log_abi::log;
 use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
-use syscall::{Handle, Rights, kind};
+use syscall::Rights;
 
 use crate::relay::{LogRelay, LogSink, SourceNames};
 
@@ -23,7 +24,7 @@ const _: () = assert!(
 /// Лог-порт с циклом пересылки в отдельном потоке. Корневая capability не
 /// покидает владельца и держит порт с получателем. Пока она открыта,
 /// отправители паркуются и на уже мёртвом цикле. Владелец закрывает её через
-/// `shutdown` либо `wait`.
+/// `shutdown`.
 pub struct LogRelayThread {
     root: Port,
     thread: JoinHandle,
@@ -49,42 +50,15 @@ impl LogRelayThread {
         Ok(Self { root, thread })
     }
 
-    /// Лог-сессия со значком `badge`: отправка и перенос кадром. Приёма и минта
-    /// производных сессия не даёт.
-    pub fn session(&self, badge: NonZeroU64) -> Result<Port> {
+    /// Лог-сессия со значком `badge` и правами `WRITE | TRANSFER | DUPLICATE`. Права приёма
+    /// сессия не даёт.
+    pub fn session(&self, badge: NonZeroU64) -> Result<Session<log::Protocol>> {
         self.root
-            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
-    }
-
-    /// Лог-сессия подсистемы, раздающей логирование своим процессам: к правам
-    /// сессии добавлен минт производных. Значок set-once, и производные содержат
-    /// тот же `badge`.
-    pub fn delegated_session(&self, badge: NonZeroU64) -> Result<Port> {
-        self.root.duplicate(
-            Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
-            Some(badge),
-        )
-    }
-
-    /// Отдаёт waitable handle потока relay для supervisor loop.
-    #[must_use]
-    pub fn handle(&self) -> Handle<kind::Thread> {
-        self.thread.handle()
-    }
-
-    /// Возвращает финальный exit-код завершённого потока relay.
-    pub fn exit_code(&self) -> Result<u32> {
-        Ok(self.thread.exit_code()?)
-    }
-
-    /// Ждёт завершения цикла пересылки до `timeout` и закрывает лог-порт. Порт
-    /// закрывается и при отказе по таймауту. Цикл, не уложившийся в срок, остаётся
-    /// работать.
-    pub fn wait(self, timeout: Timeout) -> Result<()> {
-        let Self { root, thread } = self;
-        let waited = thread.join(timeout);
-        drop(root);
-        Ok(waited?)
+            .duplicate(
+                Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
+                Some(badge),
+            )
+            .map(Session::from_handle)
     }
 
     /// Закрывает лог-порт и ждёт завершения цикла.

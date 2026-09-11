@@ -1,210 +1,245 @@
 use anyhow::{Context, Result, bail, ensure};
-use component_abi::SlotKind;
-use userland_image::{DeviceSpec, SlotSpec};
+use component_abi::{LOG_REQUIREMENT, RequirementKind, SESSION_SCOPE_MAX};
+use userland_image::{DeviceSpec, RequirementSourceSpec, RequirementSpec};
 
-use crate::manifest::ProgramManifest;
+use crate::{
+    manifest::{ManifestRequirement, ProgramManifest},
+    plan::source::ComponentEntry,
+};
 
-#[derive(Clone, Copy)]
-struct Provider {
-    instance: usize,
-    export: usize,
+const BIND_KEY: &str = "bind";
+const SCOPE_KEY: &str = "scope";
+const INSTANCE_KEY: &str = "instance";
+
+pub(super) struct Consumer<'a> {
+    pub(super) index: usize,
+    pub(super) name: &'a str,
+    pub(super) entry: &'a ComponentEntry,
+    pub(super) declared: &'a ProgramManifest,
+    pub(super) compatible: &'a [Vec<&'a str>],
 }
 
-#[derive(Default)]
-pub(super) struct ComponentBinding<'a> {
-    pub(super) slots: Vec<SlotSpec<'a>>,
-    pub(super) providers: Vec<usize>,
+pub(super) struct Providers<'p> {
+    pub(super) names: &'p [&'p str],
+    pub(super) declarations: &'p [&'p ProgramManifest],
 }
 
-impl<'a> ComponentBinding<'a> {
-    fn provided_by(&mut self, provider: usize, names: &[&'a str]) -> Result<&'a str> {
-        // Импорт сервиса и каталог компонента поднимают провайдера раньше
-        // потребителя, а ребро выводится из связывания.
-        self.providers.push(provider);
-        names
-            .get(provider)
-            .copied()
-            .context("boot plan resolves a provider outside the composition")
+pub(super) fn compile_requirements<'a>(
+    consumer: &Consumer<'a>,
+    providers: &Providers<'_>,
+) -> Result<Vec<RequirementSpec<'a>>> {
+    validate_keys(consumer)?;
+    consumer
+        .declared
+        .requirements
+        .iter()
+        .zip(consumer.compatible)
+        .map(|(requirement, compatible)| {
+            let source = match requirement.kind {
+                RequirementKind::Region => RequirementSourceSpec::Region,
+                RequirementKind::Irq => {
+                    RequirementSourceSpec::Irq(device(consumer.entry, requirement, compatible))
+                }
+                RequirementKind::Mmio => {
+                    RequirementSourceSpec::Mmio(device(consumer.entry, requirement, compatible))
+                }
+                RequirementKind::Session => session(consumer, requirement, providers)?,
+            };
+            Ok(RequirementSpec {
+                name: &requirement.name,
+                source,
+            })
+        })
+        .collect()
+}
+
+fn device<'a>(
+    entry: &ComponentEntry,
+    requirement: &ManifestRequirement,
+    compatible: &'a [&'a str],
+) -> DeviceSpec<'a> {
+    DeviceSpec {
+        compatible,
+        // Требование без ключа `instance` получает первое устройство своей совместимости.
+        instance: entry.instance.get(&requirement.name).copied().unwrap_or(0),
+        resource: requirement.resource,
     }
 }
 
-pub(super) fn compile_slots<'a>(
-    name: &'a str,
-    declared: &ProgramManifest,
-    selectors: &'a [Vec<&'a str>],
-    declarations: &[&ProgramManifest],
-    names: &[&'a str],
-) -> Result<ComponentBinding<'a>> {
-    let mut binding = ComponentBinding::default();
-    for (slot, compatible) in declared.slots.iter().zip(selectors) {
-        let device = DeviceSpec {
-            compatible,
-            // Экземпляр среди совместимых устройств всегда нулевой: назвать
-            // второй композиции нечем.
-            instance: 0,
-            resource: slot.resource,
-        };
-        let spec = match slot.kind {
-            SlotKind::Userland => SlotSpec::Userland,
-            SlotKind::Irq => SlotSpec::Irq(device),
-            SlotKind::Mmio => SlotSpec::Mmio(device),
-            SlotKind::Service => {
-                let provider = find_provider(name, compatible, declarations, names)?;
-                let export = u8::try_from(provider.export)
-                    .context("boot plan resolves an export outside the record of its provider")?;
-                SlotSpec::Service {
-                    provider: binding.provided_by(provider.instance, names)?,
-                    export,
-                }
-            }
-            SlotKind::Directory => {
-                let provider = find_area(name, compatible, declarations, names)?;
-                SlotSpec::Directory {
-                    provider: binding.provided_by(provider, names)?,
-                }
-            }
-            SlotKind::Supervisor => SlotSpec::Supervisor,
-        };
-        binding.slots.push(spec);
-    }
-    binding.providers.sort_unstable();
-    binding.providers.dedup();
-    Ok(binding)
-}
-
-fn find_provider(
-    name: &str,
-    declared: &[&str],
-    declarations: &[&ProgramManifest],
-    names: &[&str],
-) -> Result<Provider> {
-    let protocol = declared.first().copied().with_context(|| {
-        format!("boot plan component '{name}' declares a service slot without a protocol")
+fn session<'a>(
+    consumer: &Consumer<'a>,
+    requirement: &'a ManifestRequirement,
+    providers: &Providers<'_>,
+) -> Result<RequirementSourceSpec<'a>> {
+    let name = consumer.name;
+    let protocol = requirement.names.first().with_context(|| {
+        format!(
+            "boot plan component '{name}' declares session requirement '{}' without a protocol",
+            requirement.name
+        )
     })?;
-    let provider = match declared.get(1).copied() {
-        Some(instance) => find_instance(name, protocol, instance, declarations, names)?,
-        None => find_only_provider(name, protocol, declarations, names)?,
+    let provider = match consumer.entry.bind.get(&requirement.name) {
+        Some(instance) => {
+            bound_provider(consumer, &requirement.name, protocol, instance, providers)?
+        }
+        None => only_provider(consumer, &requirement.name, protocol, providers)?,
+    };
+    Ok(RequirementSourceSpec::Export {
+        provider: u16::try_from(provider)
+            .context("boot plan resolves a provider past the count of a plan record")?,
+        protocol,
+        scope: consumer
+            .entry
+            .scope
+            .get(&requirement.name)
+            .map_or("", String::as_str),
+    })
+}
+
+fn bound_provider(
+    consumer: &Consumer<'_>,
+    requirement: &str,
+    protocol: &str,
+    instance: &str,
+    providers: &Providers<'_>,
+) -> Result<usize> {
+    let name = consumer.name;
+    let index = providers
+        .names
+        .iter()
+        .position(|known| *known == instance)
+        .with_context(|| {
+            format!(
+                "boot plan component '{name}' binds requirement '{requirement}' to instance '{instance}', \
+                 which the composition does not contain"
+            )
+        })?;
+    ensure!(
+        index != consumer.index,
+        "boot plan component '{name}' binds requirement '{requirement}' to itself"
+    );
+    let declared = providers
+        .declarations
+        .get(index)
+        .context("boot plan resolves a provider outside the composition")?;
+    ensure!(
+        exports(declared, protocol),
+        "boot plan component '{name}' binds requirement '{requirement}' to instance '{instance}', \
+         which exports no protocol '{protocol}'"
+    );
+    Ok(index)
+}
+
+fn only_provider(
+    consumer: &Consumer<'_>,
+    requirement: &str,
+    protocol: &str,
+    providers: &Providers<'_>,
+) -> Result<usize> {
+    let name = consumer.name;
+    let exporters: Vec<usize> = providers
+        .declarations
+        .iter()
+        .enumerate()
+        .filter(|(_, declared)| exports(declared, protocol))
+        .map(|(index, _)| index)
+        .collect();
+    let [provider] = exporters[..] else {
+        ensure!(
+            !exporters.is_empty(),
+            "boot plan component '{name}' imports protocol '{protocol}' for requirement '{requirement}', \
+             which no component of the composition exports"
+        );
+        let names: Vec<&str> = exporters
+            .iter()
+            .filter_map(|index| providers.names.get(*index).copied())
+            .collect();
+        bail!(
+            "boot plan component '{name}' imports protocol '{protocol}' for requirement '{requirement}', \
+             which {} components export: {}; name one with '{BIND_KEY}'",
+            names.len(),
+            names.join(", ")
+        );
     };
     ensure!(
-        names.get(provider.instance).copied() != Some(name),
+        provider != consumer.index,
         "boot plan component '{name}' imports the protocol it exports itself"
     );
     Ok(provider)
 }
 
-fn find_instance(
-    name: &str,
-    protocol: &str,
-    instance: &str,
-    declarations: &[&ProgramManifest],
-    names: &[&str],
-) -> Result<Provider> {
-    let index = names
-        .iter()
-        .position(|known| *known == instance)
-        .with_context(|| {
-            format!(
-                "boot plan component '{name}' imports protocol '{protocol}' from instance \
-                 '{instance}', which the composition does not contain"
-            )
-        })?;
-    let declared = declarations
-        .get(index)
-        .context("boot plan resolves a provider outside the composition")?;
-    let export = exported_by(declared, protocol).with_context(|| {
-        format!(
-            "boot plan component '{name}' imports protocol '{protocol}' from instance \
-             '{instance}', which exports no such protocol"
-        )
-    })?;
-    Ok(Provider {
-        instance: index,
-        export,
-    })
+fn exports(declared: &ProgramManifest, protocol: &str) -> bool {
+    declared.exports.iter().any(|export| export == protocol)
 }
 
-fn find_area(
-    name: &str,
-    declared: &[&str],
-    declarations: &[&ProgramManifest],
-    names: &[&str],
-) -> Result<usize> {
-    let instance = declared.first().copied().with_context(|| {
-        format!("boot plan component '{name}' declares a directory slot without an instance")
-    })?;
-    let index = names
-        .iter()
-        .position(|known| *known == instance)
-        .with_context(|| {
-            format!(
-                "boot plan component '{name}' takes its directory from instance '{instance}', \
-                 which the composition does not contain"
-            )
-        })?;
-    ensure!(
-        names.get(index).copied() != Some(name),
-        "boot plan component '{name}' takes its directory from itself"
-    );
-    let provider = declarations
-        .get(index)
-        .context("boot plan resolves a provider outside the composition")?;
-    // Каталог приходит сессией, суженной до него, и сузить её может лишь тот, кто её
-    // сам создаёт.
-    ensure!(
-        provider.establishes_sessions,
-        "boot plan component '{name}' takes its directory from instance '{instance}', \
-         which does not establish its own sessions"
-    );
-    // Слот-каталог протокола не называет, и выбрать экспорт провайдера ему нечем.
-    ensure!(
-        provider.exports.len() == 1,
-        "boot plan component '{name}' takes its directory from instance '{instance}', \
-         which exports {} protocols; the directory slot names none",
-        provider.exports.len()
-    );
-    Ok(index)
-}
-
-fn find_only_provider(
-    name: &str,
-    protocol: &str,
-    declarations: &[&ProgramManifest],
-    names: &[&str],
-) -> Result<Provider> {
-    let providers: Vec<Provider> = declarations
-        .iter()
-        .enumerate()
-        .filter_map(|(index, declared)| {
-            exported_by(declared, protocol).map(|export| Provider {
-                instance: index,
-                export,
-            })
-        })
-        .collect();
-    let [provider] = providers[..] else {
-        if providers.is_empty() {
-            bail!(
-                "boot plan component '{name}' imports protocol '{protocol}', \
-                 which no component of the composition exports"
-            );
-        }
-        let exporters: Vec<&str> = providers
-            .iter()
-            .filter_map(|provider| names.get(provider.instance).copied())
-            .collect();
-        bail!(
-            "boot plan component '{name}' imports protocol '{protocol}', \
-             which {} components export: {}",
-            exporters.len(),
-            exporters.join(", ")
+fn validate_keys(consumer: &Consumer<'_>) -> Result<()> {
+    let entry = consumer.entry;
+    for requirement in entry.bind.keys() {
+        validate_key(consumer, BIND_KEY, requirement, RequirementClass::Session)?;
+    }
+    for (requirement, scope) in &entry.scope {
+        validate_key(consumer, SCOPE_KEY, requirement, RequirementClass::Session)?;
+        ensure!(
+            !scope.is_empty() && scope.len() <= SESSION_SCOPE_MAX,
+            "boot plan component '{}' sets '{SCOPE_KEY}' on requirement '{requirement}' with {} bytes; \
+             a scope is non-empty and at most {SESSION_SCOPE_MAX}",
+            consumer.name,
+            scope.len()
         );
-    };
-    Ok(provider)
+    }
+    for requirement in entry.instance.keys() {
+        validate_key(
+            consumer,
+            INSTANCE_KEY,
+            requirement,
+            RequirementClass::Device,
+        )?;
+    }
+    Ok(())
 }
 
-fn exported_by(declared: &ProgramManifest, protocol: &str) -> Option<usize> {
-    declared
-        .exports
+#[derive(Clone, Copy)]
+enum RequirementClass {
+    Session,
+    Device,
+}
+
+fn validate_key(
+    consumer: &Consumer<'_>,
+    key: &str,
+    requirement: &str,
+    class: RequirementClass,
+) -> Result<()> {
+    let name = consumer.name;
+    // Родитель сам выдаёт журнал, и описание композиции его не связывает.
+    ensure!(
+        requirement != LOG_REQUIREMENT,
+        "boot plan component '{name}' sets '{key}' on requirement '{LOG_REQUIREMENT}', \
+         the name reserved for the log its parent serves"
+    );
+    let declaration = consumer
+        .declared
+        .requirements
         .iter()
-        .position(|export| export == protocol)
+        .find(|declaration| declaration.name == requirement)
+        .with_context(|| {
+            format!(
+                "boot plan component '{name}' sets '{key}' on requirement '{requirement}', \
+                 which its manifest does not declare"
+            )
+        })?;
+    match class {
+        RequirementClass::Session => ensure!(
+            declaration.kind == RequirementKind::Session,
+            "boot plan component '{name}' sets '{key}' on requirement '{requirement}', which takes no session"
+        ),
+        RequirementClass::Device => ensure!(
+            matches!(
+                declaration.kind,
+                RequirementKind::Irq | RequirementKind::Mmio
+            ),
+            "boot plan component '{name}' sets '{key}' on requirement '{requirement}', which names no device"
+        ),
+    }
+    Ok(())
 }

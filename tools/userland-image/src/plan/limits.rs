@@ -1,15 +1,16 @@
 use anyhow::{Result, ensure};
-use component_abi::{COMPONENT_EXPORT_MAX, COMPONENT_SLOT_MAX};
-use syscall::{HANDLE_TABLE_CAPACITY, MAX_RESOURCE_DEPTH, WAIT_MANY_MAX_COUNT};
+use component_abi::{PROTOCOL_ID_MAX, RequirementKind};
+use syscall::{HANDLE_TABLE_CAPACITY, IPC_BUFFER_MAX_CAPS, MAX_SEGMENTS_PER_IMG};
 
 use crate::manifest::ProgramManifest;
 
-const BOOT_COMPOSITION_DEPTH: u16 = 0;
+const BASE: usize = 8;
+const LAUNCH: usize = MAX_SEGMENTS_PER_IMG + 3;
+const ROOTKEEPER_THREADS: usize = 2;
+const FRAME: usize = ROOTKEEPER_THREADS * (1 + IPC_BUFFER_MAX_CAPS);
 
-pub(super) const COMPONENT_RESOURCE_LEVELS: u16 = 3;
-pub(super) const SUPERVISOR_HANDLES: usize = 24;
-pub(super) const SUPERVISOR_WAITS: usize = 2;
-pub(super) const COMPONENT_HANDLES: usize = 13;
+pub(super) const ROOTKEEPER_HANDLES: usize = BASE + LAUNCH + FRAME;
+pub(super) const CHILD_HANDLES: usize = 3;
 
 pub(super) fn validate_composition(
     names: &[&str],
@@ -18,60 +19,62 @@ pub(super) fn validate_composition(
     for (name, declared) in names.iter().zip(declarations) {
         validate_component(name, declared)?;
     }
-    validate_supervisor_limits(names.len(), declarations)
+    validate_rootkeeper_limits(declarations)
 }
 
 fn validate_component(name: &str, declared: &ProgramManifest) -> Result<()> {
-    ensure!(
-        declared.slots.len() <= COMPONENT_SLOT_MAX,
-        "boot plan component '{name}' declares {} slots; \
-         the startup transaction carries {COMPONENT_SLOT_MAX}",
-        declared.slots.len()
-    );
-    ensure!(
-        declared.exports.len() <= COMPONENT_EXPORT_MAX,
-        "boot plan component '{name}' declares {} exports; \
-         the startup transaction carries {COMPONENT_EXPORT_MAX}",
-        declared.exports.len()
-    );
-    ensure!(
-        !declared.establishes_sessions || !declared.exports.is_empty(),
-        "boot plan component '{name}' establishes its own sessions without exporting a protocol"
-    );
-    validate_resource_depth(name, COMPONENT_RESOURCE_LEVELS)
-}
-
-pub(super) fn validate_resource_depth(name: &str, levels: u16) -> Result<()> {
-    ensure!(
-        BOOT_COMPOSITION_DEPTH + levels <= MAX_RESOURCE_DEPTH,
-        "boot plan component '{name}' needs {levels} resource levels \
-         under depth {BOOT_COMPOSITION_DEPTH}; the ceiling is {MAX_RESOURCE_DEPTH}"
-    );
+    for export in &declared.exports {
+        ensure!(
+            export.len() <= PROTOCOL_ID_MAX,
+            "boot plan component '{name}' exports protocol '{export}' of {} bytes; \
+             a protocol id holds at most {PROTOCOL_ID_MAX}",
+            export.len()
+        );
+    }
     Ok(())
 }
 
-fn validate_supervisor_limits(count: usize, declarations: &[&ProgramManifest]) -> Result<()> {
-    // Supervisor ждёт процессы компонентов вместе с потоком relay и сигналом порта
-    // транзакции расширения одним массивом ожидания. Набор ступени 1 пополняет тот же
-    // массив, и потолок держит обе ступени сразу.
-    let waits = count + SUPERVISOR_WAITS;
-    ensure!(
-        waits <= WAIT_MANY_MAX_COUNT,
-        "boot plan composition of {count} components needs {waits} supervisor wait objects; \
-         the ceiling is {WAIT_MANY_MAX_COUNT}"
-    );
-
-    let slots: usize = declarations
+pub(super) fn rootkeeper_handles(declarations: &[&ProgramManifest]) -> usize {
+    // Оценка сверху. `BASE` покрывает порт `Bootstrap`, ресурс, регионы образа и FDT,
+    // `IrqControl`, порты `ComponentStartup` и журнала и поток relay. `LAUNCH` покрывает один
+    // запуск программы, и rootkeeper запускает программы по очереди. `FRAME` покрывает принятый
+    // кадр на каждый принимающий поток. Запись компонента держит `Process`, резерв и источник
+    // журнала в `CHILD_HANDLES`, а также по заявке на требование сессии, по `accept` на экспорт
+    // и копии выдач incarnation.
+    let per_component: usize = declarations
         .iter()
-        .map(|declared| declared.slots.len())
+        .map(|declared| {
+            let session_requirements = count(declared, |kind| kind == RequirementKind::Session);
+            let held = 1 + count(declared, |kind| kind != RequirementKind::Session);
+            CHILD_HANDLES + session_requirements + declared.exports.len() + held
+        })
         .sum();
-    // Оценка сверху: постоянные капы supervisor, постоянные капы каждого компонента и
-    // по капе на слот. Временные капы подъёма существуют не дольше одного компонента.
-    let handles = SUPERVISOR_HANDLES + count * COMPONENT_HANDLES + slots;
+    let device_roots: usize = declarations
+        .iter()
+        .map(|declared| {
+            count(declared, |kind| {
+                matches!(kind, RequirementKind::Irq | RequirementKind::Mmio)
+            })
+        })
+        .sum();
+    ROOTKEEPER_HANDLES + per_component + device_roots
+}
+
+fn count(declared: &ProgramManifest, kind: impl Fn(RequirementKind) -> bool) -> usize {
+    declared
+        .requirements
+        .iter()
+        .filter(|requirement| kind(requirement.kind))
+        .count()
+}
+
+fn validate_rootkeeper_limits(declarations: &[&ProgramManifest]) -> Result<()> {
+    let handles = rootkeeper_handles(declarations);
     ensure!(
         handles <= HANDLE_TABLE_CAPACITY as usize,
-        "boot plan composition of {count} components needs up to {handles} rootkeeper handles; \
-         the table holds {HANDLE_TABLE_CAPACITY}"
+        "boot plan composition of {} components requires up to {handles} rootkeeper handles; \
+         the table holds {HANDLE_TABLE_CAPACITY}",
+        declarations.len()
     );
     Ok(())
 }

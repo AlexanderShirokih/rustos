@@ -26,7 +26,9 @@ impl SaturatedBudget {
         // Производный ресурс - капа, деривированная от хэндла исходного. Закрытие
         // исходного отзывает его, поэтому проба держит оба.
         let origin = Resource::self_resource().expect("self metering resource");
-        let resource = origin.split(PROBE_BUDGET_PAGES).expect("split");
+        let resource = origin
+            .split(PROBE_BUDGET_PAGES * USERLAND_PAGE_SIZE)
+            .expect("split");
         let mut granted = Vec::new();
         let refusal = fill(&resource, &mut granted);
 

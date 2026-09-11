@@ -3,8 +3,11 @@
 
 use core::fmt::Write as _;
 
-use ipc::{Transport as _, wire::IpcError};
-use kernel_objects::{Port, ReceivedFrame};
+use ipc::{
+    Listener, RecvError,
+    wire::{IpcError, MESSAGE_INLINE_MAX},
+};
+use kernel_objects::{Delivery, Port};
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, log};
 use runtime::PortTransport;
 use syscall::Timeout;
@@ -59,39 +62,30 @@ impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
     }
 
     fn receive_loop(&mut self) -> &'static str {
-        let transport = PortTransport::server(self.receiver.borrow());
+        let transport = PortTransport::new(self.receiver.borrow());
+        let mut bytes = [0u8; MESSAGE_INLINE_MAX];
         let mut failures = 0;
         loop {
-            match transport.wait_readable(Timeout::INFINITE) {
-                Ok(()) => {}
+            let frame = match transport.recv(&mut bytes, Timeout::INFINITE) {
+                Ok(frame) => frame,
                 // Ни один исход кадра не доставляет. Состояния сессий relay не держит, а
                 // бессрочный приём срока не имеет и пробуждение без кадра цикл не завершает.
-                Err(IpcError::SenderGone | IpcError::Timeout) => continue,
-                // Исчерпание относится к одному кадру. Буфер приёма при этом
-                // не содержит доставленного сообщения.
-                Err(IpcError::ResourceExhausted) => {
+                Err(RecvError::SenderGone(_) | RecvError::Timeout) => continue,
+                // Отброшенный кадр относится к одному вызову.
+                Err(RecvError::Discarded) => {
                     let _ = self.sink.write(RELAY_SOURCE, RESOURCE_EXHAUSTED_MESSAGE);
                     continue;
                 }
-                Err(IpcError::PeerClosed) => return "stopped: log port closed",
-                Err(_) => return "stopped: log port receive failed",
-            }
-
-            // Приём выше доставил кадр. Capability контракт не передаёт, и владеющий кадр
-            // закрывает их вместе с незавершённым ответом.
-            let Some(received) = ReceivedFrame::take(&transport) else {
-                continue;
+                Err(RecvError::Closed) => return "stopped: log port closed",
             };
-            let source = source_of(&self.names, received.badge());
 
             let mut forwarding = Forwarding {
                 sink: &mut self.sink,
-                source: source.as_str(),
+                names: &self.names,
                 forwarded: None,
             };
-            let _ = log::dispatch(&mut forwarding, &transport);
+            let _ = log::dispatch(&mut forwarding, frame);
             let forwarded = forwarding.forwarded;
-            drop(received);
 
             match forwarded {
                 // Кадр вне контракта до стока не доходит и следа в журнале не
@@ -109,19 +103,21 @@ impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
     }
 }
 
-struct Forwarding<'a, S: LogSink> {
+struct Forwarding<'a, S: LogSink, N: SourceNames> {
     sink: &'a mut S,
-    source: &'a str,
+    names: &'a N,
     forwarded: Option<Result<(), IpcError>>,
 }
 
-impl<S: LogSink> log::Service for Forwarding<'_, S> {
+impl<S: LogSink, N: SourceNames> log::Service<Delivery> for Forwarding<'_, S, N> {
     fn write(
         &mut self,
+        frame: &Delivery,
         tag: ipc::wire::Str<'_, { LOG_TAG_MAX }>,
         message: ipc::wire::Str<'_, { LOG_MESSAGE_MAX }>,
     ) {
-        let source = compose_source(self.source, tag.as_str());
+        let owner = source_of(self.names, frame.badge);
+        let source = compose_source(owner.as_str(), tag.as_str());
         self.forwarded = Some(forward_message(
             self.sink,
             source.as_str(),

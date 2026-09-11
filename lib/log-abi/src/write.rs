@@ -2,13 +2,13 @@
 //! укладывает их в кадры.
 
 use ipc::{
-    Transport,
+    Channel,
     wire::{IpcError, Str},
 };
 
 use crate::{LOG_MESSAGE_MAX, chunks, log};
 
-impl<T: Transport> log::Client<T> {
+impl<C: Channel> log::Client<C> {
     /// Шлёт [`log::write`]. Сообщение длиннее кадра уходит
     /// несколькими кадрами под тем же тегом, тег усекается до своей границы.
     pub fn write_str(&self, tag: &str, message: &str) -> Result<(), IpcError> {
@@ -23,23 +23,22 @@ impl<T: Transport> log::Client<T> {
 mod tests {
     use std::{format, string::String, vec::Vec};
 
-    use ipc_test::MockEnd;
-
     use crate::{LOG_MESSAGE_MAX, LOG_TAG_MAX, log, tests::Sink};
 
     fn logged_frames(tag: &str, message: &str) -> Vec<String> {
-        let (client_end, server_end) = MockEnd::pair();
+        let (client_end, server_end) = ipc_test::pair();
         log::Client::new(client_end)
             .write_str(tag, message)
             .expect("log write");
         let mut sink = Sink::default();
         let mut frames = Vec::new();
-        while log::dispatch(&mut sink, &server_end).is_ok() {
-            match sink.last.take() {
-                Some(line) => frames.push(line),
-                None => break,
-            }
-        }
+        server_end
+            .serve_all(|frame| {
+                log::dispatch(&mut sink, frame)?;
+                frames.extend(sink.last.take());
+                Ok::<_, ipc::wire::IpcError>(())
+            })
+            .expect("dispatch ok");
         frames
     }
 

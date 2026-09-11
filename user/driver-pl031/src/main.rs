@@ -1,5 +1,5 @@
 //! Драйвер PL031 RTC: компонент композиции, получающий линию прерывания и
-//! MMIO-окно устройства слотами стартовой транзакции. Описание платформы
+//! MMIO-окно устройства требованиями своего манифеста. Описание платформы
 //! драйверу не выдаётся.
 
 #![no_std]
@@ -8,19 +8,25 @@
 
 runtime::process_heap!();
 
-use core::panic::PanicInfo;
+extern crate alloc;
 
-use component_startup::{ReceivedStartup, component_manifest};
+use alloc::boxed::Box;
+use core::{convert::Infallible, panic::PanicInfo};
+
+use component_startup::{component_manifest, serve_export, whole_export};
 use io::mmio::{Mmio, Reg};
-use ipc::wire::IpcError;
+use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqLine, Port};
 use rtc_abi::rtc;
-use runtime::{PortTransport, Timeout, UserMemFlags, install_log, log_line, thread_exit};
+use runtime::{
+    PortTransport, Priority, Timeout, UserMemFlags, install_log, log_fmt, log_line, process_exit,
+    spawn_owned,
+};
 use syscall::{Handle, kind};
 
 mod error;
 
-use error::Result;
+use error::{Error, Result};
 
 const LOG_TAG: &str = "rtc";
 
@@ -33,15 +39,19 @@ const ALARM_TICKS: u32 = 2;
 
 const ALARM_BUDGET: Timeout = Timeout::from_secs(10);
 
-const ALARM_LOST_EXIT_CODE: u32 = 5;
+const FAILED_EXIT_CODE: u64 = 1;
+const ALARM_LOST_EXIT_CODE: u64 = 5;
+const EXPORT_FAILED_EXIT_CODE: u64 = 6;
+
+const EXPORT_STACK: u64 = 0x4000;
 
 component_manifest! {
     struct RtcStartup {
-        exports: { service: "Rtc" },
-        slots: {
+        requirements: {
             line: irq(compatible = ["arm,pl031"]),
             window: mmio(compatible = ["arm,pl031"]),
         },
+        exports: [rtc::Protocol],
     }
 }
 
@@ -67,61 +77,79 @@ impl Pl031 {
     }
 }
 
-impl rtc::Service for Pl031 {
-    fn now(&mut self) -> u64 {
+impl<F: ipc::ReceivedResources> rtc::Service<F> for Pl031 {
+    fn now(&mut self, _frame: &F) -> u64 {
         u64::from(self.device.read_reg(RTC_DATA))
     }
 
-    fn tick(&mut self) -> u64 {
+    fn tick(&mut self, _frame: &F) -> u64 {
         self.arm();
         if self.line.wait(ALARM_BUDGET).is_err() || self.acknowledge().is_err() {
             log_line("alarm line silent");
-            thread_exit(u64::from(ALARM_LOST_EXIT_CODE));
+            process_exit(ALARM_LOST_EXIT_CODE);
         }
         u64::from(self.device.read_reg(RTC_DATA))
     }
 }
 
-/// `startup` - серверная сторона startup-порта, аргумент точки входа.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(startup: Handle<kind::Port>) -> ! {
-    thread_exit(u64::from(run(startup).is_err()))
+pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
+    let Err(error) = run(parent);
+    log_fmt(format_args!("stopped: {error:?}"));
+    process_exit(FAILED_EXIT_CODE)
 }
 
-fn run(startup: Handle<kind::Port>) -> Result<()> {
-    let ReceivedStartup { log, resources } = RtcStartup::receive(Port::from_handle(startup))?;
-    install_log(log.into_raw(), LOG_TAG);
-    // Клиентскую сторону startup-порта supervisor держит всю incarnation. Серверная
-    // остаётся открытой до конца процесса вместе с ней.
-    let _startup = resources.startup;
-    let service = resources.service;
+fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
+    let started = RtcStartup::start(parent)?;
+    if let Some(log) = started.log {
+        install_log(log.into_handle().into_raw(), LOG_TAG);
+    }
+    let service: &'static Port = Box::leak(Box::new(Port::create()?));
+    // Поток экспорта работает до конца процесса.
+    let exporter = started.requirements.parent;
+    spawn_owned(
+        move || {
+            let failure = serve_export::<rtc::Protocol>(&exporter, whole_export(service));
+            log_fmt(format_args!("export stopped: {failure:?}"));
+            process_exit(EXPORT_FAILED_EXIT_CODE)
+        },
+        EXPORT_STACK,
+        Priority::new(1),
+    )
+    .map_err(|_| Error::Runtime)?;
 
-    let line = resources.line;
-    let window = resources.window;
-    let mapping = window.map_full(UserMemFlags::ReadWrite)?;
+    let mapping = started
+        .requirements
+        .window
+        .map_full(UserMemFlags::ReadWrite)?;
     let mut driver = Pl031 {
         device: mapping.mmio(),
-        line,
+        line: started.requirements.line,
     };
 
     log_line("started");
-    serve(&service, &mut driver);
-    Ok(())
+    serve(service, &mut driver);
+    Err(Error::Ipc)
 }
 
 fn serve(service: &Port, driver: &mut Pl031) {
-    let transport = PortTransport::server(service.borrow());
-    // Драйвер не хранит сессий. Уход значка и покадровое исчерпание порт не закрывают, а
-    // прочий отказ терминален.
-    while matches!(
-        rtc::dispatch(driver, &transport),
-        Ok(()) | Err(IpcError::SenderGone | IpcError::ResourceExhausted | IpcError::Timeout)
-    ) {}
+    let transport = PortTransport::new(service.borrow());
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    // Драйвер не хранит сессий. Уход значка и отброшенный кадр порт не закрывают, а закрытие
+    // порта терминально.
+    loop {
+        match transport.recv(&mut bytes, Timeout::INFINITE) {
+            Ok(frame) => {
+                let _ = rtc::dispatch(driver, frame);
+            }
+            Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
+            Err(RecvError::Closed) => break,
+        }
+    }
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &PanicInfo<'_>) -> ! {
+    log_fmt(format_args!("panic: {info}"));
+    process_exit(FAILED_EXIT_CODE)
 }

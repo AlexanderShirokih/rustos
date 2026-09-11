@@ -1,49 +1,129 @@
-//! Абстракция транспортного канала.
+//! Транспорт кадров поверх рандеву ядра.
 //!
-//! [`Transport`] реализуется платформенным адаптером поверх syscall-ов канала.
-//! Кадр кодируется в `bytes`, capability - в отдельном `handles`-векторе.
+//! Клиентская сторона - [`Channel`]: односторонняя отправка и вызов с ответом. Серверная
+//! сторона - [`Listener`]: приём кадра вместе с ресурсами его доставки. Ответ встречному вызову
+//! уходит каналом [`ReplyChannel`], который приходит в ресурсах кадра вызова. Кадр кодируется в
+//! `bytes`, capability - в отдельном `handles`-векторе.
+
+use core::fmt;
 
 use syscall::Timeout;
 
-use crate::wire::IpcError;
+use crate::wire::{IpcError, MESSAGE_INLINE_MAX};
 
-/// Длины прочитанного кадра: байты тела и число хэндлов.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MessageLen {
-    /// Число записанных в буфер байт кадра.
-    pub bytes: usize,
-    /// Число записанных в вектор хэндлов.
-    pub handles: usize,
+/// Буфер приёма одного кадра.
+pub type FrameBytes = [u8; MESSAGE_INLINE_MAX];
+
+/// Принятый кадр: его байты в буфере приёма и ресурсы доставки.
+pub struct Incoming<'b, R> {
+    /// Байты кадра: заголовок и тело.
+    pub bytes: &'b [u8],
+    /// Ресурсы доставки: capability кадра по слотам и канал ответа встречного вызова.
+    pub resources: R,
 }
 
-impl MessageLen {
-    /// Создаёт длины из числа байт и числа хэндлов.
-    #[must_use]
-    pub const fn new(bytes: usize, handles: usize) -> Self {
-        Self { bytes, handles }
+/// Клиентская сторона канала.
+pub trait Channel {
+    /// Ресурсы кадра ответа.
+    type Resources: crate::ReceivedResources;
+
+    /// Отправляет односторонний кадр. Успех означает, что получатель принял кадр, и его
+    /// capability перенесены. `Timeout` - получатель не принял кадр за срок `wait`, и capability
+    /// остались у отправителя. `PeerClosed` - у канала нет получателя.
+    fn send(&self, bytes: &[u8], handles: &[u32], wait: Timeout) -> Result<(), IpcError>;
+
+    /// Отправляет кадр вызова и принимает в `reply` кадр ответа этого вызова. `Timeout` -
+    /// ответ не пришёл за срок `wait`, `PeerClosed` - получатель ушёл либо отменил ответ.
+    fn call<'b>(
+        &self,
+        bytes: &[u8],
+        handles: &[u32],
+        reply: &'b mut FrameBytes,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, Self::Resources>, IpcError>;
+}
+
+/// Серверная сторона канала.
+pub trait Listener {
+    /// Ресурсы принятого кадра.
+    type Resources: crate::ReceivedResources;
+
+    /// Принимает в `into` один кадр в пределах срока `wait`.
+    fn recv<'b>(
+        &self,
+        into: &'b mut FrameBytes,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, Self::Resources>, RecvError>;
+}
+
+/// Отказ приёма кадра.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvError {
+    /// Вместо кадра доставлено событие ухода отправителей значка `badge`.
+    SenderGone(u64),
+    /// Истёк срок ожидания.
+    Timeout,
+    /// Кадр доставлен, а принять его нечем. Кадр отброшен, и его вызыватель получил отказ.
+    Discarded,
+    /// Канал закрыт, и кадров больше не будет.
+    Closed,
+}
+
+/// Отказ приёма как отказ операции, которой кадр нужен сейчас. Уход отправителя и закрытие
+/// канала для неё равны `PeerClosed`, а цикл приёма, для которого уход значка не конец,
+/// разбирает [`RecvError`] сам.
+impl From<RecvError> for IpcError {
+    fn from(error: RecvError) -> Self {
+        match error {
+            RecvError::Timeout => Self::Timeout,
+            RecvError::Discarded => Self::ResourceExhausted,
+            RecvError::SenderGone(_) | RecvError::Closed => Self::PeerClosed,
+        }
     }
 }
 
-/// Двунаправленный канал сообщений под контрактом.
-/// `bytes` - кадр (заголовок + тело), `handles` - транспортный вектор
-/// capability кадра.
-pub trait Transport {
-    /// Владелец ресурсов одного доставленного кадра.
-    type Resources: crate::ReceivedResources;
+/// Канал одного ответа вызывателю, пришедший с кадром его вызова.
+///
+/// Канал отправляет единственный кадр ответа и исчерпывается на любом исходе отправки.
+/// Разрушение канала без отправки отменяет ответ, и вызыватель получает `PeerClosed`.
+pub trait ReplyChannel: Sized {
+    /// Отправляет вызывателю кадр `bytes` и его handle-вектор `handles`. `PeerClosed`, если
+    /// вызыватель больше не ждёт ответа. При отказе capability `handles` остаются у
+    /// отправителя.
+    fn send(self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError>;
+}
 
-    /// Однократно передаёт доставленные ресурсы независимо от результата разбора кадра.
-    fn take_resources(&self) -> Self::Resources;
+/// Неотправленное значение вместе с причиной отказа. Capability значения остались у
+/// отправителя.
+pub struct Undelivered<V> {
+    /// Причина отказа отправки.
+    pub error: IpcError,
+    /// Значение, которое отправка не передала.
+    pub value: V,
+}
 
-    /// Отправляет один кадр и его handle-вектор дальнему концу.
-    /// `PeerClosed`, если дальний конец закрыт.
-    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError>;
+impl ReplyChannel for core::convert::Infallible {
+    fn send(self, _bytes: &[u8], _handles: &[u32]) -> Result<(), IpcError> {
+        match self {}
+    }
+}
 
-    /// Принимает один кадр в `bytes` и его хэндлы в `handles`.
-    /// `WouldBlock`, если нет кадра. `PeerClosed` после закрытия и опустошения.
-    /// `Truncated`, если буфер короче кадра или хэндлов больше места.
-    fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError>;
+impl<V> fmt::Debug for Undelivered<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Undelivered")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
 
-    /// Ждёт готовности к чтению до истечения `timeout`.
-    /// `Timeout` по истечении срока. `PeerClosed`, если дальний конец закрыт.
-    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError>;
+impl<V> PartialEq for Undelivered<V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.error == other.error
+    }
+}
+
+impl<V> From<Undelivered<V>> for IpcError {
+    fn from(undelivered: Undelivered<V>) -> Self {
+        undelivered.error
+    }
 }

@@ -9,8 +9,6 @@ use core::panic::PanicInfo;
 use runtime::{handle_close, thread_exit};
 use syscall::{Handle, kind};
 
-/// Программа-фикстура для теста `spawn_from_image`. Закрывает `start` и сообщает результат
-/// кодом выхода.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(start: Handle<kind::Port>) -> ! {
     let code = u64::from(handle_close(start) != 0);

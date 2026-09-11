@@ -1,7 +1,7 @@
 //! Поиск device-окна по базовому PA: FDT даёт координаты устройства, право
 //! на MMIO - cap из набора ядра. Связь между ними - совпадение базы.
 
-use ipc::{ReceivedResources, Transport, wire::IpcError};
+use ipc::{Channel, ReceivedResources, wire::IpcError};
 use syscall::kind;
 
 use crate::bootstrap;
@@ -12,21 +12,20 @@ pub trait DeviceWindow<H>: Sized + From<H> {
     fn base(&self) -> Option<u64>;
 }
 
-impl<T: Transport> bootstrap::Client<T> {
+impl<C: Channel> bootstrap::Client<C> {
     /// Находит device-окно с базой `base` перебором `acquire_device_memory`.
     /// `Ok(None)` - набор исчерпан (индекс вне набора либо отказ выдачи).
     pub fn acquire_device_memory_by_base<
-        W: DeviceWindow<<T::Resources as ReceivedResources>::Handle<kind::MemoryRegion>>,
+        W: DeviceWindow<<C::Resources as ReceivedResources>::Handle<kind::MemoryRegion>>,
     >(
         &self,
         base: u64,
     ) -> Result<Option<W>, IpcError> {
         for index in 0.. {
-            let mut response = self.acquire_device_memory(index)?;
-            let Ok(cap) = response.value else {
+            let Ok(region) = self.acquire_device_memory(index)? else {
                 return Ok(None);
             };
-            let window = W::from(response.claim(cap).ok_or(IpcError::InvalidValue)?);
+            let window = W::from(region);
             if window.base() == Some(base) {
                 return Ok(Some(window));
             }
@@ -40,8 +39,7 @@ mod tests {
     use core::num::NonZeroU32;
     use std::thread;
 
-    use ipc::{Transport, wire::Cap};
-    use ipc_test::MockEnd;
+    use ipc::wire::Cap;
     use syscall::{Handle, ObjectKind, kind};
 
     use super::DeviceWindow;
@@ -53,27 +51,32 @@ mod tests {
 
     struct Vendor;
 
-    impl bootstrap::Service for Vendor {
+    impl<F: ipc::ReceivedResources> bootstrap::Service<F> for Vendor {
         fn log(
             &mut self,
+            _frame: &F,
             _tag: ipc::wire::Str<'_, { crate::LOG_TAG_MAX }>,
             _message: ipc::wire::Str<'_, { crate::LOG_MESSAGE_MAX }>,
         ) {
         }
 
-        fn acquire_irq_control(&mut self) -> Result<Cap<kind::IrqControl>, u32> {
+        fn acquire_irq_control(&mut self, _frame: &F) -> Result<Cap<kind::IrqControl>, u32> {
             Err(1)
         }
 
-        fn acquire_userland_image(&mut self) -> Result<Cap<kind::MemoryRegion>, u32> {
+        fn acquire_userland_image(&mut self, _frame: &F) -> Result<Cap<kind::MemoryRegion>, u32> {
             Err(1)
         }
 
-        fn acquire_boot_fdt(&mut self) -> Result<crate::BootFdt, u32> {
+        fn acquire_boot_fdt(&mut self, _frame: &F) -> Result<crate::BootFdt, u32> {
             Err(1)
         }
 
-        fn acquire_device_memory(&mut self, index: u32) -> Result<Cap<kind::MemoryRegion>, u32> {
+        fn acquire_device_memory(
+            &mut self,
+            _frame: &F,
+            index: u32,
+        ) -> Result<Cap<kind::MemoryRegion>, u32> {
             if index >= 2 {
                 return Err(7);
             }
@@ -100,17 +103,13 @@ mod tests {
         }
     }
 
-    fn with_vendor<R>(body: impl FnOnce(&bootstrap::Client<MockEnd>) -> R) -> R {
-        let (client_end, server_end) = MockEnd::pair();
+    fn with_vendor<R>(body: impl FnOnce(&bootstrap::Client<ipc_test::MockChannel>) -> R) -> R {
+        let (client_end, server_end) = ipc_test::pair();
         let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut vendor = Vendor;
-                while server_end.wait_readable(ipc::Timeout::INFINITE).is_ok() {
-                    if bootstrap::dispatch(&mut vendor, &server_end).is_err() {
-                        break;
-                    }
-                }
+                let _ = server_end.serve_all(|frame| bootstrap::dispatch(&mut vendor, frame));
             });
             let result = body(&client);
             drop(client);

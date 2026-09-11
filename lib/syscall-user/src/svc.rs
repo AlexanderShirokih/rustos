@@ -472,7 +472,8 @@ pub fn process_terminate(handle: Handle<kind::Process>, exit_code: u64) -> i64 {
 ///
 /// Требует `Rights::WRITE` на `handle` и `Rights::TRANSFER` на `bootstrap_handle`, а нулевой
 /// `bootstrap_handle` даёт `InvalidArgument`. Стартовый хэндл уходит из таблицы вызывающего
-/// в таблицу потомка, и X0 первого потока получает его id уже в child-таблице.
+/// в таблицу потомка без права `Rights::TRANSFER`, и X0 первого потока получает его id уже в
+/// child-таблице.
 ///
 /// Метеринг-ресурс потомку достаётся одним из двух путей. Нулевой `resource_handle` отдаёт
 /// ресурс вызывающего с правами его же гранта. Ненулевой требует

@@ -1,129 +1,73 @@
-/// Объявляет манифест компонента: экспортируемые протоколы и слоты.
+use component_abi::{LOG_REQUIREMENT, REQUIREMENT_NAME_MAX, ResourceError, component_startup};
+use ipc::{
+    Timeout,
+    wire::{IpcError, Str},
+};
+use kernel_objects::{OwnedHandle, PortTransport, ReceivedHandle, Session, kind};
+use syscall::{Handle, ObjectKind};
+
+use crate::request::session;
+
+/// Срок одного запроса `start` к родителю.
+pub const STARTUP_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(5);
+
+/// Ресурсы, которые получил `start`.
+#[derive(Debug)]
+pub struct Startup<T> {
+    /// Сессия журнала либо `None`, если родитель отказал.
+    pub log: Option<Session<log_abi::log::Protocol>>,
+    /// Структура манифеста с полем на каждое требование.
+    pub requirements: T,
+}
+
+/// Первое требование, которое `start` не получил, и причина отказа. `start` не запрашивает
+/// требования после него.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupError {
+    pub requirement: &'static str,
+    pub failure: StartupFailure,
+}
+
+/// Причина, по которой `start` не получил требование.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupFailure {
+    /// Отказ в сессии требования.
+    Session(component_abi::SessionError),
+    /// Отказ в линии прерывания, MMIO-окне либо регионе образа.
+    Resource(ResourceError),
+    /// Отказ транспорта либо истечение [`STARTUP_REQUEST_TIMEOUT`].
+    Ipc(IpcError),
+}
+
+/// Объявляет манифест компонента: требования и экспортируемые протоколы.
 ///
-/// Слот - имя, под которым компоненту при запуске выдаётся capability: сессия чужого
-/// экспорта, каталог, регион образа, окно MMIO или линия прерывания. Объявление слота
-/// называет вид capability и признак, по которому сборка выбирает источник.
-///
-/// Макрос раскрывает объявление в структуру приёмника транзакции. Имя структуры взято из
-/// объявления. Первое поле структуры - владеющий хэндл `startup`: серверная сторона порта
-/// supervisor. Supervisor держит клиентскую сторону всю incarnation. За ним идёт поле на каждый
-/// экспорт под именем его ключа и поле на каждый слот под именем этого слота.
-/// Ассоциированная функция `receive` принимает стартовую транзакцию по handle стартового
-/// порта и возвращает [`ReceivedStartup`](crate::ReceivedStartup) с заполненной структурой
-/// и лог-сессией компонента.
-///
-/// Запись манифеста попадает тем же раскрытием в секцию `.component.manifest` собранной
-/// программы. По этой записи сборка строит слоты компонента.
-///
-/// Программа получает handle стартового порта при запуске (по соглашению аргументом точки
-/// входа `_start`). Программа на Rust со стандартной библиотекой получает этот handle от
-/// `component-startup-std`.
-///
-/// Объявление слота `rtc`, импортирующего протокол `Rtc`, экспортированный другим
-/// компонентом. Под объявлением - приём транзакции по handle точки входа:
-///
-/// ```ignore
-/// component_manifest! {
-///     struct ClockStartup {
-///         slots: { rtc: service(protocol = "Rtc") },
-///     }
-/// }
-///
-/// // Раскрытие даёт `struct ClockStartup { startup, rtc }`.
-/// fn run(startup: Handle) -> Result<(), StartupError> {
-///     let received = ClockStartup::receive(OwnedHandle::from_handle(startup))?;
-///     let rtc_session = received.resources.rtc;
-///     Ok(())
-/// }
-/// ```
-///
-/// Чтобы экспортировать протокол другим компонентам, объявление называет его в ключе
-/// `exports` парой "имя поля - протокол". Под именем протокола сборка образа находит
-/// провайдера для чужого слота, а поле принимает серверную сторону порта этого экспорта.
-/// Экспортов у компонента может быть несколько, и административный протокол объявляется
-/// таким же экспортом, как и любой другой.
-///
-/// Без ключа `establishes_sessions` сессии экспортов выдаются клиентам помимо компонента.
-/// С ключом `establishes_sessions: true` каждую сессию создаёт сам компонент по запросу
-/// `ComponentStartup::open_session` на своём startup-порту.
-///
-/// Объявление компонента, который экспортирует `Namespace` и `NamespaceAdmin` на своих
-/// портах и сам создаёт их сессии:
-///
-/// ```ignore
-/// component_manifest! {
-///     struct RouterStartup {
-///         exports: { service: "Namespace", admin: "NamespaceAdmin" },
-///         establishes_sessions: true,
-///         slots: {},
-///     }
-/// }
-///
-/// // Раскрытие даёт `struct RouterStartup { startup, service, admin }`.
-/// ```
-///
-/// Провайдер слота - компонент, который экспортирует названный протокол либо содержит
-/// нужный каталог. Композиция поднимает одну программу несколькими компонентами под разными
-/// именами экземпляров. Провайдер назван именем экземпляра.
-///
-/// Импорт протокола принимает необязательное `instance` - имя экземпляра-провайдера. Сборка
-/// связывает импорт без имени с единственным провайдером этого протокола в композиции.
-///
-/// У слота-каталога протокол отсутствует. `instance` в таком слоте обязателен. Компонент
-/// берёт у названного провайдера сессию, в корне которой лежит каталог компонента.
-///
-/// Объявление слота `files`, импортирующего протокол `FileSystem` у экземпляра `ramfs`, и
-/// слота-каталога `area` у экземпляра `filesystem-imagefs`:
-///
-/// ```ignore
-/// component_manifest! {
-///     struct FileReaderStartup {
-///         slots: {
-///             files: service(protocol = "FileSystem", instance = "ramfs"),
-///             area: directory(instance = "filesystem-imagefs"),
-///         },
-///     }
-/// }
-/// ```
-///
-/// Вид поля слота берётся из его объявления. Поле `service` принимает портовый транспорт,
-/// а поле `mmio` - регион памяти:
+/// Раскрытие даёт структуру с полем `parent`, полем на каждое требование и функцией `start`,
+/// а также запись манифеста в секции `.component.manifest`. Протокол назван типом, который
+/// порождает [`ipc::protocol!`].
 ///
 /// ```no_run
-/// use component_startup::{MemoryRegion, component_manifest};
-/// use kernel_objects::PortTransport;
+/// use component_startup::component_manifest;
+///
+/// ipc::protocol! {
+///     mod rtc {
+///         name = "Rtc";
+///     }
+/// }
+///
+/// ipc::protocol! {
+///     mod alarm {
+///         name = "Alarm";
+///     }
+/// }
 ///
 /// component_manifest! {
-///     struct WindowStartup {
-///         slots: {
-///             rtc: service(protocol = "Rtc"),
+///     struct AlarmStartup {
+///         requirements: {
+///             rtc: session(rtc::Protocol),
 ///             window: mmio(compatible = ["arm,pl031"]),
 ///         },
+///         exports: [alarm::Protocol],
 ///     }
-/// }
-///
-/// fn use_fields(started: WindowStartup) {
-///     let _ = PortTransport::client(&started.rtc);
-///     let _: MemoryRegion = started.window;
-/// }
-///
-/// fn main() {}
-/// ```
-///
-/// Поле окна MMIO объектной операции линии прерывания не принимает:
-///
-/// ```compile_fail
-/// use component_startup::component_manifest;
-/// use syscall::Timeout;
-///
-/// component_manifest! {
-///     struct WindowStartup {
-///         slots: { window: mmio(compatible = ["arm,pl031"]) },
-///     }
-/// }
-///
-/// fn use_fields(started: WindowStartup) {
-///     let _ = started.window.wait(Timeout::INFINITE);
 /// }
 ///
 /// fn main() {}
@@ -133,56 +77,114 @@ macro_rules! component_manifest {
     (
         $(#[$attribute:meta])*
         $visibility:vis struct $name:ident {
-            $(exports: { $($export:ident: $protocol:literal),* $(,)? },)?
-            $(establishes_sessions: $establishes:literal,)?
-            slots: { $($slot:ident: $kind:ident $(($($parameter:tt)*))?),* $(,)? } $(,)?
+            $(requirements: { $($requirement:ident: $kind:ident $(($($parameter:tt)*))?),* $(,)? } $(,)?)?
+            $(exports: [$($export:path),* $(,)?] $(,)?)?
         }
     ) => {
         $(#[$attribute])*
         $visibility struct $name {
-            /// Серверная сторона startup-порта: его клиентскую сторону supervisor держит
-            /// всю incarnation.
-            pub startup: $crate::Port,
-            $($(pub $export: $crate::Port,)*)?
-            $(pub $slot: $crate::OwnedHandle<
-                $crate::component_manifest!(@slot_kind $kind)
-            >,)*
+            /// Клиент стартовой сессии без срока ожидания.
+            pub parent: $crate::component_startup::Client<$crate::PortTransport>,
+            $($(pub $requirement: $crate::component_manifest!(@field $kind $(($($parameter)*))?),)*)?
         }
 
         impl $name {
-            /// Принимает стартовую транзакцию целиком по владеющему стартовому порту.
-            $visibility fn receive(
-                startup: $crate::Port,
-            ) -> ::core::result::Result<$crate::ReceivedStartup<Self>, $crate::StartupError> {
-                const EXPORTS: &[()] = &[$($($crate::component_manifest!(@place $export)),*)?];
-                const SLOTS: &[()] = &[$($crate::component_manifest!(@place $slot)),*];
+            /// Запрашивает у родителя журнал и требования в порядке объявления.
+            $visibility fn start(
+                parent: $crate::Handle<$crate::kind::Port>,
+            ) -> ::core::result::Result<$crate::Startup<Self>, $crate::StartupError> {
+                let requests =
+                    $crate::start_parent(parent).with_wait($crate::STARTUP_REQUEST_TIMEOUT);
+                let log = $crate::start_log(&requests);
+                $($(
+                    let $requirement = $crate::component_manifest!(
+                        @request requests $requirement $kind $(($($parameter)*))?
+                    )?;
+                )*)?
 
-                let mut set = $crate::receive_set(startup, EXPORTS.len(), SLOTS.len())?;
-                $($(let $export = set.next_export()?;)*)?
-                $(let $slot =
-                    set.next_slot::<$crate::component_manifest!(@slot_kind $kind)>()?;)*
-                ::core::result::Result::Ok($crate::ReceivedStartup {
-                    log: set.log,
-                    resources: Self {
-                        startup: set.startup,
-                        $($($export,)*)?
-                        $($slot,)*
+                ::core::result::Result::Ok($crate::Startup {
+                    log,
+                    requirements: Self {
+                        parent: $crate::start_parent(parent),
+                        $($($requirement,)*)?
                     },
                 })
             }
         }
 
         $crate::component_abi::__component_manifest_record! {
-            exports = [$($($protocol),*)?]
-            establishes = [$($establishes)?]
-            slots { $($kind $(($($parameter)*))?),* }
+            exports = [$($($export),*)?]
+            requirements { $($($requirement: $kind $(($($parameter)*))?),*)? }
         }
     };
-    (@place $slot:ident) => { () };
-    (@slot_kind userland) => { $crate::kind::MemoryRegion };
-    (@slot_kind mmio) => { $crate::kind::MemoryRegion };
-    (@slot_kind irq) => { $crate::kind::IrqLine };
-    (@slot_kind service) => { $crate::kind::Port };
-    (@slot_kind directory) => { $crate::kind::Port };
-    (@slot_kind supervisor) => { $crate::kind::Port };
+    (@field session($protocol:path)) => { $crate::Session<$protocol> };
+    (@field irq $parameters:tt) => { $crate::IrqLine };
+    (@field mmio $parameters:tt) => { $crate::MemoryRegion };
+    (@field region) => { $crate::MemoryRegion };
+    (@request $requests:ident $requirement:ident session($protocol:path)) => {
+        $crate::start_session::<$protocol>(&$requests, stringify!($requirement))
+    };
+    (@request $requests:ident $requirement:ident irq $parameters:tt) => {
+        $crate::start_resource(stringify!($requirement), |name| $requests.irq(name))
+    };
+    (@request $requests:ident $requirement:ident mmio $parameters:tt) => {
+        $crate::start_resource(stringify!($requirement), |name| $requests.mmio(name))
+    };
+    (@request $requests:ident $requirement:ident region) => {
+        $crate::start_resource(stringify!($requirement), |name| $requests.region(name))
+    };
+}
+
+#[must_use]
+pub fn start_parent(parent: Handle<kind::Port>) -> component_startup::Client<PortTransport> {
+    component_startup::Client::new(PortTransport::new(parent))
+}
+
+/// Запрашивает журнал один раз. Любой отказ даёт `None`.
+#[must_use]
+pub fn start_log(
+    requests: &component_startup::Client<PortTransport>,
+) -> Option<Session<log_abi::log::Protocol>> {
+    session::<log_abi::log::Protocol>(requests, LOG_REQUIREMENT)
+        .ok()?
+        .ok()
+}
+
+/// Запрашивает сессию требования `requirement` и повторяет запрос на `IpcError::PeerClosed`.
+pub fn start_session<P: ipc::Protocol>(
+    requests: &component_startup::Client<PortTransport>,
+    requirement: &'static str,
+) -> Result<Session<P>, StartupError> {
+    loop {
+        match session::<P>(requests, requirement) {
+            Ok(Ok(session)) => return Ok(session),
+            Ok(Err(error)) => return Err(failed(requirement, StartupFailure::Session(error))),
+            Err(IpcError::PeerClosed) => {}
+            Err(error) => return Err(failed(requirement, StartupFailure::Ipc(error))),
+        }
+    }
+}
+
+pub fn start_resource<K: ObjectKind>(
+    requirement: &'static str,
+    request: impl FnOnce(
+        Str<'static, REQUIREMENT_NAME_MAX>,
+    ) -> Result<Result<ReceivedHandle<K>, ResourceError>, IpcError>,
+) -> Result<OwnedHandle<K>, StartupError> {
+    let name = Str::new(requirement).ok_or(failed(
+        requirement,
+        StartupFailure::Ipc(IpcError::InvalidValue),
+    ))?;
+    match request(name) {
+        Ok(Ok(handle)) => Ok(OwnedHandle::from(handle)),
+        Ok(Err(error)) => Err(failed(requirement, StartupFailure::Resource(error))),
+        Err(error) => Err(failed(requirement, StartupFailure::Ipc(error))),
+    }
+}
+
+const fn failed(requirement: &'static str, failure: StartupFailure) -> StartupError {
+    StartupError {
+        requirement,
+        failure,
+    }
 }

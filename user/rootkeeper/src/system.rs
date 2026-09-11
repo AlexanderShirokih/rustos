@@ -1,64 +1,56 @@
-//! Композиция, которую rootkeeper поднимает при загрузке, и её supervisor.
+//! Композиция, которую rootkeeper поднимает при загрузке, и её родитель.
 
-use alloc::{boxed::Box, format, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
 use core::{
     fmt::{Arguments, Write as _},
     num::NonZeroU64,
+    ops::ControlFlow,
 };
 
-use bootstrap_abi::bootstrap;
-use component_abi::{SESSION_SCOPE_MAX, component_startup};
-use device_resolver::{
-    DeviceMmio, DeviceSelector, DeviceTreePlatform, PlatformDescription, ResolveError, acquire_mmio,
+use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap};
+use component_abi::{
+    AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
+    SessionError, SessionRequest, SessionRequirement, SessionScope, component_startup,
 };
-use device_resolver_aarch64::PLATFORM_BINDINGS;
-use fdt::devicetree::DeviceTree;
-use ipc::wire::Str;
+use ipc::{
+    Listener as _, Protocol as _, RecvError,
+    wire::{MESSAGE_INLINE_MAX, Str},
+};
 use kernel_objects::{
-    BorrowedHandle, IrqControl, IrqLine, MemoryRegion, Port, ReadOnlyMapping, Resource, kind,
-    wait_any,
+    Delivery, Error, MemoryRegion, ObjectKind, OwnedHandle, Port, ReadOnlyMapping, ReceivedHandle,
+    Resource, Session, kind,
 };
 use log_abi::{LogBuffer, log};
-use managed_component::{
-    ComponentRoots, ComponentSlots, ManagedComponent, ManagedStartupError, launch_component,
-};
-use runtime::{PortTransport, Timeout};
-use supervisor_abi::ExtendError;
-use syscall::{Handle, Rights, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem};
+use log_relay::{KernelLogSink, LogRelayThread};
+use managed_component::{Children, Departure, Outcome, Status};
+use runtime::{Mutex, PortTransport, Timeout};
+use syscall::{Handle, Rights};
 use userland_image::{
-    BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, DecodedProgram, OnExhausted,
-    PlanComponent, PlanDecodeError, PlanDevice, SlotSource, decode, decode_plan, decode_program,
+    BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, DecodedProgram, PlanComponent,
+    PlanDecodeError, RequirementSource, decode, decode_plan,
 };
 
 use crate::{
-    extension::{Answer, ExtensionPort, Request},
-    relay,
+    devices::{DeviceGrants, DeviceKind, DeviceRefusal},
+    relay::{ComponentNames, log_badge},
 };
 
-const LOG_TAG: &str = "supervisor";
+const LOG_TAG: &str = "rootkeeper";
 
-/// Конечный срок остановки компонента.
-pub const STOP_TIMEOUT: Timeout = Timeout::from_secs(5);
+/// Срок возврата бюджета перед перезапуском записи.
+pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-const SUPERVISOR_WAITS: usize = 2;
+type Debt = ReceivedHandle<kind::Reply>;
 
-const WHOLE_EXPORT: &str = "";
-const SINGLE_EXPORT: u16 = 0;
-
-/// Источник делегированных лог-сессий компонентов.
-pub type LogSessions = fn(NonZeroU64) -> Option<Port>;
-
-/// Исход прохода supervisor: этим кодом ядро гасит машину.
+/// Код, с которым завершается процесс rootkeeper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
-    /// Инфраструктура supervisor не поднялась.
+    /// Relay журнала не поднялся либо ресурса композиции не хватило.
     Startup = 1,
-    /// Userland-образ либо план загрузки недоступны.
+    /// Userland-образ, план загрузки либо программа записи недоступны.
     BadImage = 2,
-    /// Критический компонент завершился.
+    /// Главный поток вышел из оборота либо паниковал.
     Subsystem = 3,
-    /// Ресурс устройства, названный планом, недоступен композиции.
-    Device = 4,
 }
 
 /// Причина, по которой композиция не поднялась.
@@ -70,73 +62,42 @@ pub enum BootFailure {
     PlanMissing,
     /// Запись плана не разобрана.
     Plan(PlanDecodeError),
-    /// Зависимости плана не укладываются в порядок запуска.
-    PlanOrder,
-    /// Запись компонента, поданная транзакцией расширения, не разобрана.
-    Record,
-    /// Имя экземпляра занято другим компонентом композиции.
-    Instance,
-    /// Значок вызывателя не отображается ни в одну запись композиции.
-    Caller,
-    /// В образе нет программы компонента.
+    /// В образе нет программы записи плана.
     ProgramMissing,
     /// Ресурса композиции не хватило.
     Budget(BudgetFailure),
-    /// Полномочия провижининга устройств недоступны.
-    DeviceAuthority,
-    /// Описание платформы не дало ресурс, названный слотом.
-    Device(ResolveError),
-    /// Ресурс устройства уже отдан другому компоненту композиции.
-    DeviceBusy,
-    /// Провайдер сервисного слота не поднят.
-    Provider,
-    /// Слот компонента не наполнен.
-    Slot(SlotFailure),
-    /// Managed-запуск компонента не завершился.
-    Launch(ManagedStartupError),
 }
 
 /// Ресурс композиции, которого не хватило.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetFailure {
-    /// Лог-сессия компонента не выдана.
+    /// Сессия журнала записи не выдана.
     LogSession,
     /// Корневой metering resource недоступен.
     Root,
-    /// Резерв компонента не выделен либо композиция не помещается в набор ожидания.
+    /// Резерв бюджета компонента не выдан.
     Reserve,
+    /// Порт `ComponentStartup` не создан.
+    StartupPort,
 }
 
-/// Содержимое слота, которого компонент не получил.
+/// Требование `name` импортёра. Импортёр получает по нему сессию экспорта `protocol` записи
+/// плана `provider` с областью `scope`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SlotFailure {
-    /// Провайдер не установил сессию сервисного слота.
-    Session,
-    /// Провайдер не установил сессию, суженную до каталога компонента.
-    Directory,
-    /// Capability слота не сминчена.
-    Mint,
+pub struct ImporterRequirement<'n> {
+    pub name: &'n str,
+    pub provider: &'n str,
+    pub protocol: &'n str,
+    pub scope: &'n str,
 }
 
-/// Исход одного оборота supervisor.
+/// Отказ [`RootSystem::importer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Supervised {
-    /// Компонент ушёл с кодом `exit_code`, и композиция подняла его новую
-    /// incarnation вместе с `dependents` его потребителями.
-    Restarted {
-        exit_code: Option<u32>,
-        dependents: u16,
-    },
-    /// Некритический компонент исчерпал запуски и снят с композиции вместе с
-    /// `dependents` его потребителями, а сама композиция осталась поднятой.
-    Abandoned {
-        exit_code: Option<u32>,
-        dependents: u16,
-    },
-    /// Оборот обслужил операцию транзакции расширения композиции.
-    Extended,
-    /// Оборот supervisor не смог восстановить композицию, и она остановлена.
-    Stopped(Stopped),
+pub enum ImporterRefusal {
+    /// Требование с этим номером не связывается с экспортом плана.
+    Requirement(usize),
+    /// Порт импортёра не создан.
+    Importer(Error),
 }
 
 /// Userland-образ, отображённый в адресное пространство rootkeeper.
@@ -145,76 +106,36 @@ pub struct SystemImage {
     mapping: ReadOnlyMapping,
 }
 
-struct FdtMapping {
-    mapping: ReadOnlyMapping,
-    offset: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    Record(u16),
+    Importer(usize),
 }
 
-impl FdtMapping {
-    fn blob(&self) -> Option<&[u8]> {
-        self.mapping.as_bytes().get(self.offset..)
-    }
+struct ImporterBinding<'a> {
+    name: String,
+    export: Export<'a>,
 }
 
-/// Определение компонента транзакцией расширения содержит запись плана с одним компонентом
-/// и регион, чьи байты начинаются его программой.
-pub struct Definition {
-    record: Box<[u8]>,
-    program: MemoryRegion,
+#[derive(Clone)]
+struct Export<'a> {
+    provider: u16,
+    protocol: &'a str,
+    scope: SessionScope,
 }
 
-struct DeviceAuthority {
-    description: Option<FdtMapping>,
-    _region: Option<MemoryRegion>,
-    lines: Option<IrqControl>,
-    windows: Vec<GrantedWindow>,
-}
-
-struct GrantedWindow {
-    window: DeviceMmio,
-    owner: u16,
-}
-
-enum ComponentRecord<'a> {
-    Booted(PlanComponent<'a>),
-    Defined {
-        record: Box<[u8]>,
-        mapping: ReadOnlyMapping,
-        _region: MemoryRegion,
-    },
-}
-
-/// Компонент композиции вместе с его записью плана.
-pub struct Component<'a> {
-    managed: ManagedComponent<ComponentRoots>,
-    record: ComponentRecord<'a>,
-    log: Port,
-    owner: Option<u16>,
-    charged_launches: u32,
-}
-
-struct Provider<'a> {
-    roots: &'a ComponentRoots,
-    startup: BorrowedHandle<'a, kind::Port>,
-    plan: PlanComponent<'a>,
-}
-
-/// Поднятая композиция rootkeeper.
+/// Композиция плана и её родитель. Поток rootkeeper обслуживает композицию повтором [`turn`].
 pub struct RootSystem<'a> {
-    components: Vec<Component<'a>>,
-    order: Vec<u16>,
-    devices: DeviceAuthority,
-    extension: Option<ExtensionPort>,
-    kernel: Handle<kind::Port>,
+    children: Children<'a, Holder, DecodedProgram<'a>>,
+    plan: BootPlan<'a>,
+    logs: Vec<Session<log::Protocol>>,
+    devices: DeviceGrants,
     image: &'a SystemImage,
-    entries: DecodedImage<'a>,
-    resource: Resource,
-    log_sessions: LogSessions,
+    kernel: Handle<kind::Port>,
+    restarts_used: Vec<u32>,
+    importers: Vec<Vec<ImporterBinding<'a>>>,
+    _resource: Resource,
 }
-
-/// Код, которым остановка композиции завершает её компоненты.
-pub const SHUTDOWN_EXIT_CODE: u32 = 1;
-const EXIT_MESSAGE_MAX: usize = 96;
 
 impl From<Stopped> for u64 {
     fn from(stopped: Stopped) -> Self {
@@ -223,85 +144,27 @@ impl From<Stopped> for u64 {
 }
 
 impl BootFailure {
-    /// Код выхода supervisor, соответствующий отказу.
+    /// Код выхода rootkeeper, соответствующий отказу.
     #[must_use]
     pub const fn stopped(self) -> Stopped {
         match self {
-            Self::Image
-            | Self::PlanMissing
-            | Self::Plan(_)
-            | Self::PlanOrder
-            | Self::ProgramMissing => Stopped::BadImage,
-            Self::DeviceAuthority | Self::Device(_) | Self::DeviceBusy => Stopped::Device,
-            Self::Record
-            | Self::Instance
-            | Self::Caller
-            | Self::Budget(_)
-            | Self::Provider
-            | Self::Slot(_)
-            | Self::Launch(_) => Stopped::Startup,
-        }
-    }
-
-    /// Отказ операции транзакции расширения, соответствующий отказу подъёма.
-    #[must_use]
-    pub const fn refused(self) -> ExtendError {
-        match self {
-            Self::Image | Self::PlanMissing | Self::Plan(_) | Self::Record => {
-                ExtendError::BadRecord
+            Self::Image | Self::PlanMissing | Self::Plan(_) | Self::ProgramMissing => {
+                Stopped::BadImage
             }
-            Self::Instance => ExtendError::Duplicate,
-            Self::Caller => ExtendError::NoTransaction,
-            Self::PlanOrder | Self::Provider => ExtendError::Unresolved,
-            Self::Budget(_) => ExtendError::NoSpace,
-            Self::ProgramMissing
-            | Self::DeviceAuthority
-            | Self::Device(_)
-            | Self::DeviceBusy
-            | Self::Slot(_)
-            | Self::Launch(_) => ExtendError::NotStarted,
+            Self::Budget(_) => Stopped::Startup,
         }
     }
 
-    /// Строка отказа для журнала.
-    #[must_use]
-    pub const fn message(self) -> &'static str {
+    const fn message(self) -> &'static str {
         match self {
             Self::Image => "userland image unavailable",
             Self::PlanMissing => "boot plan record missing",
             Self::Plan(_) => "boot plan not decoded",
-            Self::PlanOrder => "boot plan dependencies have no start order",
-            Self::Record => "component record not decoded",
-            Self::Instance => "instance name already taken",
-            Self::Caller => "caller badge outside the composition",
             Self::ProgramMissing => "component program missing",
-            Self::Budget(budget) => budget.message(),
-            Self::DeviceAuthority => "platform description unavailable",
-            Self::Device(_) => "device not described by the platform",
-            Self::DeviceBusy => "device resource taken by another component",
-            Self::Provider => "service provider not running",
-            Self::Slot(slot) => slot.message(),
-            Self::Launch(_) => "component not started",
-        }
-    }
-}
-
-impl BudgetFailure {
-    const fn message(self) -> &'static str {
-        match self {
-            Self::LogSession => "log session not minted",
-            Self::Root => "root resource unavailable",
-            Self::Reserve => "component reserve not granted",
-        }
-    }
-}
-
-impl SlotFailure {
-    const fn message(self) -> &'static str {
-        match self {
-            Self::Session => "service provider did not establish a session",
-            Self::Directory => "component directory not granted",
-            Self::Mint => "component slot not minted",
+            Self::Budget(BudgetFailure::LogSession) => "log session not minted",
+            Self::Budget(BudgetFailure::Root) => "root resource unavailable",
+            Self::Budget(BudgetFailure::Reserve) => "component reserve not granted",
+            Self::Budget(BudgetFailure::StartupPort) => "startup port not created",
         }
     }
 }
@@ -309,12 +172,12 @@ impl SlotFailure {
 impl SystemImage {
     /// Забирает у ядра capability образа и отображает его read-only.
     pub fn acquire(kernel: Handle<kind::Port>) -> Result<Self, BootFailure> {
-        let client = bootstrap::Client::new(PortTransport::client(kernel));
-        let mut response = client
+        let client = bootstrap::Client::new(PortTransport::new(kernel));
+        let region = client
             .acquire_userland_image()
+            .map_err(|_| BootFailure::Image)?
+            .map(MemoryRegion::from)
             .map_err(|_| BootFailure::Image)?;
-        let cap = response.value.map_err(|_| BootFailure::Image)?;
-        let region = MemoryRegion::from(response.claim(cap).ok_or(BootFailure::Image)?);
         let mapping = region
             .map_full_read_only()
             .map_err(|_| BootFailure::Image)?;
@@ -334,998 +197,453 @@ impl SystemImage {
             .ok_or(BootFailure::PlanMissing)?;
         decode_plan(record.data()).map_err(BootFailure::Plan)
     }
-
-    /// Регион образа, из которого нарезаются производные капы incarnation.
-    #[must_use]
-    pub const fn region(&self) -> &MemoryRegion {
-        &self.region
-    }
-}
-
-impl Definition {
-    /// Копирует запись плана и берёт регион её программы во владение.
-    #[must_use]
-    pub fn new(record: &[u8], program: MemoryRegion) -> Self {
-        Self {
-            record: Box::from(record),
-            program,
-        }
-    }
-}
-
-impl DeviceAuthority {
-    const fn absent() -> Self {
-        Self {
-            description: None,
-            _region: None,
-            lines: None,
-            windows: Vec::new(),
-        }
-    }
-
-    const fn is_absent(&self) -> bool {
-        self.description.is_none()
-    }
-
-    fn acquire(kernel: Handle<kind::Port>) -> Result<Self, BootFailure> {
-        let client = bootstrap::Client::new(PortTransport::client(kernel));
-        let mut response = client
-            .acquire_boot_fdt()
-            .map_err(|_| BootFailure::DeviceAuthority)?;
-        let fdt = response.value.map_err(|_| BootFailure::DeviceAuthority)?;
-        let region = MemoryRegion::from(
-            response
-                .claim(fdt.region)
-                .ok_or(BootFailure::DeviceAuthority)?,
-        );
-        let description = FdtMapping {
-            mapping: region
-                .map_full_read_only()
-                .map_err(|_| BootFailure::DeviceAuthority)?,
-            offset: fdt.offset as usize,
-        };
-        let mut response = client
-            .acquire_irq_control()
-            .map_err(|_| BootFailure::DeviceAuthority)?;
-        let lines = response.value.map_err(|_| BootFailure::DeviceAuthority)?;
-        let lines = response.claim(lines).ok_or(BootFailure::DeviceAuthority)?;
-        Ok(Self {
-            description: Some(description),
-            _region: Some(region),
-            lines: Some(IrqControl::from(lines)),
-            windows: Vec::new(),
-        })
-    }
-
-    fn resolve<R>(
-        &self,
-        body: impl FnOnce(&DeviceTreePlatform<'_>) -> Result<R, ResolveError>,
-    ) -> Result<R, BootFailure> {
-        let blob = self
-            .description
-            .as_ref()
-            .and_then(FdtMapping::blob)
-            .ok_or(BootFailure::DeviceAuthority)?;
-        let tree = DeviceTree::from_bytes(blob).map_err(|_| BootFailure::DeviceAuthority)?;
-        body(&DeviceTreePlatform::new(&tree, PLATFORM_BINDINGS)).map_err(BootFailure::Device)
-    }
-
-    fn line(
-        &self,
-        device: PlanDevice<'_>,
-        owner: &str,
-        kernel_log: &bootstrap::Client<PortTransport>,
-    ) -> Result<IrqLine, BootFailure> {
-        let interrupt = self.first_match(device, |platform, selector| {
-            platform.interrupt(selector, device.resource)
-        })?;
-        let lines = self.lines.as_ref().ok_or(BootFailure::DeviceAuthority)?;
-        let number = interrupt.line.number();
-        match lines.mint(number, interrupt.trigger) {
-            Ok(line) => Ok(line),
-            Err(kernel_objects::Error::Syscall(SyscallError::AlreadyBound)) => {
-                // Линия принадлежит одному компоненту. Занявший её держит
-                // capability, и второй bind ядро отвергает.
-                log_device_conflict(kernel_log, owner, format_args!("irq line {number}"));
-                Err(BootFailure::DeviceBusy)
-            }
-            Err(_) => Err(BootFailure::Slot(SlotFailure::Mint)),
-        }
-    }
-
-    fn window(
-        &mut self,
-        kernel: Handle<kind::Port>,
-        device: PlanDevice<'_>,
-        owner: u16,
-        name: &str,
-        kernel_log: &bootstrap::Client<PortTransport>,
-    ) -> Result<MemoryRegion, BootFailure> {
-        let window = self.first_match(device, |platform, selector| {
-            platform.mmio(selector, device.resource)
-        })?;
-        if self
-            .windows
-            .iter()
-            .any(|granted| granted.window == window && granted.owner != owner)
-        {
-            let base = window.base;
-            log_device_conflict(kernel_log, name, format_args!("mmio window {base:#x}"));
-            return Err(BootFailure::DeviceBusy);
-        }
-        let client = bootstrap::Client::new(PortTransport::client(kernel));
-        let region: MemoryRegion = acquire_mmio(&client, window).map_err(BootFailure::Device)?;
-        // Смена incarnation забирает окно заново, и запись владельца остаётся одна. Учёт
-        // ведётся по компоненту плана, а не по его запуску.
-        if !self
-            .windows
-            .iter()
-            .any(|granted| granted.window == window && granted.owner == owner)
-        {
-            self.windows.push(GrantedWindow { window, owner });
-        }
-        Ok(region)
-    }
-
-    fn first_match<R>(
-        &self,
-        device: PlanDevice<'_>,
-        body: impl Fn(&DeviceTreePlatform<'_>, DeviceSelector<'_>) -> Result<R, ResolveError> + Copy,
-    ) -> Result<R, BootFailure> {
-        // Драйвер объявляет семейство совместимостей, а описание платформы решает, какая
-        // из них стоит на этой машине. Причину отказа содержит последняя.
-        let mut failure = BootFailure::Device(ResolveError::DeviceNotFound);
-        for compatible in device.compatible() {
-            let selector = DeviceSelector {
-                compatible,
-                instance: device.instance,
-            };
-            match self.resolve(|platform| body(platform, selector)) {
-                Ok(resolved) => return Ok(resolved),
-                Err(error) => failure = error,
-            }
-        }
-        Err(failure)
-    }
-}
-
-impl<'a> ComponentRecord<'a> {
-    fn defined(definition: Definition) -> Result<Self, BootFailure> {
-        let Definition { record, program } = definition;
-        // Загрузчик читает сегменты прямо из региона, и его страницы обязаны быть неизменны.
-        // Маска доступа с записью отвергается отображением.
-        let mapping = program
-            .map_full_read_only()
-            .map_err(|_| BootFailure::Record)?;
-        Ok(Self::Defined {
-            record,
-            mapping,
-            _region: program,
-        })
-    }
-
-    fn plan(&self) -> Result<PlanComponent<'_>, BootFailure> {
-        match self {
-            Self::Booted(plan) => Ok(*plan),
-            Self::Defined { record, .. } => decode_plan(record)
-                .map_err(|_| BootFailure::Record)?
-                .component(0)
-                .ok_or(BootFailure::Record),
-        }
-    }
-
-    fn program(&self, entries: &DecodedImage<'a>) -> Result<DecodedProgram<'_>, BootFailure> {
-        let plan = self.plan()?;
-        match self {
-            Self::Booted(_) => {
-                let record = format!("{}/{COMPONENT_PROGRAM_NAME}", plan.executable());
-                entries
-                    .entry(&record)
-                    .and_then(|entry| entry.program().ok())
-                    .ok_or(BootFailure::ProgramMissing)
-            }
-            Self::Defined { mapping, .. } => decode_program(plan.executable(), mapping.as_bytes())
-                .map_err(|_| BootFailure::ProgramMissing),
-        }
-    }
-}
-
-impl Component<'_> {
-    /// Managed-примитив компонента.
-    #[must_use]
-    pub const fn managed(&self) -> &ManagedComponent<ComponentRoots> {
-        &self.managed
-    }
-}
-
-impl<'a> Provider<'a> {
-    fn of(components: &'a [Component<'_>], instance: &str) -> Result<Self, BootFailure> {
-        let index = find_instance(components, instance).ok_or(BootFailure::Provider)?;
-        let component = components
-            .get(usize::from(index))
-            .ok_or(BootFailure::Provider)?;
-        let running = component.managed.running().ok_or(BootFailure::Provider)?;
-        Ok(Self {
-            roots: running.roots(),
-            startup: running.startup(),
-            plan: component.record.plan()?,
-        })
-    }
 }
 
 impl<'a> RootSystem<'a> {
-    /// Поднимает компоненты плана `plan` в топологическом порядке.
+    /// Заводит записи плана `plan`, которые запускает первый [`turn`]. `log_sessions` создаёт
+    /// источник журнала записи по значку [`log_badge`](crate::relay::log_badge) её номера.
     pub fn bring_up(
         image: &'a SystemImage,
         plan: BootPlan<'a>,
         kernel: Handle<kind::Port>,
-        log_sessions: LogSessions,
+        log_sessions: impl Fn(NonZeroU64) -> Option<Session<log::Protocol>>,
     ) -> Result<Self, BootFailure> {
         let entries = image.entries()?;
         let resource =
             Resource::self_resource().map_err(|_| BootFailure::Budget(BudgetFailure::Root))?;
-        let mut system = Self {
-            components: Vec::with_capacity(usize::from(plan.len())),
-            order: Vec::new(),
-            devices: DeviceAuthority::absent(),
-            extension: None,
-            kernel,
+        let mut children =
+            Children::new().map_err(|_| BootFailure::Budget(BudgetFailure::StartupPort))?;
+        let logs = (0..plan.len())
+            .map(|record| log_sessions(log_badge(record)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
+        let devices = DeviceGrants::new(kernel, &plan);
+
+        for (record, component) in (0..plan.len()).zip(plan.components()) {
+            let path = format!("{}/{COMPONENT_PROGRAM_NAME}", component.executable());
+            let program = entries
+                .entry(&path)
+                .and_then(|entry| entry.program().ok())
+                .ok_or(BootFailure::ProgramMissing)?;
+            children
+                .add(
+                    Holder::Record(record),
+                    program,
+                    component.name(),
+                    &resource,
+                    component.memory_limit(),
+                    BUDGET_RETURN_TIMEOUT,
+                )
+                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
+        }
+
+        Ok(Self {
+            children,
+            plan,
+            logs,
+            devices,
             image,
-            entries,
-            resource,
-            log_sessions,
-        };
-        if let Err(failure) = system.compose(plan) {
-            // Поднятые компоненты уходят вместе с неудавшейся загрузкой. Иначе они держат
-            // линии и окна устройств несуществующей композиции.
-            system.shutdown();
-            return Err(failure);
-        }
-        Ok(system)
-    }
-
-    /// Компонент с номером `index` в наборе композиции.
-    #[must_use]
-    pub fn component(&self, index: u16) -> Option<&Component<'a>> {
-        self.components.get(usize::from(index))
-    }
-
-    /// Номер компонента с именем экземпляра `instance`.
-    #[must_use]
-    pub fn instance(&self, instance: &str) -> Option<u16> {
-        find_instance(&self.components, instance)
-    }
-
-    /// Номера компонентов в порядке запуска. Остановка идёт в обратном.
-    #[must_use]
-    pub fn start_order(&self) -> &[u16] {
-        &self.order
-    }
-
-    /// Поднимает набор транзакции расширения в топологическом порядке по объединению рёбер
-    /// набора и уже поднятых компонентов. Отказ любого шага снимает набор целиком, оставляя
-    /// поднятые компоненты нетронутыми.
-    pub fn extend(
-        &mut self,
-        caller: NonZeroU64,
-        definitions: Vec<Definition>,
-    ) -> Result<(), BootFailure> {
-        let owner = self.caller_record(caller)?;
-        let first = self.components.len();
-        let order = self.order.clone();
-        if let Err(failure) = self.compose_extension(owner, definitions) {
-            self.discard(first, order);
-            return Err(failure);
-        }
-        Ok(())
-    }
-
-    /// Сессия экспорта `protocol` компонента `instance` для вызывателя со значком `caller`.
-    /// Компонент, которого вызыватель не определял, и протокол вне его экспортов
-    /// недоступны.
-    pub fn caller_session(
-        &self,
-        caller: NonZeroU64,
-        instance: &str,
-        protocol: &str,
-    ) -> Result<Port, BootFailure> {
-        let owner = self.caller_record(caller)?;
-        let index = find_instance(&self.components, instance).ok_or(BootFailure::Provider)?;
-        let component = self.component(index).ok_or(BootFailure::Provider)?;
-        if component.owner != Some(owner) {
-            return Err(BootFailure::Provider);
-        }
-        let export = component
-            .record
-            .plan()?
-            .exports()
-            .position(|export| export == protocol)
-            .ok_or(BootFailure::Provider)?;
-        let export = u8::try_from(export).map_err(|_| BootFailure::Provider)?;
-        session(&self.components, instance, export, caller)
-    }
-
-    /// Оборот supervisor. Ждёт завершения любого компонента, потока `relay_thread` либо
-    /// операции транзакции расширения, записывает исход в журнал ядра и поднимает ушедшему
-    /// компоненту смену.
-    ///
-    /// Завершение потока пересылки критично. Композиция не восстанавливает его.
-    pub fn supervise_turn(&mut self, relay_thread: Handle<kind::Thread>) -> Supervised {
-        let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
-        let mut waits = Vec::with_capacity(self.components.len() + SUPERVISOR_WAITS);
-        let mut watched: Vec<u16> = Vec::with_capacity(self.components.len());
-        for index in 0..self.component_count() {
-            let Some(running) = self.component(index).and_then(|c| c.managed.running()) else {
-                continue;
-            };
-            waits.push(WaitItem::new(running.process().as_raw(), SIGNALED));
-            watched.push(index);
-        }
-        waits.push(WaitItem::new(relay_thread, SIGNALED));
-        if let Some(posted) = self.extension.as_ref().map(ExtensionPort::posted) {
-            waits.push(WaitItem::new(posted, SIGNALED));
-        }
-
-        match wait_any(&waits, Timeout::INFINITE) {
-            Ok(index) if index < watched.len() => match watched.get(index) {
-                Some(&component) => self.replace_component(component, &kernel_log),
-                None => Supervised::Stopped(Stopped::Subsystem),
-            },
-            Ok(index) if index == watched.len() => {
-                log_exit(&kernel_log, "log relay", relay::exit_code());
-                Supervised::Stopped(Stopped::Subsystem)
-            }
-            Ok(_) => self.serve_extension(),
-            Err(_) => {
-                let _ = kernel_log.log_str(LOG_TAG, "supervisor wait failed");
-                Supervised::Stopped(Stopped::Subsystem)
-            }
-        }
-    }
-
-    /// Завершает компоненты композиции в порядке, обратном порядку запуска.
-    pub fn shutdown(&mut self) {
-        if let Some(extension) = &mut self.extension {
-            extension.shutdown();
-        }
-        self.stop_from(0);
-    }
-
-    fn compose(&mut self, plan: BootPlan<'a>) -> Result<(), BootFailure> {
-        if plan_needs_devices(&plan) {
-            self.devices = DeviceAuthority::acquire(self.kernel)?;
-        }
-        self.extension =
-            Some(ExtensionPort::start().map_err(|_| BootFailure::Slot(SlotFailure::Mint))?);
-        for index in 0..plan.len() {
-            let component = plan.component(index).ok_or(BootFailure::PlanOrder)?;
-            let log = (self.log_sessions)(relay::component_badge(index))
-                .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
-            let managed = ManagedComponent::new(&self.resource, component.memory_pages())
-                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
-            self.components.push(Component {
-                managed,
-                record: ComponentRecord::Booted(component),
-                log,
-                owner: None,
-                charged_launches: 1,
-            });
-        }
-        self.publish_names();
-        self.order = start_order(&self.components)?;
-        for index in self.order.clone() {
-            self.launch(index)?;
-        }
-        Ok(())
-    }
-
-    fn compose_extension(
-        &mut self,
-        owner: u16,
-        definitions: Vec<Definition>,
-    ) -> Result<(), BootFailure> {
-        let first = self.components.len();
-        if first + definitions.len() + SUPERVISOR_WAITS > WAIT_MANY_MAX_COUNT {
-            return Err(BootFailure::Budget(BudgetFailure::Reserve));
-        }
-        for definition in definitions {
-            let index = u16::try_from(self.components.len())
-                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
-            let record = ComponentRecord::defined(definition)?;
-            let pages = {
-                let plan = record.plan()?;
-                if find_instance(&self.components, plan.name()).is_some() {
-                    return Err(BootFailure::Instance);
-                }
-                plan.memory_pages()
-            };
-            let log = (self.log_sessions)(relay::component_badge(index))
-                .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
-            let managed = ManagedComponent::new(&self.resource, pages)
-                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
-            self.components.push(Component {
-                managed,
-                record,
-                log,
-                owner: Some(owner),
-                charged_launches: 1,
-            });
-        }
-        self.publish_names();
-        if self.devices.is_absent() && self.needs_devices(first) {
-            self.devices = DeviceAuthority::acquire(self.kernel)?;
-        }
-        self.order = start_order(&self.components)?;
-        for index in self.order.clone() {
-            if usize::from(index) >= first {
-                self.launch(index)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn needs_devices(&self, first: usize) -> bool {
-        self.components.iter().skip(first).any(|component| {
-            component.record.plan().is_ok_and(|plan| {
-                plan.slots()
-                    .any(|slot| matches!(slot, SlotSource::Irq(_) | SlotSource::Mmio(_)))
-            })
+            kernel,
+            restarts_used: vec![0; usize::from(plan.len())],
+            importers: Vec::new(),
+            _resource: resource,
         })
     }
 
-    fn discard(&mut self, first: usize, order: Vec<u16>) {
-        self.stop_from(first);
-        self.components.truncate(first);
-        self.publish_names();
-        self.order = order;
-    }
-
-    fn publish_names(&self) {
-        let names: Vec<&str> = self.components.iter().map(instance_name).collect();
-        relay::install_names(names.iter().copied());
-    }
-
-    fn stop_from(&mut self, first: usize) {
-        for index in self.order.clone().into_iter().rev() {
-            if usize::from(index) >= first {
-                self.stop(index);
-            }
-        }
-        // Компонент, до запуска которого подъём не дошёл, в порядке запуска не стоит.
-        for index in (first..self.components.len()).rev() {
-            if let Ok(index) = u16::try_from(index) {
-                self.stop(index);
-            }
-        }
-    }
-
-    fn stop(&mut self, index: u16) {
-        if let Some(component) = self.components.get_mut(usize::from(index)) {
-            let _ = component.managed.stop(SHUTDOWN_EXIT_CODE, STOP_TIMEOUT);
-        }
-    }
-
-    fn caller_record(&self, caller: NonZeroU64) -> Result<u16, BootFailure> {
-        relay::component_index(caller)
-            .filter(|index| *index < self.component_count())
-            .ok_or(BootFailure::Caller)
-    }
-
-    fn serve_extension(&mut self) -> Supervised {
-        let Some(request) = self
-            .extension
-            .as_ref()
-            .and_then(ExtensionPort::take_request)
-        else {
-            return Supervised::Extended;
-        };
-        let answer = match request {
-            Request::Commit {
-                caller,
-                definitions,
-            } => Answer::Extended(
-                self.extend(caller, definitions)
-                    .map_err(BootFailure::refused),
-            ),
-            Request::Session {
-                caller,
-                instance,
-                protocol,
-            } => Answer::Session(
-                self.caller_session(caller, &instance, &protocol)
-                    .map_err(refused_session),
-            ),
-        };
-        if let Some(extension) = &self.extension {
-            extension.answer(answer);
-        }
-        Supervised::Extended
-    }
-
-    fn launch(&mut self, index: u16) -> Result<(), BootFailure> {
-        let slots = self.provision(index)?;
-        let Self {
-            components,
-            entries,
-            ..
-        } = self;
-        let component = components
-            .get_mut(usize::from(index))
-            .ok_or(BootFailure::PlanOrder)?;
-        let Component {
-            managed,
-            record,
-            log,
-            ..
-        } = component;
-        let plan = record.plan()?;
-        let program = record.program(entries)?;
-        launch_component(
-            managed,
-            &program,
-            plan.name(),
-            log,
-            plan.startup_timeout(),
-            plan.exports().count(),
-            slots,
-        )
-        .map_err(BootFailure::Launch)
-    }
-
-    fn provision(&mut self, index: u16) -> Result<ComponentSlots, BootFailure> {
-        let badge = relay::component_badge(index);
-        let kernel_log = bootstrap::Client::new(PortTransport::client(self.kernel));
-        let Self {
-            components,
-            devices,
-            extension,
-            kernel,
-            image,
-            ..
-        } = self;
-        let plan = components
-            .get(usize::from(index))
-            .ok_or(BootFailure::PlanOrder)?
-            .record
-            .plan()?;
-        let mut slots = ComponentSlots::default();
-        for source in plan.slots() {
-            match source {
-                SlotSource::Userland => slots.push(
-                    image
-                        .region()
-                        .duplicate(Rights::READ | Rights::TRANSFER | Rights::DUPLICATE, None)
-                        .map_err(|_| BootFailure::Slot(SlotFailure::Mint))?,
-                ),
-                SlotSource::Irq(device) => {
-                    slots.push(devices.line(device, plan.name(), &kernel_log)?)
-                }
-                SlotSource::Mmio(device) => {
-                    slots.push(devices.window(*kernel, device, index, plan.name(), &kernel_log)?)
-                }
-                SlotSource::Service { provider, export } => {
-                    slots.push(session(components, provider, export, badge)?)
-                }
-                // Область слота-каталога назначает supervisor: путь берёт запись программы.
-                SlotSource::Directory { provider } => {
-                    slots.push(component_area(components, provider, plan.executable())?)
-                }
-                SlotSource::Supervisor => slots.push(
-                    extension
-                        .as_ref()
-                        .and_then(|port| port.slot(badge))
-                        .ok_or(BootFailure::Slot(SlotFailure::Mint))?,
-                ),
-            }
-            .map_err(BootFailure::Launch)?;
-        }
-        Ok(slots)
-    }
-
-    fn component_count(&self) -> u16 {
-        u16::try_from(self.components.len()).unwrap_or(u16::MAX)
-    }
-
-    fn replace_component(
+    /// Создаёт клиентскую capability импортёра с требованиями `requirements`. Родитель отвечает
+    /// по ней только на запрос `session` требования из `requirements`. Поток, который зовёт
+    /// [`turn`], не вызывает по ней.
+    pub fn importer(
         &mut self,
-        index: u16,
-        kernel_log: &bootstrap::Client<PortTransport>,
-    ) -> Supervised {
-        // Слоты принадлежат incarnation, и капы ушедшей ядро отзывает. Уход провайдера снимает
-        // потребителей, а они получают новую incarnation только вместе с его собственным
-        // перезапуском.
-        let group = self.dependents(index);
-        let dependents = u16::try_from(group.len()).unwrap_or(u16::MAX);
-        let Some(component) = self.components.get_mut(usize::from(index)) else {
-            return Supervised::Stopped(Stopped::Subsystem);
-        };
-        let exit_code = component
-            .managed
-            .running()
-            .and_then(|running| running.process().exit_code().ok());
-        let observed = component.managed.observe_exit(Timeout::POLL);
-        let charged = component.charged_launches;
+        requirements: &[ImporterRequirement<'_>],
+    ) -> Result<Port, ImporterRefusal> {
+        let mut bindings: Vec<ImporterBinding<'a>> = Vec::with_capacity(requirements.len());
+        for (index, requirement) in requirements.iter().enumerate() {
+            let binding = self
+                .importer_binding(requirement, &bindings)
+                .ok_or(ImporterRefusal::Requirement(index))?;
+            bindings.push(binding);
+        }
+        let port = self
+            .children
+            .importer(Holder::Importer(self.importers.len()))
+            .map_err(ImporterRefusal::Importer)?;
+        self.importers.push(bindings);
+        Ok(port)
+    }
 
-        let Ok(plan) = component.record.plan() else {
-            return Supervised::Stopped(Stopped::Subsystem);
-        };
-        let launches = plan.launches();
-        let on_exhausted = plan.on_exhausted();
-        log_exit(kernel_log, plan.name(), exit_code);
+    /// Завершает процесс работающей записи плана `name` кодом `code`. Следующий [`turn`] решает,
+    /// что делать с записью.
+    pub fn terminate(&mut self, name: &str, code: u32) {
+        if let Some((record, _)) = self.record_named(name) {
+            self.children.terminate(Holder::Record(record), code);
+        }
+    }
 
-        if observed.is_err() {
-            let _ = kernel_log.log_str(LOG_TAG, "component budget not returned");
-            return Supervised::Stopped(Stopped::Subsystem);
+    fn record_named(&self, name: &str) -> Option<(u16, PlanComponent<'a>)> {
+        (0..self.plan.len())
+            .zip(self.plan.components())
+            .find(|(_, component)| component.name() == name)
+    }
+
+    fn importer_binding(
+        &self,
+        requirement: &ImporterRequirement<'_>,
+        bound: &[ImporterBinding<'a>],
+    ) -> Option<ImporterBinding<'a>> {
+        if requirement.name == LOG_REQUIREMENT
+            || requirement.name.len() > REQUIREMENT_NAME_MAX
+            || bound.iter().any(|binding| binding.name == requirement.name)
+        {
+            return None;
         }
-        if dependents > 0 {
-            log_takedown(kernel_log, plan.name(), dependents);
+        let (provider, component) = self.record_named(requirement.provider)?;
+        let protocol = component
+            .exports()
+            .find(|export| *export == requirement.protocol)?;
+        Some(ImporterBinding {
+            name: String::from(requirement.name),
+            export: Export {
+                provider,
+                protocol,
+                scope: SessionScope::new(requirement.scope)?,
+            },
+        })
+    }
+
+    fn launch_due(&mut self) {
+        while let Some(departure) = self.children.launch_due() {
+            self.decide(departure);
         }
-        for &member in group.iter().rev() {
-            self.stop(member);
-        }
-        if charged >= launches {
-            let _ = kernel_log.log_str(LOG_TAG, "component restart limit reached");
-            return give_up(on_exhausted, exit_code, dependents);
-        }
-        if let Err(failure) = self.launch(index) {
-            if let Some(plan) = self
-                .component(index)
-                .and_then(|component| component.record.plan().ok())
+    }
+
+    fn decide(&mut self, departure: Departure<Holder>) {
+        let Holder::Record(record) = departure.child else {
+            return;
+        };
+        let Some(component) = self.plan.component(record) else {
+            return;
+        };
+        let name = component.name();
+        let retry = match departure.outcome {
+            Outcome::Exit(code) => {
+                self.log(format_args!("{name} stopped with exit code {code}"));
+                code != 0
+            }
+            Outcome::TakenDown => {
+                self.log(format_args!("{name} taken down: startup session closed"));
+                true
+            }
+            Outcome::LaunchFailed => {
+                self.log(format_args!("{name} launch failed"));
+                false
+            }
+            Outcome::BudgetNotReturned => {
+                self.log(format_args!("{name} budget not returned"));
+                false
+            }
+        };
+
+        let child = Holder::Record(record);
+        if retry {
+            if let Some(used) = self.restarts_used.get_mut(usize::from(record))
+                && *used < component.restarts()
             {
-                log_restart_failure(kernel_log, plan.name(), failure);
+                *used += 1;
+                self.children.restart(child);
+                return;
             }
-            return give_up(on_exhausted, exit_code, dependents);
+            self.log(format_args!("{name} restart limit reached"));
         }
-        self.charge_launch(index);
-        for member in group {
-            if self.launch(member).is_ok() {
-                continue;
+        self.children.remove(child);
+    }
+
+    fn record_export(&self, record: u16, requirement: &str) -> Option<Export<'a>> {
+        match self.plan.component(record)?.requirement(requirement)? {
+            RequirementSource::Export {
+                provider,
+                protocol,
+                scope,
+            } => Some(Export {
+                provider,
+                protocol,
+                scope: SessionScope::new(scope)?,
+            }),
+            RequirementSource::Irq(_) | RequirementSource::Mmio(_) | RequirementSource::Region => {
+                None
             }
-            let _ = kernel_log.log_str(LOG_TAG, "dependent component not restarted");
-            if self.halts(member) {
-                return Supervised::Stopped(Stopped::Subsystem);
-            }
-        }
-        Supervised::Restarted {
-            exit_code,
-            dependents,
         }
     }
 
-    fn dependents(&self, index: u16) -> Vec<u16> {
-        let mut taken = alloc::vec![false; self.components.len()];
-        let Some(gone) = taken.get_mut(usize::from(index)) else {
-            return Vec::new();
+    fn importer_export(&self, importer: usize, requirement: &str) -> Option<Export<'a>> {
+        self.importers
+            .get(importer)?
+            .iter()
+            .find(|binding| binding.name == requirement)
+            .map(|binding| binding.export.clone())
+    }
+
+    fn log_session(
+        &mut self,
+        record: u16,
+        badge: u64,
+        protocol: &str,
+    ) -> Result<Port, SessionError> {
+        if protocol != log::Protocol::ID {
+            return Err(SessionError::Refused);
+        }
+        let source = self
+            .logs
+            .get(usize::from(record))
+            .ok_or(SessionError::Refused)?;
+        self.children
+            .grant(
+                badge,
+                LOG_REQUIREMENT,
+                source.handle().borrow(),
+                Rights::WRITE | Rights::TRANSFER,
+            )
+            .map_err(SessionError::from)
+    }
+
+    fn record_requirement(
+        &self,
+        badge: u64,
+        requirement: &str,
+    ) -> Option<(u16, RequirementSource<'a>)> {
+        let Holder::Record(record) = self.children.caller(badge)? else {
+            return None;
         };
-        *gone = true;
-        let mut group = Vec::new();
-        // Порядок запуска топологический, и один проход по нему замыкает потребителей
-        // транзитивно.
-        for &candidate in &self.order {
-            if candidate == index {
-                continue;
-            }
-            let Some(component) = self.components.get(usize::from(candidate)) else {
-                continue;
-            };
-            let depends = dependencies(component).is_ok_and(|mut edges| {
-                edges.any(|edge| {
-                    find_instance(&self.components, edge)
-                        .and_then(|provider| taken.get(usize::from(provider)).copied())
-                        .unwrap_or(false)
-                })
-            });
-            if !depends {
-                continue;
-            }
-            if let Some(slot) = taken.get_mut(usize::from(candidate)) {
-                *slot = true;
-            }
-            // Снятый компонент своей смены не получает. Композиция держит его без запуска.
-            if component.managed.running().is_some() {
-                group.push(candidate);
-            }
-        }
-        group
+        Some((
+            record,
+            self.plan.component(record)?.requirement(requirement)?,
+        ))
     }
 
-    fn charge_launch(&mut self, index: u16) {
-        if let Some(component) = self.components.get_mut(usize::from(index)) {
-            component.charged_launches = component.charged_launches.saturating_add(1);
-        }
+    fn device<K: DeviceKind>(
+        &mut self,
+        badge: u64,
+        requirement: &str,
+    ) -> Result<OwnedHandle<K>, ResourceError> {
+        let (record, device) = self
+            .record_requirement(badge, requirement)
+            .and_then(|(record, source)| Some((record, K::device(source)?)))
+            .ok_or(ResourceError::Refused)?;
+        let children = &mut self.children;
+        K::root(&mut self.devices, record, requirement, device, |root| {
+            grant(children, badge, requirement, root)
+        })
+        .unwrap_or_else(|refusal| Err(self.refuse_device(record, requirement, refusal)))
     }
 
-    fn halts(&self, index: u16) -> bool {
-        self.components
-            .get(usize::from(index))
-            .and_then(|component| component.record.plan().ok())
-            .is_none_or(|plan| matches!(plan.on_exhausted(), OnExhausted::Halt))
+    fn refuse_device(
+        &self,
+        record: u16,
+        requirement: &str,
+        refusal: DeviceRefusal,
+    ) -> ResourceError {
+        let name = self
+            .plan
+            .component(record)
+            .map_or("", |component| component.name());
+        self.log(format_args!(
+            "{name} requirement {requirement} refused: {}",
+            refusal.reason()
+        ));
+        ResourceError::Refused
+    }
+
+    fn log(&self, line: Arguments<'_>) {
+        log_line(self.kernel, line);
     }
 }
 
-/// Поднимает систему и держит её до завершения критического компонента.
-pub fn supervise(kernel: Handle<kind::Port>) -> Stopped {
-    let kernel_log = bootstrap::Client::new(PortTransport::client(kernel));
-    if relay::start(kernel).is_err() {
-        // Отказ relay идёт в bootstrap-канал. По отказавшему пути диагностика не проходит.
-        let _ = kernel_log.log_str(LOG_TAG, "log relay not started");
-        return Stopped::Startup;
+impl component_startup::Service<Delivery> for RootSystem<'_> {
+    fn session(
+        &mut self,
+        frame: &Delivery,
+        requirement: SessionRequirement<'_>,
+        reply: component_startup::session::Reply<Debt>,
+    ) {
+        let badge = frame.badge;
+        let name = requirement.name.as_str();
+        let protocol = requirement.protocol.as_str();
+        let export = match self.children.caller(badge) {
+            Some(Holder::Record(record)) if name == LOG_REQUIREMENT => {
+                let answer = self.log_session(record, badge, protocol);
+                let _ = reply.send(answer);
+                return;
+            }
+            Some(Holder::Record(record)) => self.record_export(record, name),
+            Some(Holder::Importer(importer)) => self.importer_export(importer, name),
+            None => None,
+        };
+        let Some(export) = export.filter(|export| export.protocol == protocol) else {
+            let _ = reply.send(Err::<Port, _>(SessionError::Refused));
+            return;
+        };
+
+        let provider = Holder::Record(export.provider);
+        if matches!(self.children.status(provider), None | Some(Status::Removed)) {
+            let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
+            return;
+        }
+        self.children
+            .request(provider, export.protocol, badge, name, export.scope, reply);
     }
-    let stopped = run(kernel, &kernel_log);
-    relay::shutdown(STOP_TIMEOUT);
-    stopped
+
+    fn irq(
+        &mut self,
+        frame: &Delivery,
+        requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
+        reply: component_startup::irq::Reply<Debt>,
+    ) {
+        let _ = reply.send(self.device(frame.badge, requirement.as_str()));
+    }
+
+    fn mmio(
+        &mut self,
+        frame: &Delivery,
+        requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
+        reply: component_startup::mmio::Reply<Debt>,
+    ) {
+        let _ = reply.send(self.device(frame.badge, requirement.as_str()));
+    }
+
+    fn region(
+        &mut self,
+        frame: &Delivery,
+        requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
+        reply: component_startup::region::Reply<Debt>,
+    ) {
+        let requirement = requirement.as_str();
+        let answer = match self.record_requirement(frame.badge, requirement) {
+            Some((_, RequirementSource::Region)) => self
+                .children
+                .grant(
+                    frame.badge,
+                    requirement,
+                    self.image.region.borrow(),
+                    Rights::READ | Rights::DUPLICATE | Rights::TRANSFER,
+                )
+                .map_err(ResourceError::from),
+            _ => Err(ResourceError::Refused),
+        };
+        let _ = reply.send(answer);
+    }
+
+    fn accept(
+        &mut self,
+        frame: &Delivery,
+        export: Str<'_, { PROTOCOL_ID_MAX }>,
+        reply: component_startup::accept::Reply<Debt>,
+    ) {
+        let export = export.as_str();
+        let provider = match self.children.caller(frame.badge) {
+            Some(Holder::Record(record))
+                if self
+                    .plan
+                    .component(record)
+                    .is_some_and(|component| component.exports().any(|name| name == export)) =>
+            {
+                Holder::Record(record)
+            }
+            Some(Holder::Record(_) | Holder::Importer(_)) | None => {
+                let _ = reply.send(Err::<
+                    SessionRequest<component_startup::session::Reply<Debt>>,
+                    _,
+                >(AcceptError::Refused));
+                return;
+            }
+        };
+        self.children.accept(provider, frame.badge, export, reply);
+    }
 }
 
-fn run(kernel: Handle<kind::Port>, kernel_log: &bootstrap::Client<PortTransport>) -> Stopped {
-    let Some(session) = relay::session(relay::SUPERVISOR_BADGE) else {
-        let _ = kernel_log.log_str(LOG_TAG, "supervisor log session not minted");
-        return Stopped::Startup;
+/// Один оборот обслуживания композиции `system`: запуск ждущих записей, приём кадра не дольше
+/// `timeout` и его обслуживание. На время приёма замок `system` отпущен. `Break` означает, что
+/// порт закрыт.
+pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()> {
+    let (port, wait) = {
+        let mut guard = system.lock();
+        guard.launch_due();
+        let next = guard.children.next_launch();
+        let wait = if next.raw() < timeout.raw() {
+            next
+        } else {
+            timeout
+        };
+        (guard.children.port().as_raw(), wait)
     };
-    let log = log::Client::new(PortTransport::client(&session));
-    let _ = log.write_str(LOG_TAG, "started");
 
-    let Some(relay_thread) = relay::thread_handle() else {
-        let _ = log.write_str(LOG_TAG, "log relay thread unavailable");
-        return Stopped::Startup;
-    };
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    match PortTransport::new(port).recv(&mut bytes, wait) {
+        Ok(incoming) => {
+            let _ = component_startup::dispatch(&mut *system.lock(), incoming);
+        }
+        Err(RecvError::SenderGone(badge)) => {
+            let mut guard = system.lock();
+            if let Some(departure) = guard.children.depart(badge) {
+                guard.decide(departure);
+            }
+        }
+        Err(RecvError::Timeout | RecvError::Discarded) => {}
+        Err(RecvError::Closed) => return ControlFlow::Break(()),
+    }
+    ControlFlow::Continue(())
+}
 
+/// Поднимает композицию загрузочного плана и служит её родителем. Возвращается только при
+/// отказе подъёма либо выходе из оборота.
+pub fn run(kernel: Handle<kind::Port>) -> Stopped {
     let image = match SystemImage::acquire(kernel) {
         Ok(image) => image,
-        Err(failure) => {
-            let _ = log.write_str(LOG_TAG, failure.message());
-            return failure.stopped();
-        }
+        Err(failure) => return refuse_boot(kernel, failure),
     };
     let plan = match image.plan(BOOT_PLAN_PATH) {
         Ok(plan) => plan,
-        Err(failure) => {
-            let _ = log.write_str(LOG_TAG, failure.message());
-            return failure.stopped();
-        }
+        Err(failure) => return refuse_boot(kernel, failure),
     };
-
-    run_composition(&image, plan, kernel, relay_thread, &log)
-}
-
-fn run_composition(
-    image: &SystemImage,
-    plan: BootPlan<'_>,
-    kernel: Handle<kind::Port>,
-    relay_thread: Handle<kind::Thread>,
-    log: &log::Client<PortTransport>,
-) -> Stopped {
-    match RootSystem::bring_up(image, plan, kernel, relay::delegated_session) {
-        Ok(mut system) => {
-            let _ = log.write_str(LOG_TAG, "composition started");
-            let stopped = loop {
-                match system.supervise_turn(relay_thread) {
-                    Supervised::Restarted { .. } => {
-                        let _ = log.write_str(LOG_TAG, "component restarted");
-                    }
-                    Supervised::Abandoned { .. } => {
-                        let _ = log.write_str(LOG_TAG, "component abandoned");
-                    }
-                    Supervised::Extended => {}
-                    Supervised::Stopped(stopped) => break stopped,
-                }
-            };
-            system.shutdown();
-            stopped
-        }
-        Err(failure) => {
-            let _ = log.write_str(LOG_TAG, failure.message());
-            failure.stopped()
-        }
-    }
-}
-
-const fn give_up(on_exhausted: OnExhausted, exit_code: Option<u32>, dependents: u16) -> Supervised {
-    match on_exhausted {
-        OnExhausted::Halt => Supervised::Stopped(Stopped::Subsystem),
-        OnExhausted::Detach => Supervised::Abandoned {
-            exit_code,
-            dependents,
-        },
-    }
-}
-
-const fn refused_session(failure: BootFailure) -> ExtendError {
-    match failure {
-        BootFailure::Provider | BootFailure::Caller => ExtendError::NotFound,
-        other => other.refused(),
-    }
-}
-
-fn plan_needs_devices(plan: &BootPlan<'_>) -> bool {
-    plan.components().any(|component| {
-        component
-            .slots()
-            .any(|slot| matches!(slot, SlotSource::Irq(_) | SlotSource::Mmio(_)))
-    })
-}
-
-fn session(
-    components: &[Component<'_>],
-    instance: &str,
-    export: u8,
-    badge: NonZeroU64,
-) -> Result<Port, BootFailure> {
-    let provider = Provider::of(components, instance)?;
-    // Значки сессий провайдера с состоянием принадлежат ему одному. Минтер супервизора на
-    // порт его экспорта значков не выдаёт.
-    if provider.plan.establishes_sessions() {
-        return open_session(
-            provider.startup,
-            provider.plan.startup_timeout(),
-            u16::from(export),
-            WHOLE_EXPORT,
-        );
-    }
-    provider
-        .roots
-        .session(usize::from(export), badge)
-        .map_err(|_| BootFailure::Slot(SlotFailure::Mint))
-}
-
-fn component_area(
-    components: &[Component<'_>],
-    instance: &str,
-    scope: &str,
-) -> Result<Port, BootFailure> {
-    let provider = Provider::of(components, instance)?;
-    // Сузить сессию до области может лишь тот, кто её и создаёт. Сминченный значок области
-    // не назначает.
-    if !provider.plan.establishes_sessions() {
-        return Err(BootFailure::Slot(SlotFailure::Directory));
-    }
-    // Слот-каталог протокола не называет, и каталог приходит сессией единственного экспорта.
-    open_session(
-        provider.startup,
-        provider.plan.startup_timeout(),
-        SINGLE_EXPORT,
-        scope,
-    )
-    .map_err(|_| BootFailure::Slot(SlotFailure::Directory))
-}
-
-fn start_order(components: &[Component<'_>]) -> Result<Vec<u16>, BootFailure> {
-    // Порядок запуска топологический. Компонент поднимается после всех, кого называют
-    // провайдеры его слотов и `after`.
-    let count = components.len();
-    let mut started = alloc::vec![false; count];
-    let mut order = Vec::with_capacity(count);
-    while order.len() < count {
-        let mut progress = false;
-        for (index, component) in components.iter().enumerate() {
-            if started.get(index).copied().unwrap_or(true) {
-                continue;
-            }
-            let mut ready = true;
-            for edge in dependencies(component)? {
-                let edge = find_instance(components, edge).ok_or(BootFailure::Provider)?;
-                ready &= started
-                    .get(usize::from(edge))
-                    .copied()
-                    .ok_or(BootFailure::Provider)?;
-            }
-            if ready {
-                if let Some(slot) = started.get_mut(index) {
-                    *slot = true;
-                }
-                order.push(u16::try_from(index).map_err(|_| BootFailure::PlanOrder)?);
-                progress = true;
-            }
-        }
-        if !progress {
-            return Err(BootFailure::PlanOrder);
-        }
-    }
-    Ok(order)
-}
-
-fn dependencies<'a>(
-    component: &'a Component<'_>,
-) -> Result<impl Iterator<Item = &'a str>, BootFailure> {
-    let plan = component.record.plan()?;
-    Ok(plan
-        .slots()
-        .filter_map(|slot| match slot {
-            SlotSource::Service { provider, .. } | SlotSource::Directory { provider } => {
-                Some(provider)
-            }
-            _ => None,
-        })
-        .chain(plan.after()))
-}
-
-fn instance_name<'a>(component: &'a Component<'_>) -> &'a str {
-    component.record.plan().map_or("", |plan| plan.name())
-}
-
-fn find_instance(components: &[Component<'_>], instance: &str) -> Option<u16> {
-    components
-        .iter()
-        .position(|component| {
-            component
-                .record
-                .plan()
-                .is_ok_and(|plan| plan.name() == instance)
-        })
-        .and_then(|index| u16::try_from(index).ok())
-}
-
-fn open_session(
-    startup: BorrowedHandle<'_, kind::Port>,
-    timeout: Timeout,
-    export: u16,
-    scope: &str,
-) -> Result<Port, BootFailure> {
-    let scope =
-        Str::<SESSION_SCOPE_MAX>::new(scope).ok_or(BootFailure::Slot(SlotFailure::Session))?;
-    let mut response = component_startup::Client::new(PortTransport::client(startup))
-        .with_wait(timeout)
-        .open_session(export, scope)
-        .map_err(|_| BootFailure::Slot(SlotFailure::Session))?;
-    let session = response
-        .value
-        .map_err(|_| BootFailure::Slot(SlotFailure::Session))?;
-    let handle = response
-        .claim(session)
-        .ok_or(BootFailure::Slot(SlotFailure::Session))?;
-    Ok(handle.into())
-}
-
-fn log_device_conflict(
-    kernel_log: &bootstrap::Client<PortTransport>,
-    component: &str,
-    resource: Arguments<'_>,
-) {
-    let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
-    if write!(
-        message,
-        "{component} takes {resource}, held by another component"
-    )
-    .is_ok()
-    {
-        let _ = kernel_log.log_str(LOG_TAG, message.as_str());
-    }
-}
-
-fn log_restart_failure(
-    kernel_log: &bootstrap::Client<PortTransport>,
-    component: &str,
-    failure: BootFailure,
-) {
-    let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
-    if write!(message, "{component} not restarted: {}", failure.message()).is_ok() {
-        let _ = kernel_log.log_str(LOG_TAG, message.as_str());
-    }
-}
-
-fn log_takedown(kernel_log: &bootstrap::Client<PortTransport>, component: &str, dependents: u16) {
-    let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
-    let plural = if dependents == 1 { "" } else { "s" };
-    if write!(
-        message,
-        "{component} takes down {dependents} dependent component{plural}"
-    )
-    .is_ok()
-    {
-        let _ = kernel_log.log_str(LOG_TAG, message.as_str());
-    }
-}
-
-fn log_exit(
-    kernel_log: &bootstrap::Client<PortTransport>,
-    subsystem: &str,
-    exit_code: Option<u32>,
-) {
-    let mut message = LogBuffer::<EXIT_MESSAGE_MAX>::new();
-    let written = match exit_code {
-        Some(code) => write!(message, "{subsystem} stopped with exit code {code}"),
-        None => write!(message, "{subsystem} stopped; exit code unavailable"),
+    let Ok(relay) = LogRelayThread::start(ComponentNames::of(&plan), KernelLogSink::new(kernel))
+    else {
+        log_line(kernel, format_args!("log relay not started"));
+        return Stopped::Startup;
     };
-    if written.is_ok() {
-        let _ = kernel_log.log_str(LOG_TAG, message.as_str());
-    }
+    let system = match RootSystem::bring_up(&image, plan, kernel, |badge| relay.session(badge).ok())
+    {
+        Ok(system) => Mutex::new(system),
+        Err(failure) => return refuse_boot(kernel, failure),
+    };
+    log_line(kernel, format_args!("composition started"));
+
+    while turn(&system, Timeout::INFINITE).is_continue() {}
+    log_line(kernel, format_args!("startup port closed"));
+    Stopped::Subsystem
+}
+
+fn grant<'a, K: ObjectKind + 'static>(
+    children: &mut Children<'a, Holder, DecodedProgram<'a>>,
+    badge: u64,
+    requirement: &str,
+    root: kernel_objects::BorrowedHandle<'_, K>,
+) -> Result<OwnedHandle<K>, ResourceError> {
+    children
+        .grant(
+            badge,
+            requirement,
+            root,
+            Rights::READ | Rights::WRITE | Rights::DUPLICATE | Rights::TRANSFER,
+        )
+        .map_err(ResourceError::from)
+}
+
+fn refuse_boot(kernel: Handle<kind::Port>, failure: BootFailure) -> Stopped {
+    log_line(kernel, format_args!("{}", failure.message()));
+    failure.stopped()
+}
+
+fn log_line(kernel: Handle<kind::Port>, line: Arguments<'_>) {
+    let mut message = LogBuffer::<LOG_MESSAGE_MAX>::new();
+    let _ = message.write_fmt(line);
+    let _ = bootstrap::Client::new(PortTransport::new(kernel)).log_str(LOG_TAG, message.as_str());
 }

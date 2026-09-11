@@ -1,7 +1,7 @@
 //! Подключение фасада к системе: capability становится транспортом и отображением.
 
-use filesystem_abi::FileSystemError;
-use ipc::{ReceivedResources, Transport};
+use filesystem_abi::{FileSystemError, file_system};
+use ipc::{Channel, ReceivedResources};
 use syscall::{ObjectKind, kind};
 
 /// Источник транспорта и отображений, на котором работает фасад. Окружение владеет
@@ -12,7 +12,7 @@ pub trait Environment {
 
     /// Транспорт, по которому идут вызовы контракта файловой системы. Виды его принятых
     /// ресурсов совпадают с видами окружения.
-    type Transport: Transport<
+    type Transport: Channel<
         Resources: ReceivedResources<
             Handle<kind::Port> = Self::Handle<kind::Port>,
             Handle<kind::MemoryRegion> = Self::Handle<kind::MemoryRegion>,
@@ -22,8 +22,11 @@ pub trait Environment {
     /// Отображение буфера данных сессии.
     type Region: SharedRegion;
 
-    /// Открывает транспорт поверх capability сессии файловой системы.
-    fn connect(&self, port: Self::Handle<kind::Port>) -> Result<Self::Transport, FileSystemError>;
+    /// Открывает транспорт поверх принятой сессии файловой системы.
+    fn connect(
+        &self,
+        session: ipc::wire::Session<file_system::Protocol, Self::Handle<kind::Port>>,
+    ) -> Result<Self::Transport, FileSystemError>;
 
     /// Отображает capability региона в адресное пространство программы.
     fn map(

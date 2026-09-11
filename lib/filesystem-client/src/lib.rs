@@ -28,4 +28,4 @@ pub use filesystem::FileSystem;
 pub use listing::Listing;
 pub use node::OpenNode;
 #[cfg(target_os = "molecular")]
-pub use system::{FileSystemEnvironment, SessionPort, SessionRegion};
+pub use system::{FileSystemEnvironment, SessionRegion};

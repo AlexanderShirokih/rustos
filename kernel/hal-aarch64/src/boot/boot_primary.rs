@@ -232,7 +232,7 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
         kernel,
         buffered,
         SCHED_CONFIG,
-        spawn_init_process_impl(),
+        spawn_initial_process_impl(),
     )
 }
 
@@ -307,18 +307,18 @@ fn device_window_to_region(window: &AddressSpace) -> Option<Arc<MemoryRegion>> {
     )))
 }
 
-type InitTask = fn(
+type InitialProcess = fn(
     &Scheduler<Aarch64Context, KernelTimerSource, Bootstrapped>,
     &mut KernelContext,
 ) -> Result<(), scheduler::SpawnError>;
 
-fn spawn_init_process_impl() -> InitTask {
+fn spawn_initial_process_impl() -> InitialProcess {
     #[cfg(feature = "kernel-tests")]
     {
         kernelspace::kernel_tests::spawn_kernel_tests_process::<Aarch64Context>
     }
     #[cfg(not(feature = "kernel-tests"))]
     {
-        kernelspace::init::spawn_init_process::<Aarch64Context>
+        kernelspace::initial_process::spawn_initial_process::<Aarch64Context>
     }
 }

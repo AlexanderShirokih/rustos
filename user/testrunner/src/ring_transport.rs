@@ -1,16 +1,14 @@
-//! E2E проверка `RingTransport` из EL0: producer и consumer над общим
+//! E2E проверка `RingProducer`/`RingConsumer` из EL0: концы над общим
 //! регионом-кольцом (`SpscRing`) в shared memory и одним "data"-сигналом.
 //!
 //! Главный поток выступает стороной producer, рабочий поток - стороной
 //! consumer. Регион создаётся через `Resource`/`MemoryRegion` и маппится,
-//! оборачивается двумя значениями `SpscRing` (по одному на конец). Consumer в
-//! цикле `wait_readable` + `read_message` выгребает `FRAMES` кадров, producer
-//! шлёт те же `FRAMES` (retry на `WouldBlock` с уступкой планировщику).
-//! Проверяем, что все кадры получены по порядку.
+//! оборачивается двумя значениями `SpscRing` (по одному на конец). Consumer
+//! вызовами `pop` выгребает `FRAMES` кадров, producer шлёт те же `FRAMES`
+//! (повтор на `Full`). Проверяем, что все кадры получены по порядку.
 
-use collections::SpscRing;
-use ipc::{Transport, wire::IpcError};
-use kernel_objects::{Resource, RingTransport, Signal, kind};
+use collections::{RingError, SpscRing};
+use kernel_objects::{Resource, RingConsumer, RingProducer, Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags, spawn};
 use syscall::Handle;
@@ -44,26 +42,13 @@ extern "C" fn consumer_worker(arg: usize) -> u32 {
     // один producer + один consumer).
     let ring = unsafe { SpscRing::from_raw(base, shared.region_len, SLOT_PAYLOAD) }
         .expect("consumer ring");
-    let transport = RingTransport::consumer(ring, shared.data);
+    let consumer = RingConsumer::new(ring, shared.data);
 
-    let mut next = 0u32;
-    let mut handles: [u32; 0] = [];
-    while next < FRAMES {
-        match transport.wait_readable(WAIT_TIMEOUT) {
-            Ok(()) => {}
-            Err(_) => return 1,
-        }
+    for next in 0..FRAMES {
         let mut buf = [0u8; SLOT_PAYLOAD];
-        match transport.read_message(&mut buf, &mut handles) {
-            Ok(len) => {
-                if len.bytes != SLOT_PAYLOAD || u32::from_le_bytes(buf) != next {
-                    return 1;
-                }
-                next += 1;
-            }
-            // Из-за гонки поток просыпается, но кадр ещё не виден - повторяем.
-            Err(IpcError::WouldBlock) => core::hint::spin_loop(),
-            Err(_) => return 1,
+        match consumer.pop(&mut buf, WAIT_TIMEOUT) {
+            Ok(SLOT_PAYLOAD) if u32::from_le_bytes(buf) == next => {}
+            _ => return 1,
         }
     }
 
@@ -103,20 +88,19 @@ fn ring_transport_round_trip() {
     // единственный producer-конец над ней.
     let producer_ring =
         unsafe { SpscRing::from_raw(base, region_len, SLOT_PAYLOAD) }.expect("producer ring");
-    let producer = RingTransport::producer_signal(producer_ring, data_signal.borrow());
+    let producer = RingProducer::new(producer_ring, data_signal.borrow());
 
     // Спавним consumer-поток в текущем процессе.
     let arg = (&raw const shared) as usize;
     let thread =
         spawn(consumer_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn consumer worker");
 
-    // Producer: шлём FRAMES кадров; на полном кольце (WouldBlock) уступаем.
-    let handles: [u32; 0] = [];
+    // Producer: шлём FRAMES кадров; на полном кольце повторяем.
     let mut sent = 0u32;
     while sent < FRAMES {
-        match producer.write_message(&sent.to_le_bytes(), &handles) {
+        match producer.push(&sent.to_le_bytes()) {
             Ok(()) => sent += 1,
-            Err(IpcError::WouldBlock) => core::hint::spin_loop(),
+            Err(RingError::Full) => core::hint::spin_loop(),
             Err(_) => kernel_tests::kassert!(false),
         }
     }

@@ -11,7 +11,6 @@
 
 mod host;
 mod manifest;
-mod mounts;
 mod plan;
 mod seeds;
 mod units;

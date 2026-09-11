@@ -1,9 +1,9 @@
 //! Режим доступа открываемого дескриптора.
 
 use ipc::{
-    WireTyped, WireValue,
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
     schema::WireType,
-    wire::{HandleSlots, IpcError, MessageBuf, value},
+    wire::{IpcError, MessageBuf, value},
 };
 
 /// Режим доступа дескриптора, в кадре занимает `u8`. Обязательный параметр `open`: дескриптор
@@ -53,19 +53,22 @@ impl AccessMode {
     }
 }
 
-impl<'a> WireValue<'a> for AccessMode {
-    fn write_as_field<const N: usize>(
-        &self,
-        buf: &mut MessageBuf<N>,
-        field_id: u8,
-        _handles: &mut HandleSlots,
-    ) -> Result<(), IpcError> {
+impl<'a, R: ReceivedResources> WireValue<'a, R> for AccessMode {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        Self::from_wire(value::decode_u8(data)?).ok_or(IpcError::InvalidValue)
+    }
+}
+
+impl IntoWireValue for AccessMode {
+    type Read = Self;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
         buf.write_field(field_id, &value::encode_u8(self.as_wire()))
     }
 
-    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
-        Self::from_wire(value::decode_u8(data)?).ok_or(IpcError::InvalidValue)
-    }
+    fn relinquish(self) {}
 }
 
 impl WireTyped for AccessMode {
@@ -76,8 +79,8 @@ impl WireTyped for AccessMode {
 #[cfg(test)]
 mod tests {
     use ipc::{
-        WireValue,
-        wire::{FieldCursor, HandleSlots, IpcError, MESSAGE_INLINE_MAX, MessageBuf, value},
+        IntoWireValue, WireValue,
+        wire::{FieldCursor, IpcError, MessageBuf, value},
     };
 
     use super::AccessMode;
@@ -87,13 +90,12 @@ mod tests {
     const MODES: [AccessMode; 3] = [AccessMode::Read, AccessMode::Write, AccessMode::ReadWrite];
 
     fn round_trip(mode: AccessMode) -> Result<AccessMode, IpcError> {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        mode.write_as_field(&mut buf, FIELD_ID, &mut HandleSlots::new())
-            .expect("write ok");
+        let mut buf = MessageBuf::new();
+        mode.write_as_field(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");
-        AccessMode::from_field(field.data, &HandleSlots::new())
+        AccessMode::from_field(field.data, &mut ())
     }
 
     #[test]
@@ -106,11 +108,11 @@ mod tests {
     #[test]
     fn a_mode_without_read_or_write_is_unrepresentable() {
         assert_eq!(
-            AccessMode::from_field(&value::encode_u8(0), &HandleSlots::new()),
+            AccessMode::from_field(&value::encode_u8(0), &mut ()),
             Err(IpcError::InvalidValue)
         );
         assert_eq!(
-            AccessMode::from_field(&value::encode_u8(4), &HandleSlots::new()),
+            AccessMode::from_field(&value::encode_u8(4), &mut ()),
             Err(IpcError::InvalidValue)
         );
     }

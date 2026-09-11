@@ -18,7 +18,7 @@ pub enum Error {
     FileSystem(FileSystemError),
     /// Образ не разобран в дерево имён.
     Image(ImageFileSystemError),
-    /// Стартовый кадр не принёс capability.
+    /// `start` не получил требование.
     Start,
 }
 
@@ -46,7 +46,7 @@ impl Display for Error {
             Self::Ipc(error) => write!(formatter, "ipc error {error:?}"),
             Self::FileSystem(error) => write!(formatter, "file system error {error:?}"),
             Self::Image(error) => write!(formatter, "image error {error:?}"),
-            Self::Start => formatter.write_str("no start frame"),
+            Self::Start => formatter.write_str("start refused"),
         }
     }
 }

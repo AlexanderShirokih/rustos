@@ -1,9 +1,9 @@
 //! Вид узла дерева имён.
 
 use ipc::{
-    WireTyped, WireValue,
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
     schema::WireType,
-    wire::{HandleSlots, IpcError, MessageBuf, value},
+    wire::{IpcError, MessageBuf, value},
 };
 
 /// Вид узла: файл либо каталог.
@@ -39,19 +39,22 @@ impl NodeKind {
     }
 }
 
-impl<'a> WireValue<'a> for NodeKind {
-    fn write_as_field<const N: usize>(
-        &self,
-        buf: &mut MessageBuf<N>,
-        field_id: u8,
-        _handles: &mut HandleSlots,
-    ) -> Result<(), IpcError> {
+impl<'a, R: ReceivedResources> WireValue<'a, R> for NodeKind {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        Self::from_wire(value::decode_u8(data)?).ok_or(IpcError::InvalidValue)
+    }
+}
+
+impl IntoWireValue for NodeKind {
+    type Read = Self;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
         buf.write_field(field_id, &value::encode_u8(self.as_wire()))
     }
 
-    fn from_field(data: &'a [u8], _handles: &HandleSlots) -> Result<Self, IpcError> {
-        Self::from_wire(value::decode_u8(data)?).ok_or(IpcError::InvalidValue)
-    }
+    fn relinquish(self) {}
 }
 
 impl WireTyped for NodeKind {
@@ -62,8 +65,8 @@ impl WireTyped for NodeKind {
 #[cfg(test)]
 mod tests {
     use ipc::{
-        WireValue,
-        wire::{FieldCursor, HandleSlots, IpcError, MESSAGE_INLINE_MAX, MessageBuf},
+        IntoWireValue, WireValue,
+        wire::{FieldCursor, IpcError, MessageBuf},
     };
 
     use super::NodeKind;
@@ -73,13 +76,12 @@ mod tests {
     const KINDS: [NodeKind; 2] = [NodeKind::File, NodeKind::Directory];
 
     fn round_trip(kind: NodeKind) -> Result<NodeKind, IpcError> {
-        let mut buf = MessageBuf::<MESSAGE_INLINE_MAX>::new();
-        kind.write_as_field(&mut buf, FIELD_ID, &mut HandleSlots::new())
-            .expect("write ok");
+        let mut buf = MessageBuf::new();
+        kind.write_as_field(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");
-        NodeKind::from_field(field.data, &HandleSlots::new())
+        NodeKind::from_field(field.data, &mut ())
     }
 
     #[test]
@@ -100,11 +102,11 @@ mod tests {
     fn discriminant_outside_the_set_is_rejected() {
         assert_eq!(NodeKind::from_wire(3), None);
         assert_eq!(
-            NodeKind::from_field(&[0], &HandleSlots::new()),
+            NodeKind::from_field(&[0], &mut ()),
             Err(IpcError::InvalidValue)
         );
         assert_eq!(
-            NodeKind::from_field(&[3], &HandleSlots::new()),
+            NodeKind::from_field(&[3], &mut ()),
             Err(IpcError::InvalidValue)
         );
     }
@@ -112,7 +114,7 @@ mod tests {
     #[test]
     fn wrong_field_length_is_rejected() {
         assert_eq!(
-            NodeKind::from_field(&[1, 0], &HandleSlots::new()),
+            NodeKind::from_field(&[1, 0], &mut ()),
             Err(IpcError::InvalidValue)
         );
     }

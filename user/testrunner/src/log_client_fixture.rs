@@ -1,6 +1,3 @@
-//! Программа-фикстура границы полномочий лог-капы пробует по стартовой капе
-//! операции bootstrap-контракта и завершается кодом первой прошедшей.
-
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
@@ -22,7 +19,6 @@ use log_fixture_protocol::{
     FIXTURE_LINE,
 };
 
-/// `log` приходит в x0 как HandleId лог-сессии.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(log: Handle<kind::Port>) -> ! {
     let log = Port::from_handle(log);
@@ -30,30 +26,21 @@ pub extern "C" fn _start(log: Handle<kind::Port>) -> ! {
 }
 
 fn probe(log: &Port) -> u64 {
-    let bootstrap = bootstrap::Client::new(PortTransport::client(log.borrow()));
-    // Выданную capability закрывает ответ: пробе довольно самого факта выдачи.
-    if let Ok(response) = bootstrap.acquire_irq_control()
-        && response.value.is_ok()
-    {
+    let bootstrap = bootstrap::Client::new(PortTransport::new(log.borrow()));
+    if let Ok(Ok(_)) = bootstrap.acquire_irq_control() {
         return EXIT_IRQ_CONTROL;
     }
-    if let Ok(response) = bootstrap.acquire_userland_image()
-        && response.value.is_ok()
-    {
+    if let Ok(Ok(_)) = bootstrap.acquire_userland_image() {
         return EXIT_USERLAND_IMAGE;
     }
-    if let Ok(response) = bootstrap.acquire_boot_fdt()
-        && response.value.is_ok()
-    {
+    if let Ok(Ok(_)) = bootstrap.acquire_boot_fdt() {
         return EXIT_BOOT_FDT;
     }
-    if let Ok(response) = bootstrap.acquire_device_memory(0)
-        && response.value.is_ok()
-    {
+    if let Ok(Ok(_)) = bootstrap.acquire_device_memory(0) {
         return EXIT_DEVICE_MEMORY;
     }
 
-    let client = log::Client::new(PortTransport::client(log.borrow()));
+    let client = log::Client::new(PortTransport::new(log.borrow()));
     if client.write_str("probe", FIXTURE_LINE).is_err() {
         return EXIT_LOG_REFUSED;
     }

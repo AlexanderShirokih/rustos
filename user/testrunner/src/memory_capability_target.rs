@@ -61,12 +61,11 @@ fn memory_with_profile_refuses_a_cached_region() {
 
 #[kernel_test]
 fn memory_with_profile_retypes_a_device_window() {
-    let client = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let mut response = client
+    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    let cap = client
         .acquire_device_memory(0)
-        .expect("acquire_device_memory call");
-    let capability = response.value.expect("vend ok");
-    let cap = response.claim(capability).expect("capability owner");
+        .expect("acquire_device_memory call")
+        .expect("vend ok");
     let window = MemoryRegion::from(cap);
 
     let device = window.inspect().expect("inspect device window");

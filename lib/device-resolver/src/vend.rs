@@ -1,5 +1,5 @@
 use bootstrap_abi::{DeviceWindow, bootstrap};
-use ipc::{ReceivedResources, Transport};
+use ipc::{Channel, ReceivedResources};
 use syscall::kind;
 
 use crate::platform::{DeviceMmio, ResolveError};
@@ -7,10 +7,10 @@ use crate::platform::{DeviceMmio, ResolveError};
 /// Забирает у ядра capability MMIO-окна `window`. Индекс окна в наборе ядра
 /// наружу не выходит. Набор перебирается по базовому адресу.
 pub fn acquire_mmio<
-    T: Transport,
-    W: DeviceWindow<<T::Resources as ReceivedResources>::Handle<kind::MemoryRegion>>,
+    C: Channel,
+    W: DeviceWindow<<C::Resources as ReceivedResources>::Handle<kind::MemoryRegion>>,
 >(
-    kernel: &bootstrap::Client<T>,
+    kernel: &bootstrap::Client<C>,
     window: DeviceMmio,
 ) -> Result<W, ResolveError> {
     kernel

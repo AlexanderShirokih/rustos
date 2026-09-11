@@ -15,21 +15,17 @@ use core::{
 };
 
 use bootstrap_abi::bootstrap;
-use ipc::wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf};
-use kernel_objects::{MemoryRegion, Port, Process, Resource, kind};
+use ipc::wire::{Header, IpcError, MessageBuf};
+use kernel_objects::{Port, Session};
 use kernel_tests::kernel_test;
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
+use rootkeeper::relay::ComponentNames;
 use runtime::{PortTransport, Timeout, port_send};
 use spin::Mutex;
 use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
-use userland_image::{component_name, decode};
-use userland_loader::load_entry;
 
-use crate::{ipc_raw, log_fixture_protocol::FIXTURE_LINE};
-
-pub(crate) const ROUTER_BADGE: NonZeroU64 =
-    NonZeroU64::new(0x1001_1001_1001_1001).expect("badge is non-zero");
+use crate::{fixture::spawn_entry, ipc_raw, log_fixture_protocol::FIXTURE_LINE};
 
 const NAMED_BADGE: NonZeroU64 = NonZeroU64::new(0x0101_0101_0101_0101).expect("badge is non-zero");
 const UNNAMED_BADGE: NonZeroU64 =
@@ -44,11 +40,7 @@ struct TestSourceNames;
 
 impl SourceNames for SharedSourceNames {
     fn name(&self, badge: u64) -> Option<LogBuffer<LOG_SOURCE_MAX>> {
-        match badge {
-            _ if badge == ROUTER_BADGE.get() => Some(source("filesystem")),
-            _ if badge == SELFTEST_BADGE.get() => Some(source("std-selftest")),
-            _ => None,
-        }
+        (badge == SELFTEST_BADGE.get()).then(|| source("std-selftest"))
     }
 }
 
@@ -85,6 +77,12 @@ struct Record {
     message: String,
 }
 
+impl Record {
+    fn of(&self, component: &str) -> bool {
+        self.source.split('/').next() == Some(component)
+    }
+}
+
 static RECORDED: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 
 static SHARED: Mutex<Option<LogRelayThread>> = Mutex::new(None);
@@ -93,15 +91,7 @@ static ACTIVE: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
 static SINK_REFUSES: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn shared_relay_thread() -> Option<syscall::Handle<kind::Thread>> {
-    SHARED.lock().as_ref().map(LogRelayThread::handle)
-}
-
-pub(crate) fn scenario_relay_thread() -> Option<syscall::Handle<kind::Thread>> {
-    ACTIVE.lock().as_ref().map(LogRelayThread::handle)
-}
-
-pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<Port> {
+pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<Session<log::Protocol>> {
     let mut shared = SHARED.lock();
     let relay = shared.get_or_insert_with(|| {
         LogRelayThread::start(
@@ -110,7 +100,7 @@ pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<Port> {
         )
         .expect("shared log relay starts")
     });
-    relay.delegated_session(badge).ok()
+    relay.session(badge).ok()
 }
 
 pub(crate) fn shutdown_relays() {
@@ -131,7 +121,7 @@ struct RecordingSink;
 
 impl LogSink for RecordingSink {
     fn write(&mut self, source: &str, message: &str) -> Result<(), IpcError> {
-        let kernel = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
+        let kernel = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
         let forwarded = kernel.log_str(source, message);
         // Двусторонний вызов ядра перезаписывает значок в IPC-буфере потока.
         // Выданный образ закрывает ответ: значок буфера здесь важнее самой capability.
@@ -147,37 +137,43 @@ impl LogSink for RecordingSink {
     }
 }
 
-pub(crate) fn start_component_relay() {
-    // Имена источников ставит и читает сам rootkeeper: сценарий подменяет
-    // только сток, чтобы прочитать пересланные строки.
+pub(crate) fn start_component_relay(names: ComponentNames) {
     RECORDED.lock().clear();
     SINK_REFUSES.store(false, SeqCst);
-    *ACTIVE.lock() = Some(
-        LogRelayThread::start(rootkeeper::relay::ComponentNames, RecordingSink)
-            .expect("component log relay starts"),
-    );
+    *ACTIVE.lock() =
+        Some(LogRelayThread::start(names, RecordingSink).expect("component log relay starts"));
 }
 
-pub(crate) fn component_scenario_session(badge: NonZeroU64) -> Option<Port> {
-    ACTIVE.lock().as_ref()?.delegated_session(badge).ok()
+pub(crate) fn component_scenario_session(badge: NonZeroU64) -> Option<Session<log::Protocol>> {
+    ACTIVE.lock().as_ref()?.session(badge).ok()
 }
 
 pub(crate) fn await_component_sources(names: &[&str]) -> Vec<String> {
+    await_records(|records| {
+        names
+            .iter()
+            .all(|name| records.iter().any(|record| record.of(name)))
+    })
+    .into_iter()
+    .map(|record| record.source)
+    .collect()
+}
+
+pub(crate) fn await_component_lines(name: &str, count: usize) -> Vec<String> {
+    await_records(|records| records.iter().filter(|record| record.of(name)).count() >= count)
+        .into_iter()
+        .filter(|record| record.of(name))
+        .map(|record| record.message)
+        .collect()
+}
+
+fn await_records(complete: impl Fn(&[Record]) -> bool) -> Vec<Record> {
     let idle = Port::create().expect("port create");
     let mut waited = 0;
     loop {
-        let sources: Vec<String> = RECORDED
-            .lock()
-            .iter()
-            .map(|record| record.source.clone())
-            .collect();
-        let complete = names.iter().all(|name| {
-            sources
-                .iter()
-                .any(|source| source.split('/').next() == Some(name))
-        });
-        if complete || waited >= RECORD_TIMEOUT.raw() {
-            return sources;
+        let records = RECORDED.lock().clone();
+        if complete(&records) || waited >= RECORD_TIMEOUT.raw() {
+            return records;
         }
         let _ = idle.recv(RECORD_POLL);
         waited += RECORD_POLL.raw();
@@ -186,7 +182,6 @@ pub(crate) fn await_component_sources(names: &[&str]) -> Vec<String> {
 
 pub(crate) fn stop_component_relay() {
     stop(&ACTIVE);
-    rootkeeper::relay::install_names(core::iter::empty());
 }
 
 fn scenario_session(badge: NonZeroU64) -> Port {
@@ -197,6 +192,7 @@ fn scenario_session(badge: NonZeroU64) -> Port {
         .expect("scenario relay is running")
         .session(badge)
         .expect("log session")
+        .into_handle()
 }
 
 fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> Port)) {
@@ -237,15 +233,15 @@ fn wait_for_records(count: usize) -> Vec<Record> {
 }
 
 fn write_log(session: &Port, tag: &str, message: &str) {
-    log::Client::new(PortTransport::client(session))
+    log::Client::new(PortTransport::new(session))
         .write_str(tag, message)
         .expect("log frame delivered");
 }
 
 fn send_unknown_ordinal(session: &Port) {
-    let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
+    let mut frame = MessageBuf::new();
     frame
-        .write_header(&Header::new(log::write::ORDINAL ^ 1, 0, 0))
+        .write_header(&Header::new(log::write::ORDINAL ^ 1))
         .expect("header fits");
     frame.finish().expect("frame fits");
     ipc_raw::write_frame(frame.as_bytes(), &[]);
@@ -253,9 +249,9 @@ fn send_unknown_ordinal(session: &Port) {
 }
 
 fn send_log_frame_with_cap(session: &Port, cap: Port) -> i64 {
-    let mut frame = MessageBuf::<{ MESSAGE_INLINE_MAX }>::new();
+    let mut frame = MessageBuf::new();
     frame
-        .write_header(&Header::new(log::write::ORDINAL, 0, 0))
+        .write_header(&Header::new(log::write::ORDINAL))
         .expect("header fits");
     frame
         .write_field(1, "carrier".as_bytes())
@@ -291,25 +287,6 @@ fn exhaust_handle_table() -> (Port, Vec<Port>) {
         }
     }
     (source, handles)
-}
-
-fn spawn_image_entry(path: &str, start: Port) -> Process {
-    let kernel = bootstrap::Client::new(PortTransport::client(crate::bootstrap_handle()));
-    let mut response = kernel
-        .acquire_userland_image()
-        .expect("acquire_userland_image call");
-    let capability = response.value.expect("image vend");
-    let cap = response.claim(capability).expect("capability owner");
-    let region = MemoryRegion::from(cap);
-    let mapping = region.map_full_read_only().expect("map image read-only");
-    let image = decode(mapping.as_bytes()).expect("decode userland image");
-    let program = image
-        .entry(path)
-        .expect("image carries the entry")
-        .program()
-        .expect("entry record carries a program");
-    let resource = Resource::self_resource().expect("self metering resource");
-    load_entry(&program, Some(component_name(path)), &resource, start).expect("spawn from image")
 }
 
 // Кадр лог-сессии доходит до стока под именем её значка, а локальный тег
@@ -561,7 +538,7 @@ fn relay_serves_after_receiver_resource_exhaustion() {
 #[kernel_test]
 fn log_session_denies_bootstrap_operations() {
     with_relay(|session| {
-        let fixture = spawn_image_entry(LOG_CLIENT_FIXTURE, session(NAMED_BADGE));
+        let fixture = spawn_entry(LOG_CLIENT_FIXTURE, session(NAMED_BADGE));
         fixture.join(JOIN_TIMEOUT).expect("fixture terminates");
         kernel_tests::kassert_eq!(fixture.exit_code().expect("exit code"), 0);
 

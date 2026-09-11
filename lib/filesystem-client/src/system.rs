@@ -1,10 +1,9 @@
-//! Окружение фасада поверх объектов ядра: capability становится портом сессии и
-//! отображённым регионом её данных.
+//! Окружение фасада поверх объектов ядра. Сессия становится транспортом её клиента, а
+//! capability региона - отображением данных сессии.
 
-use filesystem_abi::FileSystemError;
-use ipc::{MessageLen, Transport, wire::IpcError};
-use kernel_objects::{Mapping, MemoryRegion, Port, PortTransport, ReceivedHandle};
-use syscall::{Timeout, UserMemFlags, kind};
+use filesystem_abi::{FileSystemError, file_system, namespace};
+use kernel_objects::{Mapping, MemoryRegion, ReceivedHandle, SessionTransport};
+use syscall::{UserMemFlags, kind};
 
 use crate::{
     FileSystem,
@@ -16,56 +15,20 @@ pub struct FileSystemEnvironment;
 
 impl FileSystem<FileSystemEnvironment> {
     /// Фасад над сессией файловой системы. Путь отсчитывается от корня её области.
-    pub fn windowed(session: Port) -> Self {
-        Self::windowed_with_environment(FileSystemEnvironment, SessionPort::over(session))
+    pub fn windowed(session: kernel_objects::Session<file_system::Protocol>) -> Self {
+        Self::windowed_with_environment(FileSystemEnvironment, session.client().into_channel())
     }
 
     /// Фасад над маршрутизатором имён. Путь разбирается по монтированиям.
-    pub fn routed(namespace: Port) -> Self {
-        Self::routed_with_environment(FileSystemEnvironment, SessionPort::over(namespace))
+    pub fn routed(namespace: kernel_objects::Session<namespace::Protocol>) -> Self {
+        Self::routed_with_environment(FileSystemEnvironment, namespace.client().into_channel())
     }
-}
-
-/// Порт сессии файловой системы, владеющий своим хэндлом.
-pub struct SessionPort {
-    transport: PortTransport,
-    _handle: Port,
 }
 
 /// Отображённый регион данных сессии вместе с capability самого региона.
 pub struct SessionRegion {
     mapping: Mapping,
     _region: MemoryRegion,
-}
-
-impl SessionPort {
-    /// Порт поверх хэндла сессии.
-    pub fn over(handle: Port) -> Self {
-        Self {
-            transport: PortTransport::client(&handle),
-            _handle: handle,
-        }
-    }
-}
-
-impl Transport for SessionPort {
-    type Resources = <PortTransport as Transport>::Resources;
-
-    fn take_resources(&self) -> Self::Resources {
-        self.transport.take_resources()
-    }
-
-    fn write_message(&self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
-        self.transport.write_message(bytes, handles)
-    }
-
-    fn read_message(&self, bytes: &mut [u8], handles: &mut [u32]) -> Result<MessageLen, IpcError> {
-        self.transport.read_message(bytes, handles)
-    }
-
-    fn wait_readable(&self, timeout: Timeout) -> Result<(), IpcError> {
-        self.transport.wait_readable(timeout)
-    }
 }
 
 impl SharedRegion for SessionRegion {
@@ -88,11 +51,16 @@ impl SharedRegion for SessionRegion {
 
 impl Environment for FileSystemEnvironment {
     type Handle<K: syscall::ObjectKind> = ReceivedHandle<K>;
-    type Transport = SessionPort;
+    type Transport = SessionTransport;
     type Region = SessionRegion;
 
-    fn connect(&self, port: ReceivedHandle<kind::Port>) -> Result<SessionPort, FileSystemError> {
-        Ok(SessionPort::over(port.into()))
+    fn connect(
+        &self,
+        session: ipc::wire::Session<file_system::Protocol, ReceivedHandle<kind::Port>>,
+    ) -> Result<SessionTransport, FileSystemError> {
+        Ok(kernel_objects::Session::from_session(session)
+            .client()
+            .into_channel())
     }
 
     fn map(

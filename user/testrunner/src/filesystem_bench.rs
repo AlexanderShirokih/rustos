@@ -7,9 +7,9 @@
 use alloc::vec;
 
 use filesystem_abi::{AccessMode, OpenFlags, Opened, file_system};
-use kernel_objects::{MemoryRegion, Resource};
+use kernel_objects::{MemoryRegion, Resource, SessionTransport};
 use kernel_tests::{kernel_test, kreport};
-use runtime::{Instant, MemoryAccess, PortTransport, UserMemFlags};
+use runtime::{Instant, MemoryAccess, UserMemFlags};
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::filesystem::{connect, open, path, ram_session};
@@ -39,26 +39,24 @@ fn nanos_per_op(rounds: u64, mut operation: impl FnMut()) -> u64 {
     elapsed / rounds
 }
 
-fn acquire(client: &file_system::Client<PortTransport>) -> MemoryRegion {
-    let mut response = client
+fn acquire(client: &file_system::Client<SessionTransport>) -> MemoryRegion {
+    let cap = client
         .acquire_buffer(BENCH_BUFFER)
-        .expect("acquire_buffer call");
-    let capability = response.value.expect("buffer granted");
-    let cap = response.claim(capability).expect("capability owner");
+        .expect("acquire_buffer call")
+        .expect("buffer granted");
     MemoryRegion::from(cap)
 }
 
-fn fill(client: &file_system::Client<PortTransport>, opened: &Opened, size: usize) {
+fn fill(client: &file_system::Client<SessionTransport>, opened: &Opened, size: usize) {
     let written = client
         .write(opened.fd, 0, size as u32)
         .expect("write call")
-        .value
         .expect("write ok");
     kernel_tests::kassert_eq!(written.count, size as u32);
 }
 
 fn measure_frame_plane(
-    client: &file_system::Client<PortTransport>,
+    client: &file_system::Client<SessionTransport>,
     opened: &Opened,
     plane: &str,
     size: usize,
@@ -70,7 +68,6 @@ fn measure_frame_plane(
         client
             .read(opened.fd, 0, len)
             .expect("read call")
-            .value
             .expect("read ok");
     });
     kreport!("fs {plane} read bytes={size} ns_per_op={read}");
@@ -79,7 +76,6 @@ fn measure_frame_plane(
         client
             .write(opened.fd, 0, len)
             .expect("write call")
-            .value
             .expect("write ok");
     });
     kreport!("fs {plane} write bytes={size} ns_per_op={write}");
@@ -89,8 +85,7 @@ fn measure_frame_plane(
 fn bench_call_floor() {
     // Пол кадровой плоскости: вызов без обмена данными через буфер сессии, и под ним - syscall
     // без IPC, разделяющий цену входа в ядро и цену раунда.
-    let capability = ram_session();
-    let client = connect(&capability);
+    let client = connect(ram_session());
     let buffer = acquire(&client);
 
     let inspect = nanos_per_op(rounds_for(PROBE), || {
@@ -106,11 +101,7 @@ fn bench_call_floor() {
     );
 
     let stat = nanos_per_op(rounds_for(PROBE), || {
-        client
-            .stat(opened.fd)
-            .expect("stat call")
-            .value
-            .expect("stat ok");
+        client.stat(opened.fd).expect("stat call").expect("stat ok");
     });
     kreport!("fs call stat ns_per_op={stat}");
 }
@@ -140,8 +131,7 @@ fn bench_plain_memory() {
 
 #[kernel_test(bench)]
 fn bench_ramfs_heap_plane() {
-    let capability = ram_session();
-    let client = connect(&capability);
+    let client = connect(ram_session());
     let _buffer = acquire(&client);
 
     for (name, size) in ["/bench-heap-a", "/bench-heap-b", "/bench-heap-c"]
@@ -156,8 +146,7 @@ fn bench_ramfs_heap_plane() {
 
 #[kernel_test(bench)]
 fn bench_ramfs_promoted_plane() {
-    let capability = ram_session();
-    let client = connect(&capability);
+    let client = connect(ram_session());
     let _buffer = acquire(&client);
 
     for (name, size) in [
@@ -171,11 +160,12 @@ fn bench_ramfs_promoted_plane() {
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::CREATE);
         // Ёмкость закрепляется по длине на момент выдачи. Файл наполняется до неё заранее.
         fill(&client, &opened, size);
-        let mut response = client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call");
-        let capability = response.value.expect("backing granted");
-        let backing = MemoryRegion::from(response.claim(capability).expect("capability owner"));
+        let backing = MemoryRegion::from(
+            client
+                .backing_memory(opened.fd)
+                .expect("backing_memory call")
+                .expect("backing granted"),
+        );
         let mapped = backing
             .map_full(UserMemFlags::ReadWrite)
             .expect("map promoted backing");
@@ -192,8 +182,7 @@ fn bench_ramfs_promoted_plane() {
 
 #[kernel_test(bench)]
 fn bench_ramfs_imported_plane() {
-    let capability = ram_session();
-    let client = connect(&capability);
+    let client = connect(ram_session());
     let _buffer = acquire(&client);
     let resource = Resource::self_resource().expect("self resource");
 
@@ -212,7 +201,6 @@ fn bench_ramfs_imported_plane() {
         client
             .create_backed(path(name), region, size as u64)
             .expect("create_backed call")
-            .value
             .expect("create backed file");
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::NONE);
         measure_frame_plane(&client, &opened, "imported", size);
@@ -221,8 +209,7 @@ fn bench_ramfs_imported_plane() {
 
 #[kernel_test(bench)]
 fn bench_ramfs_imported_scales_with_region() {
-    let capability = ram_session();
-    let client = connect(&capability);
+    let client = connect(ram_session());
     let _buffer = acquire(&client);
     let resource = Resource::self_resource().expect("self resource");
 
@@ -237,7 +224,6 @@ fn bench_ramfs_imported_scales_with_region() {
         client
             .create_backed(path(name), region, PROBE as u64)
             .expect("create_backed call")
-            .value
             .expect("create backed file");
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::NONE);
 
@@ -245,7 +231,6 @@ fn bench_ramfs_imported_scales_with_region() {
             client
                 .read(opened.fd, 0, PROBE as u32)
                 .expect("read call")
-                .value
                 .expect("read ok");
         });
         kreport!("fs imported read bytes={PROBE} region_pages={pages} ns_per_op={read}");

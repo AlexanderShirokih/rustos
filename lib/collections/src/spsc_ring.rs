@@ -781,7 +781,7 @@ mod tests {
             let mut buf = [0u8; FRAME_BYTES];
             let mut next = 0u32;
             while next < N {
-                // Тот же протокол, что у RingTransport::wait_readable.
+                // Тот же протокол, что у RingConsumer::pop.
                 loop {
                     if !consumer.is_empty() {
                         break;

@@ -1,11 +1,3 @@
-//! Программа-фикстура с портовым протоколом обслуживает запросы родителя
-//! в собственном адресном пространстве.
-//!
-//! Нужна тестам, которым мало одного exit-кода потомка, и даёт изоляцию адресных
-//! пространств (слот в `.bss` лежит на одном и том же VA у всех экземпляров
-//! этого бинаря) и разделяемую память (регион приходит capability в
-//! `caps[0]`).
-
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
@@ -60,7 +52,6 @@ pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
     loop {
         let reply = match port.recv(Timeout::INFINITE) {
             Ok(Some(reply)) => reply,
-            // Значок сессии ушёл: родитель закрыл клиентскую капу либо завершился.
             Err(Error::Syscall(SyscallError::SenderGone)) => thread_exit(0),
             _ => thread_exit(EXIT_RECV_FAILED),
         };
@@ -99,8 +90,6 @@ pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
                 let Some(handle) = owned_of::<kind::Any>(cap) else {
                     thread_exit(EXIT_BAD_REQUEST)
                 };
-                // Закрытие последнего держателя снимает процесс фикстуры. Ответ
-                // ниже тогда не исполняется.
                 drop(handle);
                 answer(reply, &[REPLY_OK]);
             }
@@ -136,8 +125,6 @@ fn start_parked_sibling() -> bool {
     if spawned.is_err() {
         return false;
     }
-    // Возврат отложен до того, как сосед встал в ожидание. Без этого
-    // `ProcessExit` снимал бы поток, ни разу не получавший CPU.
     ready.wait(SIGNALED, PARK_TIMEOUT).is_ok()
 }
 
@@ -146,7 +133,6 @@ fn park_forever(ready: Handle<kind::Signal>) -> u32 {
         return 1;
     };
     let _ = signal_set(ready, SIGNALED, 0, WakeCount::All);
-    // Пробуждения у этого сигнала нет ни одного. Поток снимает `ProcessExit`.
     let _ = signal.wait(SIGNALED, Timeout::INFINITE);
     0
 }
@@ -209,8 +195,6 @@ fn map_check(cap: u32, expected: u64) -> u8 {
         return REPLY_MAP_FAILED;
     };
     let region = MemoryRegion::from_handle(region.into_raw());
-    // Размер берётся из самого региона. Договорённость о нём с родителем была
-    // бы вторым источником истины, а ядро требует точного совпадения.
     let Ok(mapping) = region.map_full(UserMemFlags::ReadWrite) else {
         return REPLY_MAP_FAILED;
     };

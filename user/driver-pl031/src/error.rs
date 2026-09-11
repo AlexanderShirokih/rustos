@@ -1,4 +1,4 @@
-use component_startup::StartupError;
+use component_startup::{StartupError, StartupFailure};
 use ipc::wire::IpcError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7,7 +7,7 @@ pub enum Error {
     Runtime,
     /// Отказ приёма либо отправки кадра.
     Ipc,
-    /// Стартовая транзакция не сложилась в контракт.
+    /// Родитель отказал в требовании.
     Start,
 }
 
@@ -27,9 +27,9 @@ impl From<IpcError> for Error {
 
 impl From<StartupError> for Error {
     fn from(error: StartupError) -> Self {
-        match error {
-            StartupError::Transport(_) => Self::Ipc,
-            _ => Self::Start,
+        match error.failure {
+            StartupFailure::Ipc(_) => Self::Ipc,
+            StartupFailure::Session(_) | StartupFailure::Resource(_) => Self::Start,
         }
     }
 }

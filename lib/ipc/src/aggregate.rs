@@ -1,17 +1,27 @@
 //! Объявление агрегата, передаваемого одним полем сообщения.
 
-/// Объявляет struct и выводит для него [`WireValue`](crate::WireValue) и
-/// [`WireTyped`](crate::WireTyped). Значение передаётся вложенным суб-кадром одной записи поля.
+/// Объявляет структуру, которая передаётся одним полем сообщения, и выводит для неё
+/// [`WireValue`](crate::WireValue), [`IntoWireValue`](crate::IntoWireValue) и
+/// [`WireTyped`](crate::WireTyped).
 ///
-/// Раскрытие порождает структуру с именем, видимостью и полями из объявления, а следом -
-/// оба impl. Поля идут в порядке объявления с позиционными `field_id` от единицы, каждое -
-/// сам `WireValue`. Допускается не более одного лайфтайма, type- и const-генерики не
-/// поддержаны.
+/// Поля кодируются в порядке объявления с `field_id` от единицы. Допускается не более одного
+/// лайфтайма.
 ///
-/// Суб-кадр устроен как тело кадра: записи полей и терминатор. Капы полей агрегата
-/// передаются в общих слотах кадра, и суб-кадр содержит их индексы. Отсутствие поля в
-/// принятом суб-кадре - `MissingField`, неизвестное поле пропускается курсором. Число полей
-/// агрегата вместе с вложенными проверяет const-ассерт на месте объявления.
+/// Тип поля-capability задаётся параметром владельца, умолчание которого - тип записи поля,
+/// например `Cap<K>` либо [`Session<P>`](crate::wire::Session).
+///
+/// ```
+/// ipc::wire_value! {
+///     pub struct Extent<M = ipc::wire::Cap<syscall::kind::MemoryRegion>> {
+///         pub region: M,
+///         pub len: u32,
+///     }
+/// }
+/// ```
+///
+/// Поле передаётся вложенной записью из записей полей и терминатора. Capability полей
+/// передаются в общих слотах кадра. Поле, которого нет в принятом кадре, даёт `MissingField`,
+/// неизвестное поле пропускается. Число полей вместе с вложенными проверяет const-ассерт.
 #[macro_export]
 macro_rules! wire_value {
     (
@@ -26,7 +36,25 @@ macro_rules! wire_value {
         }
 
         $crate::wire_value!(@fields
-            name = [$name $(<$lt>)?] lifetime = [$($lt)?]
+            name = $name lifetime = [$($lt)?] owners = []
+            acc = [] id = $crate::wire::FIELD_ID_MIN;
+            $($field : $ty),*
+        );
+    };
+
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident < $($lt:lifetime ,)? $($owner:ident = $default:ty),+ $(,)? > {
+            $( $(#[$field_attr:meta])* $field_vis:vis $field:ident : $ty:ty ),* $(,)?
+        }
+    ) => {
+        $(#[$attr])*
+        $vis struct $name < $($lt ,)? $($owner = $default),+ > {
+            $( $(#[$field_attr])* $field_vis $field: $ty, )*
+        }
+
+        $crate::wire_value!(@fields
+            name = $name lifetime = [$($lt)?] owners = [$($owner = $default),+]
             acc = [] id = $crate::wire::FIELD_ID_MIN;
             $($field : $ty),*
         );
@@ -34,87 +62,115 @@ macro_rules! wire_value {
 
     // Позиционный `field_id` назначается обходом полей: раскрыться в список выражений макрос
     // не может, поэтому поля копятся в аккумуляторе.
-    (@fields name = $name:tt lifetime = $lt:tt acc = [$($acc:tt)*] id = $id:expr;) => {
-        $crate::wire_value!(@impl name = $name lifetime = $lt fields = [$($acc)*]);
+    (@fields name = $name:ident lifetime = $lt:tt owners = $owners:tt
+        acc = [$($acc:tt)*] id = $id:expr;
+    ) => {
+        $crate::wire_value!(@impl name = $name lifetime = $lt owners = $owners fields = [$($acc)*]);
     };
 
-    (@fields name = $name:tt lifetime = $lt:tt acc = [$($acc:tt)*] id = $id:expr;
+    (@fields name = $name:ident lifetime = $lt:tt owners = $owners:tt
+        acc = [$($acc:tt)*] id = $id:expr;
         $field:ident : $ty:ty $(, $($more:tt)*)?
     ) => {
         $crate::wire_value!(@fields
-            name = $name lifetime = $lt
+            name = $name lifetime = $lt owners = $owners
             acc = [$($acc)* { $id , $field , $ty }] id = $id + 1u8;
             $($($more)*)?
         );
     };
 
-    (@impl name = [$name:ident] lifetime = [] fields = [$($fields:tt)*]) => {
-        impl<'wire> $crate::WireValue<'wire> for $name {
-            $crate::wire_value!(@body 'wire, $($fields)*);
-        }
-
-        impl $crate::WireTyped for $name {
-            $crate::wire_value!(@desc $($fields)*);
-        }
-
-        $crate::wire_value!(@guard $name);
-    };
-
-    (@impl name = [$name:ident <$lt:lifetime>] lifetime = [$_lt:lifetime]
+    // Запись - умолчание. Псевдонимы параметров внутри блока подставляют умолчание в типы
+    // полей, и прочитанное значение заменяет каждый параметр владельца формой, которую
+    // получатель читает из его умолчания. `IntoWireValue` реализуется для любого владельца с
+    // `Read` = умолчание.
+    (@impl name = $name:ident lifetime = [$($lt:lifetime)?] owners = [$($owner:ident = $default:ty),*]
         fields = [$($fields:tt)*]
     ) => {
-        impl<$lt> $crate::WireValue<$lt> for $name<$lt> {
-            $crate::wire_value!(@body $lt, $($fields)*);
+        const _: () = {
+            $( type $owner = $default; )*
+            $crate::wire_value!(@read name = $name lifetime = [$($lt)?] owners = [$($owner),*]
+                fields = [$($fields)*]);
+        };
+
+        impl<$($lt,)? $($owner: $crate::IntoWireValue<Read = $default>),*> $crate::IntoWireValue
+            for $name<$($lt,)? $($owner),*>
+        {
+            type Read = $name $(<$lt>)?;
+
+            $crate::wire_value!(@write $($fields)*);
         }
 
-        impl<$lt> $crate::WireTyped for $name<$lt> {
-            $crate::wire_value!(@desc $($fields)*);
-        }
-
-        $crate::wire_value!(@guard $name);
-    };
-
-    (@guard $name:ident) => {
         const _: () = ::core::assert!(
             $crate::schema::type_fits_field_id_space(
                 <$name as $crate::WireTyped>::WIRE_TYPE,
                 $crate::wire::FIELD_ID_MAX,
             ),
-            "aggregate declares more fields than the sub-frame field_id space carries"
+            "aggregate declares more fields than its nested record field_id space carries"
         );
     };
 
-    (@body $lt:lifetime, $( { $id:expr , $field:ident , $ty:ty } )*) => {
-        fn write_as_field<const N: usize>(
-            &self,
-            buf: &mut $crate::wire::MessageBuf<N>,
-            field_id: u8,
-            handles: &mut $crate::wire::HandleSlots,
-        ) -> ::core::result::Result<(), $crate::wire::IpcError> {
-            let mut sub = $crate::wire::MessageBuf::<{ $crate::wire::FIELD_DATA_MAX }>::new();
-            $(
-                $crate::WireValue::write_as_field(&self.$field, &mut sub, $id, handles)?;
-            )*
-            sub.finish()?;
-            buf.write_field(field_id, sub.as_bytes())
+    (@read name = $name:ident lifetime = [] owners = [$($owner:ident),*] fields = [$($fields:tt)*]) => {
+        impl<'wire, __Frame: $crate::ReceivedResources> $crate::WireValue<'wire, __Frame> for $name {
+            type Owned = $name<$( <$owner as $crate::WireValue<'wire, __Frame>>::Owned ),*>;
+
+            $crate::wire_value!(@from_field name = $name lifetime = 'wire, $($fields)*);
         }
 
+        impl $crate::WireTyped for $name {
+            $crate::wire_value!(@desc $($fields)*);
+        }
+    };
+
+    (@read name = $name:ident lifetime = [$lt:lifetime] owners = [$($owner:ident),*]
+        fields = [$($fields:tt)*]
+    ) => {
+        impl<$lt, __Frame: $crate::ReceivedResources> $crate::WireValue<$lt, __Frame> for $name<$lt> {
+            type Owned = $name<$lt, $( <$owner as $crate::WireValue<$lt, __Frame>>::Owned ),*>;
+
+            $crate::wire_value!(@from_field name = $name lifetime = $lt, $($fields)*);
+        }
+
+        impl<$lt> $crate::WireTyped for $name<$lt> {
+            $crate::wire_value!(@desc $($fields)*);
+        }
+    };
+
+    (@write $( { $id:expr , $field:ident , $ty:ty } )*) => {
+        fn write_as_field(
+            &self,
+            buf: &mut $crate::wire::MessageBuf,
+            field_id: u8,
+        ) -> ::core::result::Result<(), $crate::wire::IpcError> {
+            buf.write_nested(field_id, |fields| {
+                $( $crate::IntoWireValue::write_as_field(&self.$field, fields, $id)?; )*
+                ::core::result::Result::Ok(())
+            })
+        }
+
+        fn relinquish(self) {
+            $( $crate::IntoWireValue::relinquish(self.$field); )*
+        }
+    };
+
+    (@from_field name = $name:ident lifetime = $lt:lifetime,
+        $( { $id:expr , $field:ident , $ty:ty } )*
+    ) => {
         fn from_field(
             data: &$lt [u8],
-            handles: &$crate::wire::HandleSlots,
-        ) -> ::core::result::Result<Self, $crate::wire::IpcError> {
-            $( let mut $field: ::core::option::Option<$ty> = ::core::option::Option::None; )*
+            frame: &mut __Frame,
+        ) -> ::core::result::Result<Self::Owned, $crate::wire::IpcError> {
+            $( let mut $field = ::core::option::Option::None; )*
             let mut cursor = $crate::wire::FieldCursor::new(data);
             while let ::core::option::Option::Some(entry) = cursor.next_field()? {
                 $(
                     if entry.id == $id {
                         $field = ::core::option::Option::Some(
-                            <$ty as $crate::WireValue>::from_field(entry.data, handles)?,
+                            <$ty as $crate::WireValue<$lt, __Frame>>::from_field(entry.data, frame)?,
                         );
                     }
                 )*
             }
-            ::core::result::Result::Ok(Self {
+            ::core::result::Result::Ok($name {
                 $(
                     $field: match $field {
                         ::core::option::Option::Some(value) => value,

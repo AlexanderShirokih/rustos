@@ -1,48 +1,42 @@
-use component_abi::{COMPONENT_SLOT_MAX, SlotKind};
-use filesystem_abi::NAME_MAX;
-use supervisor_abi::PLAN_RECORD_MAX;
-use syscall::{
-    HANDLE_TABLE_CAPACITY, MAX_PROCESS_NAME_LEN, MAX_RESOURCE_DEPTH, WAIT_MANY_MAX_COUNT,
-};
-use userland_image::{BootPlan, SlotSource, decode_plan};
+use component_abi::{PROTOCOL_ID_MAX, RequirementKind, SESSION_SCOPE_MAX};
+use syscall::{HANDLE_TABLE_CAPACITY, MAX_PROCESS_NAME_LEN};
+use userland_image::{BootPlan, PlanRequirement, RequirementSource, decode_plan};
 
 use super::{
-    CompiledStages, PlanProgram, compile_stages,
-    limits::{
-        COMPONENT_HANDLES, COMPONENT_RESOURCE_LEVELS, SUPERVISOR_HANDLES, SUPERVISOR_WAITS,
-        validate_resource_depth,
-    },
+    PlanProgram, compile_plan,
+    limits::{CHILD_HANDLES, ROOTKEEPER_HANDLES, rootkeeper_handles},
     source::BOOT_PLAN_MANIFEST_VERSION,
 };
-use crate::manifest::{ManifestSlot, ProgramManifest};
+use crate::manifest::{ManifestRequirement, ProgramManifest};
 
 const ROUTER: &str = "namespace-router";
+const TWIN: &str = "namespace-router-twin";
 const DRIVER: &str = "driver-pl031";
 const IMAGE_FS: &str = "filesystem-imagefs";
 const RAM_FS: &str = "filesystem-ramfs";
 const ROOTKEEPER: &str = "rootkeeper";
 const CONSUMER: &str = "namespace-consumer-fixture";
 const AREA: &str = "area-consumer";
+const AREA_REQUIREMENT: &str = "area";
 const HELPER: &str = "helper";
 
 const NAMESPACE_PROTOCOL: &str = "Namespace";
 const NAMESPACE_ADMIN_PROTOCOL: &str = "NamespaceAdmin";
 const FILE_SYSTEM_PROTOCOL: &str = "FileSystem";
+const CLOCK_PROTOCOL: &str = "Clock";
 
 const RTC_COMPATIBLE: &[&str] = &["arm,pl031", "arm,primecell"];
 
-const DRIVER_FAMILY: usize = WAIT_MANY_MAX_COUNT;
-
 const DEFAULT_MEMORY_LIMIT: &str = "256K";
-const DEFAULT_FAILURE_POLICY: &str = "detach";
 
 struct Component {
     executable: String,
     memory_limit: String,
-    startup_timeout: Option<String>,
-    on_failure: String,
+    restarts: Option<u32>,
     name: Option<String>,
-    after: Vec<String>,
+    bind: Vec<(String, String)>,
+    scope: Vec<(String, String)>,
+    instance: Vec<(String, u16)>,
 }
 
 impl Component {
@@ -50,10 +44,11 @@ impl Component {
         Self {
             executable: String::from(executable),
             memory_limit: String::from(DEFAULT_MEMORY_LIMIT),
-            startup_timeout: None,
-            on_failure: String::from(DEFAULT_FAILURE_POLICY),
+            restarts: None,
             name: None,
-            after: Vec::new(),
+            bind: Vec::new(),
+            scope: Vec::new(),
+            instance: Vec::new(),
         }
     }
 
@@ -67,13 +62,8 @@ impl Component {
         self
     }
 
-    fn startup_timeout(mut self, timeout: &str) -> Self {
-        self.startup_timeout = Some(String::from(timeout));
-        self
-    }
-
-    fn on_failure(mut self, policy: &str) -> Self {
-        self.on_failure = String::from(policy);
+    fn restarts(mut self, restarts: u32) -> Self {
+        self.restarts = Some(restarts);
         self
     }
 
@@ -82,36 +72,68 @@ impl Component {
         self
     }
 
-    fn after(mut self, edges: &[&str]) -> Self {
-        self.after = edges.iter().map(|edge| String::from(*edge)).collect();
+    fn bind(mut self, requirement: &str, instance: &str) -> Self {
+        self.bind
+            .push((String::from(requirement), String::from(instance)));
+        self
+    }
+
+    fn scope(mut self, requirement: &str, scope: &str) -> Self {
+        self.scope
+            .push((String::from(requirement), String::from(scope)));
+        self
+    }
+
+    fn instance(mut self, requirement: &str, instance: u16) -> Self {
+        self.instance.push((String::from(requirement), instance));
         self
     }
 
     fn render(&self) -> String {
-        let startup_timeout = match &self.startup_timeout {
-            Some(timeout) => format!("startup_timeout = \"{timeout}\"\n"),
+        let restarts = match self.restarts {
+            Some(restarts) => format!("restarts = {restarts}\n"),
             None => String::new(),
         };
         let name = match &self.name {
             Some(name) => format!("name = \"{name}\"\n"),
             None => String::new(),
         };
-        let after = match self.after.as_slice() {
-            [] => String::new(),
-            edges => {
-                let quoted: Vec<String> = edges.iter().map(|edge| format!("\"{edge}\"")).collect();
-                format!("after = [{}]\n", quoted.join(", "))
-            }
-        };
+        let bind = table(
+            "bind",
+            self.bind
+                .iter()
+                .map(|(requirement, to)| (requirement, format!("\"{to}\""))),
+        );
+        let scope = table(
+            "scope",
+            self.scope
+                .iter()
+                .map(|(requirement, area)| (requirement, format!("\"{area}\""))),
+        );
+        let instance = table(
+            "instance",
+            self.instance
+                .iter()
+                .map(|(requirement, index)| (requirement, index.to_string())),
+        );
         format!(
             "\n[[components]]\n\
              executable = \"{}\"\n\
              memory_limit = \"{}\"\n\
-             on_failure = \"{}\"\n\
-             {startup_timeout}{name}{after}",
-            self.executable, self.memory_limit, self.on_failure
+             {restarts}{name}{bind}{scope}{instance}",
+            self.executable, self.memory_limit
         )
     }
+}
+
+fn table<'a>(key: &str, entries: impl Iterator<Item = (&'a String, String)>) -> String {
+    let entries: Vec<String> = entries
+        .map(|(requirement, value)| format!("{requirement} = {value}"))
+        .collect();
+    if entries.is_empty() {
+        return String::new();
+    }
+    format!("{key} = {{ {} }}\n", entries.join(", "))
 }
 
 fn versioned(version: u16, components: &[Component]) -> String {
@@ -124,17 +146,11 @@ fn plan(components: &[Component]) -> String {
 }
 
 fn router() -> Component {
-    Component::new(ROUTER)
-        .memory_limit("8M")
-        .startup_timeout("2s")
-        .on_failure("restart 2 then halt")
+    Component::new(ROUTER).memory_limit("8M").restarts(2)
 }
 
 fn image_filesystem() -> Component {
-    Component::new(IMAGE_FS)
-        .memory_limit("8M")
-        .startup_timeout("2s")
-        .on_failure("halt")
+    Component::new(IMAGE_FS).memory_limit("8M")
 }
 
 fn ram_filesystem() -> Component {
@@ -149,32 +165,38 @@ fn consumer() -> Component {
     Component::new(CONSUMER)
 }
 
-fn slot(kind: SlotKind, resource: u16, names: &[&str]) -> ManifestSlot {
-    ManifestSlot {
+fn requirement(
+    name: &str,
+    kind: RequirementKind,
+    resource: u16,
+    names: &[&str],
+) -> ManifestRequirement {
+    ManifestRequirement {
+        name: String::from(name),
         kind,
         resource,
         names: names.iter().map(|name| String::from(*name)).collect(),
     }
 }
 
-fn declaration(slots: Vec<ManifestSlot>, export: Option<&str>) -> ProgramManifest {
-    exporting(slots, &export.into_iter().collect::<Vec<_>>())
+fn session(name: &str, protocol: &str) -> ManifestRequirement {
+    requirement(name, RequirementKind::Session, 0, &[protocol])
 }
 
-fn exporting(slots: Vec<ManifestSlot>, exports: &[&str]) -> ProgramManifest {
+fn region(name: &str) -> ManifestRequirement {
+    requirement(name, RequirementKind::Region, 0, &[])
+}
+
+fn declaration(requirements: Vec<ManifestRequirement>, exports: &[&str]) -> ProgramManifest {
     ProgramManifest {
-        slots,
+        requirements,
         exports: exports.iter().map(|export| String::from(*export)).collect(),
-        establishes_sessions: false,
     }
 }
 
 fn router_declaration() -> ProgramManifest {
-    exporting(
-        vec![
-            slot(SlotKind::Userland, 0, &[]),
-            slot(SlotKind::Supervisor, 0, &[]),
-        ],
+    declaration(
+        vec![region("image")],
         &[NAMESPACE_PROTOCOL, NAMESPACE_ADMIN_PROTOCOL],
     )
 }
@@ -182,32 +204,30 @@ fn router_declaration() -> ProgramManifest {
 fn device_declaration() -> ProgramManifest {
     declaration(
         vec![
-            slot(SlotKind::Irq, 0, RTC_COMPATIBLE),
-            slot(SlotKind::Mmio, 1, RTC_COMPATIBLE),
+            requirement("line", RequirementKind::Irq, 0, RTC_COMPATIBLE),
+            requirement("window", RequirementKind::Mmio, 1, RTC_COMPATIBLE),
         ],
-        None,
+        &[],
     )
 }
 
 fn consumer_declaration() -> ProgramManifest {
-    declaration(
-        vec![slot(SlotKind::Service, 0, &[NAMESPACE_PROTOCOL])],
-        None,
-    )
+    declaration(vec![session("names", NAMESPACE_PROTOCOL)], &[])
 }
 
 fn image_filesystem_declaration() -> ProgramManifest {
-    ProgramManifest {
-        establishes_sessions: true,
-        ..declaration(
-            vec![slot(SlotKind::Userland, 0, &[])],
-            Some(FILE_SYSTEM_PROTOCOL),
-        )
-    }
+    declaration(vec![region("image")], &[FILE_SYSTEM_PROTOCOL])
+}
+
+fn ram_filesystem_declaration() -> ProgramManifest {
+    declaration(
+        vec![session("namespace", NAMESPACE_ADMIN_PROTOCOL)],
+        &[FILE_SYSTEM_PROTOCOL],
+    )
 }
 
 fn area_declaration() -> ProgramManifest {
-    declaration(vec![slot(SlotKind::Directory, 0, &[IMAGE_FS])], None)
+    declaration(vec![session(AREA_REQUIREMENT, FILE_SYSTEM_PROTOCOL)], &[])
 }
 
 struct ImageEntry {
@@ -236,12 +256,9 @@ impl Image {
             (DRIVER, device_declaration()),
             (CONSUMER, consumer_declaration()),
             (IMAGE_FS, image_filesystem_declaration()),
-            (RAM_FS, ProgramManifest::default()),
+            (RAM_FS, ram_filesystem_declaration()),
         ] {
             image = image.with(bin, manifest);
-        }
-        for index in 0..DRIVER_FAMILY {
-            image = image.with(&driver_family_member(index), device_declaration());
         }
         image
     }
@@ -284,24 +301,12 @@ impl Image {
     }
 
     fn compiled(&self, source: &str) -> Vec<u8> {
-        compile_stages(source, None, &self.programs())
-            .expect("compile must succeed")
-            .plan
+        compile_plan(source, &self.programs()).expect("compile must succeed")
     }
 
     fn rejected(&self, source: &str) -> String {
-        let error = compile_stages(source, None, &self.programs())
-            .expect_err("invalid composition must fail");
-        reason(&error)
-    }
-
-    fn staged(&self, plan: &str, stage_one: &str) -> CompiledStages {
-        compile_stages(plan, Some(stage_one), &self.programs()).expect("compile must succeed")
-    }
-
-    fn staging_rejected(&self, plan: &str, stage_one: &str) -> String {
-        let error = compile_stages(plan, Some(stage_one), &self.programs())
-            .expect_err("invalid composition must fail");
+        let error =
+            compile_plan(source, &self.programs()).expect_err("invalid composition must fail");
         reason(&error)
     }
 }
@@ -322,16 +327,6 @@ fn image_with_two_helpers() -> Image {
         )
 }
 
-fn driver_family_member(index: usize) -> String {
-    format!("driver-{index}")
-}
-
-fn driver_family(drivers: usize) -> Vec<Component> {
-    let mut components = vec![router()];
-    components.extend((1..=drivers).map(|index| Component::new(&driver_family_member(index))));
-    components
-}
-
 fn compiled(source: &str) -> Vec<u8> {
     Image::new().compiled(source)
 }
@@ -344,12 +339,28 @@ fn decoded(bytes: &[u8]) -> BootPlan<'_> {
     decode_plan(bytes).expect("compiled plan must decode")
 }
 
-fn slots_of(bytes: &[u8], index: u16) -> Vec<SlotSource<'_>> {
+fn requirements_of(bytes: &[u8], index: u16) -> Vec<PlanRequirement<'_>> {
     decoded(bytes)
         .component(index)
         .expect("the plan carries the component")
-        .slots()
+        .requirements()
         .collect()
+}
+
+fn session_of<'a>(
+    name: &'a str,
+    provider: u16,
+    protocol: &'a str,
+    scope: &'a str,
+) -> PlanRequirement<'a> {
+    PlanRequirement {
+        name,
+        source: RequirementSource::Export {
+            provider,
+            protocol,
+            scope,
+        },
+    }
 }
 
 fn reason(error: &anyhow::Error) -> String {
@@ -359,117 +370,7 @@ fn reason(error: &anyhow::Error) -> String {
 }
 
 #[test]
-fn stage_one_record_carries_one_component() {
-    let stages = Image::new().staged(&plan(&[image_filesystem()]), &plan(&[ram_filesystem()]));
-
-    assert_eq!(decoded(&stages.plan).len(), 1);
-    // `define` принимает запись плана ровно с одним компонентом, и владелец политики
-    // загрузки подаёт её байты как есть.
-    assert_eq!(stages.stage_one.len(), 1);
-    assert_eq!(stages.stage_one[0].name, RAM_FS);
-    let record = decoded(&stages.stage_one[0].bytes);
-    assert_eq!(record.len(), 1);
-    let component = record.component(0).expect("record carries its component");
-    assert_eq!(component.executable(), image_path(RAM_FS));
-    assert_eq!(component.name(), RAM_FS);
-}
-
-#[test]
-fn stage_one_binds_a_slot_to_an_exporter_of_stage_zero() {
-    let stages = Image::new().staged(&plan(&[router()]), &plan(&[consumer()]));
-
-    // Имена экземпляров работают сквозь ступени, а провайдер слота стоит в плане.
-    assert_eq!(
-        slots_of(&stages.stage_one[0].bytes, 0),
-        [SlotSource::Service {
-            provider: ROUTER,
-            export: 0
-        }]
-    );
-}
-
-#[test]
-fn stage_one_rejects_a_name_taken_by_stage_zero() {
-    assert_eq!(
-        Image::new().staging_rejected(
-            &plan(&[image_filesystem(), ram_filesystem()]),
-            &plan(&[ram_filesystem()])
-        ),
-        format!("boot plan names component '{RAM_FS}' more than once")
-    );
-}
-
-#[test]
-fn stage_zero_rejects_a_dependency_on_stage_one() {
-    assert_eq!(
-        Image::new().staging_rejected(
-            &plan(&[image_filesystem().after(&[RAM_FS])]),
-            &plan(&[ram_filesystem()])
-        ),
-        format!(
-            "boot plan component '{IMAGE_FS}' depends on '{RAM_FS}', \
-             which stage 1 raises"
-        )
-    );
-}
-
-#[test]
-fn stage_one_rejects_a_name_longer_than_an_image_record() {
-    let name = "n".repeat(NAME_MAX + 1);
-
-    assert_eq!(
-        Image::new().staging_rejected(
-            &plan(&[image_filesystem()]),
-            &plan(&[ram_filesystem().name(&name)])
-        ),
-        format!(
-            "stage 1 component name '{name}' is longer than {NAME_MAX} bytes, \
-             which an image record name holds"
-        )
-    );
-}
-
-#[test]
-fn stage_one_rejects_a_record_past_the_transaction_bound() {
-    const BULKY: &str = "bulky-driver";
-    let compatible = format!("arm,{}", "d".repeat(200));
-    let slots = (0..COMPONENT_SLOT_MAX)
-        .map(|_| slot(SlotKind::Irq, 0, &[&compatible, &compatible]))
-        .collect();
-
-    let error = Image::new()
-        .with(BULKY, declaration(slots, None))
-        .staging_rejected(
-            &plan(&[image_filesystem()]),
-            &plan(&[Component::new(BULKY)]),
-        );
-
-    assert!(
-        error.contains(&format!(
-            "the extension transaction carries {PLAN_RECORD_MAX}"
-        )),
-        "the record bound must be the failing check: {error}"
-    );
-}
-
-#[test]
-fn stage_one_rejects_a_cycle_of_its_own() {
-    let first = ram_filesystem().after(&[DRIVER]);
-    let second = rtc().after(&[RAM_FS]);
-
-    // Порядок запуска топологический по объединению ступеней, и цикл внутри ступени 1
-    // делает его невыразимым так же, как цикл в плане.
-    assert_eq!(
-        Image::new().staging_rejected(&plan(&[image_filesystem()]), &plan(&[first, second])),
-        format!(
-            "boot plan dependencies form a cycle over components: \
-             {RAM_FS}, {DRIVER}"
-        )
-    );
-}
-
-#[test]
-fn plan_takes_every_slot_from_the_program_declaration() {
+fn plan_takes_every_requirement_from_the_program_declaration() {
     let bytes = compiled(&plan(&[image_filesystem(), rtc()]));
 
     let plan = decoded(&bytes);
@@ -478,177 +379,58 @@ fn plan_takes_every_slot_from_the_program_declaration() {
     let filesystem = plan.component(0).expect("image filesystem");
     assert_eq!(filesystem.executable(), image_path(IMAGE_FS));
     assert_eq!(
-        filesystem.slots().collect::<Vec<_>>(),
-        [SlotSource::Userland]
+        filesystem.requirements().collect::<Vec<_>>(),
+        [PlanRequirement {
+            name: "image",
+            source: RequirementSource::Region
+        }]
     );
 
     let rtc = plan.component(1).expect("rtc");
-    let slots: Vec<SlotSource<'_>> = rtc.slots().collect();
-    let SlotSource::Irq(line) = slots[0] else {
-        panic!("first slot is an interrupt line")
+    let Some(RequirementSource::Irq(line)) = rtc.requirement("line") else {
+        panic!("`line` is an interrupt line")
     };
     assert_eq!(line.compatible().collect::<Vec<_>>(), RTC_COMPATIBLE);
     assert_eq!(line.resource, 0);
-    let SlotSource::Mmio(window) = slots[1] else {
-        panic!("second slot is an MMIO window")
+    let Some(RequirementSource::Mmio(window)) = rtc.requirement("window") else {
+        panic!("`window` is an MMIO window")
     };
     assert_eq!(window.compatible().collect::<Vec<_>>(), RTC_COMPATIBLE);
     assert_eq!(window.resource, 1);
 }
 
 #[test]
-fn plan_carries_the_declaration_of_own_sessions() {
-    const FILE_SYSTEM: &str = "filesystem-establishing";
-    const READER: &str = "file-reader";
+fn plan_binds_an_imported_protocol_to_its_exporter_in_either_order() {
+    for (components, importer, exporter) in [
+        ([router(), consumer()], 1, 0),
+        ([consumer(), router()], 0, 1),
+    ] {
+        let bytes = compiled(&plan(&components));
 
-    let provider = ProgramManifest {
-        establishes_sessions: true,
-        ..declaration(vec![], Some(FILE_SYSTEM_PROTOCOL))
-    };
-    let reader = declaration(
-        vec![slot(SlotKind::Service, 0, &[FILE_SYSTEM_PROTOCOL])],
-        None,
-    );
-    let bytes = Image::new()
-        .with(FILE_SYSTEM, provider)
-        .with(READER, reader)
-        .compiled(&plan(&[
-            router().executable(FILE_SYSTEM),
-            Component::new(READER),
-        ]));
-
-    let plan = decoded(&bytes);
-    let provider = plan.component(0).expect("file system");
-    assert!(provider.establishes_sessions());
-    let reader = plan.component(1).expect("reader");
-    assert!(!reader.establishes_sessions());
-    assert_eq!(
-        reader.slots().collect::<Vec<_>>(),
-        [SlotSource::Service {
-            provider: FILE_SYSTEM,
-            export: 0
-        }]
-    );
+        assert_eq!(
+            requirements_of(&bytes, importer),
+            [session_of("names", exporter, NAMESPACE_PROTOCOL, "")]
+        );
+    }
 }
 
 #[test]
-fn plan_rejects_own_sessions_without_an_export() {
-    const MUTE: &str = "mute-provider";
-    let mute = ProgramManifest {
-        establishes_sessions: true,
-        ..declaration(vec![], None)
-    };
+fn two_instances_of_one_program_bind_one_requirement_to_two_providers() {
+    let bytes = compiled(&plan(&[
+        router().name("names-a"),
+        router().name("names-b"),
+        consumer().name("consumer-a").bind("names", "names-a"),
+        consumer().name("consumer-b").bind("names", "names-b"),
+    ]));
 
     assert_eq!(
-        Image::new()
-            .with(MUTE, mute)
-            .rejected(&plan(&[Component::new(MUTE)])),
-        "boot plan component 'mute-provider' establishes its own sessions \
-         without exporting a protocol"
+        requirements_of(&bytes, 2),
+        [session_of("names", 0, NAMESPACE_PROTOCOL, "")]
     );
-}
-
-#[test]
-fn plan_binds_an_imported_protocol_to_its_exporter() {
-    let bytes = compiled(&plan(&[router(), consumer()]));
-
     assert_eq!(
-        slots_of(&bytes, 1),
-        [SlotSource::Service {
-            provider: ROUTER,
-            export: 0
-        }]
+        requirements_of(&bytes, 3),
+        [session_of("names", 1, NAMESPACE_PROTOCOL, "")]
     );
-}
-
-#[test]
-fn plan_binds_a_named_import_to_the_instance_it_names() {
-    const TWIN: &str = "namespace-router-twin";
-    const PICKY: &str = "picky-consumer";
-
-    let picky = declaration(
-        vec![slot(SlotKind::Service, 0, &[NAMESPACE_PROTOCOL, TWIN])],
-        None,
-    );
-    let bytes = Image::new()
-        .with(TWIN, router_declaration())
-        .with(PICKY, picky)
-        .compiled(&plan(&[
-            router(),
-            router().executable(TWIN),
-            Component::new(PICKY),
-        ]));
-
-    assert_eq!(
-        slots_of(&bytes, 2),
-        [SlotSource::Service {
-            provider: TWIN,
-            export: 0
-        }]
-    );
-}
-
-#[test]
-fn plan_rejects_a_named_import_of_an_instance_outside_the_composition() {
-    const PICKY: &str = "picky-consumer";
-    let picky = declaration(
-        vec![slot(SlotKind::Service, 0, &[NAMESPACE_PROTOCOL, "ghost"])],
-        None,
-    );
-
-    assert_eq!(
-        Image::new()
-            .with(PICKY, picky)
-            .rejected(&plan(&[router(), Component::new(PICKY)])),
-        format!(
-            "boot plan component 'picky-consumer' imports protocol '{NAMESPACE_PROTOCOL}' \
-             from instance 'ghost', which the composition does not contain"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_named_import_of_an_instance_that_exports_nothing() {
-    const PICKY: &str = "picky-consumer";
-    let picky = declaration(
-        vec![slot(SlotKind::Service, 0, &[NAMESPACE_PROTOCOL, DRIVER])],
-        None,
-    );
-
-    assert_eq!(
-        Image::new()
-            .with(PICKY, picky)
-            .rejected(&plan(&[router(), rtc(), Component::new(PICKY)])),
-        format!(
-            "boot plan component 'picky-consumer' imports protocol '{NAMESPACE_PROTOCOL}' \
-             from instance '{DRIVER}', which exports no such protocol"
-        )
-    );
-}
-
-#[test]
-fn plan_orders_an_importer_after_its_exporter() {
-    // Потребитель стоит в записи первым, а зависит от провайдера. Ребро
-    // ведёт вперёд по плану, и порядок остаётся выразимым.
-    let bytes = compiled(&plan(&[consumer(), router()]));
-
-    assert_eq!(
-        slots_of(&bytes, 0),
-        [SlotSource::Service {
-            provider: ROUTER,
-            export: 0
-        }]
-    );
-}
-
-#[test]
-fn plan_keeps_an_after_edge_without_an_import() {
-    let bytes = compiled(&plan(&[router(), rtc().after(&[ROUTER])]));
-
-    let plan = decoded(&bytes);
-    let rtc = plan.component(1).expect("rtc");
-    assert_eq!(rtc.after().collect::<Vec<_>>(), [ROUTER]);
-    assert_eq!(rtc.slots().count(), 2);
 }
 
 #[test]
@@ -656,23 +438,77 @@ fn plan_rejects_an_import_no_component_exports() {
     assert_eq!(
         rejected(&plan(&[rtc(), consumer()])),
         format!(
-            "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE_PROTOCOL}', \
-             which no component of the composition exports"
+            "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE_PROTOCOL}' \
+             for requirement 'names', which no component of the composition exports"
         )
     );
 }
 
 #[test]
 fn plan_rejects_an_import_two_components_export() {
-    const TWIN: &str = "namespace-router-twin";
-
     assert_eq!(
         Image::new()
             .with(TWIN, router_declaration())
             .rejected(&plan(&[router(), router().executable(TWIN), consumer()])),
         format!(
-            "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE_PROTOCOL}', \
-             which 2 components export: {ROUTER}, namespace-router-twin"
+            "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE_PROTOCOL}' \
+             for requirement 'names', which 2 components export: {ROUTER}, {TWIN}; \
+             name one with 'bind'"
+        )
+    );
+}
+
+#[test]
+fn plan_rejects_a_key_on_a_name_outside_the_manifest() {
+    for (key, component) in [
+        ("bind", consumer().bind("files", ROUTER)),
+        ("scope", consumer().scope("files", "/")),
+        ("instance", consumer().instance("files", 1)),
+    ] {
+        assert_eq!(
+            rejected(&plan(&[router(), component])),
+            format!(
+                "boot plan component '{CONSUMER}' sets '{key}' on requirement 'files', \
+                 which its manifest does not declare"
+            )
+        );
+    }
+}
+
+#[test]
+fn plan_rejects_a_session_key_on_a_requirement_that_takes_no_session() {
+    for (key, component) in [
+        ("bind", image_filesystem().bind("image", ROUTER)),
+        ("scope", image_filesystem().scope("image", "/")),
+    ] {
+        assert_eq!(
+            rejected(&plan(&[router(), component])),
+            format!(
+                "boot plan component '{IMAGE_FS}' sets '{key}' on requirement 'image', \
+                 which takes no session"
+            )
+        );
+    }
+}
+
+#[test]
+fn plan_rejects_a_bind_to_an_instance_outside_the_composition() {
+    assert_eq!(
+        rejected(&plan(&[router(), consumer().bind("names", "ghost")])),
+        format!(
+            "boot plan component '{CONSUMER}' binds requirement 'names' to instance 'ghost', \
+             which the composition does not contain"
+        )
+    );
+}
+
+#[test]
+fn plan_rejects_a_bind_to_an_instance_that_does_not_export_the_protocol() {
+    assert_eq!(
+        rejected(&plan(&[router(), rtc(), consumer().bind("names", DRIVER)])),
+        format!(
+            "boot plan component '{CONSUMER}' binds requirement 'names' to instance '{DRIVER}', \
+             which exports no protocol '{NAMESPACE_PROTOCOL}'"
         )
     );
 }
@@ -681,8 +517,8 @@ fn plan_rejects_an_import_two_components_export() {
 fn plan_rejects_a_component_importing_what_it_exports() {
     const SELF_BOUND: &str = "self-bound";
     let self_bound = declaration(
-        vec![slot(SlotKind::Service, 0, &[NAMESPACE_PROTOCOL])],
-        Some(NAMESPACE_PROTOCOL),
+        vec![session("names", NAMESPACE_PROTOCOL)],
+        &[NAMESPACE_PROTOCOL],
     );
 
     assert_eq!(
@@ -694,156 +530,182 @@ fn plan_rejects_a_component_importing_what_it_exports() {
 }
 
 #[test]
-fn plan_binds_an_import_to_the_second_export_of_its_provider() {
-    const ADMIN: &str = "mount-admin";
-    let admin = declaration(
-        vec![slot(SlotKind::Service, 0, &[NAMESPACE_ADMIN_PROTOCOL])],
-        None,
+fn plan_rejects_a_bind_to_the_component_itself() {
+    const SELF_BOUND: &str = "self-bound";
+    let self_bound = declaration(
+        vec![session("names", NAMESPACE_PROTOCOL)],
+        &[NAMESPACE_PROTOCOL],
     );
-    let bytes = Image::new()
-        .with(ADMIN, admin)
-        .compiled(&plan(&[router(), Component::new(ADMIN)]));
 
-    // Ребро зависимости выведено из связывания. Провайдер поднимается раньше того, кто
-    // зовёт его админ-операции.
     assert_eq!(
-        slots_of(&bytes, 1),
-        [SlotSource::Service {
-            provider: ROUTER,
-            export: 1
-        }]
-    );
-}
-
-#[test]
-fn plan_binds_a_named_admin_import_to_the_instance_it_names() {
-    const TWIN: &str = "namespace-router-twin";
-    const ADMIN: &str = "mount-admin";
-
-    let admin = declaration(
-        vec![slot(
-            SlotKind::Service,
-            0,
-            &[NAMESPACE_ADMIN_PROTOCOL, TWIN],
-        )],
-        None,
-    );
-    let bytes = Image::new()
-        .with(TWIN, router_declaration())
-        .with(ADMIN, admin)
-        .compiled(&plan(&[
+        Image::new().with(SELF_BOUND, self_bound).rejected(&plan(&[
             router(),
-            router().executable(TWIN),
-            Component::new(ADMIN),
-        ]));
-
-    assert_eq!(
-        slots_of(&bytes, 2),
-        [SlotSource::Service {
-            provider: TWIN,
-            export: 1
-        }]
+            Component::new(SELF_BOUND).bind("names", SELF_BOUND),
+        ])),
+        "boot plan component 'self-bound' binds requirement 'names' to itself"
     );
 }
 
 #[test]
-fn plan_binds_a_directory_slot_to_the_named_instance() {
-    let bytes = Image::new()
-        .with(AREA, area_declaration())
-        .compiled(&plan(&[image_filesystem(), Component::new(AREA)]));
-
-    // Ребро зависимости выведено из связывания. Файловая система поднимается
-    // раньше того, кому выдаёт каталог.
+fn a_plan_binding_the_log_requirement_is_refused() {
     assert_eq!(
-        slots_of(&bytes, 1),
-        [SlotSource::Directory { provider: IMAGE_FS }]
-    );
-}
-
-#[test]
-fn plan_rejects_a_directory_slot_naming_its_own_component() {
-    let area = declaration(vec![slot(SlotKind::Directory, 0, &[AREA])], None);
-
-    assert_eq!(
-        Image::new()
-            .with(AREA, area)
-            .rejected(&plan(&[image_filesystem(), Component::new(AREA)])),
-        format!("boot plan component '{AREA}' takes its directory from itself")
-    );
-}
-
-#[test]
-fn plan_rejects_a_directory_slot_naming_an_instance_outside_the_composition() {
-    assert_eq!(
-        Image::new()
-            .with(AREA, area_declaration())
-            .rejected(&plan(&[rtc(), Component::new(AREA)])),
+        rejected(&plan(&[router(), consumer().bind("log", ROUTER)])),
         format!(
-            "boot plan component '{AREA}' takes its directory from instance \
-             '{IMAGE_FS}', which the composition does not contain"
+            "boot plan component '{CONSUMER}' sets 'bind' on requirement 'log', \
+             the name reserved for the log its parent serves"
         )
     );
 }
 
 #[test]
-fn plan_rejects_a_directory_slot_from_an_instance_with_two_exports() {
-    const CROWDED: &str = "crowded-filesystem";
-    let crowded = ProgramManifest {
-        establishes_sessions: true,
-        ..exporting(
-            vec![slot(SlotKind::Userland, 0, &[])],
-            &[FILE_SYSTEM_PROTOCOL, NAMESPACE_ADMIN_PROTOCOL],
+fn plan_carries_the_mount_prefix_as_the_scope_of_the_namespace_requirement() {
+    let bytes = compiled(&plan(&[
+        router(),
+        ram_filesystem().scope("namespace", "/tmp"),
+    ]));
+
+    assert_eq!(
+        requirements_of(&bytes, 1),
+        [session_of("namespace", 0, NAMESPACE_ADMIN_PROTOCOL, "/tmp")]
+    );
+}
+
+#[test]
+fn plan_rejects_a_scope_past_its_bound() {
+    let wide = format!("/{}", "a".repeat(SESSION_SCOPE_MAX));
+
+    assert_eq!(
+        Image::new()
+            .with(AREA, area_declaration())
+            .rejected(&plan(&[
+                image_filesystem(),
+                Component::new(AREA).scope(AREA_REQUIREMENT, &wide),
+            ])),
+        format!(
+            "boot plan component '{AREA}' sets 'scope' on requirement '{AREA_REQUIREMENT}' with {} bytes; \
+             a scope is non-empty and at most {SESSION_SCOPE_MAX}",
+            wide.len()
+        )
+    );
+}
+
+#[test]
+fn an_instance_names_the_device_of_its_requirement() {
+    let bytes = compiled(&plan(&[rtc().instance("line", 1)]));
+
+    let plan = decoded(&bytes);
+    let rtc = plan.component(0).expect("rtc");
+    let Some(RequirementSource::Irq(line)) = rtc.requirement("line") else {
+        panic!("`line` is an interrupt line")
+    };
+    assert_eq!(line.instance, 1);
+    let Some(RequirementSource::Mmio(window)) = rtc.requirement("window") else {
+        panic!("`window` is an MMIO window")
+    };
+    assert_eq!(window.instance, 0);
+}
+
+#[test]
+fn an_instance_on_a_session_requirement_is_refused() {
+    assert_eq!(
+        rejected(&plan(&[router(), consumer().instance("names", 1)])),
+        format!(
+            "boot plan component '{CONSUMER}' sets 'instance' on requirement 'names', \
+             which names no device"
+        )
+    );
+}
+
+#[test]
+fn plan_carries_the_restart_count_of_a_component() {
+    let bytes = compiled(&plan(&[router(), rtc()]));
+
+    let plan = decoded(&bytes);
+    assert_eq!(plan.component(0).expect("router").restarts(), 2);
+    assert_eq!(plan.component(1).expect("rtc").restarts(), 0);
+}
+
+#[test]
+fn the_rootkeeper_handle_estimate_counts_session_requirements_and_exports() {
+    let provider = declaration(Vec::new(), &[CLOCK_PROTOCOL]);
+    let two = declaration(
+        vec![
+            session("first", CLOCK_PROTOCOL),
+            session("second", CLOCK_PROTOCOL),
+        ],
+        &[],
+    );
+    let one = declaration(vec![session("only", CLOCK_PROTOCOL)], &[]);
+
+    assert_eq!(
+        rootkeeper_handles(&[&provider, &two, &one]),
+        ROOTKEEPER_HANDLES + 3 * CHILD_HANDLES + 3 + 1 + 3
+    );
+}
+
+#[test]
+fn the_rootkeeper_handle_estimate_counts_the_grants_a_component_holds() {
+    assert_eq!(
+        rootkeeper_handles(&[&device_declaration()]),
+        ROOTKEEPER_HANDLES + CHILD_HANDLES + 3 + 2
+    );
+    assert_eq!(
+        rootkeeper_handles(&[&image_filesystem_declaration()]),
+        ROOTKEEPER_HANDLES + CHILD_HANDLES + 1 + 2
+    );
+}
+
+#[test]
+fn plan_rejects_a_composition_past_the_rootkeeper_handle_estimate() {
+    const CLOCK: &str = "clock-source";
+    const IMPORTERS: usize = 10;
+    const REQUIREMENTS: usize = 100;
+
+    let importer = || {
+        declaration(
+            (0..REQUIREMENTS)
+                .map(|index| session(&format!("requirement-{index}"), CLOCK_PROTOCOL))
+                .collect(),
+            &[],
         )
     };
-    let area = declaration(vec![slot(SlotKind::Directory, 0, &[CROWDED])], None);
+    let mut image = Image::new().with(CLOCK, declaration(Vec::new(), &[CLOCK_PROTOCOL]));
+    let mut components = vec![Component::new(CLOCK)];
+    for index in 0..IMPORTERS {
+        let name = format!("importer-{index}");
+        image = image.with(&name, importer());
+        components.push(Component::new(&name));
+    }
+    let declarations: Vec<ProgramManifest> = (0..IMPORTERS)
+        .map(|_| importer())
+        .chain([declaration(Vec::new(), &[CLOCK_PROTOCOL])])
+        .collect();
+    let handles = rootkeeper_handles(&declarations.iter().collect::<Vec<_>>());
+    assert!(handles > HANDLE_TABLE_CAPACITY as usize);
 
-    // Слот-каталог протокола не называет, и выбрать экспорт провайдера ему нечем.
     assert_eq!(
-        Image::new()
-            .with(CROWDED, crowded)
-            .with(AREA, area)
-            .rejected(&plan(&[
-                image_filesystem().executable(CROWDED),
-                Component::new(AREA)
-            ])),
+        image.rejected(&plan(&components)),
         format!(
-            "boot plan component '{AREA}' takes its directory from instance \
-             '{CROWDED}', which exports 2 protocols; the directory slot names none"
+            "boot plan composition of {} components requires up to {handles} rootkeeper handles; \
+             the table holds {HANDLE_TABLE_CAPACITY}",
+            IMPORTERS + 1
         )
     );
 }
 
 #[test]
-fn plan_rejects_a_directory_slot_from_an_instance_without_own_sessions() {
-    let area = declaration(vec![slot(SlotKind::Directory, 0, &[ROUTER])], None);
+fn plan_rejects_an_export_past_the_protocol_id_bound() {
+    const WIDE: &str = "wide-exporter";
+    let protocol = "P".repeat(PROTOCOL_ID_MAX + 1);
 
-    // Область назначает supervisor, а сужает её сам провайдер. Просто сминченный значок
-    // области не предоставляет.
     assert_eq!(
         Image::new()
-            .with(AREA, area)
-            .rejected(&plan(&[router(), Component::new(AREA)])),
+            .with(WIDE, declaration(Vec::new(), &[&protocol]))
+            .rejected(&plan(&[Component::new(WIDE)])),
         format!(
-            "boot plan component '{AREA}' takes its directory from instance \
-             '{ROUTER}', which does not establish its own sessions"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_directory_slot_of_a_component_the_provider_waits_for() {
-    // Компонент, которого сама ждёт файловая система, каталога от неё не
-    // получает: порядок запуска такой композиции невыразим.
-    assert_eq!(
-        Image::new()
-            .with(AREA, area_declaration())
-            .rejected(&plan(&[
-                image_filesystem().after(&[AREA]),
-                Component::new(AREA),
-            ])),
-        format!(
-            "boot plan dependencies form a cycle over components: \
-             {IMAGE_FS}, {AREA}"
+            "boot plan component '{WIDE}' exports protocol '{protocol}' of {} bytes; \
+             a protocol id holds at most {PROTOCOL_ID_MAX}",
+            protocol.len()
         )
     );
 }
@@ -907,28 +769,9 @@ fn one_program_carries_two_named_instances() {
     assert_eq!(first.executable(), second.executable());
     assert_eq!(first.name(), "names-boot");
     assert_eq!(second.name(), "names-spare");
-    // Каталог у экземпляров общий, а значит и файлы. Запись каталога
-    // называет программа, а не композиция.
     assert_eq!(
-        first.slots().collect::<Vec<_>>(),
-        second.slots().collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn an_after_edge_names_another_instance_of_the_same_program() {
-    let bytes = compiled(&plan(&[
-        router().name("names-boot"),
-        router().name("names-spare").after(&["names-boot"]),
-    ]));
-
-    assert_eq!(
-        decoded(&bytes)
-            .component(1)
-            .expect("second instance")
-            .after()
-            .collect::<Vec<_>>(),
-        ["names-boot"]
+        first.requirements().collect::<Vec<_>>(),
+        second.requirements().collect::<Vec<_>>()
     );
 }
 
@@ -961,39 +804,12 @@ fn plan_rejects_an_empty_composition() {
 
 #[test]
 fn plan_rejects_a_memory_limit_outside_the_grammar() {
-    for limit in ["0", "8MB", "5000", ""] {
+    for limit in ["0", "8MB", ""] {
         assert!(
             rejected(&plan(&[router().memory_limit(limit)])).starts_with(&format!(
                 "boot plan component '{ROUTER}' sets 'memory_limit'"
             )),
             "'{limit}' must fail on the memory limit"
-        );
-    }
-}
-
-#[test]
-fn plan_rejects_a_startup_timeout_outside_the_grammar() {
-    assert!(
-        rejected(&plan(&[router().startup_timeout("0s")])).starts_with(&format!(
-            "boot plan component '{ROUTER}' sets 'startup_timeout'"
-        ))
-    );
-}
-
-#[test]
-fn plan_rejects_a_failure_policy_outside_the_grammar() {
-    for policy in [
-        "",
-        "reboot",
-        "restart 2",
-        "restart two then halt",
-        "restart 0 then halt",
-        "restart 2 then reboot",
-    ] {
-        assert!(
-            rejected(&plan(&[router().on_failure(policy)]))
-                .starts_with(&format!("boot plan component '{ROUTER}' sets 'on_failure'")),
-            "'{policy}' must fail on the failure policy"
         );
     }
 }
@@ -1067,18 +883,6 @@ fn a_component_named_by_the_qualified_form_is_called_by_it() {
 }
 
 #[test]
-fn a_qualified_name_holds_as_an_image_record_name() {
-    let stages = image_with_two_helpers().staged(
-        &plan(&[image_filesystem()]),
-        &plan(&[Component::new("foo::helper")]),
-    );
-
-    assert_eq!(stages.stage_one[0].name, "foo::helper");
-    let record = decoded(&stages.stage_one[0].bytes);
-    assert_eq!(record.component(0).expect("helper").name(), "foo::helper");
-}
-
-#[test]
 fn plan_rejects_a_qualified_name_longer_than_a_process_name() {
     let package = "p".repeat(MAX_PROCESS_NAME_LEN);
     let executable = format!("{package}::{HELPER}");
@@ -1141,34 +945,7 @@ fn a_program_without_a_manifest_declares_nothing() {
     let plan = decoded(&bytes);
     let component = plan.component(0).expect("component");
     assert_eq!(component.executable(), image_path(ROOTKEEPER));
-    assert_eq!(component.slots().count(), 0);
-}
-
-#[test]
-fn plan_rejects_a_cycle_over_after() {
-    assert_eq!(
-        rejected(&plan(&[router().after(&[DRIVER]), rtc().after(&[ROUTER])])),
-        format!("boot plan dependencies form a cycle over components: {ROUTER}, {DRIVER}")
-    );
-}
-
-#[test]
-fn plan_rejects_a_self_dependency() {
-    assert_eq!(
-        rejected(&plan(&[router().after(&[ROUTER])])),
-        format!("boot plan component '{ROUTER}' names itself in 'after'")
-    );
-}
-
-#[test]
-fn plan_rejects_an_unknown_edge() {
-    assert_eq!(
-        rejected(&plan(&[router().after(&["logger"])])),
-        format!(
-            "boot plan component '{ROUTER}' names 'logger' in 'after', \
-             which the composition does not contain"
-        )
-    );
+    assert_eq!(component.requirements().count(), 0);
 }
 
 #[test]
@@ -1176,78 +953,4 @@ fn plan_rejects_an_unknown_key() {
     let source = format!("{}slots = [{{ source = \"image\" }}]\n", plan(&[router()]));
 
     assert!(rejected(&source).starts_with("Failed to parse boot plan TOML"));
-}
-
-#[test]
-fn plan_rejects_more_slots_than_the_startup_transaction_carries() {
-    const CROWDED: &str = "crowded";
-    let crowded = declaration(
-        (0..=COMPONENT_SLOT_MAX)
-            .map(|_| slot(SlotKind::Userland, 0, &[]))
-            .collect(),
-        None,
-    );
-
-    assert_eq!(
-        Image::new()
-            .with(CROWDED, crowded)
-            .rejected(&plan(&[Component::new(CROWDED)])),
-        format!(
-            "boot plan component 'crowded' declares {} slots; \
-             the startup transaction carries {COMPONENT_SLOT_MAX}",
-            COMPONENT_SLOT_MAX + 1
-        )
-    );
-}
-
-#[test]
-fn plan_allows_two_userland_slot_consumers() {
-    const TWIN: &str = "filesystem-imagefs-twin";
-    let userland = declaration(vec![slot(SlotKind::Userland, 0, &[])], None);
-    let source = plan(&[image_filesystem(), image_filesystem().executable(TWIN)]);
-
-    Image::new().with(TWIN, userland).compiled(&source);
-}
-
-#[test]
-fn components_fit_the_resource_depth_ceiling() {
-    validate_resource_depth(ROUTER, COMPONENT_RESOURCE_LEVELS)
-        .expect("a component fits the ceiling");
-
-    let too_deep = validate_resource_depth(ROUTER, MAX_RESOURCE_DEPTH + 1)
-        .expect_err("a component past the ceiling must fail")
-        .to_string();
-    assert_eq!(
-        too_deep,
-        format!(
-            "boot plan component '{ROUTER}' needs {} resource levels under depth 0; \
-             the ceiling is {MAX_RESOURCE_DEPTH}",
-            MAX_RESOURCE_DEPTH + 1
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_composition_past_the_supervisor_wait_ceiling() {
-    let components = driver_family(WAIT_MANY_MAX_COUNT - 1);
-
-    assert_eq!(
-        rejected(&plan(&components)),
-        format!(
-            "boot plan composition of {WAIT_MANY_MAX_COUNT} components needs \
-             {} supervisor wait objects; the ceiling is {WAIT_MANY_MAX_COUNT}",
-            WAIT_MANY_MAX_COUNT + SUPERVISOR_WAITS
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_composition_past_the_handle_estimate() {
-    let drivers = (HANDLE_TABLE_CAPACITY as usize - SUPERVISOR_HANDLES) / COMPONENT_HANDLES;
-    let components = driver_family(drivers);
-
-    assert!(
-        rejected(&plan(&components)).contains("rootkeeper handles; the table holds"),
-        "handle estimate must be the failing check"
-    );
 }

@@ -10,9 +10,6 @@ use kernel_objects::{Port, kind};
 use runtime::{Timeout, thread_exit};
 use syscall::Handle;
 
-/// Программа-фикстура шлёт один кадр и уходит, не закрывая клиентскую капу.
-/// `thread_exit` не разматывает стек, и капа остаётся в таблице процесса
-/// до её разрушения.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(client: Handle<kind::Port>) -> ! {
     let port = Port::from_handle(client);

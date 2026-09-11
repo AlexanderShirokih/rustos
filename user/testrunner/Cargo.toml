@@ -26,12 +26,6 @@ test = false
 bench = false
 
 [[bin]]
-name = "startup-fixture"
-path = "src/startup_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "port-fixture"
 path = "src/port_fixture.rs"
 test = false
@@ -56,38 +50,14 @@ test = false
 bench = false
 
 [[bin]]
-name = "namespace-consumer-fixture"
-path = "src/namespace_consumer_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "filesystem-client-fixture"
 path = "src/filesystem_client_fixture.rs"
 test = false
 bench = false
 
 [[bin]]
-name = "filesystem-consumer-fixture"
-path = "src/filesystem_consumer_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "directory-consumer-fixture"
-path = "src/directory_consumer_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "control-consumer-fixture"
-path = "src/control_consumer_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "supervisor-consumer-fixture"
-path = "src/supervisor_consumer_fixture.rs"
+name = "scope-consumer-fixture"
+path = "src/scope_consumer_fixture.rs"
 test = false
 bench = false
 
@@ -104,36 +74,6 @@ test = false
 bench = false
 
 [[bin]]
-name = "spare-filesystem"
-path = "src/spare_filesystem.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "managed-startup-fixture"
-path = "src/managed_startup_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "managed-startup-hung"
-path = "src/managed_startup_hung.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "startup-ownership-fixture"
-path = "src/startup_ownership_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "startup-stale-buffer-fixture"
-path = "src/startup_stale_buffer_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "handle-table-full-fixture"
 path = "src/handle_table_full_fixture.rs"
 test = false
@@ -145,13 +85,96 @@ path = "src/managed_startup_closed.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "budget-holder-fixture"
+path = "src/budget_holder_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "device-forwarding-fixture"
+path = "src/device_forwarding_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "irq-fixture"
+path = "src/irq_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "refusal-probe-fixture"
+path = "src/refusal_probe_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "log-duplicate-fixture"
+path = "src/log_duplicate_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "failing-fixture"
+path = "src/failing_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "idle-export-fixture"
+path = "src/idle_export_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "export-fixture"
+path = "src/export_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "helper-panic-fixture"
+path = "src/helper_panic_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "two-requirements-fixture"
+path = "src/two_requirements_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "probe-importer-fixture"
+path = "src/probe_importer_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "child-steps-fixture"
+path = "src/child_steps_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "start-handle-forward-fixture"
+path = "src/start_handle_forward_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "answer-exhaustion-fixture"
+path = "src/answer_exhaustion_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
 collections = { workspace = true }
 component-abi = { workspace = true }
 component-startup = { workspace = true }
-device-resolver = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
 filesystem-server = { workspace = true }
@@ -166,7 +189,6 @@ syscall = { workspace = true }
 managed-component = { workspace = true }
 rootkeeper = { path = "../rootkeeper" }
 rtc-abi = { workspace = true }
-supervisor-abi = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }
 userland-loader = { workspace = true }
