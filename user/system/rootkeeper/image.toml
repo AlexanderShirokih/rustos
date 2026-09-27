@@ -5,29 +5,29 @@ source = "user/system/rootkeeper/system.toml"
 
 [[programs]]
 package = "rootkeeper"
-path = "/boot/rootkeeper"
+path = "/rootkeeper"
 boot = true
 
 [[programs]]
 package = "driver-pl031"
-path = "/boot/driver-pl031"
+path = "/driver-pl031"
 
 [[programs]]
 package = "namespace-router"
-path = "/boot/namespace-router"
+path = "/namespace-router"
 
 [[programs]]
 package = "filesystem-imagefs"
-path = "/boot/filesystem-imagefs"
+path = "/filesystem-imagefs"
 
 [[programs]]
 package = "filesystem-ramfs"
-path = "/boot/filesystem-ramfs"
+path = "/filesystem-ramfs"
 
 [[programs]]
 package = "hello-std"
-path = "/boot/hello-std"
+path = "/hello-std"
 
 [[programs]]
 package = "clock-std"
-path = "/boot/clock-std"
+path = "/clock-std"

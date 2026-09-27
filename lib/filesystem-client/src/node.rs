@@ -141,6 +141,13 @@ impl<E: Environment> OpenNode<E> {
             .write(self.descriptor, APPEND_OFFSET, len)??)
     }
 
+    /// Задаёт длину узла. Байты за `size` отбрасываются, расширение дописывает нули. Позиция
+    /// чтения-записи остаётся прежней.
+    pub fn set_size(&self, size: u64) -> Result<()> {
+        self.session.client().set_size(self.descriptor, size)??;
+        Ok(())
+    }
+
     /// Метаданные узла на сервере сейчас. Значения [`kind`](Self::kind) и [`size`](Self::size)
     /// остаются от открытия.
     pub fn metadata(&self) -> Result<NodeInfo> {

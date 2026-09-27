@@ -6,9 +6,13 @@ publish.workspace = true
 
 [features]
 alloc = []
+rustc-dep-of-std = ["dep:core", "spin/rustc-dep-of-std"]
 
+# `spin` объявлен без фич по умолчанию, потому что его фича `lock_api` добавляет в граф
+# зависимостей `std` крейт без `rustc-dep-of-std`.
 [dependencies]
-spin = { workspace = true }
+spin = { version = "0.12.0", default-features = false, features = ["spin_mutex"] }
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 
 [lints]
 workspace = true

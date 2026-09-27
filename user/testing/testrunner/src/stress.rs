@@ -17,7 +17,7 @@ use runtime::{
 };
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
-const PLAN_PATH: &str = "/boot/testrunner/stress-plan";
+const PLAN_PATH: &str = "/testrunner/stress-plan";
 
 const STACK_SIZE: u64 = 0x4000;
 const OPERATION_TIMEOUT: Timeout = Timeout::from_secs(1);

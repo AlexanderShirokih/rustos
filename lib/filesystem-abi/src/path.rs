@@ -16,6 +16,20 @@ const _: () = assert!(
     "the separator byte differs from the separator"
 );
 
+/// Путь из строкового литерала. Форма и границы проверяются на сборке, и литерал вне контракта
+/// останавливает компиляцию.
+#[macro_export]
+macro_rules! const_path {
+    ($text:literal) => {
+        const {
+            match $crate::Path::new($text) {
+                Ok(path) => path,
+                Err(_) => panic!("the literal path breaks the path contract"),
+            }
+        }
+    };
+}
+
 /// Абсолютный путь, форму и границы которого проверил [`Path::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Path<'a>(&'a str);
@@ -28,8 +42,8 @@ impl<'a> Path<'a> {
     /// Корень дерева имён.
     pub const ROOT: Self = Self("/");
 
-    /// Проверяет форму и границы пути. Нарушение любого правила - `InvalidPath`.
-    /// Константный путь программы проверяется на сборке.
+    /// Проверяет форму и границы пути. Нарушение любого правила - `InvalidPath`. Литерал
+    /// проверяется на сборке макросом [`const_path!`](crate::const_path).
     pub const fn new(text: &'a str) -> Result<Self, FileSystemError> {
         if text.len() > PATH_MAX {
             return Err(FileSystemError::InvalidPath);
@@ -213,10 +227,7 @@ mod tests {
 
     #[test]
     fn a_constant_path_is_checked_at_build_time() {
-        const SAMPLE: Path<'static> = match Path::new("/data/sample") {
-            Ok(path) => path,
-            Err(_) => panic!("the constant path keeps the form of the contract"),
-        };
+        const SAMPLE: Path<'static> = crate::const_path!("/data/sample");
 
         assert_eq!(SAMPLE.as_str(), "/data/sample");
         assert_eq!(components(SAMPLE.as_str()), ["data", "sample"]);

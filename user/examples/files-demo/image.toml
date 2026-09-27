@@ -1,0 +1,29 @@
+version = 1
+
+[plan]
+source = "user/examples/files-demo/system.toml"
+
+[[programs]]
+package = "rootkeeper"
+path = "/rootkeeper"
+boot = true
+
+[[programs]]
+package = "namespace-router"
+path = "/namespace-router"
+
+[[programs]]
+package = "filesystem-imagefs"
+path = "/filesystem-imagefs"
+
+[[programs]]
+package = "filesystem-ramfs"
+path = "/filesystem-ramfs"
+
+[[programs]]
+package = "files-demo"
+path = "/files-demo"
+
+[[files]]
+path = "/files-demo/greeting"
+source = "user/examples/files-demo/assets/greeting.txt"

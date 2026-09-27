@@ -34,9 +34,13 @@ const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 const VIEW_WAIT: Timeout = Timeout::from_secs(5);
 const OUTSIDE_WAIT: Timeout = Timeout::from_millis(100);
 
-const CLIENT_FIXTURE: &str = "/boot/filesystem-client-fixture/program";
+const CLIENT_FIXTURE: &str = "/filesystem-client-fixture/program";
 
 const RAM_MOUNT: &str = "/tmp";
+
+const IMAGE_MOUNT: &str = "/boot";
+
+const SHADOW_MOUNT: &str = "/boot/testrunner";
 
 const RAM_FILESYSTEM_NAME: &str = "filesystem-ramfs";
 
@@ -45,11 +49,13 @@ const RAM_VIEW: &str = "tmp";
 const SPARE_VIEW: &str = "spare";
 const STUCK_VIEW: &str = "stuck";
 const UNCOVERED_VIEW: &str = "uncovered";
+const SHADOW_VIEW: &str = "shadow";
 const RAM_EXPORT: &str = "ramfs";
 const QUEUE_VIEW: &str = "queue";
 const EMPTY_SCOPE_ADMIN: &str = "empty-scope-admin";
 
 pub(crate) const STRESS_VIEW: &str = "stress";
+pub(crate) const FAILING_VIEW: &str = "failing";
 
 const NAMESPACE_REQUIREMENTS: &[ImporterRequirement<'static>] = &[
     view(ROOT_VIEW, ""),
@@ -63,8 +69,8 @@ const NAMESPACE_REQUIREMENTS: &[ImporterRequirement<'static>] = &[
     admin("paired-second-admin", "/paired-second"),
     view("paired-detached", "/paired-detached"),
     admin("paired-detached-admin", "/paired-detached"),
-    view("boot", "/boot"),
-    admin("boot-admin", "/boot"),
+    view(SHADOW_VIEW, SHADOW_MOUNT),
+    admin("shadow-admin", SHADOW_MOUNT),
     view("replaced", "/replaced"),
     admin("replaced-admin", "/replaced"),
     view(STRESS_VIEW, "/stress"),
@@ -73,6 +79,8 @@ const NAMESPACE_REQUIREMENTS: &[ImporterRequirement<'static>] = &[
     admin("other-admin", "/other"),
     view(QUEUE_VIEW, "/queue"),
     admin("queue-admin", "/queue"),
+    view(FAILING_VIEW, "/failing"),
+    admin("failing-admin", "/failing"),
     admin(EMPTY_SCOPE_ADMIN, ""),
     ImporterRequirement {
         name: RAM_EXPORT,
@@ -86,14 +94,12 @@ pub(crate) const BUFFER_SIZE: u32 = 4096;
 
 const LISTING_ENTRIES: usize = 70;
 
-pub(crate) const IMAGE_DIRECTORY: &str = "/boot";
+pub(crate) const COMPONENT_DIRECTORY: &str = "/testrunner";
 
-pub(crate) const COMPONENT_DIRECTORY: &str = "/boot/testrunner";
-
-pub(crate) const IMAGE_FILE: &str = "/boot/testrunner/sample";
+pub(crate) const IMAGE_FILE: &str = "/testrunner/sample";
 pub(crate) const IMAGE_FILE_BODY: &[u8] = b"hello from the userland image\n";
 
-const IMAGE_EMPTY_FILE: &str = "/boot/testrunner/empty";
+const IMAGE_EMPTY_FILE: &str = "/testrunner/empty";
 
 const UNANSWERED_PATH: &str = "/unanswered";
 
@@ -120,8 +126,8 @@ fn start_namespace() -> Namespace {
         .expect("compiled boot plan decodes");
     let composition = Composition::start(plan, component_log_session);
     let importer = composition.importer(NAMESPACE_REQUIREMENTS);
-    for requirement in [ROOT_VIEW, RAM_VIEW] {
-        drop(resolved(&importer, requirement, Path::ROOT.as_str()));
+    for (requirement, text) in [(ROOT_VIEW, IMAGE_MOUNT), (RAM_VIEW, Path::ROOT.as_str())] {
+        drop(resolved(&importer, requirement, text));
     }
     Namespace {
         importer,
@@ -168,6 +174,14 @@ pub(crate) fn mount_ram_window(requirement: &str, scope: &str) -> Mounted {
     Mounted::new(importer(), requirement, Session::from_session(window))
 }
 
+pub(crate) fn mount(requirement: &str, filesystem: Session<file_system::Protocol>) -> Mounted {
+    Mounted::new(importer(), requirement, filesystem)
+}
+
+pub(crate) fn root_view() -> Port {
+    view_of(ROOT_VIEW)
+}
+
 pub(crate) fn remove_ram_directory(text: &str) {
     connect(ram_session())
         .unlink(path(text), NodeKind::Directory)
@@ -184,7 +198,7 @@ pub(crate) fn ram_session() -> Session<file_system::Protocol> {
 }
 
 pub(crate) fn image_session() -> Session<file_system::Protocol> {
-    session_for(Path::ROOT.as_str())
+    session_for(IMAGE_MOUNT)
 }
 
 pub(crate) fn connect(
@@ -641,9 +655,9 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
     let namespace = namespace_client(&capability);
 
     let image = namespace
-        .resolve(path(IMAGE_DIRECTORY))
+        .resolve(path(IMAGE_MOUNT))
         .expect("resolve call")
-        .expect("root mount covers the path");
+        .expect("image mount covers the path");
     drop(image);
 
     connect(ram_session())
@@ -699,9 +713,9 @@ fn namespace_rejects_admin_operations_on_the_service_port() {
     kernel_tests::kassert_eq!(refused.err(), Some(IpcError::PeerClosed));
 
     let mounted = namespace_client(&view_of(ROOT_VIEW))
-        .resolve(path(IMAGE_FILE))
+        .resolve(path(IMAGE_MOUNT))
         .expect("resolve call")
-        .expect("root mount survives the rejected frame");
+        .expect("image mount survives the rejected frame");
     drop(mounted);
 }
 
@@ -909,10 +923,8 @@ fn an_admin_session_with_an_empty_scope_is_refused() {
 
 #[kernel_test]
 fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
-    const BOOT_VIEW: &str = "boot";
-
-    let mut mounted = Mounted::new(importer(), BOOT_VIEW, ram_session());
-    let window = resolved(importer(), BOOT_VIEW, Path::ROOT.as_str());
+    let mut mounted = Mounted::new(importer(), SHADOW_VIEW, ram_session());
+    let window = resolved(importer(), SHADOW_VIEW, Path::ROOT.as_str());
     mounted.close_admin();
     kernel_tests::kassert!(mounted.ended(CALL_TIMEOUT));
     drop(mounted);
@@ -922,10 +934,10 @@ fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
         .expect("issued window still answers")
         .expect("issued window keeps its root");
     kernel_tests::kassert_eq!(opened.kind, NodeKind::Directory);
-    let rerouted = session_for(IMAGE_DIRECTORY);
+    let rerouted = session_for(SHADOW_MOUNT);
     let image_file = open(
         &connect(rerouted),
-        "/testrunner/sample",
+        "/sample",
         AccessMode::Read,
         OpenFlags::NONE,
     );
@@ -962,7 +974,7 @@ fn filesystem_lists_the_image_directory() {
 
     let directory = open(
         &client,
-        IMAGE_DIRECTORY,
+        Path::ROOT.as_str(),
         AccessMode::Read,
         OpenFlags::DIRECTORY,
     );
@@ -1377,7 +1389,7 @@ fn filesystem_refuses_to_change_the_image() {
     kernel_tests::kassert_eq!(truncated, Err(FileSystemError::WrongMode));
 
     let created = client
-        .open(path("/boot/fresh"), AccessMode::Write, OpenFlags::CREATE)
+        .open(path("/fresh"), AccessMode::Write, OpenFlags::CREATE)
         .expect("open call");
     kernel_tests::kassert_eq!(created, Err(FileSystemError::ReadOnly));
 
@@ -1387,12 +1399,12 @@ fn filesystem_refuses_to_change_the_image() {
     kernel_tests::kassert_eq!(removed, Err(FileSystemError::ReadOnly));
 
     let absent = client
-        .unlink(path("/boot/absent"), NodeKind::File)
+        .unlink(path("/absent"), NodeKind::File)
         .expect("unlink call");
     kernel_tests::kassert_eq!(absent, Err(FileSystemError::NotFound));
 
     let through_a_file = client
-        .unlink(path("/boot/testrunner/sample/inner"), NodeKind::File)
+        .unlink(path("/testrunner/sample/inner"), NodeKind::File)
         .expect("unlink call");
     kernel_tests::kassert_eq!(through_a_file, Err(FileSystemError::NotADirectory));
 }

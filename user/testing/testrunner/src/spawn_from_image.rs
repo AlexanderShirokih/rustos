@@ -8,7 +8,7 @@ use userland::{Entry, Segment, SegmentPermissions, USERLAND_PAGE_SIZE};
 use userland_image::component_name;
 use userland_loader::load_entry;
 
-const REPLY_HOLDER: &str = "/boot/reply-holder/program";
+const REPLY_HOLDER: &str = "/reply-holder/program";
 const ROLLBACK_PROBE_NAME: &str = "load-image-rollback";
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -34,7 +34,7 @@ fn load_image_error_reclaims_each_created_process() {
         },
     ];
     let invalid = Entry {
-        path: "/boot/load-image-rollback",
+        path: "/load-image-rollback",
         entry_va: BASE,
         stack_size: USERLAND_PAGE_SIZE,
         segments: &segments,

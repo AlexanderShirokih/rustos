@@ -1,0 +1,22 @@
+version = 1
+
+[[components]]
+executable = "namespace-router"
+memory_limit = "8M"
+restarts = 2
+
+[[components]]
+executable = "filesystem-imagefs"
+memory_limit = "4M"
+scope = { namespace = "/boot" }
+
+[[components]]
+executable = "filesystem-ramfs"
+memory_limit = "4M"
+scope = { namespace = "/tmp" }
+
+[[components]]
+executable = "files-demo"
+memory_limit = "2M"
+bind = { area = "filesystem-imagefs" }
+scope = { area = "/files-demo" }

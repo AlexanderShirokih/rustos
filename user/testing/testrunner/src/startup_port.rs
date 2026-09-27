@@ -28,13 +28,13 @@ use crate::{
 
 type Debt = ReceivedHandle<kind::Reply>;
 
-const STEPS_ENTRY: &str = "/boot/child-steps-fixture/program";
-const IMPORTER_ENTRY: &str = "/boot/probe-importer-fixture/program";
-const TWO_REQUIREMENTS_ENTRY: &str = "/boot/two-requirements-fixture/program";
-const HELPER_PANIC_ENTRY: &str = "/boot/helper-panic-fixture/program";
-const CLOSED_ENTRY: &str = "/boot/managed-startup-closed/program";
-const EXPORT_ENTRY: &str = "/boot/export-fixture/program";
-const IDLE_EXPORT_ENTRY: &str = "/boot/idle-export-fixture/program";
+const STEPS_ENTRY: &str = "/child-steps-fixture/program";
+const IMPORTER_ENTRY: &str = "/probe-importer-fixture/program";
+const TWO_REQUIREMENTS_ENTRY: &str = "/two-requirements-fixture/program";
+const HELPER_PANIC_ENTRY: &str = "/helper-panic-fixture/program";
+const CLOSED_ENTRY: &str = "/managed-startup-closed/program";
+const EXPORT_ENTRY: &str = "/export-fixture/program";
+const IDLE_EXPORT_ENTRY: &str = "/idle-export-fixture/program";
 
 const PROVIDER: &str = "provider";
 const SECOND_PROVIDER: &str = "second-provider";

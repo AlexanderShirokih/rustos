@@ -28,8 +28,6 @@ bench = false
 [dependencies]
 component-startup = { workspace = true }
 component-startup-std = { workspace = true }
-filesystem-abi = { workspace = true }
-filesystem-client = { workspace = true }
 ipc = { workspace = true }
 rtc-abi = { workspace = true }
 kernel-objects = { workspace = true }

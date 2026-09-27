@@ -66,8 +66,10 @@ const OTHER_VIEW: &str = "other";
 const HELD_PATH: &str = "/held";
 const WRITTEN_PATH: &str = "/written";
 const RENAMED_PATH: &str = "/renamed";
-const SPARE_PATH: &str = "/spare/x";
-const AREA_SCOPE: &str = "/boot/scope-consumer-fixture";
+const IMAGE_MOUNT: &str = "/boot";
+const NESTED_SPARE_MOUNT: &str = "/boot/spare";
+const NESTED_SPARE_PATH: &str = "/boot/spare/x";
+const AREA_SCOPE: &str = "/scope-consumer-fixture";
 
 const PROBE_PROVIDER: u16 = 0;
 const ROUTER_RECORD: u16 = 0;
@@ -125,10 +127,12 @@ const RTC_LINE: &[RequirementSpec<'static>] = &[RequirementSpec {
 
 const RAM_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[namespace_requirement("/tmp")];
 const SPARE_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[namespace_requirement("/spare")];
+const NESTED_SPARE_FS_REQUIREMENTS: &[RequirementSpec<'static>] =
+    &[namespace_requirement(NESTED_SPARE_MOUNT)];
 const CRASH_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[namespace_requirement("/crash")];
 
 const IMAGE_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[
-    namespace_requirement("/"),
+    namespace_requirement(IMAGE_MOUNT),
     RequirementSpec {
         name: IMAGE,
         source: RequirementSourceSpec::Region,
@@ -162,21 +166,20 @@ const PROBE_REQUIREMENTS: &[RequirementSpec<'static>] = &[RequirementSpec {
     },
 }];
 
-const EXPORT: ComponentSpec<'static> = fixture("/boot/export-fixture", "export-fixture");
-const EXPORT_ENTRY: &str = "/boot/export-fixture/program";
+const EXPORT: ComponentSpec<'static> = fixture("/export-fixture", "export-fixture");
+const EXPORT_ENTRY: &str = "/export-fixture/program";
 
-const IDLE_EXPORT: ComponentSpec<'static> =
-    fixture("/boot/idle-export-fixture", "idle-export-fixture");
+const IDLE_EXPORT: ComponentSpec<'static> = fixture("/idle-export-fixture", "idle-export-fixture");
 
 const REFUSAL_PROBE: ComponentSpec<'static> = ComponentSpec {
     requirements: PROBE_REQUIREMENTS,
     exports: &[],
-    ..fixture("/boot/refusal-probe-fixture", "refusal-probe-fixture")
+    ..fixture("/refusal-probe-fixture", "refusal-probe-fixture")
 };
 
 const LOG_DUPLICATE: ComponentSpec<'static> = ComponentSpec {
     exports: &[],
-    ..fixture("/boot/log-duplicate-fixture", "log-duplicate-fixture")
+    ..fixture("/log-duplicate-fixture", "log-duplicate-fixture")
 };
 
 const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
@@ -186,29 +189,29 @@ const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
 
 const FAILING: ComponentSpec<'static> = ComponentSpec {
     exports: &[],
-    ..fixture("/boot/failing-fixture", "failing-fixture")
+    ..fixture("/failing-fixture", "failing-fixture")
 };
 
 const CLOSED: ComponentSpec<'static> = ComponentSpec {
     exports: &[],
-    ..fixture("/boot/managed-startup-closed", "managed-startup-closed")
+    ..fixture("/managed-startup-closed", "managed-startup-closed")
 };
 
 const PROBE_IMPORTER: ComponentSpec<'static> = ComponentSpec {
     requirements: PROBE_REQUIREMENTS,
     exports: &[],
-    ..fixture("/boot/probe-importer-fixture", "probe-importer-fixture")
+    ..fixture("/probe-importer-fixture", "probe-importer-fixture")
 };
 
 const HOLDER: ComponentSpec<'static> = ComponentSpec {
     requirements: HOLDER_REQUIREMENTS,
     memory_limit: 2 * MIB,
     restarts: 1,
-    ..fixture("/boot/budget-holder-fixture", "budget-holder-fixture")
+    ..fixture("/budget-holder-fixture", "budget-holder-fixture")
 };
 
 const RTC: ComponentSpec<'static> = ComponentSpec {
-    executable: "/boot/driver-pl031",
+    executable: "/driver-pl031",
     name: "driver-pl031",
     requirements: RTC_DEVICES,
     exports: &[rtc::Protocol::ID],
@@ -219,21 +222,18 @@ const RTC: ComponentSpec<'static> = ComponentSpec {
 const FORWARDING: ComponentSpec<'static> = ComponentSpec {
     requirements: RTC_DEVICES,
     exports: FORWARDING_EXPORTS,
-    ..fixture(
-        "/boot/device-forwarding-fixture",
-        "device-forwarding-fixture",
-    )
+    ..fixture("/device-forwarding-fixture", "device-forwarding-fixture")
 };
 
 const IRQ: ComponentSpec<'static> = ComponentSpec {
     requirements: RTC_LINE,
     exports: &[],
     restarts: 1,
-    ..fixture("/boot/irq-fixture", "irq-fixture")
+    ..fixture("/irq-fixture", "irq-fixture")
 };
 
 const ROUTER: ComponentSpec<'static> = ComponentSpec {
-    executable: "/boot/namespace-router",
+    executable: "/namespace-router",
     name: ROUTER_NAME,
     requirements: &[],
     exports: ROUTER_EXPORTS,
@@ -242,7 +242,7 @@ const ROUTER: ComponentSpec<'static> = ComponentSpec {
 };
 
 const RAM_FS: ComponentSpec<'static> = ComponentSpec {
-    executable: "/boot/filesystem-ramfs",
+    executable: "/filesystem-ramfs",
     name: "filesystem-ramfs",
     requirements: RAM_FS_REQUIREMENTS,
     exports: FILE_SYSTEM_EXPORTS,
@@ -251,21 +251,26 @@ const RAM_FS: ComponentSpec<'static> = ComponentSpec {
 };
 
 const IMAGE_FS: ComponentSpec<'static> = ComponentSpec {
-    executable: "/boot/filesystem-imagefs",
+    executable: "/filesystem-imagefs",
     name: "filesystem-imagefs",
     requirements: IMAGE_FS_REQUIREMENTS,
     ..RAM_FS
 };
 
 const SPARE_FS: ComponentSpec<'static> = ComponentSpec {
-    executable: "/boot/filesystem-ramfs",
+    executable: "/filesystem-ramfs",
     name: "spare-filesystem",
     requirements: SPARE_FS_REQUIREMENTS,
     ..RAM_FS
 };
 
+const NESTED_SPARE_FS: ComponentSpec<'static> = ComponentSpec {
+    requirements: NESTED_SPARE_FS_REQUIREMENTS,
+    ..SPARE_FS
+};
+
 const CRASH_FS: ComponentSpec<'static> = ComponentSpec {
-    executable: "/boot/crash-filesystem",
+    executable: "/crash-filesystem",
     name: "crash-filesystem",
     requirements: CRASH_FS_REQUIREMENTS,
     restarts: 1,
@@ -275,7 +280,7 @@ const CRASH_FS: ComponentSpec<'static> = ComponentSpec {
 const SCOPE_CONSUMER: ComponentSpec<'static> = ComponentSpec {
     requirements: AREA_REQUIREMENTS,
     exports: &[],
-    ..fixture("/boot/scope-consumer-fixture", "scope-consumer-fixture")
+    ..fixture("/scope-consumer-fixture", "scope-consumer-fixture")
 };
 
 const fn fixture(executable: &'static str, name: &'static str) -> ComponentSpec<'static> {
@@ -506,7 +511,7 @@ fn compiled_plan_carries_the_boot_composition() {
         .expect("plan carries the router");
 
     for (name, scope) in [
-        ("filesystem-imagefs", "/"),
+        ("filesystem-imagefs", IMAGE_MOUNT),
         ("unresponsive-filesystem", "/stuck"),
         ("spare-filesystem", "/spare"),
         ("filesystem-ramfs", "/tmp"),
@@ -1078,15 +1083,15 @@ fn a_restarted_router_is_mounted_again_by_every_file_system() {
     ]);
     let importer = composition.importer(&[view(ROOT_VIEW, ""), view(TMP_VIEW, "/tmp")]);
     let before = importer.port::<namespace::Protocol>(ROOT_VIEW);
-    kernel_tests::kassert_eq!(resolution(&before, "/", VIEW_WAIT), Ok(Ok(())));
+    kernel_tests::kassert_eq!(resolution(&before, IMAGE_MOUNT, VIEW_WAIT), Ok(Ok(())));
 
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
 
-    for requirement in [ROOT_VIEW, TMP_VIEW] {
+    for (requirement, text) in [(ROOT_VIEW, IMAGE_MOUNT), (TMP_VIEW, "/")] {
         let renewed = importer.port::<namespace::Protocol>(requirement);
-        kernel_tests::kassert_eq!(resolution(&renewed, "/", VIEW_WAIT), Ok(Ok(())));
+        kernel_tests::kassert_eq!(resolution(&renewed, text, VIEW_WAIT), Ok(Ok(())));
     }
-    kernel_tests::kassert!(resolution(&before, "/", SHORT_WAIT).is_err());
+    kernel_tests::kassert!(resolution(&before, IMAGE_MOUNT, SHORT_WAIT).is_err());
     finish(composition);
 }
 
@@ -1114,16 +1119,16 @@ fn router_restart_keeps_file_system_components_and_their_sessions() {
 
 #[kernel_test]
 fn a_removed_file_system_frees_its_prefix() {
-    let composition = scenario(&[ROUTER, IMAGE_FS, SPARE_FS]);
+    let composition = scenario(&[ROUTER, IMAGE_FS, NESTED_SPARE_FS]);
     let importer = composition.importer(&[
         view(ROOT_VIEW, ""),
-        view(SPARE_VIEW, "/spare"),
-        file_system_of(FILES, SPARE_FS.name),
+        view(SPARE_VIEW, NESTED_SPARE_MOUNT),
+        file_system_of(FILES, NESTED_SPARE_FS.name),
     ]);
     let spare = importer.port::<namespace::Protocol>(SPARE_VIEW);
     kernel_tests::kassert_eq!(resolution(&spare, "/", VIEW_WAIT), Ok(Ok(())));
 
-    composition.terminate(SPARE_FS.name, TERMINATE_EXIT_CODE);
+    composition.terminate(NESTED_SPARE_FS.name, TERMINATE_EXIT_CODE);
 
     kernel_tests::kassert_eq!(
         requested::<file_system::Protocol>(&importer, FILES, CALL_WAIT),
@@ -1135,7 +1140,7 @@ fn a_removed_file_system_frees_its_prefix() {
     );
     let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
     kernel_tests::kassert_eq!(
-        resolution(&root, SPARE_PATH, VIEW_WAIT),
+        resolution(&root, NESTED_SPARE_PATH, VIEW_WAIT),
         Ok(Err(FileSystemError::NotFound))
     );
     finish(composition);

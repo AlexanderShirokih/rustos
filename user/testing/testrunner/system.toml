@@ -8,7 +8,7 @@ restarts = 2
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-scope = { namespace = "/" }
+scope = { namespace = "/boot" }
 
 [[components]]
 executable = "unresponsive-filesystem"

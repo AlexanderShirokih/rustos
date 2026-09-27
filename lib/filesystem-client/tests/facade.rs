@@ -485,10 +485,19 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
     fn set_size(
         &mut self,
         _frame: &F,
-        _fd: NodeDescriptor,
-        _size: u64,
+        fd: NodeDescriptor,
+        size: u64,
     ) -> Result<u32, FileSystemError> {
-        Err(FileSystemError::NotSupported)
+        let path = self.path_of(fd)?;
+        let mut tree = self.filesystem.tree();
+        let Some(Node::File(bytes)) = tree.get_mut(&path) else {
+            return Err(FileSystemError::IsADirectory);
+        };
+
+        let size = usize::try_from(size).map_err(|_| FileSystemError::NoSpace)?;
+        bytes.resize(size, 0);
+
+        Ok(0)
     }
 
     fn stat(&mut self, _frame: &F, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
@@ -1232,6 +1241,38 @@ fn append_beyond_the_buffer_writes_the_fitting_prefix() {
     assert_eq!(
         read_all(&mut filesystem, "/data/first", 3 + body.len()).len(),
         3 + BUFFER_SIZE as usize
+    );
+}
+
+#[test]
+fn set_size_cuts_and_extends_the_node_and_keeps_the_position() {
+    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("abcdef"))]);
+    let mut filesystem = routed(&world);
+    let mut node = filesystem
+        .open(path("/data/first"), AccessMode::ReadWrite, OpenFlags::NONE)
+        .expect("open");
+    node.seek(4);
+
+    node.set_size(2).expect("cut");
+    assert_eq!(node.metadata().expect("stat").size, 2);
+    node.set_size(4).expect("extend");
+
+    assert_eq!(node.position(), 4);
+    drop(node);
+    assert_eq!(read_all(&mut filesystem, "/data/first", 8), b"ab\0\0");
+}
+
+#[test]
+fn set_size_of_a_directory_is_refused() {
+    let world = World::new(&[("/data", Node::Directory)]);
+    let mut filesystem = routed(&world);
+    let node = filesystem
+        .open(path("/data"), AccessMode::Read, OpenFlags::DIRECTORY)
+        .expect("open");
+
+    assert_eq!(
+        node.set_size(0),
+        Err(Failure::FileSystem(FileSystemError::IsADirectory))
     );
 }
 

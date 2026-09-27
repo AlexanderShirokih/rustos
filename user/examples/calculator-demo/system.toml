@@ -1,21 +1,6 @@
 version = 1
 
 [[components]]
-executable = "namespace-router"
-memory_limit = "8M"
-restarts = 2
-
-[[components]]
-executable = "filesystem-imagefs"
-memory_limit = "4M"
-scope = { namespace = "/" }
-
-[[components]]
-executable = "filesystem-ramfs"
-memory_limit = "4M"
-scope = { namespace = "/tmp" }
-
-[[components]]
 executable = "driver-pl031"
 memory_limit = "1M"
 restarts = 2
@@ -29,5 +14,3 @@ restarts = 2
 executable = "demo"
 memory_limit = "2M"
 restarts = 2
-bind = { area = "filesystem-imagefs" }
-scope = { area = "/boot/demo" }

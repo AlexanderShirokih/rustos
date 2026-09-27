@@ -5,35 +5,19 @@ source = "user/examples/calculator-demo/system.toml"
 
 [[programs]]
 package = "rootkeeper"
-path = "/boot/rootkeeper"
+path = "/rootkeeper"
 boot = true
 
 [[programs]]
 package = "driver-pl031"
-path = "/boot/driver-pl031"
-
-[[programs]]
-package = "namespace-router"
-path = "/boot/namespace-router"
-
-[[programs]]
-package = "filesystem-imagefs"
-path = "/boot/filesystem-imagefs"
-
-[[programs]]
-package = "filesystem-ramfs"
-path = "/boot/filesystem-ramfs"
+path = "/driver-pl031"
 
 [[programs]]
 package = "calculator-demo"
 bin = "calculator"
-path = "/boot/calculator"
+path = "/calculator"
 
 [[programs]]
 package = "calculator-demo"
 bin = "demo"
-path = "/boot/demo"
-
-[[files]]
-path = "/boot/demo/banner"
-source = "user/examples/calculator-demo/assets/banner.txt"
+path = "/demo"

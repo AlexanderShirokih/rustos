@@ -35,7 +35,7 @@ const SECOND_BADGE: NonZeroU64 = NonZeroU64::new(0x82).expect("badge is non-zero
 
 const PROBE_VALUE: u32 = 0x5A5A;
 
-const TABLE_FULL_ENTRY: &str = "/boot/handle-table-full-fixture/program";
+const TABLE_FULL_ENTRY: &str = "/handle-table-full-fixture/program";
 const TABLE_FULL_NAME: &str = "handle-table-full";
 
 const OUTCOME_ANSWERED: i64 = 1;

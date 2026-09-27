@@ -23,7 +23,7 @@ const RECORD: &str = "/sample";
 const RECORD_BODY: &[u8] = b"component area of the userland image\n";
 
 const ESCAPE_RELATIVE: &str = "/../testrunner/sample";
-const ESCAPE_ABSOLUTE: &str = "/boot/testrunner/sample";
+const ESCAPE_ABSOLUTE: &str = "/testrunner/sample";
 
 const NO_STARTUP_EXIT_CODE: u64 = 1;
 const READ_EXIT_CODE: u64 = 2;

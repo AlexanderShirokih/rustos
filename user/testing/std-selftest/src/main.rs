@@ -6,7 +6,7 @@
 //! Проверяется поверхность самой `std` поверх платформенного слоя. Его примитивы
 //! под ней покрыты набором `testrunner` отдельно.
 
-#![feature(molecular_ext)]
+#![feature(can_vector, io_error_too_many_open_files, molecular_ext)]
 #![allow(
     clippy::expect_used,
     clippy::indexing_slicing,
@@ -24,11 +24,18 @@ use std::{
 
 use component_startup::component_manifest;
 use component_startup_std::into_std_handle;
+use filesystem_abi::namespace;
 use kernel_objects::Port;
 use syscall::{Handle, Rights};
 
+mod filesystem;
+
 component_manifest! {
-    struct SelftestStartup {}
+    struct SelftestStartup {
+        requirements: {
+            namespace: session(namespace::Protocol),
+        },
+    }
 }
 
 mod local {
@@ -44,8 +51,11 @@ mod local {
 }
 
 fn main() {
-    let _startup = startup_set_reaches_the_program();
+    let startup = startup_set_reaches_the_program();
     the_start_handle_is_handed_out_once();
+    filesystem::a_path_before_the_root_is_not_connected();
+    filesystem::the_root_is_installed(startup.namespace.into_handle());
+    filesystem::a_second_root_is_handed_back();
     an_owned_handle_closes_its_capability();
     heap_serves_growing_collections();
     monotonic_clock_moves_forward();
@@ -56,6 +66,16 @@ fn main() {
     sleep_waits_out_its_duration();
     an_unrepresentable_stack_size_is_refused();
     spawning_outlives_the_handle_table();
+    filesystem::open_options_follow_their_flags();
+    filesystem::reads_writes_and_seeks_share_one_position();
+    filesystem::an_append_lands_at_the_end_in_one_piece();
+    filesystem::a_clone_shares_the_position();
+    filesystem::two_files_in_two_threads_stay_apart();
+    filesystem::metadata_holds_only_the_kind_and_the_size();
+    filesystem::the_image_reads_and_refuses_writes();
+    filesystem::unsupported_file_operations_say_so();
+    filesystem::malformed_paths_are_refused();
+    filesystem::file_system_errors_keep_their_meaning();
     println!("checks passed");
 }
 

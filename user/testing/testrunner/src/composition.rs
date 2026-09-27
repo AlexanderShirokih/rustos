@@ -22,7 +22,7 @@ use spin::Once;
 use syscall::{Handle, SIGNALED, SyscallError, kind};
 use userland_image::{BootPlan, ComponentSpec, decode_plan, encode_plan};
 
-pub(crate) const BOOT_PLAN_ENTRY: &str = "/boot/testrunner/plan";
+pub(crate) const BOOT_PLAN_ENTRY: &str = "/testrunner/plan";
 
 pub(crate) const ROUTER_NAME: &str = "namespace-router";
 

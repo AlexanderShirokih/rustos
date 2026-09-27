@@ -17,6 +17,7 @@ bench = false
 [dependencies]
 component-startup = { workspace = true }
 component-startup-std = { workspace = true }
+filesystem-abi = { workspace = true }
 kernel-objects = { workspace = true }
 syscall = { workspace = true }
 

@@ -2,172 +2,172 @@ version = 1
 
 [plan]
 source = "user/testing/testrunner/system.toml"
-path = "/boot/testrunner/plan"
+path = "/testrunner/plan"
 
 [[programs]]
 package = "testrunner"
 bin = "testrunner"
-path = "/boot/testrunner"
+path = "/testrunner"
 boot = true
 
 [[programs]]
 package = "testrunner"
 bin = "spawn-fixture"
-path = "/boot/spawn-fixture"
+path = "/spawn-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "port-fixture"
-path = "/boot/port-fixture"
+path = "/port-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "reply-holder"
-path = "/boot/reply-holder"
+path = "/reply-holder"
 
 [[programs]]
 package = "testrunner"
 bin = "badge-client"
-path = "/boot/badge-client"
+path = "/badge-client"
 
 [[programs]]
 package = "testrunner"
 bin = "log-client-fixture"
-path = "/boot/log-client-fixture"
+path = "/log-client-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "filesystem-client-fixture"
-path = "/boot/filesystem-client-fixture"
+path = "/filesystem-client-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "scope-consumer-fixture"
-path = "/boot/scope-consumer-fixture"
+path = "/scope-consumer-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "unresponsive-filesystem"
-path = "/boot/unresponsive-filesystem"
+path = "/unresponsive-filesystem"
 
 [[programs]]
 package = "testrunner"
 bin = "managed-startup-closed"
-path = "/boot/managed-startup-closed"
+path = "/managed-startup-closed"
 
 [[programs]]
 package = "testrunner"
 bin = "budget-holder-fixture"
-path = "/boot/budget-holder-fixture"
+path = "/budget-holder-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "device-forwarding-fixture"
-path = "/boot/device-forwarding-fixture"
+path = "/device-forwarding-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "irq-fixture"
-path = "/boot/irq-fixture"
+path = "/irq-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "refusal-probe-fixture"
-path = "/boot/refusal-probe-fixture"
+path = "/refusal-probe-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "log-duplicate-fixture"
-path = "/boot/log-duplicate-fixture"
+path = "/log-duplicate-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "failing-fixture"
-path = "/boot/failing-fixture"
+path = "/failing-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "idle-export-fixture"
-path = "/boot/idle-export-fixture"
+path = "/idle-export-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "export-fixture"
-path = "/boot/export-fixture"
+path = "/export-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "helper-panic-fixture"
-path = "/boot/helper-panic-fixture"
+path = "/helper-panic-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "two-requirements-fixture"
-path = "/boot/two-requirements-fixture"
+path = "/two-requirements-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "probe-importer-fixture"
-path = "/boot/probe-importer-fixture"
+path = "/probe-importer-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "child-steps-fixture"
-path = "/boot/child-steps-fixture"
+path = "/child-steps-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "handle-table-full-fixture"
-path = "/boot/handle-table-full-fixture"
+path = "/handle-table-full-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "start-handle-forward-fixture"
-path = "/boot/start-handle-forward-fixture"
+path = "/start-handle-forward-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "answer-exhaustion-fixture"
-path = "/boot/answer-exhaustion-fixture"
+path = "/answer-exhaustion-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "stack-overflow-fixture"
-path = "/boot/stack-overflow-fixture"
+path = "/stack-overflow-fixture"
 
 [[programs]]
 package = "testrunner"
 bin = "crash-filesystem"
-path = "/boot/crash-filesystem"
+path = "/crash-filesystem"
 
 [[programs]]
 package = "driver-pl031"
-path = "/boot/driver-pl031"
+path = "/driver-pl031"
 
 [[programs]]
 package = "namespace-router"
-path = "/boot/namespace-router"
+path = "/namespace-router"
 
 [[programs]]
 package = "filesystem-ramfs"
-path = "/boot/filesystem-ramfs"
+path = "/filesystem-ramfs"
 
 [[programs]]
 package = "filesystem-imagefs"
-path = "/boot/filesystem-imagefs"
+path = "/filesystem-imagefs"
 
 [[files]]
-path = "/boot/testrunner/sample"
+path = "/testrunner/sample"
 source = "user/testing/testrunner/assets/sample.txt"
 
 [[files]]
-path = "/boot/testrunner/empty"
+path = "/testrunner/empty"
 source = "user/testing/testrunner/assets/empty.txt"
 
 [[files]]
-path = "/boot/scope-consumer-fixture/sample"
+path = "/scope-consumer-fixture/sample"
 source = "user/testing/testrunner/assets/area.txt"
 
 [[programs]]
 package = "std-selftest"
-path = "/boot/std-selftest"
+path = "/std-selftest"

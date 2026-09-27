@@ -5,6 +5,7 @@ resolver = "3"
 members = [
     "examples/calculator-demo",
     "examples/clock-std",
+    "examples/files-demo",
     "examples/hello-std",
     "system/driver-pl031",
     "system/filesystem-imagefs",

@@ -16,8 +16,6 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "component-startup-std",
- "filesystem-abi",
- "filesystem-client",
  "ipc",
  "kernel-objects",
  "rtc-abi",
@@ -105,6 +103,19 @@ name = "fdt"
 version = "0.1.0"
 dependencies = [
  "collections",
+]
+
+[[package]]
+name = "files-demo"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "component-startup-std",
+ "filesystem-abi",
+ "filesystem-client",
+ "kernel-objects",
+ "syscall",
+ "userland-build",
 ]
 
 [[package]]
@@ -343,6 +354,7 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "component-startup-std",
+ "filesystem-abi",
  "kernel-objects",
  "syscall",
  "userland-build",

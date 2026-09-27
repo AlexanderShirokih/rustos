@@ -71,7 +71,7 @@ fn filesystem_scoped_session_stays_inside_its_window() {
     let parent = connect(image_session());
     let scoped = connect(window_of(&parent, COMPONENT_DIRECTORY));
 
-    // Путь от корня монтирования внутри окна означает другой узел: /boot/boot/sample
+    // Путь от корня образа внутри окна означает другой узел: /testrunner/testrunner/sample
     // в дереве образа отсутствует.
     let absolute = scoped
         .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE)

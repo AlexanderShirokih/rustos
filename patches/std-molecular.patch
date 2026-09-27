@@ -1,13 +1,16 @@
 diff -ruN a/std/Cargo.toml b/std/Cargo.toml
 --- a/std/Cargo.toml	2026-08-07 22:42:11.982085856 +0000
 +++ b/std/Cargo.toml	2026-08-10 18:37:47.249202613 +0000
-@@ -70,6 +70,10 @@
+@@ -70,6 +70,13 @@
      'rustc-dep-of-std',
  ], public = true }
  
 +[target.'cfg(target_os = "molecular")'.dependencies]
 +runtime = { path = "../../../../lib/runtime", features = ['rustc-dep-of-std'], public = true }
 +syscall-user = { path = "../../../../lib/syscall-user", features = ['rustc-dep-of-std'], public = true }
++filesystem-abi = { path = "../../../../lib/filesystem-abi", features = ['rustc-dep-of-std'] }
++filesystem-client = { path = "../../../../lib/filesystem-client", features = ['rustc-dep-of-std'] }
++kernel-objects = { path = "../../../../lib/kernel-objects", features = ['rustc-dep-of-std'] }
 +
  [target.'cfg(target_os = "motor")'.dependencies]
  moto-rt = { version = "0.16", features = ['rustc-dep-of-std'], public = true }
@@ -38,7 +41,7 @@ diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
 diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 --- a/std/src/os/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/os/molecular/mod.rs	2026-08-10 18:37:47.249314886 +0000
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,79 @@
 +//! RustOS-specific definitions.
 +//!
 +//! Процесс получает ресурсы системы стартовым набором capability, который композиция выдаёт
@@ -101,6 +104,13 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +/// процесс запущен без стартового handle.
 +pub fn take_start_handle() -> Option<OwnedHandle> {
 +    Some(OwnedHandle { handle: runtime::take_bootstrap()?.as_nonzero() })
++}
++
++/// Делает сессию маршрутизатора имён файловым корнем процесса. Пути `std::fs` отсчитываются
++/// от области этой сессии, а до установки операции по пути отвечают `NotConnected`.
++/// Установленный корень не заменяется, и повторный вызов возвращает `root` в `Err`.
++pub fn install_filesystem_root(root: OwnedHandle) -> Result<(), OwnedHandle> {
++    crate::sys::fs::install_root(root)
 +}
 +
 +/// Направляет `stdout` и `stderr` процесса в лог-сессию `session`.
@@ -167,6 +177,553 @@ diff -ruN a/std/src/sys/exit.rs b/std/src/sys/exit.rs
          target_os = "motor" => {
              moto_rt::process::exit(code)
          }
+diff -ruN a/std/src/sys/fs/mod.rs b/std/src/sys/fs/mod.rs
+--- a/std/src/sys/fs/mod.rs	2026-09-27 15:58:52.388457430 +0000
++++ b/std/src/sys/fs/mod.rs	2026-09-27 16:02:00.683082926 +0000
+@@ -29,6 +29,11 @@
+         mod hermit;
+         use hermit as imp;
+     }
++    target_os = "molecular" => {
++        mod molecular;
++        use molecular as imp;
++        pub use molecular::install_root;
++    }
+     target_os = "motor" => {
+         mod motor;
+         use motor as imp;
+diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
+--- a/std/src/sys/fs/molecular.rs	1970-01-01 00:00:00.000000000 +0000
++++ b/std/src/sys/fs/molecular.rs	2026-09-27 18:11:10.269297626 +0000
+@@ -0,0 +1,528 @@
++//! Файловая поверхность RustOS поверх `filesystem-client`.
++//!
++//! Корень процесса - сессия маршрутизатора имён, которую программа один раз передаёт
++//! `install_root`. Фасад строится поверх неё при первой операции по пути и остаётся в ячейке
++//! до конца процесса. `File` владеет открытым узлом фасада, и клоны файла делят узел, его
++//! дескриптор и позицию.
++//!
++//! Операции с каталогами и деревом имён отвечают `Unsupported`.
++
++use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags};
++use filesystem_client::{Failure, FileSystem, FileSystemEnvironment, OpenNode};
++use kernel_objects::{Port, Session};
++use syscall_user::ipc::wire::IpcError;
++use syscall_user::syscall::Handle;
++
++use crate::ffi::OsString;
++use crate::fmt;
++use crate::fs::TryLockError;
++use crate::io::{self, BorrowedCursor, ErrorKind, IoSlice, IoSliceMut, SeekFrom};
++use crate::mem;
++use crate::os::molecular::OwnedHandle;
++use crate::path::{Path, PathBuf};
++use crate::sync::Arc;
++use crate::sync::nonpoison::Mutex;
++pub use crate::sys::fs::common::Dir;
++use crate::sys::time::SystemTime;
++use crate::sys::{unsupported, unsupported_err};
++
++type Root = FileSystem<FileSystemEnvironment>;
++
++type Node = OpenNode<FileSystemEnvironment>;
++
++static ROOT: Mutex<RootCell> = Mutex::new(RootCell::Empty);
++
++/// Файловый корень процесса.
++enum RootCell {
++    Empty,
++    /// Сессия маршрутизатора до построения фасада.
++    Installed(OwnedHandle),
++    Ready(Root),
++}
++
++pub struct File(Arc<Mutex<FileState>>);
++
++struct FileState {
++    node: Node,
++    append: bool,
++}
++
++#[derive(Clone)]
++pub struct FileAttr {
++    kind: NodeKind,
++    size: u64,
++}
++
++pub struct ReadDir(!);
++
++pub struct DirEntry(!);
++
++#[derive(Clone, Debug)]
++pub struct OpenOptions {
++    read: bool,
++    write: bool,
++    append: bool,
++    truncate: bool,
++    create: bool,
++    create_new: bool,
++}
++
++#[derive(Copy, Clone, Debug, Default)]
++pub struct FileTimes {}
++
++/// Права узла. Файловый контракт не хранит прав на узле, и значение не меняет доступа.
++#[derive(Clone, PartialEq, Eq, Debug)]
++pub struct FilePermissions {
++    readonly: bool,
++}
++
++#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
++pub struct FileType {
++    directory: bool,
++}
++
++#[derive(Debug)]
++pub struct DirBuilder {}
++
++impl RootCell {
++    /// Фасад корня. Первое обращение строит фасад поверх установленной сессии.
++    fn ready(&mut self) -> Option<&mut Root> {
++        if let Self::Installed(_) = self
++            && let Self::Installed(session) = mem::replace(self, Self::Empty)
++        {
++            let port = Port::from_handle(Handle::from_abi(session.into_raw()));
++            *self = Self::Ready(FileSystem::routed(Session::from_handle(port)));
++        }
++
++        match self {
++            Self::Ready(root) => Some(root),
++            Self::Empty | Self::Installed(_) => None,
++        }
++    }
++}
++
++impl FileAttr {
++    pub fn size(&self) -> u64 {
++        self.size
++    }
++
++    pub fn perm(&self) -> FilePermissions {
++        FilePermissions { readonly: false }
++    }
++
++    pub fn file_type(&self) -> FileType {
++        FileType { directory: self.kind == NodeKind::Directory }
++    }
++
++    pub fn modified(&self) -> io::Result<SystemTime> {
++        unsupported()
++    }
++
++    pub fn accessed(&self) -> io::Result<SystemTime> {
++        unsupported()
++    }
++
++    pub fn created(&self) -> io::Result<SystemTime> {
++        unsupported()
++    }
++}
++
++impl FilePermissions {
++    pub fn readonly(&self) -> bool {
++        self.readonly
++    }
++
++    pub fn set_readonly(&mut self, readonly: bool) {
++        self.readonly = readonly;
++    }
++}
++
++impl FileTimes {
++    pub fn set_accessed(&mut self, _t: SystemTime) {}
++    pub fn set_modified(&mut self, _t: SystemTime) {}
++}
++
++impl FileType {
++    pub fn is_dir(&self) -> bool {
++        self.directory
++    }
++
++    pub fn is_file(&self) -> bool {
++        !self.directory
++    }
++
++    pub fn is_symlink(&self) -> bool {
++        false
++    }
++}
++
++impl fmt::Debug for ReadDir {
++    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        self.0
++    }
++}
++
++impl Iterator for ReadDir {
++    type Item = io::Result<DirEntry>;
++
++    fn next(&mut self) -> Option<io::Result<DirEntry>> {
++        self.0
++    }
++}
++
++impl DirEntry {
++    pub fn path(&self) -> PathBuf {
++        self.0
++    }
++
++    pub fn file_name(&self) -> OsString {
++        self.0
++    }
++
++    pub fn metadata(&self) -> io::Result<FileAttr> {
++        self.0
++    }
++
++    pub fn file_type(&self) -> io::Result<FileType> {
++        self.0
++    }
++}
++
++impl OpenOptions {
++    pub fn new() -> OpenOptions {
++        OpenOptions {
++            read: false,
++            write: false,
++            append: false,
++            truncate: false,
++            create: false,
++            create_new: false,
++        }
++    }
++
++    pub fn read(&mut self, read: bool) {
++        self.read = read;
++    }
++    pub fn write(&mut self, write: bool) {
++        self.write = write;
++    }
++    pub fn append(&mut self, append: bool) {
++        self.append = append;
++    }
++    pub fn truncate(&mut self, truncate: bool) {
++        self.truncate = truncate;
++    }
++    pub fn create(&mut self, create: bool) {
++        self.create = create;
++    }
++    pub fn create_new(&mut self, create_new: bool) {
++        self.create_new = create_new;
++    }
++
++    fn access_mode(&self) -> io::Result<AccessMode> {
++        match (self.read, self.write || self.append) {
++            (true, false) => Ok(AccessMode::Read),
++            (false, true) => Ok(AccessMode::Write),
++            (true, true) => Ok(AccessMode::ReadWrite),
++            (false, false) => Err(io::const_error!(ErrorKind::InvalidInput, "invalid access mode")),
++        }
++    }
++
++    fn open_flags(&self) -> io::Result<OpenFlags> {
++        let creates = self.truncate || self.create || self.create_new;
++        let refused = match (self.write, self.append) {
++            (false, false) => creates,
++            (_, true) => self.truncate && !self.create_new,
++            (true, false) => false,
++        };
++
++        if refused {
++            return Err(io::const_error!(ErrorKind::InvalidInput, "invalid creation mode"));
++        }
++
++        Ok(match (self.create, self.truncate, self.create_new) {
++            (_, _, true) => OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
++            (true, true, false) => OpenFlags::CREATE | OpenFlags::TRUNCATE,
++            (true, false, false) => OpenFlags::CREATE,
++            (false, true, false) => OpenFlags::TRUNCATE,
++            (false, false, false) => OpenFlags::NONE,
++        })
++    }
++}
++
++impl File {
++    pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
++        let mode = opts.access_mode()?;
++        let flags = opts.open_flags()?;
++        let text = path.to_str().ok_or(ErrorKind::InvalidFilename)?;
++        let path = filesystem_abi::Path::new(text).map_err(filesystem_error)?;
++
++        let node = with_root(|root| root.open(path, mode, flags))?;
++        Ok(File(Arc::new(Mutex::new(FileState { node, append: opts.append }))))
++    }
++
++    pub fn file_attr(&self) -> io::Result<FileAttr> {
++        let info = self.0.lock().node.metadata().map_err(failure)?;
++        Ok(FileAttr { kind: info.kind, size: info.size })
++    }
++
++    pub fn fsync(&self) -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn datasync(&self) -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn lock(&self) -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn lock_shared(&self) -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn try_lock(&self) -> Result<(), TryLockError> {
++        Err(TryLockError::Error(unsupported_err()))
++    }
++
++    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
++        Err(TryLockError::Error(unsupported_err()))
++    }
++
++    pub fn unlock(&self) -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn truncate(&self, size: u64) -> io::Result<()> {
++        self.0.lock().node.set_size(size).map_err(failure)
++    }
++
++    pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
++        self.0.lock().node.read(buf).map_err(failure)
++    }
++
++    pub fn read_vectored(&self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
++        io::default_read_vectored(|buf| self.read(buf), bufs)
++    }
++
++    pub fn is_read_vectored(&self) -> bool {
++        false
++    }
++
++    pub fn read_buf(&self, cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
++        io::default_read_buf(|buf| self.read(buf), cursor)
++    }
++
++    pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
++        let mut state = self.0.lock();
++        if !state.append {
++            return state.node.write(buf).map_err(failure);
++        }
++
++        let written = state.node.append(buf).map_err(failure)?;
++        // Дозапись ставит позицию за записанные байты, как `O_APPEND` на Unix.
++        state.node.seek(written.offset.saturating_add(u64::from(written.count)));
++        Ok(usize::try_from(written.count).unwrap_or(buf.len()))
++    }
++
++    pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
++        io::default_write_vectored(|buf| self.write(buf), bufs)
++    }
++
++    pub fn is_write_vectored(&self) -> bool {
++        false
++    }
++
++    pub fn flush(&self) -> io::Result<()> {
++        Ok(())
++    }
++
++    pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
++        let mut state = self.0.lock();
++        let position = match pos {
++            SeekFrom::Start(offset) => Some(offset),
++            SeekFrom::Current(delta) => state.node.position().checked_add_signed(delta),
++            SeekFrom::End(delta) => {
++                state.node.metadata().map_err(failure)?.size.checked_add_signed(delta)
++            }
++        };
++        let position = position.ok_or(io::const_error!(
++            ErrorKind::InvalidInput,
++            "seek to a negative or overflowing position",
++        ))?;
++
++        state.node.seek(position);
++        Ok(position)
++    }
++
++    pub fn size(&self) -> Option<io::Result<u64>> {
++        Some(self.file_attr().map(|attr| attr.size))
++    }
++
++    pub fn tell(&self) -> io::Result<u64> {
++        Ok(self.0.lock().node.position())
++    }
++
++    pub fn duplicate(&self) -> io::Result<File> {
++        Ok(File(Arc::clone(&self.0)))
++    }
++
++    pub fn set_permissions(&self, _perm: FilePermissions) -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn set_times(&self, _times: FileTimes) -> io::Result<()> {
++        unsupported()
++    }
++}
++
++impl DirBuilder {
++    pub fn new() -> DirBuilder {
++        DirBuilder {}
++    }
++
++    pub fn mkdir(&self, _p: &Path) -> io::Result<()> {
++        unsupported()
++    }
++}
++
++impl fmt::Debug for File {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("File").finish_non_exhaustive()
++    }
++}
++
++/// Устанавливает файловый корень процесса. Установленный корень не заменяется, и повторный
++/// вызов возвращает переданную сессию.
++pub fn install_root(root: OwnedHandle) -> Result<(), OwnedHandle> {
++    let mut cell = ROOT.lock();
++    match *cell {
++        RootCell::Empty => {
++            *cell = RootCell::Installed(root);
++            Ok(())
++        }
++        RootCell::Installed(_) | RootCell::Ready(_) => Err(root),
++    }
++}
++
++fn with_root<T>(
++    operation: impl FnOnce(&mut Root) -> filesystem_client::Result<T>,
++) -> io::Result<T> {
++    let mut cell = ROOT.lock();
++    let root = cell.ready().ok_or(io::const_error!(
++        ErrorKind::NotConnected,
++        "the process has no file system root installed",
++    ))?;
++
++    operation(root).map_err(failure)
++}
++
++fn failure(failure: Failure) -> io::Error {
++    match failure {
++        Failure::FileSystem(error) => filesystem_error(error),
++        Failure::Transport(error) => transport_error(error),
++    }
++}
++
++fn filesystem_error(error: FileSystemError) -> io::Error {
++    io::Error::from(match error {
++        FileSystemError::NotFound => ErrorKind::NotFound,
++        FileSystemError::NotADirectory => ErrorKind::NotADirectory,
++        FileSystemError::IsADirectory => ErrorKind::IsADirectory,
++        FileSystemError::NotEmpty => ErrorKind::DirectoryNotEmpty,
++        FileSystemError::AlreadyExists => ErrorKind::AlreadyExists,
++        FileSystemError::InvalidPath => ErrorKind::InvalidFilename,
++        FileSystemError::BadDescriptor => ErrorKind::InvalidData,
++        FileSystemError::TooManyOpenFiles => ErrorKind::TooManyOpenFiles,
++        FileSystemError::ReadOnly => ErrorKind::ReadOnlyFilesystem,
++        FileSystemError::NoSpace => ErrorKind::StorageFull,
++        FileSystemError::CrossMount => ErrorKind::CrossesDevices,
++        FileSystemError::NoSession => ErrorKind::NotConnected,
++        FileSystemError::NoBuffer | FileSystemError::BufferTooSmall => ErrorKind::InvalidData,
++        FileSystemError::NotSupported => ErrorKind::Unsupported,
++        FileSystemError::Unresponsive => ErrorKind::TimedOut,
++        FileSystemError::WrongMode => ErrorKind::PermissionDenied,
++    })
++}
++
++fn transport_error(error: IpcError) -> io::Error {
++    io::Error::from(match error {
++        IpcError::Truncated
++        | IpcError::FieldOrder
++        | IpcError::MissingField
++        | IpcError::InvalidValue => ErrorKind::InvalidData,
++        IpcError::FrameOverflow | IpcError::TooManyHandles => ErrorKind::InvalidInput,
++        IpcError::PeerClosed => ErrorKind::BrokenPipe,
++        IpcError::Timeout => ErrorKind::TimedOut,
++        IpcError::ResourceExhausted => ErrorKind::OutOfMemory,
++    })
++}
++
++pub fn readdir(_p: &Path) -> io::Result<ReadDir> {
++    unsupported()
++}
++
++pub fn unlink(_p: &Path) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn rename(_old: &Path, _new: &Path) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn set_perm(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn set_perm_nofollow(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn set_times(_p: &Path, _times: FileTimes) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn set_times_nofollow(_p: &Path, _times: FileTimes) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn rmdir(_p: &Path) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn remove_dir_all(_path: &Path) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn exists(_path: &Path) -> io::Result<bool> {
++    unsupported()
++}
++
++pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
++    unsupported()
++}
++
++pub fn symlink(_original: &Path, _link: &Path) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn link(_src: &Path, _dst: &Path) -> io::Result<()> {
++    unsupported()
++}
++
++pub fn stat(_p: &Path) -> io::Result<FileAttr> {
++    unsupported()
++}
++
++pub fn lstat(_p: &Path) -> io::Result<FileAttr> {
++    unsupported()
++}
++
++pub fn canonicalize(_p: &Path) -> io::Result<PathBuf> {
++    unsupported()
++}
++
++pub fn copy(_from: &Path, _to: &Path) -> io::Result<u64> {
++    unsupported()
++}
 diff -ruN a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
 --- a/std/src/sys/io/error/mod.rs	2026-08-07 22:42:12.158085867 +0000
 +++ b/std/src/sys/io/error/mod.rs	2026-08-10 18:37:47.249395615 +0000

@@ -112,7 +112,7 @@ cargo xtask build-userland [--image <путь>] [--arch <name>] [--file <пут�
 
 ```bash
 cargo xtask build-userland --image user/testing/testrunner/image.toml
-cargo xtask build-userland --file /boot/rootkeeper/motd=user/system/rootkeeper/motd.txt
+cargo xtask build-userland --file /rootkeeper/motd=user/system/rootkeeper/motd.txt
 ```
 
 ## Тесты

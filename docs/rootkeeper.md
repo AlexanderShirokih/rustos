@@ -10,7 +10,7 @@ Rootkeeper поднимает userland по записи плана. Запис�
 
 ## План загрузки
 
-План — отдельная запись userland-образа `/boot/rootkeeper/plan`. Манифест образа
+План — отдельная запись userland-образа `/rootkeeper/plan`. Манифест образа
 отвечает на вопрос, что лежит в образе; план — на вопрос, что и с какими
 аргументами rootkeeper поднимает ([userland.md](userland.md#образ)).
 
@@ -29,7 +29,7 @@ restarts = 2
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-scope = { namespace = "/" }
+scope = { namespace = "/boot" }
 
 [[components]]
 executable = "filesystem-ramfs"
@@ -37,21 +37,10 @@ memory_limit = "4M"
 scope = { namespace = "/tmp" }
 
 [[components]]
-executable = "driver-pl031"
-memory_limit = "1M"
-restarts = 2
-
-[[components]]
-executable = "calculator"
-memory_limit = "1M"
-restarts = 2
-
-[[components]]
-executable = "demo"
+executable = "files-demo"
 memory_limit = "2M"
-restarts = 2
 bind = { area = "filesystem-imagefs" }
-scope = { area = "/boot/demo" }
+scope = { area = "/files-demo" }
 ```
 
 | Ключ           | Значение                                                             |

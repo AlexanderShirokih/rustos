@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "ipc-test",
+ "rustc-std-workspace-core",
  "syscall",
 ]
 
@@ -25,6 +26,8 @@ dependencies = [
 name = "collections"
 version = "0.1.0"
 dependencies = [
+ "rustc-std-workspace-alloc",
+ "rustc-std-workspace-core",
  "spin",
 ]
 
@@ -142,6 +145,7 @@ dependencies = [
 name = "io"
 version = "0.1.0"
 dependencies = [
+ "rustc-std-workspace-core",
  "spin",
 ]
 
@@ -170,6 +174,7 @@ dependencies = [
  "collections",
  "io",
  "ipc",
+ "rustc-std-workspace-core",
  "syscall",
  "syscall-user",
 ]
@@ -301,6 +306,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
 dependencies = [
  "lock_api",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]
@@ -337,6 +343,7 @@ name = "syscall-user"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "rustc-std-workspace-core",
  "syscall",
 ]
 

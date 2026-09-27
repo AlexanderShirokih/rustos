@@ -9,7 +9,7 @@ use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
 use crate::fixture::spawn_entry;
 
-const FORWARD_FIXTURE: &str = "/boot/start-handle-forward-fixture/program";
+const FORWARD_FIXTURE: &str = "/start-handle-forward-fixture/program";
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 

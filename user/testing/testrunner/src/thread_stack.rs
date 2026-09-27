@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-const OVERFLOW_FIXTURE: &str = "/boot/stack-overflow-fixture/program";
+const OVERFLOW_FIXTURE: &str = "/stack-overflow-fixture/program";
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const DEEPEST_FRAME_SPAN: u64 = 512;

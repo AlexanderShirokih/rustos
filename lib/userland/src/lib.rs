@@ -16,7 +16,7 @@ pub const USERLAND_ENTRY_PATH_CAPACITY: usize = 255;
 /// Сегменты и стек в образе выровнены по грануле трансляции, которой ядро их маппит.
 pub const USERLAND_PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 
-/// Имя записи - последний компонент её пути (`/boot/filesystem-ramfs` -> `filesystem-ramfs`).
+/// Имя записи - последний компонент её пути (`/filesystem-ramfs` -> `filesystem-ramfs`).
 /// Пусто, если путь оканчивается разделителем. [`validate_entry`] такой путь отвергает.
 pub fn entry_name(path: &str) -> &str {
     &path[path.rfind('/').map_or(0, |index| index + 1)..]

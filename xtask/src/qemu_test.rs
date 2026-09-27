@@ -11,7 +11,7 @@ pub(crate) const DEFAULT_SPEC: &str = "devices/spec/qemu-aarch64-test.yaml";
 
 const TESTRUNNER_IMAGE: &str = "user/testing/testrunner/image.toml";
 
-const STRESS_PLAN_IMAGE_PATH: &str = "/boot/testrunner/stress-plan";
+const STRESS_PLAN_IMAGE_PATH: &str = "/testrunner/stress-plan";
 
 const STRESS_PLAN_SOURCE: &str = "stress-plan.txt";
 

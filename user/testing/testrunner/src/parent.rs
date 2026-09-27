@@ -56,6 +56,10 @@ pub(crate) enum Answer {
         protocol: &'static str,
         source: Port,
     },
+    Transfer {
+        protocol: &'static str,
+        source: Option<Port>,
+    },
     Refuse,
 }
 
@@ -352,16 +356,16 @@ impl startup_contract::Service<Delivery> for State {
         let requirements = match self.caller(badge) {
             Some(Key::Record(child)) => self
                 .records
-                .get(usize::from(child))
-                .map_or(&[][..], |record| record.requirements.as_slice()),
+                .get_mut(usize::from(child))
+                .map_or(&mut [][..], |record| record.requirements.as_mut_slice()),
             Some(Key::Importer(importer)) => self
                 .importers
-                .get(usize::from(importer))
-                .map_or(&[][..], Vec::as_slice),
-            None => &[],
+                .get_mut(usize::from(importer))
+                .map_or(&mut [][..], Vec::as_mut_slice),
+            None => &mut [],
         };
         let answer = requirements
-            .iter()
+            .iter_mut()
             .find(|(bound, _)| *bound == name)
             .map(|(_, answer)| answer);
 
@@ -401,6 +405,12 @@ impl startup_contract::Service<Delivery> for State {
                     )
                     .map_err(SessionError::from);
                 let _ = reply.send(answer);
+            }
+            Some(Answer::Transfer {
+                protocol: transferred,
+                source,
+            }) if *transferred == protocol => {
+                let _ = reply.send(source.take().ok_or(SessionError::Refused));
             }
             _ => {
                 let _ = reply.send(Err::<Port, _>(SessionError::Refused));

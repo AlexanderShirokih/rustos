@@ -10,6 +10,7 @@ rustc-dep-of-std = [
     "dep:core",
     "filesystem-abi/rustc-dep-of-std",
     "ipc/rustc-dep-of-std",
+    "kernel-objects/rustc-dep-of-std",
     "syscall/rustc-dep-of-std",
 ]
 

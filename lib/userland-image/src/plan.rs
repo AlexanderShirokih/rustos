@@ -2,7 +2,7 @@ use component_abi::{LOG_REQUIREMENT, SESSION_SCOPE_MAX};
 use userland::entry_name;
 
 /// Путь записи образа, из которой rootkeeper читает план загрузочной композиции.
-pub const BOOT_PLAN_PATH: &str = "/boot/rootkeeper/plan";
+pub const BOOT_PLAN_PATH: &str = "/rootkeeper/plan";
 
 /// Имя записи с программой в каталоге компонента.
 pub const COMPONENT_PROGRAM_NAME: &str = "program";

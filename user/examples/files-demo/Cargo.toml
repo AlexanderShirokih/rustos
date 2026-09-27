@@ -1,0 +1,29 @@
+[package]
+name = "files-demo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 65536
+
+[[bin]]
+name = "files-demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+component-startup = { workspace = true }
+component-startup-std = { workspace = true }
+filesystem-abi = { workspace = true }
+filesystem-client = { workspace = true }
+kernel-objects = { workspace = true }
+syscall = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true
