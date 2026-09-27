@@ -1,7 +1,7 @@
 version = 1
 
 [plan]
-source = "user/testrunner/system.toml"
+source = "user/testing/testrunner/system.toml"
 path = "/boot/testrunner/plan"
 
 [[programs]]
@@ -153,15 +153,15 @@ path = "/boot/filesystem-imagefs"
 
 [[files]]
 path = "/boot/testrunner/sample"
-source = "user/testrunner/assets/sample.txt"
+source = "user/testing/testrunner/assets/sample.txt"
 
 [[files]]
 path = "/boot/testrunner/empty"
-source = "user/testrunner/assets/empty.txt"
+source = "user/testing/testrunner/assets/empty.txt"
 
 [[files]]
 path = "/boot/scope-consumer-fixture/sample"
-source = "user/testrunner/assets/area.txt"
+source = "user/testing/testrunner/assets/area.txt"
 
 [[programs]]
 package = "std-selftest"

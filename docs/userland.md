@@ -5,6 +5,15 @@ Userspace-процесс содержит весь свой код и работ
 программ лежит в `user/`, а упакованы они в один образ, который ядро получает от
 загрузчика и из которого поднимает начальный процесс.
 
+Программы `user/` разложены по назначению. `system/` содержит программы самой
+системы: `rootkeeper`, `namespace-router`, серверы файлов `filesystem-imagefs` и
+`filesystem-ramfs` и драйвер часов `driver-pl031`. `examples/` содержит примеры
+`calculator-demo`, `hello-std` и `clock-std`, а `testing/` — стенды тестов
+`testrunner` и `std-selftest`. Каталог не входит в имя пакета, и манифест образа
+называет программу пакетом, а не путём. Набор подкаталогов не закреплён.
+Подкаталог создаётся вместе с первой программой, которой он нужен, и может
+содержать вложенные каталоги.
+
 ## Образ
 
 `userland.img` — плоский архив именованных блобов с одной таблицей. В формате
@@ -12,13 +21,13 @@ Userspace-процесс содержит весь свой код и работ
 содержимое начинается своей магией.
 
 Состав образа задаёт TOML-манифест, путь к которому передаётся в `--image` (по
-умолчанию `user/rootkeeper/image.toml`):
+умолчанию `user/system/rootkeeper/image.toml`):
 
 ```toml
 version = 1
 
 [plan]
-source = "user/rootkeeper/system.toml"
+source = "user/system/rootkeeper/system.toml"
 
 [[programs]]
 package = "rootkeeper"
@@ -27,7 +36,7 @@ boot = true
 
 [[files]]
 path = "/boot/rootkeeper/assets"
-source = "user/rootkeeper/assets/**/*.txt"
+source = "user/system/rootkeeper/assets/**/*.txt"
 ```
 
 `[[programs]]` и `[[files]]` различаются одним — откуда инструмент берёт байты.
@@ -386,7 +395,7 @@ match requirements.rtc.client().now() {
 }
 ```
 
-Образцы — `hello-std` и `clock-std` в `user/`. Стеки потоков программа берёт из
+Образцы — `hello-std` и `clock-std` в `user/examples/`. Стеки потоков программа берёт из
 своей кучи, и предел памяти компонента покрывает их наравне с ней.
 
 Отсюда же проходит важная граница. Платформенное состояние процесса держит копия

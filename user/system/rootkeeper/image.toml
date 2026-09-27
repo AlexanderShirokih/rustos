@@ -1,7 +1,7 @@
 version = 1
 
 [plan]
-source = "user/rootkeeper/system.toml"
+source = "user/system/rootkeeper/system.toml"
 
 [[programs]]
 package = "rootkeeper"

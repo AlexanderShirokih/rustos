@@ -187,7 +187,7 @@ spin = { workspace = true }
 test-harness-qemu = { workspace = true }
 syscall = { workspace = true }
 managed-component = { workspace = true }
-rootkeeper = { path = "../rootkeeper" }
+rootkeeper = { path = "../../system/rootkeeper" }
 rtc-abi = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }

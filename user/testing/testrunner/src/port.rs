@@ -305,35 +305,20 @@ fn cap_transfer_through_port() {
 const BADGE_A: u64 = 0xA11CE;
 const BADGE_B: u64 = 0xB0B;
 
-static EP_BADGED_A: AtomicU64 = AtomicU64::new(0);
-static EP_BADGED_B: AtomicU64 = AtomicU64::new(0);
+static EP_BADGED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 static CLIENTS_READY: AtomicU64 = AtomicU64::new(0);
-static CLIENT_A_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
-static CLIENT_B_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
+static CLIENT_RESULTS: [AtomicI64; 2] = [const { AtomicI64::new(i64::MIN) }; 2];
 
-extern "C" fn badge_client_a(_arg: usize) -> u32 {
+extern "C" fn badge_client(index: usize) -> u32 {
     let va = ipc_va();
-    let h = port_of(EP_BADGED_A.load(SeqCst) as u32).expect("badged copy A");
+    let h = port_of(EP_BADGED[index].load(SeqCst) as u32).expect("badged copy");
     // SAFETY: собственный буфер.
     unsafe {
-        write_msg(va, b"a", &[]);
+        write_msg(va, &[b"ab"[index]], &[]);
     }
     CLIENTS_READY.fetch_add(1, SeqCst);
     let r = port_send(h, Timeout::INFINITE);
-    CLIENT_A_RESULT.store(r, SeqCst);
-    0
-}
-
-extern "C" fn badge_client_b(_arg: usize) -> u32 {
-    let va = ipc_va();
-    let h = port_of(EP_BADGED_B.load(SeqCst) as u32).expect("badged copy B");
-    // SAFETY: собственный буфер.
-    unsafe {
-        write_msg(va, b"b", &[]);
-    }
-    CLIENTS_READY.fetch_add(1, SeqCst);
-    let r = port_send(h, Timeout::INFINITE);
-    CLIENT_B_RESULT.store(r, SeqCst);
+    CLIENT_RESULTS[index].store(r, SeqCst);
     0
 }
 
@@ -346,14 +331,15 @@ fn badge_round_trip_two_clients() {
     // заданный badge). Права сужаем до WRITE - клиенту нужен только send.
     let copy_a = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_A).expect("mint badged copy A");
     let copy_b = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_B).expect("mint badged copy B");
-    EP_BADGED_A.store(u64::from(copy_a.raw()), SeqCst);
-    EP_BADGED_B.store(u64::from(copy_b.raw()), SeqCst);
+    EP_BADGED[0].store(u64::from(copy_a.raw()), SeqCst);
+    EP_BADGED[1].store(u64::from(copy_b.raw()), SeqCst);
     CLIENTS_READY.store(0, SeqCst);
-    CLIENT_A_RESULT.store(i64::MIN, SeqCst);
-    CLIENT_B_RESULT.store(i64::MIN, SeqCst);
+    for result in &CLIENT_RESULTS {
+        result.store(i64::MIN, SeqCst);
+    }
 
-    let client_a = spawn(badge_client_a, 0, STACK_SIZE, Priority::new(1)).expect("spawn client A");
-    let client_b = spawn(badge_client_b, 0, STACK_SIZE, Priority::new(1)).expect("spawn client B");
+    let client_a = spawn(badge_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client A");
+    let client_b = spawn(badge_client, 1, STACK_SIZE, Priority::new(1)).expect("spawn client B");
 
     while CLIENTS_READY.load(SeqCst) < 2 {
         core::hint::spin_loop();
@@ -379,8 +365,9 @@ fn badge_round_trip_two_clients() {
 
     join(client_a);
     join(client_b);
-    kernel_tests::kassert_eq!(CLIENT_A_RESULT.load(SeqCst), 0);
-    kernel_tests::kassert_eq!(CLIENT_B_RESULT.load(SeqCst), 0);
+    for result in &CLIENT_RESULTS {
+        kernel_tests::kassert_eq!(result.load(SeqCst), 0);
+    }
 }
 
 // --- (f) timeout/poll: блокирующие Port-syscall не виснут на RT-пути. ---------

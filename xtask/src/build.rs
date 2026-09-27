@@ -27,7 +27,7 @@ pub(crate) struct BuildArgs {
     #[arg(long)]
     features: Option<String>,
     /// Relative path to the userland image manifest
-    #[arg(long, default_value = "user/rootkeeper/image.toml")]
+    #[arg(long, default_value = "user/system/rootkeeper/image.toml")]
     image: PathBuf,
     /// Extra image file as 'path=source'; repeat for several files
     #[arg(long = "file", value_name = "PATH=SOURCE")]

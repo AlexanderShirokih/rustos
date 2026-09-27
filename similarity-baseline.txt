@@ -21,4 +21,3 @@ kernel/memory/src/mem_flags.rs|method user_rw|kernel/memory/src/mem_flags.rs|met
 kernel/syscall/src/port.rs|function sys_port_call|kernel/syscall/src/port.rs|function sys_port_recv
 kernel/syscall/src/port.rs|function sys_port_call|kernel/syscall/src/port.rs|function sys_port_send
 kernel/syscall/src/port.rs|function sys_port_recv|kernel/syscall/src/port.rs|function sys_port_send
-user/testrunner/src/port.rs|function badge_client_a|user/testrunner/src/port.rs|function badge_client_b

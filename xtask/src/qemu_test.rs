@@ -9,7 +9,7 @@ use crate::{artifacts::build_binary, context::BuildContext, shell, userland};
 
 pub(crate) const DEFAULT_SPEC: &str = "devices/spec/qemu-aarch64-test.yaml";
 
-const TESTRUNNER_IMAGE: &str = "user/testrunner/image.toml";
+const TESTRUNNER_IMAGE: &str = "user/testing/testrunner/image.toml";
 
 const STRESS_PLAN_IMAGE_PATH: &str = "/boot/testrunner/stress-plan";
 

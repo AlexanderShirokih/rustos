@@ -49,7 +49,7 @@ jobs:
               - lib/ipc/**
               - lib/log-abi/**
               - lib/syscall/**
-              - user/hello-std/**
+              - user/examples/hello-std/**
               - user/Cargo.toml
               - user/.cargo/config.toml
               - Dockerfile

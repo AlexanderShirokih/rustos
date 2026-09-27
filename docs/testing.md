@@ -17,7 +17,7 @@
 
 1. **Host-тест** (`cargo test --workspace`) — эффект выражается через логику
    крейта и воспроизводится на моках, без настоящих MMU и scheduler'а.
-2. **Userspace-тест** (`user/testrunner`) — эффект выражается через syscall-ABI.
+2. **Userspace-тест** (`user/testing/testrunner`) — эффект выражается через syscall-ABI.
 3. **Kernel-тест** (`kernel/*/src/kernel_tests`) — эффект виден только с EL1:
    системные регистры, биты leaf-PTE, trap-vector.
 
@@ -27,7 +27,7 @@
 ## Прогоны под QEMU
 
 `cargo xtask qemu-test` выполняет два прохода одним образом
-(`user/testrunner/image.toml`):
+(`user/testing/testrunner/image.toml`):
 
 | Проход     | Feature ядра   | Что тестирует     |
 |------------|----------------|-------------------|
@@ -76,8 +76,8 @@ fuzzing по целям. Диапазон seed стресса делится п�
 ## Фикстуры
 
 Потомок, которому мало одного exit-кода, поднимается фикстурой — отдельной
-программой образа `testrunner`; их реестр — bin-таргеты `user/testrunner`.
+программой образа `testrunner`; их реестр — bin-таргеты `user/testing/testrunner`.
 
-Поверхность стандартной библиотеки проверяет `user/std-selftest`: `testrunner`
+Поверхность стандартной библиотеки проверяет `user/testing/std-selftest`: `testrunner`
 поднимает его управляемым компонентом, код выхода программы — итог её `assert!`,
 а подробности провала уходят в журнал сообщением паники.

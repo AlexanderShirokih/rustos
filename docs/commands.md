@@ -84,11 +84,11 @@ cargo xtask build <spec> [--run] [--debug] [--features <features>] [--image <п�
 | `--run`                    | После сборки выполнить команды из секции `run` YAML-спеки                                                                             |
 | `--debug`                  | После сборки выполнить команды из секции `debug` YAML-спеки                                                                           |
 | `--features <список>`      | Дополнительные features (через запятую)                                                                                              |
-| `--image <путь>`           | Относительный путь к TOML-манифесту userland-образа. По умолчанию `user/rootkeeper/image.toml`                                        |
+| `--image <путь>`           | Относительный путь к TOML-манифесту userland-образа. По умолчанию `user/system/rootkeeper/image.toml`                                 |
 | `--file <путь>=<источник>` | Файлы образа поверх манифеста: путь записи и источник относительно корня проекта, подстановки включая. Повторяется по числу источников |
 
 ```bash
-cargo xtask build devices/spec/xiaomi-lavender.yaml --image user/calculator-demo/image.toml
+cargo xtask build devices/spec/xiaomi-lavender.yaml --image user/examples/calculator-demo/image.toml
 ```
 
 Артефакты по формату загрузчика:
@@ -111,8 +111,8 @@ cargo xtask build-userland [--image <путь>] [--arch <name>] [--file <пут�
 манифеста описан в [userland.md](userland.md#образ).
 
 ```bash
-cargo xtask build-userland --image user/testrunner/image.toml
-cargo xtask build-userland --file /boot/rootkeeper/motd=user/rootkeeper/motd.txt
+cargo xtask build-userland --image user/testing/testrunner/image.toml
+cargo xtask build-userland --file /boot/rootkeeper/motd=user/system/rootkeeper/motd.txt
 ```
 
 ## Тесты

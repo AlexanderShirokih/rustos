@@ -100,7 +100,7 @@ enum Commands {
     /// Build userland.img from a TOML image manifest
     BuildUserland {
         /// Relative path to the image manifest
-        #[arg(long, default_value = "user/rootkeeper/image.toml")]
+        #[arg(long, default_value = "user/system/rootkeeper/image.toml")]
         image: PathBuf,
         /// Registered architecture to build for; default is the first registered one
         #[arg(long, value_name = "NAME")]

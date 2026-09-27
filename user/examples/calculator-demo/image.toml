@@ -1,7 +1,7 @@
 version = 1
 
 [plan]
-source = "user/calculator-demo/system.toml"
+source = "user/examples/calculator-demo/system.toml"
 
 [[programs]]
 package = "rootkeeper"
@@ -36,4 +36,4 @@ path = "/boot/demo"
 
 [[files]]
 path = "/boot/demo/banner"
-source = "user/calculator-demo/assets/banner.txt"
+source = "user/examples/calculator-demo/assets/banner.txt"
