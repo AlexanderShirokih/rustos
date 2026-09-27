@@ -12,6 +12,11 @@ pub enum UserMemFlags {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidUserMemFlags;
 
+/// Бит аргумента `flags` у `MemoryAllocate`, который объединяется с [`UserMemFlags`]. Ядро
+/// оставляет под маппингом одну неотображённую страницу и не выдаёт её другим маппингам.
+/// Прочие memory-вызовы отвергают бит как `InvalidArgument`.
+pub const MEMORY_ALLOCATE_GUARD_PAGE: u64 = 1 << 8;
+
 impl UserMemFlags {
     pub const fn from_raw(raw: u64) -> Result<Self, InvalidUserMemFlags> {
         match raw {

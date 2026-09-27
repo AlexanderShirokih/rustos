@@ -29,8 +29,8 @@ use router::{Router, admin_gone, open_admin, open_view, view_gone};
 
 const LOG_TAG: &str = "router";
 
-const ADMIN_STACK: u64 = 0x10000;
-const EXPORT_STACK: u64 = 0x4000;
+const ADMIN_STACK_SIZE: u64 = 0x10000;
+const EXPORT_STACK_SIZE: u64 = 0x4000;
 
 const PANIC_EXIT_CODE: u64 = 1;
 const SERVICE_PORT_FAILED_EXIT_CODE: u64 = 9;
@@ -72,17 +72,17 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
             log_line("admin port closed");
             process_exit(ADMIN_PORT_FAILED_EXIT_CODE)
         },
-        ADMIN_STACK,
+        ADMIN_STACK_SIZE,
         Priority::new(1),
     )?;
     let _ = spawn_owned(
         move || export::<namespace::Protocol>(&views_parent, views, open_view),
-        EXPORT_STACK,
+        EXPORT_STACK_SIZE,
         Priority::new(1),
     )?;
     let _ = spawn_owned(
         move || export::<namespace_admin::Protocol>(&admins_parent, admins, open_admin),
-        EXPORT_STACK,
+        EXPORT_STACK_SIZE,
         Priority::new(1),
     )?;
     log_line("started");

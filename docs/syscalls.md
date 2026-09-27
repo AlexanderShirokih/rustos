@@ -455,7 +455,8 @@ Memory-вызовы выделяют память и управляют её м�
 | `0x67` | `MemoryRegionInspect` | `region_h`                                        | primary=`size_bytes`, secondary=`base_pa \| (profile << 5) \| (kind_tag << 3) \| access_bits` | `READ`                                                                                                              |
 
 `access_mask`: `R=1`, `W=2`, `X=4`; ноль — `InvalidArgument`; высокие биты отбрасываются.
-`flags`: `0=ReadWrite`, `1=ReadOnly`, `2=ReadExecute`; другие значения — `InvalidArgument`.
+`flags`: `0=ReadWrite`, `1=ReadOnly`, `2=ReadExecute`; `MemoryAllocate` принимает в дополнение
+бит `MEMORY_ALLOCATE_GUARD_PAGE` (`1 << 8`); другие значения — `InvalidArgument`.
 `profile`: `0=Cached`, `1=WriteCombining`, `2=Device`; другие значения — `InvalidArgument`.
 
 `MemoryRegionInspect` укладывает три поля в один secondary-возврат. `base_pa`
@@ -545,6 +546,12 @@ Virtual-срез не копирует фреймы и своего metering-о�
 активные маппинги всего поддерева, в том числе кросс-процессно. У
 `MemoryAllocate` публичной капы нет вовсе, и его маппинг снимает только
 `MemoryFree` либо завершение AS.
+
+Бит `MEMORY_ALLOCATE_GUARD_PAGE` резервирует защитную страницу непосредственно под
+маппингом `MemoryAllocate`. Ядро не отображает защитную страницу и не выдаёт её
+другим маппингам процесса. Страница не расходует бюджет, и `MemoryFree` маппинга
+освобождает её вместе с ним. Обращение к странице вызывает необработанное
+исключение, которое завершает процесс ([Process](#process)).
 
 Пример: временный рабочий буфер.
 

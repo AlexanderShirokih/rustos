@@ -169,6 +169,12 @@ path = "src/answer_exhaustion_fixture.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "stack-overflow-fixture"
+path = "src/stack_overflow_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }

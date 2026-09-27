@@ -33,9 +33,9 @@ mod store;
 pub use error::{Error, Result};
 use service::{FileSystemState, Frame, Serving};
 
-const EXPORT_STACK: u64 = 0x4000;
+const EXPORT_STACK_SIZE: u64 = 0x4000;
 
-const MOUNT_STACK: u64 = 0x4000;
+const MOUNT_STACK_SIZE: u64 = 0x8000;
 
 const FAILED_EXIT_CODE: u64 = 1;
 
@@ -85,12 +85,12 @@ where
     // Потоки экспорта и монтирования работают до конца процесса.
     let _ = spawn_owned(
         move || export::serve(start, shared),
-        EXPORT_STACK,
+        EXPORT_STACK_SIZE,
         Priority::new(1),
     )?;
     let _ = spawn_owned(
         move || mount::serve(start, namespace, shared),
-        MOUNT_STACK,
+        MOUNT_STACK_SIZE,
         Priority::new(1),
     )?;
     log_line("started");

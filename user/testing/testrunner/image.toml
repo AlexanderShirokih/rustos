@@ -132,6 +132,11 @@ path = "/boot/answer-exhaustion-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "stack-overflow-fixture"
+path = "/boot/stack-overflow-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "crash-filesystem"
 path = "/boot/crash-filesystem"
 

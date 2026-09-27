@@ -74,6 +74,8 @@ impl Display for RangeError {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllocatedRange<Tag: Clone> {
+    reserved_base: PageAlignedVirtualAddress,
+    guard_pages: usize,
     base: PageAlignedVirtualAddress,
     pages: NonZeroUsize,
     tag: Tag,
@@ -208,18 +210,33 @@ impl<Tag: Clone> RangeAllocator<Tag> {
         size_bytes: NonZeroUsize,
         tag: Tag,
     ) -> Result<AllocatedRange<Tag>, AllocateError> {
+        self.allocate_guarded(size_bytes, 0, tag)
+    }
+
+    /// Выдаёт диапазон `size_bytes` и оставляет под ним `guard_pages` страниц арены. Эти
+    /// страницы не выдаются другим диапазонам, а [`free`](Self::free) возвращает их в пул
+    /// вместе с диапазоном.
+    pub fn allocate_guarded(
+        &mut self,
+        size_bytes: NonZeroUsize,
+        guard_pages: usize,
+        tag: Tag,
+    ) -> Result<AllocatedRange<Tag>, AllocateError> {
         let requested_pages = pages_of(size_bytes).ok_or(AllocateError::UnalignedSize)?;
+        let reserved_pages = requested_pages
+            .checked_add(guard_pages)
+            .ok_or(AllocateError::NotEnoughSpace)?;
         if self.allocated.len() >= self.capacity {
             return Err(AllocateError::OutOfSlots);
         }
 
         // `None` в остатке означает точное совпадение с запрошенным размером.
-        let (idx, picked_base, remainder) = self
+        let (idx, reserved_base, remainder) = self
             .free_ranges
             .iter()
             .enumerate()
             .find_map(|(i, r)| {
-                let remainder = r.pages.get().checked_sub(requested_pages.get())?;
+                let remainder = r.pages.get().checked_sub(reserved_pages.get())?;
                 Some((i, r.base, NonZeroUsize::new(remainder)))
             })
             .ok_or(AllocateError::NotEnoughSpace)?;
@@ -231,13 +248,16 @@ impl<Tag: Clone> RangeAllocator<Tag> {
             Some(remainder) => {
                 // Сдвигаем свободный хвост вправо - сортировка сохраняется без resort-а.
                 if let Some(free) = self.free_ranges.get_mut(idx) {
-                    free.base = free.base.add_blocks(requested_pages.get());
+                    free.base = free.base.add_blocks(reserved_pages.get());
                     free.pages = remainder;
                 }
             }
         }
 
+        let picked_base = reserved_base.add_blocks(guard_pages);
         let allocated = AllocatedRange {
+            reserved_base,
+            guard_pages,
             base: picked_base,
             pages: requested_pages,
             tag,
@@ -261,7 +281,10 @@ impl<Tag: Clone> RangeAllocator<Tag> {
     ) -> Result<AllocatedRange<Tag>, RangeError> {
         let idx = self.find_exact(base, size_bytes)?;
         let removed = self.allocated.remove(idx);
-        self.insert_free(removed.base, removed.pages);
+        self.insert_free(
+            removed.reserved_base,
+            removed.pages.saturating_add(removed.guard_pages),
+        );
         Ok(removed)
     }
 
@@ -371,7 +394,11 @@ mod tests {
 
     fn total_pages<Tag: Clone>(a: &RangeAllocator<Tag>) -> usize {
         let f: usize = a.free_ranges().iter().map(|r| r.pages().get()).sum();
-        let l: usize = a.allocated().iter().map(|r| r.pages().get()).sum();
+        let l: usize = a
+            .allocated()
+            .iter()
+            .map(|r| r.pages().get() + r.guard_pages)
+            .sum();
         f + l
     }
 
@@ -517,6 +544,52 @@ mod tests {
         );
         a.allocate(nz(2 * PAGE_SIZE), 0).unwrap();
         assert!(a.free_ranges().is_empty());
+    }
+
+    #[test]
+    fn guard_page_is_not_handed_to_next_allocation() {
+        let mut a = allocator();
+        let guarded = a.allocate_guarded(nz(2 * PAGE_SIZE), 1, 0).unwrap();
+        assert_eq!(guarded.base().as_usize(), REGION_START + PAGE_SIZE);
+        assert_eq!(guarded.pages().get(), 2);
+
+        let next = a.allocate(nz(PAGE_SIZE), 0).unwrap();
+        assert_eq!(next.base().as_usize(), REGION_START + 3 * PAGE_SIZE);
+    }
+
+    #[test]
+    fn guarded_allocation_needs_room_for_guard_pages() {
+        let mut a: RangeAllocator<u32> = RangeAllocator::new(
+            PageAlignedVirtualAddress::from_usize(REGION_START).unwrap(),
+            VirtualAddress::new(REGION_START + 2 * PAGE_SIZE),
+        );
+        assert_eq!(
+            a.allocate_guarded(nz(2 * PAGE_SIZE), 1, 0),
+            Err(AllocateError::NotEnoughSpace)
+        );
+
+        a.allocate_guarded(nz(PAGE_SIZE), 1, 0).unwrap();
+        assert!(a.free_ranges().is_empty());
+    }
+
+    #[test]
+    fn free_returns_guard_pages_to_the_pool() {
+        let mut a = allocator();
+        let total = arena_pages(REGION_START, REGION_END);
+        let first = a.allocate(nz(PAGE_SIZE), 0).unwrap();
+        let guarded = a.allocate_guarded(nz(PAGE_SIZE), 1, 0).unwrap();
+        assert_eq!(total_pages(&a), total);
+
+        a.free(guarded.base(), nz(guarded.size_bytes())).unwrap();
+        assert_eq!(total_pages(&a), total);
+        assert_eq!(a.free_ranges().len(), 1);
+        assert_eq!(
+            a.free_ranges()[0].base().as_usize(),
+            first.end_va().as_usize()
+        );
+
+        a.free(first.base(), nz(first.size_bytes())).unwrap();
+        assert_eq!(a.free_ranges()[0].pages().get(), total);
     }
 
     #[test]

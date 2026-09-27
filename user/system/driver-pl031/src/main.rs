@@ -43,7 +43,7 @@ const FAILED_EXIT_CODE: u64 = 1;
 const ALARM_LOST_EXIT_CODE: u64 = 5;
 const EXPORT_FAILED_EXIT_CODE: u64 = 6;
 
-const EXPORT_STACK: u64 = 0x4000;
+const EXPORT_STACK_SIZE: u64 = 0x4000;
 
 component_manifest! {
     struct RtcStartup {
@@ -113,7 +113,7 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
             log_fmt(format_args!("export stopped: {failure:?}"));
             process_exit(EXPORT_FAILED_EXIT_CODE)
         },
-        EXPORT_STACK,
+        EXPORT_STACK_SIZE,
         Priority::new(1),
     )
     .map_err(|_| Error::Runtime)?;

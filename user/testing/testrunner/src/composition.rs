@@ -29,10 +29,10 @@ pub(crate) const ROUTER_NAME: &str = "namespace-router";
 const IMPORTER_WAIT: Timeout = Timeout::from_secs(5);
 
 const TURN: Timeout = Timeout::from_millis(20);
-const TURN_STACK: u64 = 0x10000;
+const TURN_STACK_SIZE: u64 = 0x10000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const BUDGET_POLL: Timeout = Timeout::from_millis(10);
-const MOUNT_STACK: u64 = 0x10000;
+const MOUNT_STACK_SIZE: u64 = 0x10000;
 
 const MOUNT_ENDED: u32 = 0;
 const MOUNT_FAILED: u32 = 1;
@@ -132,7 +132,7 @@ impl TurnThread {
                     while turning.load(Ordering::Acquire) && turn().is_continue() {}
                     0
                 },
-                TURN_STACK,
+                TURN_STACK_SIZE,
                 Priority::new(1),
             )
             .expect("turn thread starts")
@@ -189,7 +189,7 @@ impl Mounted {
                     MOUNT_FAILED
                 }
             },
-            MOUNT_STACK,
+            MOUNT_STACK_SIZE,
             Priority::new(1),
         )
         .expect("mount thread starts");

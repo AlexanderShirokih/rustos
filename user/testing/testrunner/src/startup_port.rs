@@ -63,7 +63,7 @@ const REFUSAL_WAIT: Timeout = Timeout::from_secs(1);
 const TAKE_DOWN_BOUND: Timeout = Timeout::from_secs(1);
 const SEND_WAIT: Timeout = Timeout::from_millis(500);
 
-const WORKER_STACK: u64 = 0x8000;
+const WORKER_STACK_SIZE: u64 = 0x8000;
 
 const FAILURE_EXIT_CODE: u32 = 5;
 const READ_EXIT_CODE: u32 = 7;
@@ -238,7 +238,7 @@ fn ask(importer: &Port, requirement: &'static str) -> JoinHandle {
                 Timeout::INFINITE,
             ))
         },
-        WORKER_STACK,
+        WORKER_STACK_SIZE,
         Priority::new(1),
     )
     .expect("importer thread starts")

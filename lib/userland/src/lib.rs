@@ -181,7 +181,7 @@ pub fn validate_entry<'a, E: EntryView<'a>>(entry: &E) -> Result<(), UserlandVal
     Ok(())
 }
 
-/// Промежуток `[start, end)` между концом старшего сегмента и низом стека -
+/// Промежуток `[start, end)` между концом старшего сегмента и защитной страницей под стеком -
 /// окно, куда раскладываются анонимные маппинги процесса (куча).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserVmWindow {
@@ -191,7 +191,8 @@ pub struct UserVmWindow {
 
 /// Выводит [`UserVmWindow`] из геометрии образа. Конец сегмента округляется
 /// вверх до страницы (переполняющий сегмент отбрасывается). Низ стека -
-/// `stack_top - stack_size`. `None`, если промежутка нет либо стек переполняет.
+/// `stack_top - stack_size`, и страница под ним остаётся вне окна неотображённой.
+/// `None`, если промежутка нет либо стек переполняет.
 pub fn user_vm_window(
     segments: impl Iterator<Item = (u64, u64)>,
     stack_top: u64,
@@ -204,13 +205,15 @@ pub fn user_vm_window(
                 .checked_next_multiple_of(USERLAND_PAGE_SIZE)
         })
         .max()?;
-    let stack_base = stack_top.checked_sub(stack_size)?;
-    if highest_end >= stack_base {
+    let guard_base = stack_top
+        .checked_sub(stack_size)?
+        .checked_sub(USERLAND_PAGE_SIZE)?;
+    if highest_end >= guard_base {
         return None;
     }
     Some(UserVmWindow {
         start: highest_end,
-        end: stack_base,
+        end: guard_base,
     })
 }
 
@@ -358,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn user_vm_window_spans_highest_segment_to_stack_base() {
+    fn user_vm_window_spans_highest_segment_to_stack_guard() {
         // Старший сегмент кончается на 0x40_2000 (0x1800 округлён вверх до 2
         // страниц); стек top 0x1_0000_0000 size 0x4000 -> base ниже на 0x4000.
         let window = user_vm_window(
@@ -368,7 +371,15 @@ mod tests {
         )
         .expect("gap exists");
         assert_eq!(window.start, 0x40_3000);
-        assert_eq!(window.end, 0x1_0000_0000 - 0x4000);
+        assert_eq!(window.end, 0x1_0000_0000 - 0x4000 - PAGE);
+    }
+
+    #[test]
+    fn user_vm_window_leaves_page_below_stack_outside() {
+        assert_eq!(
+            user_vm_window([(0, 0x10_0000 - 2 * PAGE)].into_iter(), 0x10_0000, PAGE),
+            None
+        );
     }
 
     #[test]

@@ -1,4 +1,7 @@
-//! Запуск потока в текущем процессе: стек из кучи процесса и вход по трамплину вызывающего.
+//! Запуск потока в текущем процессе: стек отдельным регионом и вход по трамплину вызывающего.
+//!
+//! Стек - анонимный регион `MemoryAllocate`, и под его нижней границей ядро оставляет
+//! неотображённую страницу. Запись в эту страницу завершает процесс отказом доступа.
 //!
 //! Механизм - выдача стека и `ThreadCreate`, а что делает поток на выходе, решает трамплин
 //! вызывающего. Поверх механизма лежит `spawn`. Он берёт тело потока значением и снимает с
@@ -7,19 +10,21 @@
 use alloc::boxed::Box;
 use core::ptr::NonNull;
 
-use syscall::{Handle, Priority, SIGNALED, SyscallError, Timeout, kind};
+use syscall::{
+    Handle, MEMORY_ALLOCATE_GUARD_PAGE, PAGE_SIZE, Priority, SIGNALED, SyscallError, Timeout,
+    UserMemFlags, kind,
+};
 
 use crate::{
-    heap::{alloc, dealloc},
+    process::metering_handle,
     svc::{
-        handle_close, process_self, signal_wait_one, thread_create, thread_exit, thread_exit_code,
+        handle_close, memory_allocate, memory_free, process_self, signal_wait_one, thread_create,
+        thread_exit, thread_exit_code,
     },
     tls::run_destructors,
 };
 
-const STACK_ALIGN: usize = 16;
-
-/// Поднятый поток: его handle и стек, выданный кучей процесса.
+/// Поднятый поток: его handle и стек.
 pub struct Spawned {
     thread: Handle<kind::Thread>,
     stack: NonNull<u8>,
@@ -33,7 +38,7 @@ impl Spawned {
         self.thread
     }
 
-    /// База стека потока.
+    /// Нижняя граница стека потока. Под ней лежит защитная страница.
     #[must_use]
     pub const fn stack(&self) -> NonNull<u8> {
         self.stack
@@ -46,10 +51,10 @@ impl Spawned {
     }
 }
 
-/// Поднимает поток в текущем процессе. Выделяет стек `stack_bytes` и входит в `entry(arg)` с
-/// приоритетом `priority`.
+/// Поднимает поток в текущем процессе. Выделяет стек `stack_bytes`, округлённый вверх до
+/// страницы, и входит в `entry(arg)` с приоритетом `priority`.
 ///
-/// На отказе выделенный стек возвращается куче.
+/// На отказе выделенный стек освобождается.
 pub fn create(
     entry: extern "C" fn(usize) -> !,
     arg: usize,
@@ -57,17 +62,16 @@ pub fn create(
     priority: Priority,
 ) -> Result<Spawned, SyscallError> {
     let bytes = stack_bytes
-        .max(STACK_ALIGN)
-        .checked_next_multiple_of(STACK_ALIGN)
+        .max(PAGE_SIZE)
+        .checked_next_multiple_of(PAGE_SIZE)
         .ok_or(SyscallError::InvalidArgument)?;
-    // SAFETY: размер ненулевой по границе снизу, выравнивание - степень двойки.
-    let stack =
-        NonNull::new(unsafe { alloc(bytes, STACK_ALIGN) }).ok_or(SyscallError::OutOfMemory)?;
+
+    let stack = allocate_stack(bytes)?;
 
     let process = match process_self() {
         Ok(process) => process,
         Err(error) => {
-            // SAFETY: стек только что выдан этой кучей и никем не адресуется.
+            // SAFETY: стек только что выдан `allocate_stack` и никем не адресуется.
             unsafe { release_stack(stack, bytes) };
             return Err(error);
         }
@@ -96,15 +100,30 @@ pub fn create(
     }
 }
 
-/// Возвращает стек потока куче процесса.
+/// Снимает отображение стека потока и возвращает его регион ядру.
 ///
 /// # Safety
 ///
 /// Поток терминирован, его стек больше никем не адресуется, а `stack` и `stack_bytes` взяты
 /// у одного [`Spawned`].
 pub unsafe fn release_stack(stack: NonNull<u8>, stack_bytes: usize) {
-    // SAFETY: блок выдан кучей процесса с этим размером и выравниванием.
-    unsafe { dealloc(stack.as_ptr(), stack_bytes, STACK_ALIGN) };
+    let _ = memory_free(stack.addr().get() as u64, stack_bytes as u64);
+}
+
+fn allocate_stack(bytes: usize) -> Result<NonNull<u8>, SyscallError> {
+    let resource = metering_handle().ok_or(SyscallError::OutOfMemory)?;
+
+    let va = memory_allocate(
+        resource,
+        bytes as u64,
+        UserMemFlags::ReadWrite.raw() | MEMORY_ALLOCATE_GUARD_PAGE,
+    );
+    if let Some(error) = SyscallError::from_return(va) {
+        return Err(error);
+    }
+
+    let address = usize::try_from(va).map_err(|_| SyscallError::OutOfMemory)?;
+    NonNull::new(address as *mut u8).ok_or(SyscallError::OutOfMemory)
 }
 
 struct SpawnPayload {
@@ -171,7 +190,7 @@ pub fn spawn(
         }),
         Err(error) => {
             // Поток не стартовал - трамплин payload не прочитает, освобождаем его;
-            // стек вернул куче сам слой.
+            // стек освободил сам слой.
             // SAFETY: payload только что из Box::into_raw, нет других владельцев.
             drop(unsafe { Box::from_raw(payload as *mut SpawnPayload) });
             Err(error)
@@ -181,7 +200,7 @@ pub fn spawn(
 
 /// Дескриптор запущенного потока владеет его хэндлом и стеком.
 ///
-/// `join` ждёт терминации и возвращает стек куче. `Drop` закрывает хэндл, а уход без `join`
+/// `join` ждёт терминации и освобождает стек. `Drop` закрывает хэндл, а уход без `join`
 /// оставляет стек выданным: поток мог ещё выполняться на нём.
 pub struct JoinHandle {
     thread: Handle<kind::Thread>,
@@ -210,10 +229,10 @@ impl JoinHandle {
         Ok(())
     }
 
-    /// Ждёт терминации потока до `timeout` и возвращает его стек куче.
+    /// Ждёт терминации потока до `timeout` и освобождает его стек.
     ///
-    /// Отказ ожидания потребляет `self`: `Drop` закрывает хэндл, а стек куче не
-    /// возвращается.
+    /// Отказ ожидания потребляет `self`: `Drop` закрывает хэндл, а стек остаётся
+    /// выданным.
     pub fn join(self, timeout: Timeout) -> Result<(), SyscallError> {
         self.wait(timeout)?;
         // SAFETY: поток терминирован, и стек больше никем не адресуется; указатель и размер

@@ -843,7 +843,7 @@ fn namespace_pair_scope_survives_a_table_change() {
 
 const ROUTER_VIEW_WAITING_REQUESTS_MAX: usize = 8;
 const QUEUE_CALLER_WAIT: Timeout = Timeout::from_secs(20);
-const QUEUE_CALLER_STACK: u64 = 0x4000;
+const QUEUE_CALLER_STACK_SIZE: u64 = 0x4000;
 const EVICTION_POLL: Timeout = Timeout::from_millis(10);
 const EVICTION_POLLS: usize = 500;
 const QUEUE_CALLER_ANSWERED: u32 = 0;
@@ -866,7 +866,7 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
                         _ => QUEUE_CALLER_FAILED,
                     }
                 },
-                QUEUE_CALLER_STACK,
+                QUEUE_CALLER_STACK_SIZE,
                 Priority::new(1),
             )
             .expect("queue caller starts")

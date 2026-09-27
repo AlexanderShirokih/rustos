@@ -82,6 +82,8 @@ mod stress;
 mod sync;
 #[cfg(target_arch = "aarch64")]
 mod thread_pointer;
+mod thread_stack;
+mod thread_stack_protocol;
 mod thread_yield;
 mod vm;
 mod watched_capability;

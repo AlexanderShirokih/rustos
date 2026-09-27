@@ -12,7 +12,7 @@ use syscall::{Handle, kind};
 
 const EXPORT_STOPPED_EXIT_CODE: u64 = 6;
 
-const EXPORT_STACK: u64 = 0x4000;
+const EXPORT_STACK_SIZE: u64 = 0x4000;
 
 ipc::protocol! {
     pub mod probe {
@@ -37,7 +37,7 @@ pub fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> ! {
             let _ = serve_export::<probe::Protocol>(&parent, whole_export(export));
             process_exit(EXPORT_STOPPED_EXIT_CODE)
         },
-        EXPORT_STACK,
+        EXPORT_STACK_SIZE,
         Priority::new(1),
     );
     if exporting.is_err() {

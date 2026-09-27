@@ -14,7 +14,7 @@ use memory::{
     range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
 };
-use syscall::{SyscallError, UserMemFlags};
+use syscall::{MEMORY_ALLOCATE_GUARD_PAGE, SyscallError, UserMemFlags};
 
 use super::{
     bridge::{SyscallFrame, parse_handle_id},
@@ -79,6 +79,12 @@ impl RevocationHook for MemoryMapping {
 
 fn parse_flags(raw: u64) -> Result<UserMemFlags, SyscallError> {
     UserMemFlags::from_raw(raw).map_err(|_| SyscallError::InvalidArgument)
+}
+
+fn parse_allocate_flags(raw: u64) -> Result<(UserMemFlags, usize), SyscallError> {
+    let guard_pages = usize::from(raw & MEMORY_ALLOCATE_GUARD_PAGE != 0);
+    let flags = parse_flags(raw & !MEMORY_ALLOCATE_GUARD_PAGE)?;
+    Ok((flags, guard_pages))
 }
 
 fn parse_profile(raw: u64) -> Result<MemoryProfile, SyscallError> {
@@ -220,7 +226,8 @@ pub fn sys_memory_with_profile(region_h: u64, profile_raw: u64) -> Result<u64, S
 
 /// `memory_allocate(resource_handle, size, flags) -> va`
 ///
-/// Анонимный маппинг без handle. Бюджет возвращается при `memory_free`/смерти AS.
+/// Анонимный маппинг без handle. Бюджет возвращается при `memory_free`/смерти AS. Бит
+/// `MEMORY_ALLOCATE_GUARD_PAGE` в `flags` оставляет под маппингом неотображённую страницу.
 pub fn sys_memory_allocate(
     resource_h: u64,
     size_bytes: u64,
@@ -228,7 +235,7 @@ pub fn sys_memory_allocate(
 ) -> Result<u64, SyscallError> {
     let resource_id = parse_handle_id(resource_h)?;
     let size = parse_size(size_bytes)?;
-    let flags = parse_flags(flags_raw)?;
+    let (flags, guard_pages) = parse_allocate_flags(flags_raw)?;
     let mem_flags = to_mem_flags(flags);
     let access = access_mask_for(flags);
 
@@ -268,8 +275,9 @@ pub fn sys_memory_allocate(
     let allocated = user_vm
         .allocator()
         .with_lock(|alloc| {
-            alloc.allocate(
+            alloc.allocate_guarded(
                 size,
+                guard_pages,
                 MappingTag {
                     flags: mem_flags,
                     region: region.clone(),
@@ -575,6 +583,24 @@ mod tests {
     fn parse_flags_unknown_maps_to_invalid_argument() {
         assert_eq!(parse_flags(3), Err(SyscallError::InvalidArgument));
         assert_eq!(parse_flags(u64::MAX), Err(SyscallError::InvalidArgument));
+    }
+
+    #[test]
+    fn guard_page_bit_is_accepted_only_by_allocate() {
+        let guarded = UserMemFlags::ReadWrite.raw() | MEMORY_ALLOCATE_GUARD_PAGE;
+        assert_eq!(
+            parse_allocate_flags(guarded),
+            Ok((UserMemFlags::ReadWrite, 1))
+        );
+        assert_eq!(
+            parse_allocate_flags(UserMemFlags::ReadOnly.raw()),
+            Ok((UserMemFlags::ReadOnly, 0))
+        );
+        assert_eq!(
+            parse_allocate_flags(MEMORY_ALLOCATE_GUARD_PAGE | 3),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(parse_flags(guarded), Err(SyscallError::InvalidArgument));
     }
 
     #[test]

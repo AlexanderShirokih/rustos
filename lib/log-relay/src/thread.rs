@@ -10,14 +10,14 @@ use syscall::Rights;
 
 use crate::relay::{LogRelay, LogSink, SourceNames};
 
-const RELAY_STACK: u64 = 0x8000;
+const RELAY_STACK_SIZE: u64 = 0x8000;
 
 const RELAY_STACK_FRAME_BUFFERS: usize = 4;
 
 const RELAY_STACK_CALL_RESERVE: usize = 0x1000;
 
 const _: () = assert!(
-    RELAY_STACK
+    RELAY_STACK_SIZE
         >= (RELAY_STACK_FRAME_BUFFERS * MESSAGE_INLINE_MAX + RELAY_STACK_CALL_RESERVE) as u64
 );
 
@@ -44,7 +44,7 @@ impl LogRelayThread {
                 relay.serve();
                 0
             },
-            RELAY_STACK,
+            RELAY_STACK_SIZE,
             Priority::new(1),
         )?;
         Ok(Self { root, thread })

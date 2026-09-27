@@ -11,7 +11,7 @@ use kernel_objects::Port;
 use runtime::{Priority, Timeout, process_exit, spawn_owned};
 use syscall::{Handle, kind};
 
-const HELPER_STACK: u64 = 0x4000;
+const HELPER_STACK_SIZE: u64 = 0x4000;
 
 const FAILED_EXIT_CODE: u64 = 1;
 const PANIC_EXIT_CODE: u64 = 8;
@@ -28,7 +28,7 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Ok(own) = Port::create() else {
         process_exit(FAILED_EXIT_CODE)
     };
-    if spawn_owned(helper, HELPER_STACK, Priority::new(1)).is_err() {
+    if spawn_owned(helper, HELPER_STACK_SIZE, Priority::new(1)).is_err() {
         process_exit(FAILED_EXIT_CODE)
     }
     let _ = own.recv(Timeout::INFINITE);

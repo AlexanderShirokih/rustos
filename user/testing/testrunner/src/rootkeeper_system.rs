@@ -88,7 +88,7 @@ const OUTSIDE_WAIT: Timeout = Timeout::from_millis(100);
 
 const REVOKE_POLLS: usize = 300;
 
-const REQUEST_STACK: u64 = 0x8000;
+const REQUEST_STACK_SIZE: u64 = 0x8000;
 
 const TERMINATE_EXIT_CODE: u32 = 7;
 
@@ -407,7 +407,7 @@ fn held_request(importer: &Importer, requirement: &'static str, wait: Timeout) -
             Err(IpcError::Timeout) => TIMED_OUT,
             _ => OTHER,
         },
-        REQUEST_STACK,
+        REQUEST_STACK_SIZE,
         Priority::new(1),
     )
     .expect("request thread starts")

@@ -29,7 +29,7 @@ mod syscallop;
 mod timeout;
 
 pub use error::{SYSCALL_RETURN_TIMEOUT, SyscallError};
-pub use flags::{InvalidUserMemFlags, UserMemFlags};
+pub use flags::{InvalidUserMemFlags, MEMORY_ALLOCATE_GUARD_PAGE, UserMemFlags};
 pub use handle::{HANDLE_TABLE_CAPACITY, Handle, RawHandle, WAIT_MANY_MAX_COUNT, WaitItem};
 pub use ipc_buffer::{
     DecodedTag, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, decode_tag, encode_tag,

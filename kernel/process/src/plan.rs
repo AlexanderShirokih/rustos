@@ -8,8 +8,8 @@ use memory::{
 use crate::image::UserImage;
 
 /// Готовит per-process [`UserVmAllocator`] на "дыре" между концом верхнего
-/// сегмента образа и базой user-стека (отсюда выдаются `memory_allocate` и
-/// `memory_map`). `None`, если дыры нет - у таких процессов оба системных
+/// сегмента образа и защитной страницей под user-стеком (отсюда выдаются
+/// `memory_allocate` и `memory_map`). `None`, если дыры нет - у таких процессов оба системных
 /// вызова всегда вернут `OutOfMemory`.
 pub fn build_user_vm_allocator(image: &UserImage<'_>) -> Option<UserVmAllocator> {
     let window = userland::user_vm_window(
@@ -87,7 +87,7 @@ mod tests {
         let alloc = build_user_vm_allocator(&image).expect("non-empty gap must produce allocator");
         assert_eq!(alloc.live_count(), 0);
         assert_eq!(alloc.arena_start().as_usize(), seg_va + PAGE);
-        assert_eq!(alloc.arena_end().as_usize(), STACK_BASE);
+        assert_eq!(alloc.arena_end().as_usize(), STACK_BASE - PAGE);
     }
 
     #[test]

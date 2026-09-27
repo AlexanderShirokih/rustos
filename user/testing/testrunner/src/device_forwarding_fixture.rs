@@ -20,7 +20,7 @@ mod device_forwarding_protocol;
 
 use device_forwarding_protocol::{FORWARDED_EXIT_CODE, Forwarded, device_forwarding};
 
-const EXPORT_STACK: u64 = 0x4000;
+const EXPORT_STACK_SIZE: u64 = 0x4000;
 
 const FAILED_EXIT_CODE: u64 = 1;
 const EXPORT_STOPPED_EXIT_CODE: u64 = 5;
@@ -72,7 +72,7 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
             let _ = serve_export::<device_forwarding::Protocol>(&parent, whole_export(export));
             process_exit(EXPORT_STOPPED_EXIT_CODE)
         },
-        EXPORT_STACK,
+        EXPORT_STACK_SIZE,
         Priority::new(1),
     );
     if exporting.is_err() {
