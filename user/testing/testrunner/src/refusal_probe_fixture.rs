@@ -10,7 +10,7 @@ use component_abi::{LOG_REQUIREMENT, component_startup as startup_contract};
 use component_startup::{accept, component_manifest, session};
 use ipc::wire::Str;
 use rtc_abi::rtc;
-use runtime::{PortTransport, Timeout, install_log, log_fmt, process_exit};
+use runtime::{PortTransport, Timeout, log_fmt, process_exit, start_component};
 use syscall::{Handle, kind};
 
 mod probe_protocol;
@@ -35,11 +35,9 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = RefusalProbeStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    if RefusalProbeStartup::request(parent).is_err() {
         process_exit(FAILED_EXIT_CODE)
-    };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
     }
     let Some(probe_requirement) = Str::new(PROBE_REQUIREMENT) else {
         process_exit(FAILED_EXIT_CODE)

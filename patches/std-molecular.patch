@@ -194,19 +194,19 @@ diff -ruN a/std/src/sys/fs/mod.rs b/std/src/sys/fs/mod.rs
          use motor as imp;
 diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 --- a/std/src/sys/fs/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/fs/molecular.rs	2026-09-27 18:11:10.269297626 +0000
-@@ -0,0 +1,528 @@
++++ b/std/src/sys/fs/molecular.rs	2026-09-27 19:23:48.863214000 +0000
+@@ -0,0 +1,595 @@
 +//! Файловая поверхность RustOS поверх `filesystem-client`.
 +//!
 +//! Корень процесса - сессия маршрутизатора имён, которую программа один раз передаёт
 +//! `install_root`. Фасад строится поверх неё при первой операции по пути и остаётся в ячейке
 +//! до конца процесса. `File` владеет открытым узлом фасада, и клоны файла делят узел, его
-+//! дескриптор и позицию.
++//! дескриптор и позицию. `ReadDir` владеет обходом каталога и его сессией.
 +//!
-+//! Операции с каталогами и деревом имён отвечают `Unsupported`.
++//! Ссылки, а также права и времена по пути отвечают `Unsupported`.
 +
 +use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags};
-+use filesystem_client::{Failure, FileSystem, FileSystemEnvironment, OpenNode};
++use filesystem_client::{Failure, FileSystem, FileSystemEnvironment, Listing, OpenNode};
 +use kernel_objects::{Port, Session};
 +use syscall_user::ipc::wire::IpcError;
 +use syscall_user::syscall::Handle;
@@ -220,7 +220,7 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +use crate::path::{Path, PathBuf};
 +use crate::sync::Arc;
 +use crate::sync::nonpoison::Mutex;
-+pub use crate::sys::fs::common::Dir;
++pub use crate::sys::fs::common::{Dir, exists};
 +use crate::sys::time::SystemTime;
 +use crate::sys::{unsupported, unsupported_err};
 +
@@ -251,9 +251,16 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    size: u64,
 +}
 +
-+pub struct ReadDir(!);
++pub struct ReadDir {
++    listing: Option<Listing<FileSystemEnvironment>>,
++    directory: PathBuf,
++}
 +
-+pub struct DirEntry(!);
++pub struct DirEntry {
++    path: PathBuf,
++    name: OsString,
++    kind: NodeKind,
++}
 +
 +#[derive(Clone, Debug)]
 +pub struct OpenOptions {
@@ -309,7 +316,7 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    }
 +
 +    pub fn file_type(&self) -> FileType {
-+        FileType { directory: self.kind == NodeKind::Directory }
++        FileType::of(self.kind)
 +    }
 +
 +    pub fn modified(&self) -> io::Result<SystemTime> {
@@ -341,6 +348,10 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +}
 +
 +impl FileType {
++    fn of(kind: NodeKind) -> FileType {
++        FileType { directory: kind == NodeKind::Directory }
++    }
++
 +    pub fn is_dir(&self) -> bool {
 +        self.directory
 +    }
@@ -355,8 +366,8 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +}
 +
 +impl fmt::Debug for ReadDir {
-+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-+        self.0
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("ReadDir").field("directory", &self.directory).finish_non_exhaustive()
 +    }
 +}
 +
@@ -364,25 +375,41 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    type Item = io::Result<DirEntry>;
 +
 +    fn next(&mut self) -> Option<io::Result<DirEntry>> {
-+        self.0
++        let directory = &self.directory;
++        let next = self.listing.as_mut()?.next_entry().map(|entry| {
++            entry.map(|entry| DirEntry {
++                path: directory.join(entry.name),
++                name: OsString::from(entry.name),
++                kind: entry.kind,
++            })
++        });
++
++        match next {
++            Ok(entry) => entry.map(Ok),
++            Err(error) => {
++                // Отказ закрывает обход, и следующий вызов отвечает концом, а не тем же отказом.
++                self.listing = None;
++                Some(Err(failure(error)))
++            }
++        }
 +    }
 +}
 +
 +impl DirEntry {
 +    pub fn path(&self) -> PathBuf {
-+        self.0
++        self.path.clone()
 +    }
 +
 +    pub fn file_name(&self) -> OsString {
-+        self.0
++        self.name.clone()
 +    }
 +
 +    pub fn metadata(&self) -> io::Result<FileAttr> {
-+        self.0
++        stat(&self.path)
 +    }
 +
 +    pub fn file_type(&self) -> io::Result<FileType> {
-+        self.0
++        Ok(FileType::of(self.kind))
 +    }
 +}
 +
@@ -452,8 +479,7 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
 +        let mode = opts.access_mode()?;
 +        let flags = opts.open_flags()?;
-+        let text = path.to_str().ok_or(ErrorKind::InvalidFilename)?;
-+        let path = filesystem_abi::Path::new(text).map_err(filesystem_error)?;
++        let path = abi_path(path)?;
 +
 +        let node = with_root(|root| root.open(path, mode, flags))?;
 +        Ok(File(Arc::new(Mutex::new(FileState { node, append: opts.append }))))
@@ -580,8 +606,12 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +        DirBuilder {}
 +    }
 +
-+    pub fn mkdir(&self, _p: &Path) -> io::Result<()> {
-+        unsupported()
++    pub fn mkdir(&self, p: &Path) -> io::Result<()> {
++        let path = abi_path(p)?;
++        // `create_directory` клиента принимает существующий каталог, а `create_dir` отвечает на
++        // него `AlreadyExists`.
++        let flags = OpenFlags::CREATE | OpenFlags::EXCLUSIVE | OpenFlags::DIRECTORY;
++        with_root(|root| root.open(path, AccessMode::Read, flags)).map(drop)
 +    }
 +}
 +
@@ -614,6 +644,11 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    ))?;
 +
 +    operation(root).map_err(failure)
++}
++
++fn abi_path(path: &Path) -> io::Result<filesystem_abi::Path<'_>> {
++    let text = path.to_str().ok_or(ErrorKind::InvalidFilename)?;
++    filesystem_abi::Path::new(text).map_err(filesystem_error)
 +}
 +
 +fn failure(failure: Failure) -> io::Error {
@@ -657,16 +692,20 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    })
 +}
 +
-+pub fn readdir(_p: &Path) -> io::Result<ReadDir> {
-+    unsupported()
++pub fn readdir(p: &Path) -> io::Result<ReadDir> {
++    let path = abi_path(p)?;
++    let listing = with_root(|root| root.read_directory(path))?;
++    Ok(ReadDir { listing: Some(listing), directory: p.to_path_buf() })
 +}
 +
-+pub fn unlink(_p: &Path) -> io::Result<()> {
-+    unsupported()
++pub fn unlink(p: &Path) -> io::Result<()> {
++    let path = abi_path(p)?;
++    with_root(|root| root.remove_file(path))
 +}
 +
-+pub fn rename(_old: &Path, _new: &Path) -> io::Result<()> {
-+    unsupported()
++pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
++    let (from, to) = (abi_path(old)?, abi_path(new)?);
++    with_root(|root| root.rename(from, to))
 +}
 +
 +pub fn set_perm(_p: &Path, _perm: FilePermissions) -> io::Result<()> {
@@ -685,16 +724,14 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    unsupported()
 +}
 +
-+pub fn rmdir(_p: &Path) -> io::Result<()> {
-+    unsupported()
++pub fn rmdir(p: &Path) -> io::Result<()> {
++    let path = abi_path(p)?;
++    with_root(|root| root.remove_directory(path))
 +}
 +
-+pub fn remove_dir_all(_path: &Path) -> io::Result<()> {
-+    unsupported()
-+}
-+
-+pub fn exists(_path: &Path) -> io::Result<bool> {
-+    unsupported()
++pub fn remove_dir_all(p: &Path) -> io::Result<()> {
++    let path = abi_path(p)?;
++    with_root(|root| root.remove_tree(path))
 +}
 +
 +pub fn readlink(_p: &Path) -> io::Result<PathBuf> {
@@ -709,20 +746,50 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    unsupported()
 +}
 +
-+pub fn stat(_p: &Path) -> io::Result<FileAttr> {
-+    unsupported()
++pub fn stat(p: &Path) -> io::Result<FileAttr> {
++    let path = abi_path(p)?;
++    let info = with_root(|root| root.metadata(path))?;
++    Ok(FileAttr { kind: info.kind, size: info.size })
 +}
 +
-+pub fn lstat(_p: &Path) -> io::Result<FileAttr> {
-+    unsupported()
++/// Файловая модель не содержит ссылок, и `lstat` совпадает со `stat`.
++pub fn lstat(p: &Path) -> io::Result<FileAttr> {
++    stat(p)
 +}
 +
-+pub fn canonicalize(_p: &Path) -> io::Result<PathBuf> {
-+    unsupported()
++/// Схлопывает повторные `/`, удаляет `.` и снимает предыдущий компонент по `..`; `..` у корня
++/// оставляет корень. Результат проверяется запросом метаданных.
++pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
++    let text = p.to_str().ok_or(ErrorKind::InvalidFilename)?;
++    let relative = text.strip_prefix('/').ok_or(ErrorKind::InvalidFilename)?;
++
++    let mut names = Vec::new();
++    for name in relative.split('/') {
++        match name {
++            "" | "." => {}
++            ".." => {
++                names.pop();
++            }
++            name => names.push(name),
++        }
++    }
++
++    let mut canonical = String::with_capacity(text.len());
++    for name in names {
++        canonical.push('/');
++        canonical.push_str(name);
++    }
++    if canonical.is_empty() {
++        canonical.push('/');
++    }
++
++    stat(Path::new(&canonical))?;
++    Ok(PathBuf::from(canonical))
 +}
 +
-+pub fn copy(_from: &Path, _to: &Path) -> io::Result<u64> {
-+    unsupported()
++pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
++    let (from, to) = (abi_path(from)?, abi_path(to)?);
++    with_root(|root| root.copy(from, to))
 +}
 diff -ruN a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
 --- a/std/src/sys/io/error/mod.rs	2026-08-07 22:42:12.158085867 +0000
@@ -834,7 +901,7 @@ diff -ruN a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
 diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 --- a/std/src/sys/pal/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/pal/molecular/mod.rs	2026-08-10 18:37:47.249510846 +0000
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,60 @@
 +//! Платформенный слой RustOS.
 +//!
 +//! Работу выполняет крейт `runtime`: он же обслуживает userspace-программы вне `std`.
@@ -850,6 +917,10 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +#[cfg(not(test))]
 +#[unsafe(no_mangle)]
 +pub extern "C" fn _start(bootstrap: u32) -> ! {
++    if let Some(parent) = crate::num::NonZeroU32::new(bootstrap) {
++        runtime::start_component(runtime::Handle::from_abi(parent), "");
++    }
++
 +    runtime::start(bootstrap);
 +
 +    unsafe extern "C" {

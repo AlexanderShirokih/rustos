@@ -15,8 +15,7 @@ test = false
 bench = false
 
 [dependencies]
-component-startup = { workspace = true }
-component-startup-std = { workspace = true }
+components = { workspace = true }
 rtc-abi = { workspace = true }
 
 [build-dependencies]

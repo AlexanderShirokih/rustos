@@ -15,7 +15,7 @@ members = [
     "testing/std-selftest",
     "testing/testrunner",
     "../lib/component-startup",
-    "../lib/component-startup-std",
+    "../lib/components",
     "../lib/filesystem-server",
     "../lib/log-relay",
     "../lib/managed-component",
@@ -37,7 +37,7 @@ spin = "0.12.0"
 
 # Крейты userspace
 component-startup = { path = "../lib/component-startup" }
-component-startup-std = { path = "../lib/component-startup-std" }
+components = { path = "../lib/components" }
 filesystem-server = { path = "../lib/filesystem-server" }
 log-relay = { path = "../lib/log-relay" }
 managed-component = { path = "../lib/managed-component" }

@@ -18,7 +18,9 @@ use component_startup::{
 use filesystem_abi::{namespace, namespace_admin};
 use ipc::{Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Port};
-use runtime::{PortTransport, Priority, install_log, log_fmt, log_line, process_exit, spawn_owned};
+use runtime::{
+    PortTransport, Priority, log_fmt, log_line, process_exit, spawn_owned, start_component,
+};
 use syscall::{Handle, Timeout, kind};
 
 mod error;
@@ -32,11 +34,6 @@ const LOG_TAG: &str = "router";
 const ADMIN_STACK_SIZE: u64 = 0x10000;
 const EXPORT_STACK_SIZE: u64 = 0x4000;
 
-const PANIC_EXIT_CODE: u64 = 1;
-const SERVICE_PORT_FAILED_EXIT_CODE: u64 = 9;
-const ADMIN_PORT_FAILED_EXIT_CODE: u64 = 10;
-const EXPORT_FAILED_EXIT_CODE: u64 = 11;
-
 component_manifest! {
     struct RouterStartup {
         requirements: {},
@@ -48,21 +45,19 @@ component_manifest! {
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Err(error) = run(parent);
     log_fmt(format_args!("stopped: {error}"));
-    process_exit(u64::from(error.exit_code()))
+    process_exit(1)
 }
 
 fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
-    let started = RouterStartup::start(parent)?;
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
-    }
+    start_component(parent, LOG_TAG);
+    let requirements = RouterStartup::request(parent)?;
     let views: &'static Port = Box::leak(Box::new(Port::create()?));
     let admins: &'static Port = Box::leak(Box::new(Port::create()?));
 
     // Потоки администратора и экспортов работают до конца процесса. Поток администратора при
     // монтировании отвечает на ожидающие запросы видов вызовом `open_root`, поэтому его стек
     // равен стеку основного потока.
-    let views_parent = started.requirements.parent;
+    let views_parent = requirements.parent;
     let admins_parent = startup_contract::Client::new(PortTransport::new(parent));
     let _ = spawn_owned(
         move || {
@@ -70,7 +65,7 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
                 let _ = namespace_admin::dispatch(&mut Router, frame);
             });
             log_line("admin port closed");
-            process_exit(ADMIN_PORT_FAILED_EXIT_CODE)
+            process_exit(1)
         },
         ADMIN_STACK_SIZE,
         Priority::new(1),
@@ -91,7 +86,7 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
         let _ = namespace::dispatch(&mut Router, frame);
     });
     log_line("service port closed");
-    process_exit(SERVICE_PORT_FAILED_EXIT_CODE)
+    process_exit(1)
 }
 
 fn listen(port: &Port, gone: fn(u64), mut received: impl FnMut(Incoming<'_, Delivery>)) {
@@ -115,11 +110,11 @@ fn export<P: ipc::Protocol>(
 ) -> u32 {
     let failure = serve_export::<P>(parent, |scope| open(port, scope));
     log_fmt(format_args!("export stopped: {failure:?}"));
-    process_exit(EXPORT_FAILED_EXIT_CODE)
+    process_exit(1)
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     log_fmt(format_args!("panic: {info}"));
-    process_exit(PANIC_EXIT_CODE)
+    process_exit(1)
 }

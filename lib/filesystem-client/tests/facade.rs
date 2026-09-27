@@ -197,6 +197,11 @@ impl World {
             .is_some_and(|(filesystem, tail)| filesystem.tree().contains_key(&tail))
     }
 
+    fn node(&self, path: &str) -> Option<Node> {
+        let (filesystem, tail) = self.covering(path)?;
+        filesystem.tree().get(&tail).cloned()
+    }
+
     fn session_end(self: &Arc<Self>, path: &str) -> MockChannel {
         let (filesystem, root) = self.covering(path).expect("a mount covers the path");
         self.session_end_in(Arc::clone(filesystem), root)
@@ -1625,6 +1630,65 @@ fn remove_tree_stops_at_the_first_refusal() {
     ));
     assert!(world.holds("/data/tree/nested/second"));
     assert!(world.holds("/data/tree"));
+}
+
+#[test]
+fn copy_carries_the_bytes_across_mounts_in_parts() {
+    let body = "h".repeat(BUFFER_SIZE as usize * 3 + 5);
+    let world = World::mounted(&[
+        (
+            ROOT,
+            &[("/data", Node::Directory), ("/data/source", file(&body))],
+        ),
+        ("/tmp", &[]),
+    ]);
+    let mut filesystem = routed(&world);
+
+    let copied = filesystem
+        .copy(path("/data/source"), path("/tmp/target"))
+        .expect("copy");
+
+    assert_eq!(copied, body.len() as u64);
+    assert!(world.node("/tmp/target") == Some(file(&body)));
+    assert!(world.node("/data/source") == Some(file(&body)));
+    assert!(world.reads.load(Ordering::SeqCst) >= 4);
+    assert_eq!(world.descriptors(), 0);
+}
+
+#[test]
+fn copy_truncates_a_longer_target() {
+    let world = World::new(&[
+        ("/data", Node::Directory),
+        ("/data/source", file("short")),
+        ("/data/target", file("a much longer body")),
+    ]);
+    let mut filesystem = routed(&world);
+
+    let copied = filesystem
+        .copy(path("/data/source"), path("/data/target"))
+        .expect("copy");
+
+    assert_eq!(copied, 5);
+    assert!(world.node("/data/target") == Some(file("short")));
+}
+
+#[test]
+fn copy_of_a_directory_leaves_the_target_untouched() {
+    let world = World::new(&[
+        ("/data", Node::Directory),
+        ("/data/nested", Node::Directory),
+        ("/data/target", file("kept")),
+    ]);
+    let mut filesystem = routed(&world);
+
+    let outcome = filesystem.copy(path("/data/nested"), path("/data/target"));
+
+    assert_eq!(
+        outcome.err(),
+        Some(Failure::FileSystem(FileSystemError::IsADirectory))
+    );
+    assert!(world.node("/data/target") == Some(file("kept")));
+    assert_eq!(world.descriptors(), 0);
 }
 
 #[test]

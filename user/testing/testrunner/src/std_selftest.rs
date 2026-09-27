@@ -4,7 +4,7 @@
 //! сессией и журналом. Программа сообщает итог проверок кодом выхода, а подробности провала
 //! уходят в журнал сообщением паники.
 
-use alloc::format;
+use alloc::{format, string::String};
 use core::num::NonZeroU64;
 
 use filesystem_abi::{
@@ -24,7 +24,10 @@ use syscall::Rights;
 use crate::{
     filesystem::{FAILING_VIEW, mount, root_view},
     fixture::{JOIN_TIMEOUT, process_bytes, program},
-    log_relay::{SELFTEST_BADGE, component_log_session},
+    log_relay::{
+        SELFTEST_BADGE, SharedSourceNames, await_component_lines, component_scenario_session,
+        start_component_relay, stop_component_relay,
+    },
     parent::{Answer, Child, Parent},
 };
 
@@ -210,7 +213,8 @@ fn std_selftest_program_passes_its_checks() {
 
     let mounted = mount(FAILING_VIEW, Session::from_handle(failing.client));
 
-    let log = component_log_session(SELFTEST_BADGE).expect("selftest log session");
+    start_component_relay(SharedSourceNames);
+    let log = component_scenario_session(SELFTEST_BADGE).expect("selftest log session");
     let budget = process_bytes(&program(SELFTEST_ENTRY)) + HEAP_SLACK_BYTES;
     let parent = Parent::start();
 
@@ -234,6 +238,11 @@ fn std_selftest_program_passes_its_checks() {
             outcome: Outcome::Exit(0),
         })
     );
+
+    let lines = await_component_lines(INSTANCE_NAME, 3);
+    stop_component_relay();
+    kernel_tests::kassert_eq!(lines.first().map(String::as_str), Some("selftest started"));
+    kernel_tests::kassert_eq!(lines.last().map(String::as_str), Some("checks passed"));
 
     drop(mounted);
     failing_server

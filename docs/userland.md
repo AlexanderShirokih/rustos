@@ -193,18 +193,22 @@ pub extern "C" fn _start(startup: Handle) -> ! { /* ... */ }
 | `region`  | регион образа требования с правом чтения                               |
 | `accept`  | следующая заявка импортёра на экспорт вызывающего                      |
 
-Линия, окно и регион действуют до конца incarnation вызывающего. Компонент
-запрашивает журнал именем `log`, и манифест это имя не объявляет. При отказе
-родителя компонент работает без журнала.
+Линия, окно и регион действуют до конца incarnation вызывающего.
+
+Журнал — неявный импорт, и манифест имя `log` не объявляет. Неявные импорты
+запрашивает `runtime::start_component` по стартовой сессии и ставит их в
+состояние процесса. У программы на стандартной библиотеке её вызывает точка
+входа `std`, у freestanding-программы — её `_start`. При отказе родителя
+компонент работает без журнала.
 
 ### Старт компонента
 
-Функция `start` объявления `component_manifest!` запрашивает у родителя журнал
-один раз, без повтора, затем требования в порядке объявления. Каждый запрос
-ждёт ответа не дольше `STARTUP_REQUEST_TIMEOUT`. На `IpcError::PeerClosed`
-повторяется только запрос требования `session`; запрос линии, окна или региона
-на этот отказ не повторяется. Отказ в журнале не прерывает старт. Первый отказ
-требования завершает старт значением `StartupError` с именем требования.
+Функция `request` объявления `component_manifest!` запрашивает у родителя
+требования в порядке объявления. Каждый запрос ждёт ответа не дольше
+`STARTUP_REQUEST_TIMEOUT`. На `IpcError::PeerClosed` повторяется только запрос
+требования `session`; запрос линии, окна или региона на этот отказ не
+повторяется. Первый отказ требования завершает старт значением `StartupError` с
+именем требования.
 
 ### Обслуживание экспорта
 
@@ -323,12 +327,6 @@ Boot FDT канал выдаёт регионом поверх страниц с
 своего relay (`lib/log-relay`). Relay пересылает принятые строки ядру по
 bootstrap-каналу.
 
-Процесс отдаёт свою лог-капу платформенному слою через `runtime::install_log`
-вместе с тегом своих строк и дальше пишет через `log_line` и `log_fmt`.
-Программа на стандартной библиотеке этого не делает. Старт
-`component-startup-std` сам передаёт лог-сессию в `std`, а relay определяет
-источник строк по значку сессии.
-
 ## Часы
 
 Монотонные часы процесса — `runtime::Instant`. Ни одного syscall они не стоят.
@@ -357,18 +355,17 @@ freestanding-программа сама объявляет `_start` и `panic_h
 
 ### Программа на стандартной библиотеке
 
-Точка входа вызывает `main` и оставляет программе стартовый handle. `main`
-первым действием передаёт функцию `start` своего `component_manifest!` в
-`component_startup_std::start`, и вызов запрашивает у родителя журнал и
-требования. Компонент без требований тоже делает этот вызов, потому что без
-лог-сессии вывод `stdout` и `stderr` не попадает в журнал. По той же причине
-программа сообщает об отказе старта кодом выхода:
+Точка входа настраивает потоки стандартного вывода и вызывает `main`.
+Программа без требований не объявляет манифест.
+
+Программа с требованиями объявляет их `component_manifest!` из крейта
+`components` и передаёт функцию `request` манифеста в
+`components::requirements`. `main` возвращает отказ требования значением, и
+`std` пишет его строкой `Error: ...` в журнал и завершает процесс кодом 1:
 
 ```rust
-use component_startup::component_manifest;
+use components::{StartupError, component_manifest};
 use rtc_abi::rtc;
-
-const NO_STARTUP_EXIT_CODE: i32 = 1;
 
 component_manifest! {
     struct ClockStartup {
@@ -376,12 +373,10 @@ component_manifest! {
     }
 }
 
-let Ok(requirements) = component_startup_std::start(ClockStartup::start) else {
-    std::process::exit(NO_STARTUP_EXIT_CODE);
-};
-match requirements.rtc.client().now() {
-    Ok(seconds) => println!("rtc reads {seconds}"),
-    Err(error) => println!("rtc call failed: {error:?}"),
+fn main() -> Result<(), StartupError> {
+    let requirements = components::requirements(ClockStartup::request)?;
+    println!("rtc reads {:?}", requirements.rtc.client().now());
+    Ok(())
 }
 ```
 
@@ -397,8 +392,8 @@ match requirements.rtc.client().now() {
 
 Программа сама объявляет свои `_start`, `panic_handler` и глобальный аллокатор
 (`runtime::process_heap!`), а платформенный слой берёт из `lib/runtime`.
-`_start` передаёт свой handle функции `start` из `component_manifest!`
-(образец — `driver-pl031` в `user/`):
+`_start` передаёт свой handle в `runtime::start_component` и функции `request`
+из `component_manifest!` (образец — `driver-pl031` в `user/`):
 
 ```rust
 #![no_std]
@@ -408,7 +403,7 @@ match requirements.rtc.client().now() {
 runtime::process_heap!();
 
 use component_startup::component_manifest;
-use runtime::{install_log, log_line, process_exit};
+use runtime::{log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "probe";
@@ -420,11 +415,9 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = ProbeStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    if ProbeStartup::request(parent).is_err() {
         process_exit(FAILED_EXIT_CODE)
-    };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
     }
     log_line("started");
     process_exit(0)

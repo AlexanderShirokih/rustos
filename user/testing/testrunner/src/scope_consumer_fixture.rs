@@ -10,7 +10,7 @@ use component_startup::component_manifest;
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system};
 use ipc::wire::Str;
 use kernel_objects::{MemoryRegion, SessionTransport};
-use runtime::{Timeout, UserMemFlags, install_log, log_fmt, log_line, process_exit};
+use runtime::{Timeout, UserMemFlags, log_fmt, log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "area";
@@ -40,14 +40,12 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = AreaStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    let Ok(requirements) = AreaStartup::request(parent) else {
         process_exit(NO_STARTUP_EXIT_CODE);
     };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
-    }
 
-    let area = started.requirements.area.client().with_wait(CALL_TIMEOUT);
+    let area = requirements.area.client().with_wait(CALL_TIMEOUT);
     let code = inspect(&area);
     if code == READ_EXIT_CODE {
         log_line("area read");

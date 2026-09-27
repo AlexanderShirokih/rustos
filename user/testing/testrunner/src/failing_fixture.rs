@@ -7,7 +7,7 @@ runtime::process_heap!();
 use core::panic::PanicInfo;
 
 use component_startup::component_manifest;
-use runtime::{install_log, log_line, process_exit};
+use runtime::{log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "failing";
@@ -21,11 +21,9 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = FailingStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    if FailingStartup::request(parent).is_err() {
         process_exit(FAILED_EXIT_CODE)
-    };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
     }
     log_line("started");
     process_exit(FAILING_EXIT_CODE)

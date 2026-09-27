@@ -15,7 +15,7 @@ name = "calculator-demo"
 version = "0.1.0"
 dependencies = [
  "component-startup",
- "component-startup-std",
+ "components",
  "ipc",
  "kernel-objects",
  "rtc-abi",
@@ -27,8 +27,7 @@ dependencies = [
 name = "clock-std"
 version = "0.1.0"
 dependencies = [
- "component-startup",
- "component-startup-std",
+ "components",
  "rtc-abi",
  "userland-build",
 ]
@@ -55,12 +54,11 @@ dependencies = [
  "component-abi",
  "ipc",
  "kernel-objects",
- "log-abi",
  "syscall",
 ]
 
 [[package]]
-name = "component-startup-std"
+name = "components"
 version = "0.1.0"
 dependencies = [
  "component-startup",
@@ -109,12 +107,9 @@ dependencies = [
 name = "files-demo"
 version = "0.1.0"
 dependencies = [
- "component-startup",
- "component-startup-std",
+ "components",
  "filesystem-abi",
  "filesystem-client",
- "kernel-objects",
- "syscall",
  "userland-build",
 ]
 
@@ -181,7 +176,6 @@ dependencies = [
  "filesystem-abi",
  "ipc",
  "kernel-objects",
- "log-abi",
  "runtime",
  "spin",
  "syscall",
@@ -192,8 +186,6 @@ dependencies = [
 name = "hello-std"
 version = "0.1.0"
 dependencies = [
- "component-startup",
- "component-startup-std",
  "userland-build",
 ]
 
@@ -327,6 +319,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "component-abi",
  "ipc",
  "log-abi",
  "syscall",
@@ -352,8 +345,7 @@ dependencies = [
 name = "std-selftest"
 version = "0.1.0"
 dependencies = [
- "component-startup",
- "component-startup-std",
+ "components",
  "filesystem-abi",
  "kernel-objects",
  "syscall",

@@ -11,7 +11,7 @@ use core::panic::PanicInfo;
 
 use component_startup::component_manifest;
 use kernel_objects::Port;
-use runtime::{install_log, log_line, process_exit};
+use runtime::{log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 
 mod probe_protocol;
@@ -30,11 +30,9 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = ExportStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    if ExportStartup::request(parent).is_err() {
         process_exit(FAILED_EXIT_CODE)
-    };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
     }
     let Ok(export) = Port::create() else {
         process_exit(FAILED_EXIT_CODE)

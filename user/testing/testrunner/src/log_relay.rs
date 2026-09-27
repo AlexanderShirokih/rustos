@@ -20,7 +20,6 @@ use kernel_objects::{Port, Session};
 use kernel_tests::kernel_test;
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
-use rootkeeper::relay::ComponentNames;
 use runtime::{PortTransport, Timeout, port_send};
 use spin::Mutex;
 use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
@@ -34,7 +33,7 @@ const UNNAMED_BADGE: NonZeroU64 =
 pub(crate) const SELFTEST_BADGE: NonZeroU64 =
     NonZeroU64::new(0x0400_0000).expect("badge is non-zero");
 
-struct SharedSourceNames;
+pub(crate) struct SharedSourceNames;
 
 struct TestSourceNames;
 
@@ -137,7 +136,7 @@ impl LogSink for RecordingSink {
     }
 }
 
-pub(crate) fn start_component_relay(names: ComponentNames) {
+pub(crate) fn start_component_relay(names: impl SourceNames + 'static) {
     RECORDED.lock().clear();
     SINK_REFUSES.store(false, SeqCst);
     *ACTIVE.lock() =

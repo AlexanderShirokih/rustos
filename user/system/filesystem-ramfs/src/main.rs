@@ -13,12 +13,10 @@ use component_startup::component_manifest;
 use filesystem::RamFileSystem;
 use filesystem_abi::{file_system, namespace_admin};
 use filesystem_server::{Error, Result, serve};
-use runtime::{log_fmt, process_exit};
+use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "ramfs";
-
-const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct RamFileSystemStartup {
@@ -31,23 +29,19 @@ component_manifest! {
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Err(error) = run(parent);
     log_fmt(format_args!("stopped: {error}"));
-    process_exit(FAILED_EXIT_CODE)
+    process_exit(1)
 }
 
 fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
-    let started = RamFileSystemStartup::start(parent).map_err(|_| Error::Start)?;
-    serve(
-        started.log,
-        parent,
-        started.requirements.namespace,
-        None,
-        LOG_TAG,
-        |_| Ok(RamFileSystem::new()),
-    )
+    start_component(parent, LOG_TAG);
+    let requirements = RamFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
+    serve(parent, requirements.namespace, None, |_| {
+        Ok(RamFileSystem::new())
+    })
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     log_fmt(format_args!("panic: {info}"));
-    process_exit(FAILED_EXIT_CODE)
+    process_exit(1)
 }

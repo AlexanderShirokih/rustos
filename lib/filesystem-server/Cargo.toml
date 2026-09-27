@@ -18,7 +18,6 @@ component-startup = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
 ipc = { workspace = true }
-log-abi = { workspace = true }
 runtime = { workspace = true }
 spin = { workspace = true }
 syscall = { workspace = true }

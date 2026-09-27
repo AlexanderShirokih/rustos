@@ -15,6 +15,9 @@ use syscall::kind;
 /// Граница длины имени требования в байтах.
 pub const REQUIREMENT_NAME_MAX: usize = 64;
 
+/// Срок одного запроса компонента к родителю по стартовой сессии.
+pub const STARTUP_REQUEST_TIMEOUT: ipc::Timeout = ipc::Timeout::from_secs(5);
+
 /// Граница длины идентификатора протокола [`ipc::Protocol::ID`] в байтах.
 pub const PROTOCOL_ID_MAX: usize = 64;
 

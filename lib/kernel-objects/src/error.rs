@@ -1,5 +1,7 @@
 //! Ошибки рантайма и нормализация сырых syscall-возвратов в `Result`.
 
+use core::fmt;
+
 use syscall::SyscallError;
 
 /// Ошибка операции рантайма.
@@ -15,6 +17,14 @@ pub enum Error {
 
 /// Результат операции рантайма.
 pub type Result<T> = core::result::Result<T, Error>;
+
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "runtime error: {self:?}")
+    }
+}
+
+impl core::error::Error for Error {}
 
 impl From<SyscallError> for Error {
     fn from(value: SyscallError) -> Self {

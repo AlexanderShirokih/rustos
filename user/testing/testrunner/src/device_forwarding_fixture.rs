@@ -50,14 +50,13 @@ impl<F: ReceivedResources> device_forwarding::Service<F> for Forwarder {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = ForwardingStartup::start(parent) else {
+    let Ok(requirements) = ForwardingStartup::request(parent) else {
         process_exit(FAILED_EXIT_CODE)
     };
-    drop(started.log);
     let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER;
     let (Ok(line), Ok(window)) = (
-        started.requirements.line.duplicate(rights, None),
-        started.requirements.window.duplicate(rights, None),
+        requirements.line.duplicate(rights, None),
+        requirements.window.duplicate(rights, None),
     ) else {
         process_exit(FAILED_EXIT_CODE)
     };

@@ -1,17 +1,21 @@
 use std::{
-    fs::{File, FileTimes, OpenOptions, TryLockError},
+    fs::{self, File, FileTimes, OpenOptions, TryLockError},
     io::{self, ErrorKind, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write},
+    iter,
     os::molecular,
+    path::Path,
     thread,
 };
 
-use component_startup_std::into_std_handle;
+use components::into_std_handle;
 use filesystem_abi::{FileSystemError, NAME_MAX, PATH_MAX};
 use kernel_objects::Port;
 
 const IMAGE_FILE: &str = "/boot/testrunner/sample";
 const IMAGE_FILE_BODY: &str = "hello from the userland image\n";
 const IMAGE_DIRECTORY: &str = "/boot/testrunner";
+
+const LISTINGS: usize = 128;
 
 const FILE_SYSTEM_ERRORS: [(FileSystemError, ErrorKind); 17] = [
     (FileSystemError::NotFound, ErrorKind::NotFound),
@@ -341,4 +345,186 @@ pub fn malformed_paths_are_refused() {
         kind_of(File::open("/std-selftest-uncovered/file")),
         Some(ErrorKind::TimedOut)
     );
+}
+
+pub fn a_listing_outlives_other_calls() {
+    const DIRECTORY: &str = "/tmp/std-selftest-listing";
+
+    fs::create_dir(DIRECTORY).expect("the directory is created");
+    for name in ["a", "b"] {
+        drop(written(&format!("{DIRECTORY}/{name}"), name.as_bytes()));
+    }
+    fs::create_dir(format!("{DIRECTORY}/nested")).expect("the nested directory is created");
+
+    let mut listing = fs::read_dir(DIRECTORY).expect("the directory lists");
+    let first = listing.next().expect("the first entry");
+    assert_eq!(contents(IMAGE_FILE), IMAGE_FILE_BODY.as_bytes());
+
+    let mut entries: Vec<_> = iter::once(first)
+        .chain(listing)
+        .map(|entry| {
+            let entry = entry.expect("the entry reads");
+            let name = entry.file_name().into_string().expect("a UTF-8 name");
+            assert_eq!(entry.path(), Path::new(DIRECTORY).join(&name));
+            let is_dir = entry.file_type().expect("the entry kind").is_dir();
+            let metadata = entry.metadata().expect("the entry metadata");
+            (name, is_dir, metadata.is_dir())
+        })
+        .collect();
+    entries.sort();
+
+    assert_eq!(
+        entries,
+        [
+            ("a".to_owned(), false, false),
+            ("b".to_owned(), false, false),
+            ("nested".to_owned(), true, true),
+        ]
+    );
+}
+
+pub fn a_dropped_listing_closes_its_session() {
+    for _ in 0..LISTINGS {
+        let mut listing = fs::read_dir(IMAGE_DIRECTORY).expect("the directory lists");
+        assert!(listing.next().is_some());
+    }
+}
+
+pub fn create_dir_refuses_an_existing_directory() {
+    const NESTED: &str = "/tmp/std-selftest-tree/one/two";
+
+    assert_eq!(kind_of(fs::create_dir(NESTED)), Some(ErrorKind::NotFound));
+    fs::create_dir_all(NESTED).expect("the chain is created");
+    fs::create_dir_all(NESTED).expect("an existing chain is accepted");
+
+    assert_eq!(
+        kind_of(fs::create_dir(NESTED)),
+        Some(ErrorKind::AlreadyExists)
+    );
+    assert!(fs::metadata(NESTED).expect("metadata").is_dir());
+}
+
+pub fn rename_stays_within_one_mount() {
+    const FROM: &str = "/tmp/std-selftest-rename-from";
+    const TO: &str = "/tmp/std-selftest-rename-to";
+
+    drop(written(FROM, b"moved"));
+    fs::rename(FROM, TO).expect("a rename inside one mount");
+
+    assert_eq!(contents(TO), b"moved");
+    assert_eq!(kind_of(fs::metadata(FROM)), Some(ErrorKind::NotFound));
+    assert_eq!(
+        kind_of(fs::rename(TO, "/boot/std-selftest-renamed")),
+        Some(ErrorKind::CrossesDevices)
+    );
+    assert_eq!(contents(TO), b"moved");
+}
+
+pub fn removal_checks_the_node_kind() {
+    const DIRECTORY: &str = "/tmp/std-selftest-remove";
+    const FILE: &str = "/tmp/std-selftest-remove/file";
+
+    fs::create_dir(DIRECTORY).expect("the directory is created");
+    drop(written(FILE, b"x"));
+
+    assert_eq!(
+        kind_of(fs::remove_file(DIRECTORY)),
+        Some(ErrorKind::IsADirectory)
+    );
+    assert_eq!(
+        kind_of(fs::remove_dir(FILE)),
+        Some(ErrorKind::NotADirectory)
+    );
+    assert_eq!(
+        kind_of(fs::remove_dir(DIRECTORY)),
+        Some(ErrorKind::DirectoryNotEmpty)
+    );
+    assert!(fs::metadata(DIRECTORY).expect("metadata").is_dir());
+
+    fs::remove_file(FILE).expect("the file is removed");
+    fs::remove_dir(DIRECTORY).expect("the empty directory is removed");
+    assert_eq!(kind_of(fs::metadata(DIRECTORY)), Some(ErrorKind::NotFound));
+}
+
+pub fn remove_dir_all_takes_the_subtree() {
+    const TREE: &str = "/tmp/std-selftest-subtree";
+
+    fs::create_dir_all(format!("{TREE}/a/b")).expect("the tree is created");
+    drop(written(&format!("{TREE}/a/file"), b"1"));
+    drop(written(&format!("{TREE}/a/b/file"), b"2"));
+
+    fs::remove_dir_all(TREE).expect("the tree is removed");
+
+    assert_eq!(kind_of(fs::metadata(TREE)), Some(ErrorKind::NotFound));
+}
+
+pub fn copy_moves_the_bytes() {
+    const SOURCE: &str = "/tmp/std-selftest-copy-source";
+    const COPY: &str = "/tmp/std-selftest-copy";
+
+    let body = vec![b'c'; 10 * 1024];
+    drop(written(SOURCE, &body));
+
+    assert_eq!(fs::copy(SOURCE, COPY).expect("a copy"), body.len() as u64);
+    assert_eq!(contents(COPY), body);
+    assert_eq!(
+        fs::copy(IMAGE_FILE, COPY).expect("a copy across mounts"),
+        IMAGE_FILE_BODY.len() as u64
+    );
+    assert_eq!(contents(COPY), IMAGE_FILE_BODY.as_bytes());
+    assert_eq!(
+        kind_of(fs::copy(IMAGE_DIRECTORY, COPY)),
+        Some(ErrorKind::IsADirectory)
+    );
+    assert_eq!(contents(COPY), IMAGE_FILE_BODY.as_bytes());
+}
+
+pub fn exists_hides_only_not_found() {
+    assert!(fs::exists(IMAGE_FILE).expect("an existing file"));
+    assert!(!fs::exists("/tmp/std-selftest-absent").expect("an absent file"));
+    assert_eq!(
+        kind_of(fs::exists("/failing/NotADirectory/file")),
+        Some(ErrorKind::NotADirectory)
+    );
+}
+
+pub fn canonicalize_normalizes_lexically() {
+    assert_eq!(
+        fs::canonicalize("/boot//./testrunner/../testrunner/sample").expect("a canonical path"),
+        Path::new(IMAGE_FILE)
+    );
+    assert_eq!(
+        fs::canonicalize("/../../boot/testrunner").expect("the parent of the root"),
+        Path::new(IMAGE_DIRECTORY)
+    );
+    assert_eq!(
+        kind_of(fs::canonicalize("/tmp/a/../std-selftest-absent")),
+        Some(ErrorKind::NotFound)
+    );
+    assert_eq!(
+        kind_of(fs::canonicalize("tmp")),
+        Some(ErrorKind::InvalidFilename)
+    );
+}
+
+#[expect(deprecated)]
+pub fn unsupported_path_operations_say_so() {
+    const TARGET: &str = "/tmp/std-selftest-link-target";
+    const LINK: &str = "/tmp/std-selftest-link";
+
+    drop(written(TARGET, b""));
+    let permissions = fs::metadata(TARGET).expect("metadata").permissions();
+
+    for refused in [
+        fs::soft_link(TARGET, LINK),
+        fs::hard_link(TARGET, LINK),
+        fs::read_link(TARGET).map(drop),
+        fs::set_permissions(TARGET, permissions.clone()),
+        fs::set_permissions_nofollow(TARGET, permissions),
+        fs::set_times(TARGET, FileTimes::new()),
+        fs::set_times_nofollow(TARGET, FileTimes::new()),
+    ] {
+        assert_eq!(kind_of(refused), Some(ErrorKind::Unsupported));
+    }
+    assert_eq!(kind_of(fs::metadata(LINK)), Some(ErrorKind::NotFound));
 }

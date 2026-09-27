@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "component-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "rustc-std-workspace-core",
+ "syscall",
+]
+
+[[package]]
 name = "ipc"
 version = "0.1.0"
 dependencies = [
@@ -22,6 +31,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "component-abi",
  "ipc",
  "log-abi",
  "rustc-std-workspace-alloc",

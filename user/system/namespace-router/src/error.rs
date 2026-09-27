@@ -15,16 +15,6 @@ pub(crate) enum Error {
 
 pub(crate) type Result<T> = core::result::Result<T, Error>;
 
-impl Error {
-    pub(crate) const fn exit_code(&self) -> u32 {
-        match self {
-            Self::Runtime(_) => 2,
-            Self::Ipc(_) => 3,
-            Self::Start => 6,
-        }
-    }
-}
-
 impl Display for Error {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
         match self {
@@ -51,7 +41,9 @@ impl From<StartupError> for Error {
     fn from(error: StartupError) -> Self {
         match error.failure {
             StartupFailure::Ipc(error) => Self::Ipc(error),
-            StartupFailure::Session(_) | StartupFailure::Resource(_) => Self::Start,
+            StartupFailure::Session(_)
+            | StartupFailure::Resource(_)
+            | StartupFailure::NoStartHandle => Self::Start,
         }
     }
 }

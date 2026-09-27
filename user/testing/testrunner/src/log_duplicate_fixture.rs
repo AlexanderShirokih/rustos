@@ -6,8 +6,9 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_startup::component_manifest;
-use kernel_objects::Error;
+use component_startup::{LOG_REQUIREMENT, component_startup::Client, session};
+use kernel_objects::{Error, PortTransport};
+use log_abi::log;
 use runtime::{install_log, log_fmt, process_exit};
 use syscall::{Handle, Rights, SyscallError, kind};
 
@@ -17,16 +18,10 @@ const FAILED_EXIT_CODE: u64 = 1;
 const REFUSED_EXIT_CODE: u64 = 3;
 const OTHER_EXIT_CODE: u64 = 4;
 
-component_manifest! {
-    struct LogDuplicateStartup {}
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = LogDuplicateStartup::start(parent) else {
-        process_exit(FAILED_EXIT_CODE)
-    };
-    let Some(log) = started.log else {
+    let requests = Client::new(PortTransport::new(parent));
+    let Ok(Ok(log)) = session::<log::Protocol>(&requests, LOG_REQUIREMENT) else {
         process_exit(FAILED_EXIT_CODE)
     };
     let duplicate = log.handle().duplicate(Rights::WRITE, None).map(drop);

@@ -1,5 +1,6 @@
 //! Платформенный слой процесса userspace: куча, futex и синхронизация, локальные данные
-//! потока, запуск потоков, монотонные часы, стартовый handle и журнал.
+//! потока, запуск потоков, монотонные часы, стартовый handle, неявные импорты компонента и
+//! журнал.
 //!
 //! Каждый из этих механизмов держит состояние процесса и существует в процессе в единственном
 //! экземпляре. Программа со стандартной библиотекой получает их через неё, программа без неё -
@@ -18,6 +19,7 @@ mod clock;
 // парковки потока импортируют `crate::sys::futex::{self, ...}`.
 pub mod futex;
 mod heap;
+mod imports;
 pub mod log;
 mod process;
 pub mod random;
@@ -32,6 +34,7 @@ pub use futex::{
     futex_wake_all,
 };
 pub use heap::{ProcessHeap, alloc, dealloc};
+pub use imports::start_component;
 pub use log::{fmt as log_fmt, install as install_log, line as log_line};
 pub use process::{exit, metering_handle, start, take_bootstrap};
 pub use sync::{Condvar, Mutex, MutexGuard};

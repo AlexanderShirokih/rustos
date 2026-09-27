@@ -7,7 +7,7 @@ runtime::process_heap!();
 use core::panic::PanicInfo;
 
 use component_startup::component_manifest;
-use runtime::{install_log, log_line, process_exit};
+use runtime::{log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "irq";
@@ -23,13 +23,11 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = IrqStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    let Ok(requirements) = IrqStartup::request(parent) else {
         process_exit(REFUSED_EXIT_CODE)
     };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
-    }
-    let _line = started.requirements.line;
+    let _line = requirements.line;
     log_line("line taken");
     process_exit(TAKEN_EXIT_CODE)
 }

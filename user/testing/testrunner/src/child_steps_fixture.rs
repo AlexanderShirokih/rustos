@@ -13,7 +13,7 @@ use ipc::{
     wire::{MESSAGE_INLINE_MAX, Str},
 };
 use kernel_objects::Port;
-use runtime::{PortTransport, Timeout, install_log, log_line, process_exit};
+use runtime::{PortTransport, Timeout, log_line, process_exit, start_component};
 use syscall::{Handle, Rights, kind};
 
 mod child_steps_protocol;
@@ -45,18 +45,16 @@ struct Fixture {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = StepsStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    let Ok(requirements) = StepsStartup::request(parent) else {
         process_exit(FAILED_EXIT_CODE)
     };
-    let logged = started.log.is_some();
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
-    }
+    let logged = runtime::log::installed();
     let Ok(export) = Port::create() else {
         process_exit(FAILED_EXIT_CODE)
     };
 
-    let steps = started.requirements.steps.client();
+    let steps = requirements.steps.client();
     let mut fixture = Fixture {
         parent,
         export,

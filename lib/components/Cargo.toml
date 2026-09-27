@@ -1,5 +1,5 @@
 [package]
-name = "component-startup-std"
+name = "components"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

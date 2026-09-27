@@ -1,34 +1,18 @@
 //! Демонстрационный компонент файловой подсистемы: читатель собственного каталога и клиент
 //! маршрутизатора имён.
 //!
-//! Через окно своего каталога программа перечисляет его записи, читает запись `/greeting` и
-//! отображает регион её содержимого. Через маршрутизатор имён она создаёт каталог под `/tmp`,
-//! пишет в нём файл, читает его и перечисляет каталог. Каждая операция пишет строку в журнал.
-//!
-//! Отказ в окне каталога и отказ под маршрутизатором программа называет разными кодами выхода.
+//! Через окно своего каталога программа перечисляет его записи и читает запись `/greeting`.
+//! Через маршрутизатор имён она создаёт каталог под `/tmp`, пишет в нём файл, читает его и
+//! перечисляет каталог. Каждая операция пишет строку в журнал.
 
-use std::{fmt, process};
+use core::error::Error;
 
-use component_startup::component_manifest;
+use components::component_manifest;
 use filesystem_abi::{AccessMode, OpenFlags, Path, const_path, file_system, namespace};
 use filesystem_client::{Failure, FileSystem, FileSystemEnvironment, Listing};
-use kernel_objects::MemoryRegion;
-use syscall::Timeout;
 
-const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
-
-const AREA_ROOT: Path<'static> = const_path!("/");
-const GREETING_RECORD: Path<'static> = const_path!("/greeting");
 const NOTES_DIRECTORY: Path<'static> = const_path!("/tmp/files-demo");
 const NOTE_RECORD: Path<'static> = const_path!("/tmp/files-demo/note");
-
-const NOTE_TEXT: &str = "written through /tmp";
-
-const TEXT_MAX_BYTES: usize = 64;
-
-const NO_STARTUP_EXIT_CODE: i32 = 1;
-const AREA_FAILED_EXIT_CODE: i32 = 2;
-const NAMESPACE_FAILED_EXIT_CODE: i32 = 3;
 
 component_manifest! {
     struct FilesStartup {
@@ -39,77 +23,31 @@ component_manifest! {
     }
 }
 
-#[derive(Debug)]
-enum Refusal {
-    Files(Failure),
-    Region(kernel_objects::Error),
-}
-
-impl fmt::Display for Refusal {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Files(failure) => write!(formatter, "{failure:?}"),
-            Self::Region(error) => write!(formatter, "region {error:?}"),
-        }
-    }
-}
-
-impl From<Failure> for Refusal {
-    fn from(failure: Failure) -> Self {
-        Self::Files(failure)
-    }
-}
-
-impl From<kernel_objects::Error> for Refusal {
-    fn from(error: kernel_objects::Error) -> Self {
-        Self::Region(error)
-    }
-}
-
-fn main() {
-    // Без журнала вывод `println!` теряется, и отказ старта передаётся кодом выхода.
-    let Ok(requirements) = component_startup_std::start(FilesStartup::start) else {
-        process::exit(NO_STARTUP_EXIT_CODE);
-    };
+fn main() -> Result<(), Box<dyn Error>> {
+    let requirements = components::requirements(FilesStartup::request)?;
     println!("started");
 
-    let mut area = FileSystem::windowed(requirements.area).with_wait(CALL_TIMEOUT);
-    if let Err(refusal) = show_area(&mut area) {
-        println!("area failed: {refusal}");
-        process::exit(AREA_FAILED_EXIT_CODE);
-    }
-
-    let mut namespace = FileSystem::routed(requirements.namespace).with_wait(CALL_TIMEOUT);
-    if let Err(refusal) = show_namespace(&mut namespace) {
-        println!("namespace failed: {refusal}");
-        process::exit(NAMESPACE_FAILED_EXIT_CODE);
-    }
+    // `windowed` открывает одну файловую систему, выданную компоненту по `bind` и `scope` плана.
+    // Путь отсчитывается от корня выданной области, узлы вне области недоступны. `routed`
+    // открывает маршрутизатор имён, и абсолютный путь разбирается по монтированиям системы
+    // (`/boot`, `/tmp`).
+    show_area(&mut FileSystem::windowed(requirements.area))?;
+    show_namespace(&mut FileSystem::routed(requirements.namespace))?;
     println!("done");
-}
-
-fn show_area(area: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Refusal> {
-    // Область windowed-сессии совпадает с каталогом компонента, и пути отсчитываются от его
-    // корня.
-    print_entries("area", area.read_directory(AREA_ROOT)?)?;
-
-    let mut greeting = area.open(GREETING_RECORD, AccessMode::Read, OpenFlags::NONE)?;
-    let mut bytes = [0; TEXT_MAX_BYTES];
-    let count = greeting.read(&mut bytes)?;
-    println!("area read: {}", text(bytes.get(..count)));
-
-    // Регион покрывает целые страницы, и длину содержимого задаёт размер узла.
-    let region = MemoryRegion::from(greeting.backing_memory()?);
-    let mapping = region.map_full_read_only()?;
-    let length = usize::try_from(greeting.size()).unwrap_or(usize::MAX);
-    println!(
-        "area backing: {} bytes mapped, {}",
-        mapping.size_bytes(),
-        text(mapping.as_bytes().get(..length))
-    );
     Ok(())
 }
 
-fn show_namespace(namespace: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Refusal> {
+fn show_area(area: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Failure> {
+    print_entries("area", area.read_directory(const_path!("/"))?)?;
+
+    let mut greeting = area.open(const_path!("/greeting"), AccessMode::Read, OpenFlags::NONE)?;
+    let mut bytes = [0; 64];
+    let count = greeting.read(&mut bytes)?;
+    println!("area read: {}", text(bytes.get(..count)));
+    Ok(())
+}
+
+fn show_namespace(namespace: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Failure> {
     namespace.create_directory(NOTES_DIRECTORY)?;
     println!("tmp directory: {}", NOTES_DIRECTORY.as_str());
 
@@ -118,20 +56,19 @@ fn show_namespace(namespace: &mut FileSystem<FileSystemEnvironment>) -> Result<(
         AccessMode::Write,
         OpenFlags::CREATE | OpenFlags::TRUNCATE,
     )?;
-    let written = note.write(NOTE_TEXT.as_bytes())?;
+    let written = note.write(b"written through /tmp")?;
     println!("tmp write: {written} bytes");
     drop(note);
 
     let mut note = namespace.open(NOTE_RECORD, AccessMode::Read, OpenFlags::NONE)?;
-    let mut bytes = [0; TEXT_MAX_BYTES];
+    let mut bytes = [0; 64];
     let count = note.read(&mut bytes)?;
     println!("tmp read: {}", text(bytes.get(..count)));
 
-    print_entries("tmp", namespace.read_directory(NOTES_DIRECTORY)?)?;
-    Ok(())
+    print_entries("tmp", namespace.read_directory(NOTES_DIRECTORY)?)
 }
 
-fn print_entries(label: &str, mut listing: Listing<FileSystemEnvironment>) -> Result<(), Refusal> {
+fn print_entries(label: &str, mut listing: Listing<FileSystemEnvironment>) -> Result<(), Failure> {
     while let Some(entry) = listing.next_entry()? {
         println!("{label} entry: {} {:?}", entry.name, entry.kind);
     }

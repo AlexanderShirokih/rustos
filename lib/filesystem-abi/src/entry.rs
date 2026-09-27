@@ -3,7 +3,7 @@
 
 use ipc::wire::{IpcError, value};
 
-use crate::{kind::NodeKind, limits::NAME_MAX};
+use crate::{kind::NodeKind, limits::NAME_MAX, path::Component};
 
 /// Длина заголовка записи каталога.
 pub const ENTRY_HEADER_SIZE: usize = size_of::<u8>() + size_of::<u16>();
@@ -13,7 +13,7 @@ pub const ENTRY_HEADER_SIZE: usize = size_of::<u8>() + size_of::<u16>();
 pub struct DirEntry<'a> {
     /// Вид узла записи.
     pub kind: NodeKind,
-    /// Имя записи, не длиннее [`NAME_MAX`] байт.
+    /// Имя записи: один компонент пути по правилам [`Component::new`].
     pub name: &'a str,
 }
 
@@ -31,12 +31,10 @@ impl<'a> DirEntry<'a> {
         ENTRY_HEADER_SIZE + self.name.len()
     }
 
-    /// Пишет запись в начало `out`, возвращая число занятых байт. `InvalidValue` - имя длиннее
-    /// [`NAME_MAX`], `Truncated` - буфер короче записи.
+    /// Пишет запись в начало `out`, возвращая число занятых байт. `InvalidValue` - имя не
+    /// является одним компонентом пути, `Truncated` - буфер короче записи.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, IpcError> {
-        if self.name.len() > NAME_MAX {
-            return Err(IpcError::InvalidValue);
-        }
+        Component::new(self.name).map_err(|_| IpcError::InvalidValue)?;
         let len = self.encoded_len();
         let Some(record) = out.get_mut(..len) else {
             return Err(IpcError::Truncated);
@@ -56,7 +54,7 @@ impl<'a> DirEntry<'a> {
     }
 
     /// Читает запись из начала `data`. `Truncated` - данных меньше записи, `InvalidValue` - вид
-    /// вне набора, имя вне границы либо не UTF-8.
+    /// вне набора, имя не UTF-8 либо не один компонент пути.
     pub fn decode(data: &'a [u8]) -> Result<DecodedEntry<'a>, IpcError> {
         let Some(header) = data.get(..ENTRY_HEADER_SIZE) else {
             return Err(IpcError::Truncated);
@@ -73,10 +71,9 @@ impl<'a> DirEntry<'a> {
         let Some(name) = data.get(ENTRY_HEADER_SIZE..len) else {
             return Err(IpcError::Truncated);
         };
-        let entry = Self {
-            kind,
-            name: value::decode_str(name)?,
-        };
+        let name = value::decode_str(name)?;
+        Component::new(name).map_err(|_| IpcError::InvalidValue)?;
+        let entry = Self { kind, name };
         Ok(DecodedEntry { entry, len })
     }
 }
@@ -189,11 +186,26 @@ mod tests {
     }
 
     #[test]
-    fn empty_name_occupies_the_header_only() {
-        let mut buf = [0u8; 8];
-        let written = entry("").encode(&mut buf).expect("encode ok");
-        assert_eq!(written, ENTRY_HEADER_SIZE);
-        let decoded = DirEntry::decode(&buf).expect("decode ok");
-        assert_eq!((decoded.entry.name, decoded.len), ("", ENTRY_HEADER_SIZE));
+    fn name_other_than_one_component_is_rejected() {
+        for name in ["", ".", "..", "/victim", "a/b", "tail/"] {
+            let mut buf = [0u8; 16];
+            assert_eq!(entry(name).encode(&mut buf), Err(IpcError::InvalidValue));
+
+            let mut wire = [0u8; 16];
+            wire[0] = KIND.as_wire();
+            wire[1..ENTRY_HEADER_SIZE].copy_from_slice(&value::encode_u16(name.len() as u16));
+            wire[ENTRY_HEADER_SIZE..ENTRY_HEADER_SIZE + name.len()]
+                .copy_from_slice(name.as_bytes());
+            assert_eq!(DirEntry::decode(&wire), Err(IpcError::InvalidValue));
+        }
+    }
+
+    #[test]
+    fn dotted_name_that_is_not_a_dot_entry_round_trips() {
+        for name in ["...", ".hidden", "a.b"] {
+            let mut buf = [0u8; 16];
+            entry(name).encode(&mut buf).expect("encode ok");
+            assert_eq!(DirEntry::decode(&buf).expect("decode ok").entry.name, name);
+        }
     }
 }

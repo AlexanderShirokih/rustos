@@ -13,7 +13,7 @@ use component_startup::component_manifest;
 use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, PATH_MAX, file_system};
 use ipc::wire::Str;
 use kernel_objects::{Port, Resource, SessionTransport};
-use runtime::{MemoryAccess, Timeout, install_log, log_line, process_exit};
+use runtime::{MemoryAccess, Timeout, log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 use userland::USERLAND_PAGE_SIZE;
 
@@ -40,13 +40,11 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = BudgetHolderStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    let Ok(requirements) = BudgetHolderStartup::request(parent) else {
         process_exit(FAILED_EXIT_CODE)
     };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
-    }
-    let files = started.requirements.files.client().with_wait(CALL_TIMEOUT);
+    let files = requirements.files.client().with_wait(CALL_TIMEOUT);
     let (Some(started_path), Some(held_path)) = (Str::new(STARTED_PATH), Str::new(HELD_PATH))
     else {
         process_exit(FAILED_EXIT_CODE)

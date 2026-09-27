@@ -8,7 +8,7 @@ use core::panic::PanicInfo;
 
 use component_startup::component_manifest;
 use kernel_objects::Port;
-use runtime::{Timeout, handle_close, install_log, log_line, process_exit};
+use runtime::{Timeout, handle_close, log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "closed";
@@ -21,13 +21,11 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = ClosedStartup::start(parent) else {
+    start_component(parent, LOG_TAG);
+    if ClosedStartup::request(parent).is_err() {
         process_exit(FAILED_EXIT_CODE)
-    };
-    if let Some(log) = started.log {
-        install_log(log.into_handle().into_raw(), LOG_TAG);
-        log_line("started");
     }
+    log_line("started");
     if handle_close(parent) != 0 {
         process_exit(FAILED_EXIT_CODE)
     }

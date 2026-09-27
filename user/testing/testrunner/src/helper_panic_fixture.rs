@@ -22,7 +22,7 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    if HelperPanicStartup::start(parent).is_err() {
+    if HelperPanicStartup::request(parent).is_err() {
         process_exit(FAILED_EXIT_CODE)
     }
     let Ok(own) = Port::create() else {

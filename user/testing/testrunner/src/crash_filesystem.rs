@@ -14,7 +14,7 @@ use filesystem_abi::{
     DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system, namespace_admin,
 };
 use filesystem_server::{Error, Result as ServerResult, serve};
-use runtime::{log_fmt, process_exit};
+use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, USER_VA_END, kind};
 
 const LOG_TAG: &str = "crashfs";
@@ -152,20 +152,14 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 }
 
 fn run(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
-    let started = CrashFileSystemStartup::start(parent).map_err(|_| Error::Start)?;
+    start_component(parent, LOG_TAG);
+    let requirements = CrashFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
     let backend = |_| {
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),
         })
     };
-    serve(
-        started.log,
-        parent,
-        started.requirements.namespace,
-        None,
-        LOG_TAG,
-        backend,
-    )
+    serve(parent, requirements.namespace, None, backend)
 }
 
 #[panic_handler]

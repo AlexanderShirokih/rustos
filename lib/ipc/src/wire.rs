@@ -4,7 +4,7 @@
 //! Все целые - little-endian. Кадр (заголовок + тело) укладывается в
 //! [`MESSAGE_INLINE_MAX`]. Кодирование без heap.
 
-use core::{marker::PhantomData, num::NonZeroU32};
+use core::{fmt, marker::PhantomData, num::NonZeroU32};
 
 use syscall::{Handle, ObjectKind, kind};
 
@@ -72,6 +72,14 @@ pub enum IpcError {
     /// Ресурс приёмной стороны исчерпан: кадр доставлен, но принять его нечем.
     ResourceExhausted,
 }
+
+impl fmt::Display for IpcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "ipc error: {self:?}")
+    }
+}
+
+impl core::error::Error for IpcError {}
 
 /// Заголовок кадра: ординал операции, `u64` LE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

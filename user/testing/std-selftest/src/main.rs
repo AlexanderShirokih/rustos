@@ -6,7 +6,13 @@
 //! Проверяется поверхность самой `std` поверх платформенного слоя. Его примитивы
 //! под ней покрыты набором `testrunner` отдельно.
 
-#![feature(can_vector, io_error_too_many_open_files, molecular_ext)]
+#![feature(
+    can_vector,
+    fs_set_times,
+    io_error_too_many_open_files,
+    molecular_ext,
+    set_permissions_nofollow
+)]
 #![allow(
     clippy::expect_used,
     clippy::indexing_slicing,
@@ -22,8 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use component_startup::component_manifest;
-use component_startup_std::into_std_handle;
+use components::{StartupError, component_manifest, into_std_handle};
 use filesystem_abi::namespace;
 use kernel_objects::Port;
 use syscall::{Handle, Rights};
@@ -50,8 +55,9 @@ mod local {
     }
 }
 
-fn main() {
-    let startup = startup_set_reaches_the_program();
+fn main() -> Result<(), StartupError> {
+    println!("selftest started");
+    let startup = components::requirements(SelftestStartup::request)?;
     the_start_handle_is_handed_out_once();
     filesystem::a_path_before_the_root_is_not_connected();
     filesystem::the_root_is_installed(startup.namespace.into_handle());
@@ -76,12 +82,18 @@ fn main() {
     filesystem::unsupported_file_operations_say_so();
     filesystem::malformed_paths_are_refused();
     filesystem::file_system_errors_keep_their_meaning();
+    filesystem::a_listing_outlives_other_calls();
+    filesystem::a_dropped_listing_closes_its_session();
+    filesystem::create_dir_refuses_an_existing_directory();
+    filesystem::rename_stays_within_one_mount();
+    filesystem::removal_checks_the_node_kind();
+    filesystem::remove_dir_all_takes_the_subtree();
+    filesystem::copy_moves_the_bytes();
+    filesystem::exists_hides_only_not_found();
+    filesystem::canonicalize_normalizes_lexically();
+    filesystem::unsupported_path_operations_say_so();
     println!("checks passed");
-}
-
-fn startup_set_reaches_the_program() -> SelftestStartup {
-    // Старт ставит журнал, по которому идёт вывод остальных проверок.
-    component_startup_std::start(SelftestStartup::start).expect("the parent answers the start")
+    Ok(())
 }
 
 fn the_start_handle_is_handed_out_once() {

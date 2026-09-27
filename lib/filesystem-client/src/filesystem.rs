@@ -192,6 +192,25 @@ impl<E: Environment> FileSystem<E> {
         )
     }
 
+    /// Копирует содержимое файла `from` в `to` и возвращает число перенесённых байт. Назначение
+    /// создаётся либо усекается. Байты проходят через клиента порциями размером с буфер данных
+    /// сессии источника. Каталог по пути `from` возвращает `IsADirectory`, и назначение при этом
+    /// не открывается.
+    pub fn copy(&mut self, from: Path<'_>, to: Path<'_>) -> Result<u64> {
+        let mut source = self.open(from, AccessMode::Read, OpenFlags::NONE)?;
+        if source.kind().is_directory() {
+            return Err(FileSystemError::IsADirectory.into());
+        }
+
+        let mut target = self.open(
+            to,
+            AccessMode::Write,
+            OpenFlags::CREATE | OpenFlags::TRUNCATE,
+        )?;
+
+        transfer(&mut source, &mut target)
+    }
+
     fn remove_node(&mut self, path: Path<'_>, expected: NodeKind) -> Result<()> {
         self.at_path(path, |_, session, root| {
             unlink(session, route::within(path, root)?, expected)
@@ -322,6 +341,35 @@ fn open_owned<E: Environment>(
     let scoped = Session::establish(environment, scoped, wait)?;
     let opened = scoped.client().open(route::wire(leaf)?, mode, flags)??;
     Ok(OpenNode::new(scoped, opened))
+}
+
+fn transfer<E: Environment>(source: &mut OpenNode<E>, target: &mut OpenNode<E>) -> Result<u64> {
+    let len = source.session().capacity().max(1);
+    let mut chunk = Vec::new();
+    chunk
+        .try_reserve_exact(len)
+        .map_err(|_| FileSystemError::NoSpace)?;
+    chunk.resize(len, 0);
+
+    let mut copied = 0u64;
+    loop {
+        let count = source.read(&mut chunk)?;
+        if count == 0 {
+            return Ok(copied);
+        }
+
+        let mut rest = chunk.get(..count).ok_or(FileSystemError::BufferTooSmall)?;
+        while !rest.is_empty() {
+            // Повтор записи, не принявшей ни одного байта, копирование не продвинет.
+            let written = target.write(rest)?;
+            if written == 0 {
+                return Err(FileSystemError::NoSpace.into());
+            }
+            rest = rest.get(written..).unwrap_or_default();
+        }
+
+        copied = copied.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
 }
 
 fn remove_tree_in<E: Environment>(session: &Session<E>, root: &str) -> Result<()> {

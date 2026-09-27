@@ -1,5 +1,7 @@
 //! Исход операции фасада.
 
+use core::fmt;
+
 use filesystem_abi::FileSystemError;
 use ipc::wire::IpcError;
 
@@ -24,6 +26,14 @@ impl Failure {
         matches!(self, Self::FileSystem(FileSystemError::NotFound))
     }
 }
+
+impl fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "file system error: {self:?}")
+    }
+}
+
+impl core::error::Error for Failure {}
 
 impl From<FileSystemError> for Failure {
     fn from(error: FileSystemError) -> Self {

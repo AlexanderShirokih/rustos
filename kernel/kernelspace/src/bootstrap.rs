@@ -9,7 +9,7 @@ use bootstrap_abi::{BootFdt, bootstrap};
 use capability::{
     Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
     KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport,
-    default_rights_for, interrupts_control, port_recv, port_send, runtime,
+    default_rights_for, interrupts_control, port_recv, port_send, release_delivered, runtime,
 };
 use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::IrqLineSpan;
@@ -196,9 +196,9 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
     loop {
         let frame = match listener.recv(&mut bytes, Timeout::INFINITE) {
             Ok(frame) => frame,
-            // Сервер не держит сессий по значкам, и убирать ему нечего. Уход значка поэтому
-            // приём не прерывает.
-            Err(RecvError::SenderGone(_)) => continue,
+            // Сервер не держит сессий по значкам. Отброшенный кадр относится к одному вызову, и
+            // его вызыватель уже получил отказ. Оба исхода не прерывают приём.
+            Err(RecvError::SenderGone(_) | RecvError::Discarded) => continue,
             Err(e) => {
                 warn!("bootstrap: receive failed: {:?}", e);
                 return;
@@ -425,10 +425,12 @@ impl Listener for KernelPort {
                 table: self.table.clone(),
             }),
         };
-        let bytes = self
-            .buffer
-            .with_lock(|buf| load_kernel_buffer(buf, into))
-            .ok_or(RecvError::Discarded)?;
+        let Some(bytes) = self.buffer.with_lock(|buf| load_kernel_buffer(buf, into)) else {
+            // Вызыватель получает отказ разрушением `resources` только после закрытия capability
+            // кадра.
+            let _ = release_delivered(&receiver);
+            return Err(RecvError::Discarded);
+        };
         Ok(Incoming { bytes, resources })
     }
 }

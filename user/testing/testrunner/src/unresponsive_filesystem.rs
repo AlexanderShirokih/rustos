@@ -26,16 +26,15 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(started) = UnresponsiveFileSystemStartup::start(parent) else {
+    let Ok(requirements) = UnresponsiveFileSystemStartup::request(parent) else {
         process_exit(FAILED_EXIT_CODE)
     };
-    drop(started.log);
     let Ok(service) = Port::create() else {
         process_exit(FAILED_EXIT_CODE)
     };
 
     let client = startup_contract::Client::new(PortTransport::new(parent));
-    let mut admin = started.requirements.namespace;
+    let mut admin = requirements.namespace;
     loop {
         let Ok(copy) = service.duplicate(Rights::WRITE | Rights::TRANSFER, None) else {
             process_exit(FAILED_EXIT_CODE)

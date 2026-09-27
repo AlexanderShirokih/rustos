@@ -18,8 +18,7 @@ use ipc::{
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Resource, Session};
-use log_abi::log;
-use runtime::{Mutex, PortTransport, Priority, install_log, log_line, spawn_owned};
+use runtime::{Mutex, PortTransport, Priority, log_line, spawn_owned};
 use spin::Once;
 use syscall::{Handle, Timeout, kind};
 
@@ -51,19 +50,14 @@ struct Shared {
 /// экспорт `FileSystem` до закрытия его порта. `found` строит бекенд из байт региона `backing`
 /// либо автономный из `None`. Отказ монтирования завершает процесс кодом 1.
 pub fn serve<B>(
-    log: Option<Session<log::Protocol>>,
     start: Handle<kind::Port>,
     namespace: Session<namespace_admin::Protocol>,
     backing: Option<MemoryRegion>,
-    tag: &'static str,
     found: impl FnOnce(Option<&'static [u8]>) -> Result<B>,
 ) -> Result<Infallible>
 where
     B: FileSystemBackend + Send + 'static,
 {
-    if let Some(log) = log {
-        install_log(log.into_handle().into_raw(), tag);
-    }
     let bytes = match backing.as_ref() {
         Some(backing) => {
             let mapping = backing.map_full_read_only()?;

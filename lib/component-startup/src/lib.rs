@@ -4,7 +4,7 @@
 //! запрос у родителя. Провайдер обслуживает экспорт циклом [`serve_export`].
 //!
 //! Программа на Rust со стандартной библиотекой получает стартовый handle от
-//! `component-startup-std`.
+//! `components`.
 
 #![no_std]
 
@@ -17,11 +17,12 @@ mod request;
 #[doc(hidden)]
 pub use component_abi;
 pub use component_abi::{
-    AcceptError, LOG_REQUIREMENT, ResourceError, SessionError, component_startup,
+    AcceptError, LOG_REQUIREMENT, ResourceError, STARTUP_REQUEST_TIMEOUT, SessionError,
+    component_startup,
 };
-pub use declare::{STARTUP_REQUEST_TIMEOUT, Startup, StartupError, StartupFailure};
+pub use declare::{StartupError, StartupFailure};
 #[doc(hidden)]
-pub use declare::{start_log, start_parent, start_resource, start_session};
+pub use declare::{start_parent, start_resource, start_session};
 pub use export::{ExportError, MintedSession, mint_session, serve_export, whole_export};
 pub use ipc::wire::IpcError;
 pub use kernel_objects::{IrqLine, MemoryRegion, OwnedHandle, Port, PortTransport, Session, kind};

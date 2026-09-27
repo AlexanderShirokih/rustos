@@ -269,6 +269,30 @@ fn kernel_server_serves_past_a_departed_badge() {
         .expect("log after the badge departure");
 }
 
+#[kernel_test]
+fn kernel_server_closes_the_capabilities_of_a_discarded_frame() {
+    let rider = Port::create().expect("port create");
+    let derived = rider
+        .duplicate(Rights::WRITE, None)
+        .expect("mint derived capability");
+
+    crate::ipc_raw::write_frame(&[0], &[rider.into_raw().raw()]);
+    kernel_tests::kassert_eq!(
+        SyscallError::from_return(port_call(crate::bootstrap_handle(), SERVE_TIMEOUT)),
+        Some(SyscallError::PeerClosed)
+    );
+    kernel_tests::kassert_eq!(
+        SyscallError::from_return(port_send(derived.as_raw(), Timeout::POLL)),
+        Some(SyscallError::Revoked)
+    );
+
+    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    client
+        .acquire_irq_control()
+        .expect("acquire_irq_control call")
+        .expect("vend ok");
+}
+
 static FIRST_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
 static SECOND_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
 static FIRST_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);

@@ -109,6 +109,25 @@ impl<'a> Path<'a> {
 }
 
 impl<'a> Component<'a> {
+    /// Проверяет, что `text` - одно непустое имя пути без разделителя, отличное от `.` и `..` и не
+    /// длиннее `NAME_MAX`. Нарушение - `InvalidPath`.
+    pub const fn new(text: &'a str) -> Result<Self, FileSystemError> {
+        let mut rest = text.as_bytes();
+        let mut dots = 0;
+        while let Some((&byte, next)) = rest.split_first() {
+            match byte {
+                SEPARATOR_BYTE => return Err(FileSystemError::InvalidPath),
+                b'.' => dots += 1,
+                _ => {}
+            }
+            rest = next;
+        }
+        if !valid_name(text.len(), dots) {
+            return Err(FileSystemError::InvalidPath);
+        }
+        Ok(Self(text))
+    }
+
     pub const fn as_str(self) -> &'a str {
         self.0
     }

@@ -32,17 +32,17 @@ component_manifest! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    match TwoRequirementsStartup::start(parent) {
+    match TwoRequirementsStartup::request(parent) {
         Ok(_) => process_exit(STARTED_EXIT_CODE),
         Err(refusal) if refusal.requirement == "first" => process_exit(match refusal.failure {
             StartupFailure::Session(_) => FIRST_SESSION_REFUSED_EXIT_CODE,
             StartupFailure::Ipc(_) => FIRST_IPC_FAILED_EXIT_CODE,
-            StartupFailure::Resource(_) => FAILED_EXIT_CODE,
+            StartupFailure::Resource(_) | StartupFailure::NoStartHandle => FAILED_EXIT_CODE,
         }),
         Err(refusal) if refusal.requirement == "second" => process_exit(match refusal.failure {
             StartupFailure::Session(_) => SECOND_SESSION_REFUSED_EXIT_CODE,
             StartupFailure::Ipc(_) => SECOND_IPC_FAILED_EXIT_CODE,
-            StartupFailure::Resource(_) => FAILED_EXIT_CODE,
+            StartupFailure::Resource(_) | StartupFailure::NoStartHandle => FAILED_EXIT_CODE,
         }),
         Err(_) => process_exit(FAILED_EXIT_CODE),
     }
