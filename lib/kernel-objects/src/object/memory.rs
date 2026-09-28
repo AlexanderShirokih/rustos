@@ -10,7 +10,7 @@
 //! передаётся ровно один раз. Из другого адресного пространства середина наблюдается
 //! пословно, голова и хвост - побайтно. Порядок трёх частей между собой ничем не закреплён.
 
-use core::mem;
+use core::{mem, ops::Range};
 
 const _: () = assert!(
     usize::BITS >= u64::BITS,
@@ -122,6 +122,20 @@ pub type MemoryRegion = OwnedHandle<kind::MemoryRegion>;
 pub struct Mapping {
     va: u64,
     size_bytes: u64,
+}
+
+/// Окно регистров устройства: регион и смещение первого регистра от начала региона.
+#[derive(Debug)]
+pub struct MmioWindow {
+    pub region: MemoryRegion,
+    pub offset: u64,
+}
+
+/// Маппинг окна регистров устройства. Освобождается вместе с маппингом региона.
+#[derive(Debug)]
+pub struct MmioMapping {
+    _mapping: Mapping,
+    registers: usize,
 }
 
 /// Маппинг региона, чья маска доступа не допускает запись. Страницы неизменны во всех адресных
@@ -237,8 +251,33 @@ impl OwnedHandle<kind::MemoryRegion> {
 }
 
 impl DeviceWindow<syscall_user::ReceivedHandle<kind::MemoryRegion>> for MemoryRegion {
-    fn base(&self) -> Option<u64> {
-        self.inspect().ok().map(|info| info.base)
+    fn physical_range(&self) -> Option<Range<u64>> {
+        let info = self.inspect().ok()?;
+        Some(info.base..info.base.checked_add(info.size_bytes)?)
+    }
+}
+
+impl MmioWindow {
+    /// Маппит регион окна целиком на запись. Смещение за концом региона отвергается
+    /// `InvalidArgument`.
+    pub fn map(&self) -> Result<MmioMapping> {
+        let mapping = self.region.map_full(UserMemFlags::ReadWrite)?;
+        let registers = (self.offset < mapping.size_bytes)
+            .then(|| mapping.va.checked_add(self.offset))
+            .flatten()
+            .and_then(|registers| usize::try_from(registers).ok())
+            .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
+        Ok(MmioMapping {
+            _mapping: mapping,
+            registers,
+        })
+    }
+}
+
+impl MmioMapping {
+    /// MMIO-хэндлер по первому регистру устройства.
+    pub fn mmio(&self) -> Mmio {
+        Mmio::new(self.registers)
     }
 }
 
@@ -246,13 +285,6 @@ impl Mapping {
     /// Базовый VA маппинга.
     pub fn va(&self) -> u64 {
         self.va
-    }
-
-    /// MMIO-хэндлер по базовому VA маппинга (device-окна).
-    pub fn mmio(&self) -> Mmio {
-        #[allow(clippy::cast_possible_truncation)]
-        let base = self.va as usize;
-        Mmio::new(base)
     }
 
     /// Размер маппинга в байтах.

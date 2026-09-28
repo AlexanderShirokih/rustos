@@ -42,23 +42,10 @@ impl AddressSpace {
     }
 }
 
-/// Трансляция child -> parent для адресного пространства шины.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
-pub struct BusRange {
-    /// Адрес в координатах дочерней шины.
-    pub child: usize,
-    /// Адрес в координатах родительской шины.
-    pub parent: usize,
-    /// Размер диапазона.
-    pub size: usize,
-}
-
 /// Адресные расширения поверх узла (для MMIO-инициализации драйверов).
 pub trait NodeAddressExt: DeviceNode {
     /// Читает `#address-cells`/`#size-cells` узла и возвращает их размерность.
     fn cells_size(&self) -> Option<CellsSize>;
-    /// Читает `ranges` и возвращает трансляцию child -> parent.
-    fn range_to_parent(&self, parent_cells: CellsSize) -> Option<BusRange>;
     /// Читает `reg` как список адресных диапазонов.
     fn reg_iter(&self, cells_size: CellsSize) -> impl Iterator<Item = AddressSpace>;
 }

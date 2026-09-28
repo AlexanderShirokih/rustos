@@ -72,6 +72,11 @@ path = "/irq-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "mmio-pair-fixture"
+path = "/mmio-pair-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "refusal-probe-fixture"
 path = "/refusal-probe-fixture"
 

@@ -5,6 +5,7 @@ mod asid;
 mod cpu_identity;
 mod exception;
 mod kheap;
+mod layout;
 mod page_flags;
 mod probe_va;
 mod smp;

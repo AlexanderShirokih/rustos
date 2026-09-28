@@ -677,3 +677,30 @@ fn the_operation_itself_is_accepted() {
     );
     assert!(hits.is_empty(), "{hits:?}");
 }
+
+#[test]
+fn a_board_name_in_shared_code_is_reported() {
+    let hits = check(
+        &declared("device_specific_name"),
+        "fn lavender_windows_include_the_framebuffer() {}\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn a_device_dtb_included_into_shared_code_is_reported() {
+    let hits = check(
+        &declared("device_specific_name"),
+        "const DTB: &[u8] = include_bytes!(\"../../../devices/dtb/board.dtb\");\n",
+    );
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn a_generic_node_name_is_accepted() {
+    let hits = check(
+        &declared("device_specific_name"),
+        "fn a_device_behind_the_soc_bus_has_a_window() {}\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}

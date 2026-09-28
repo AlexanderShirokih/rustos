@@ -26,17 +26,33 @@ pub fn find_initrd_payload(device_tree: &DeviceTree<'_>) -> Option<BootPayloadRa
 
 #[cfg(test)]
 mod tests {
+    use core::slice;
+
     use fdt::devicetree::DeviceTree;
+    use fdt_test::Token::{self, Bytes, Cells, End, Node, Strings};
 
     use super::{designated_console, find_initrd_payload};
-    use crate::test_util::{
-        StringPool, begin_node, build_chosen_dtb, build_chosen_dtb_32,
-        build_chosen_dtb_with_payload, build_fdt, end_node, end_tree, push_prop_bytes,
-    };
+
+    const INITRD_START: &str = "linux,initrd-start";
+    const INITRD_END: &str = "linux,initrd-end";
+
+    fn build_chosen_dtb(properties: &[Token<'_>]) -> Vec<u8> {
+        let mut tokens = vec![Node("chosen")];
+        tokens.extend_from_slice(properties);
+        tokens.push(End);
+        fdt_test::build(&tokens)
+    }
+
+    fn build_initrd_dtb(start: u64, end: u64) -> Vec<u8> {
+        build_chosen_dtb(&[
+            Bytes(INITRD_START, &start.to_be_bytes()),
+            Bytes(INITRD_END, &end.to_be_bytes()),
+        ])
+    }
 
     #[test]
     fn finds_initrd_payload_in_chosen() {
-        let bytes = build_chosen_dtb(Some((0x0000_0000_c800_0000, 0x0000_0000_c820_0000)));
+        let bytes = build_initrd_dtb(0x0000_0000_c800_0000, 0x0000_0000_c820_0000);
         let tree = DeviceTree::from_bytes(&bytes).unwrap();
         let payload = find_initrd_payload(&tree).unwrap();
 
@@ -47,7 +63,10 @@ mod tests {
 
     #[test]
     fn finds_initrd_payload_in_32bit_chosen_properties() {
-        let bytes = build_chosen_dtb_32(Some((0xc800_0000, 0xc820_0000)));
+        let bytes = build_chosen_dtb(&[
+            Cells(INITRD_START, &[0xc800_0000]),
+            Cells(INITRD_END, &[0xc820_0000]),
+        ]);
         let tree = DeviceTree::from_bytes(&bytes).unwrap();
         let payload = find_initrd_payload(&tree).unwrap();
 
@@ -58,7 +77,7 @@ mod tests {
 
     #[test]
     fn returns_none_when_payload_is_missing() {
-        let bytes = build_chosen_dtb(None);
+        let bytes = build_chosen_dtb(&[]);
         let tree = DeviceTree::from_bytes(&bytes).unwrap();
 
         assert!(find_initrd_payload(&tree).is_none());
@@ -66,10 +85,8 @@ mod tests {
 
     #[test]
     fn returns_none_when_only_one_initrd_property_is_present() {
-        let only_start =
-            build_chosen_dtb_with_payload(Some((0x1000u64.to_be_bytes().to_vec(), vec![])));
-        let only_end =
-            build_chosen_dtb_with_payload(Some((vec![], 0x2000u64.to_be_bytes().to_vec())));
+        let only_start = build_chosen_dtb(&[Bytes(INITRD_START, &0x1000u64.to_be_bytes())]);
+        let only_end = build_chosen_dtb(&[Bytes(INITRD_END, &0x2000u64.to_be_bytes())]);
 
         assert!(find_initrd_payload(&DeviceTree::from_bytes(&only_start).unwrap()).is_none());
         assert!(find_initrd_payload(&DeviceTree::from_bytes(&only_end).unwrap()).is_none());
@@ -77,62 +94,47 @@ mod tests {
 
     #[test]
     fn returns_none_for_malformed_initrd_properties() {
-        let malformed = build_chosen_dtb_with_payload(Some((vec![0x12, 0x34], vec![0x56])));
+        let malformed = build_chosen_dtb(&[
+            Bytes(INITRD_START, &[0x12, 0x34]),
+            Bytes(INITRD_END, &[0x56]),
+        ]);
 
         assert!(find_initrd_payload(&DeviceTree::from_bytes(&malformed).unwrap()).is_none());
     }
 
     #[test]
     fn returns_none_for_empty_or_reversed_ranges() {
-        let empty = build_chosen_dtb(Some((0x1000, 0x1000)));
-        let reversed = build_chosen_dtb(Some((0x2000, 0x1000)));
+        let empty = build_initrd_dtb(0x1000, 0x1000);
+        let reversed = build_initrd_dtb(0x2000, 0x1000);
 
         assert!(find_initrd_payload(&DeviceTree::from_bytes(&empty).unwrap()).is_none());
         assert!(find_initrd_payload(&DeviceTree::from_bytes(&reversed).unwrap()).is_none());
     }
 
-    // --- Console / serial search ---
-
     fn build_console_dtb(stdout_path: Option<&str>) -> Vec<u8> {
-        let mut pool = StringPool::new();
-        let s_addr = pool.intern("#address-cells");
-        let s_size = pool.intern("#size-cells");
-        let s_compat = pool.intern("compatible");
-        let s_devtype = pool.intern("device_type");
-        let s_serial0 = pool.intern("serial0");
-        let s_stdout = pool.intern("stdout-path");
-
-        let mut st = Vec::new();
-        begin_node(&mut st, "");
-        push_prop_bytes(&mut st, s_addr, &2u32.to_be_bytes());
-        push_prop_bytes(&mut st, s_size, &1u32.to_be_bytes());
-
-        // aliases { serial0 = "/soc/serial@2000"; }
-        begin_node(&mut st, "aliases");
-        push_prop_bytes(&mut st, s_serial0, b"/soc/serial@2000\0");
-        end_node(&mut st);
-
-        // chosen { stdout-path = ... } (опционально)
-        if let Some(path) = stdout_path {
-            begin_node(&mut st, "chosen");
-            let mut val = path.as_bytes().to_vec();
-            val.push(0);
-            push_prop_bytes(&mut st, s_stdout, &val);
-            end_node(&mut st);
+        let mut tokens = vec![
+            Cells("#address-cells", &[2]),
+            Cells("#size-cells", &[1]),
+            Node("aliases"),
+            Strings("serial0", &["/soc/serial@2000"]),
+            End,
+        ];
+        if let Some(path) = &stdout_path {
+            tokens.extend([
+                Node("chosen"),
+                Strings("stdout-path", slice::from_ref(path)),
+                End,
+            ]);
         }
-
-        // soc { serial@2000 { device_type="serial"; compatible="arm,pl011"; } }
-        begin_node(&mut st, "soc");
-        begin_node(&mut st, "serial@2000");
-        push_prop_bytes(&mut st, s_devtype, b"serial\0");
-        push_prop_bytes(&mut st, s_compat, b"arm,pl011\0");
-        end_node(&mut st); // serial
-        end_node(&mut st); // soc
-
-        end_node(&mut st); // root
-        end_tree(&mut st);
-
-        build_fdt(&st, pool.bytes())
+        tokens.extend([
+            Node("soc"),
+            Node("serial@2000"),
+            Strings("device_type", &["serial"]),
+            Strings("compatible", &["arm,pl011"]),
+            End,
+            End,
+        ]);
+        fdt_test::build(&tokens)
     }
 
     #[test]
@@ -147,7 +149,6 @@ mod tests {
 
     #[test]
     fn designation_resolves_an_alias() {
-        // Форма Raspberry Pi: stdout-path называет алиас, а не путь.
         let dtb = build_console_dtb(Some("serial0:115200n8"));
         let tree = DeviceTree::from_bytes(&dtb).unwrap();
 

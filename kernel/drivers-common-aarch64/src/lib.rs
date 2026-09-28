@@ -4,7 +4,7 @@
 //! [`adapt_to_fdt_tree`] переводит разобранное `fdt`-дерево в вид, который принимают
 //! probe-функции `drivers-common`. [`gic_interrupt::parse_gic_interrupt`] достаёт из свойства
 //! `interrupts` номер линии и её тип срабатывания.
-//! [`device_windows::enumerate_device_windows`] перечисляет MMIO-окна узла.
+//! [`device_windows::enumerate_device_windows`] перечисляет MMIO-окна устройств дерева.
 //!
 //! Крейт разбирает байты и не обращается к регистрам. Тесты крейта идут на host.
 

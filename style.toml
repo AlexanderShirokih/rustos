@@ -12,6 +12,7 @@ zavodit_verb = "deny"
 caps_emphasis = "deny"
 against_calque = "deny"
 non_ascii_punctuation = "deny"
+device_specific_name = "deny"
 
 [[text]]
 id = "latin_apostrophe"
@@ -224,3 +225,19 @@ target = "comment"
 extension = ["rs"]
 pattern = "[—–→«»“”]"
 strip = ["backticks"]
+
+[[text]]
+id = "device_specific_name"
+title = "a board or a SoC is named in shared code"
+explain = """
+Shared code and its tests describe the platform through the device tree, and a \
+concrete board, SoC or its DTB file ties them to one device. Build a synthetic tree \
+with the property under test and name its nodes generically: "soc", "bus@1000", \
+"serial@2000". A device DTB belongs to devices/ and is read by the build of that \
+device only. Code written for one SoC family is listed in not_under of this rule.
+"""
+message = "board or SoC named in shared code, use a synthetic tree with generic names"
+target = "line"
+extension = ["rs"]
+not_under = ["tools/style/tests/"]
+pattern = "(?i)(?:^|[^a-z0-9])(?:lavender|xiaomi|redmi|raspberry|rpi\\d|sdm\\d{3}|msm\\d{4}|bcm\\d{4})(?:[^a-z0-9]|$)|include_(?:bytes|str)!\\([^)]*devices/"

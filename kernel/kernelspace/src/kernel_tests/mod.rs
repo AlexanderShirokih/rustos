@@ -53,7 +53,10 @@ where
 
     scheduler
         .spawn(
-            scheduler::SpawnConfig::new("kernel-tests").priority(scheduler::Priority::highest()),
+            scheduler::SpawnConfig::new("kernel-tests")
+                .priority(scheduler::Priority::highest())
+                // Тест раскладки памяти занимает до 20 КБ стека.
+                .stack_pages(8),
             move || {
                 let captured = kernel_ptr;
                 // SAFETY: см. комментарий выше.

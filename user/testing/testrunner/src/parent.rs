@@ -5,7 +5,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{num::NonZeroU64, ops::ControlFlow};
 
 use component_abi::{
-    AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
+    AcceptError, LOG_REQUIREMENT, MmioWindow, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
     SessionError, SessionRequest, SessionRequirement, SessionScope,
     component_startup as startup_contract,
 };
@@ -13,9 +13,7 @@ use ipc::{
     Listener as _, Protocol as _, RecvError,
     wire::{MESSAGE_INLINE_MAX, Str},
 };
-use kernel_objects::{
-    Delivery, Error, ObjectKind, OwnedHandle, Port, ReceivedHandle, Resource, Session, kind,
-};
+use kernel_objects::{Delivery, Error, OwnedHandle, Port, ReceivedHandle, Resource, Session, kind};
 use log_abi::log;
 use managed_component::{Children, Departure, GrantError, Status};
 use runtime::{Instant, Mutex, PortTransport, Timeout};
@@ -334,10 +332,7 @@ impl State {
         caller
     }
 
-    fn refuse_resource<K: ObjectKind>(
-        &mut self,
-        badge: u64,
-    ) -> Result<OwnedHandle<K>, ResourceError> {
+    fn refuse_resource<R>(&mut self, badge: u64) -> Result<R, ResourceError> {
         self.caller(badge);
         Err(ResourceError::Refused)
     }
@@ -424,7 +419,7 @@ impl startup_contract::Service<Delivery> for State {
         _requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
         reply: startup_contract::irq::Reply<Debt>,
     ) {
-        let _ = reply.send(self.refuse_resource(frame.badge));
+        let _ = reply.send(self.refuse_resource::<OwnedHandle<kind::IrqLine>>(frame.badge));
     }
 
     fn mmio(
@@ -433,7 +428,7 @@ impl startup_contract::Service<Delivery> for State {
         _requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
         reply: startup_contract::mmio::Reply<Debt>,
     ) {
-        let _ = reply.send(self.refuse_resource(frame.badge));
+        let _ = reply.send(self.refuse_resource::<MmioWindow>(frame.badge));
     }
 
     fn region(
@@ -442,7 +437,7 @@ impl startup_contract::Service<Delivery> for State {
         _requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
         reply: startup_contract::region::Reply<Debt>,
     ) {
-        let _ = reply.send(self.refuse_resource(frame.badge));
+        let _ = reply.send(self.refuse_resource::<OwnedHandle<kind::MemoryRegion>>(frame.badge));
     }
 
     fn accept(

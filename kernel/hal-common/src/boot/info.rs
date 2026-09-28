@@ -100,7 +100,6 @@ mod tests {
     use memory::physical_address::PhysicalAddress;
 
     use super::{BootInfo, BootPayloadRange, HwDescription};
-    use crate::test_util::build_chosen_dtb;
 
     #[test]
     fn new_fdt_builds_expected_variant() {
@@ -125,7 +124,12 @@ mod tests {
 
     #[test]
     fn from_fdt_extracts_runtime_initrd_range() {
-        let dtb = build_chosen_dtb(Some((0x4800_0000, 0x4820_0000)));
+        let dtb = fdt_test::build(&fdt_test::tree! {
+            chosen {
+                "linux,initrd-start" = <0 0x4800_0000>;
+                "linux,initrd-end" = <0 0x4820_0000>;
+            };
+        });
         let info = BootInfo::from_fdt(PhysicalAddress::new(dtb.as_ptr() as usize));
 
         let HwDescription::Fdt(blob) = info.hw_description else {

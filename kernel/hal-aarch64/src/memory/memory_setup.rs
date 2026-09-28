@@ -27,7 +27,7 @@ use crate::{
         address_space_factory::FrameAllocatorImpl,
         asid,
         global_allocator::GLOBAL_ALLOCATOR,
-        layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag},
+        layout::{MAX_MEMORY_REGIONS, MemoryLayout, MemoryRegion, RegionTag, TooManyMemoryRegions},
         memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
         mmu::{Mmu, NormalDualSpaceConfig},
         regs::{common::EL1, dcache::DataCache, id_aa64mmfr0::IdAa64Mmfr0},
@@ -221,18 +221,21 @@ impl MemorySetup<Installed> {
             )
         });
 
-        let non_heap_regions = layout.iter().filter(|r| !r.is_heap()).copied();
-
         let mut all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS> =
             StaticVec::new();
-        for region in heap_regions
-            .chain(non_heap_regions)
-            .chain(core::iter::once(bump_range))
-        {
+        for region in heap_regions {
             all_regions
                 .push(region)
                 .ok_or(MemorySetupError::OutOfMemory)?;
         }
+
+        layout
+            .push_mapped_non_heap_regions(&mut all_regions)
+            .map_err(|TooManyMemoryRegions| MemorySetupError::OutOfMemory)?;
+
+        all_regions
+            .push(bump_range)
+            .ok_or(MemorySetupError::OutOfMemory)?;
 
         let roots = PageTableRoots {
             lower_pa: lower_root_pa,

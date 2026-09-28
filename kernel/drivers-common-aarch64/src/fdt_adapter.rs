@@ -5,7 +5,7 @@ use core::mem::size_of;
 use drivers_common::{DeviceNode, DeviceTreeSource, NodeProperty};
 use fdt::devicetree::{DeviceTree, Node, NodeIter, NodeKey, Property};
 
-use crate::tree_ext::{AddressSpace, BusRange, CellsSize, NodeAddressExt};
+use crate::tree_ext::{AddressSpace, CellsSize, NodeAddressExt};
 
 #[derive(Clone, Copy)]
 pub struct FdtTree<'a> {
@@ -47,6 +47,10 @@ impl<'dt> FdtTree<'dt> {
 impl<'dt> FdtNode<'dt> {
     pub(crate) const fn new(node: Node<'dt>) -> FdtNode<'dt> {
         FdtNode { inner: node }
+    }
+
+    pub(crate) const fn inner(&self) -> Node<'dt> {
+        self.inner
     }
 }
 
@@ -137,28 +141,6 @@ impl NodeAddressExt for FdtNode<'_> {
         Some(CellsSize {
             address_cells,
             size_cells,
-        })
-    }
-
-    fn range_to_parent(&self, parent_cells: CellsSize) -> Option<BusRange> {
-        let ranges_prop = self.inner.prop("ranges")?;
-        let child_cells = self.cells_size().unwrap_or_default();
-        let child = try_read_cell(ranges_prop.value(), child_cells.address_cells, 0)?;
-        let parent = try_read_cell(
-            ranges_prop.value(),
-            parent_cells.address_cells,
-            child_cells.address_cells,
-        )?;
-        let size = try_read_cell(
-            ranges_prop.value(),
-            child_cells.size_cells,
-            child_cells.address_cells + parent_cells.address_cells,
-        )?;
-
-        Some(BusRange {
-            child: child as usize,
-            parent: parent as usize,
-            size: size as usize,
         })
     }
 

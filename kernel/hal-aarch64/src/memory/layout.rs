@@ -21,6 +21,8 @@ pub enum RegionTag {
     Heap,
     /// Memory-mapped I/O
     Mmio,
+    /// Зарезервированная память, которую ядро не отображает и аллокатор не выдаёт
+    Unmapped,
     /// Неизвестный/служебный регион
     Other,
 }
@@ -74,6 +76,46 @@ impl MemoryLayout {
         }
 
         Ok(free_regions)
+    }
+
+    /// Дописывает в `out` отображаемые не-heap регионы. Интервалы
+    /// [`RegionTag::Unmapped`] вычитаются из каждого региона, кроме
+    /// [`RegionTag::Kernel`]: образ ядра исполняется и из карт не убирается.
+    pub fn push_mapped_non_heap_regions(
+        &self,
+        out: &mut Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
+    ) -> Result<(), TooManyMemoryRegions> {
+        for region in self
+            .iter()
+            .filter(|region| !region.is_heap() && region.tag != RegionTag::Unmapped)
+        {
+            if region.tag == RegionTag::Kernel {
+                out.push(*region).ok_or(TooManyMemoryRegions)?;
+                continue;
+            }
+
+            let mut pieces = StaticIntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
+            pieces
+                .add(region.start, region.end)
+                .ok_or(TooManyMemoryRegions)?;
+
+            for hole in self.iter().filter(|hole| hole.tag == RegionTag::Unmapped) {
+                pieces
+                    .remove(hole.start, hole.end)
+                    .ok_or(TooManyMemoryRegions)?;
+            }
+
+            for piece in pieces.iter() {
+                out.push(MemoryRegion {
+                    start: piece.start,
+                    end: piece.end,
+                    ..*region
+                })
+                .ok_or(TooManyMemoryRegions)?;
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -2,8 +2,8 @@ use core::fmt;
 
 use component_abi::{REQUIREMENT_NAME_MAX, ResourceError, component_startup};
 use ipc::wire::{IpcError, Str};
-use kernel_objects::{OwnedHandle, PortTransport, ReceivedHandle, Session, kind};
-use syscall::{Handle, ObjectKind};
+use kernel_objects::{MmioWindow, OwnedHandle, PortTransport, ReceivedHandle, Session, kind};
+use syscall::Handle;
 
 use crate::request::session;
 
@@ -120,19 +120,22 @@ macro_rules! component_manifest {
     };
     (@field session($protocol:path)) => { $crate::Session<$protocol> };
     (@field irq $parameters:tt) => { $crate::IrqLine };
-    (@field mmio $parameters:tt) => { $crate::MemoryRegion };
+    (@field mmio $parameters:tt) => { $crate::MmioWindow };
     (@field region) => { $crate::MemoryRegion };
     (@request $requests:ident $requirement:ident session($protocol:path)) => {
         $crate::start_session::<$protocol>(&$requests, stringify!($requirement))
     };
     (@request $requests:ident $requirement:ident irq $parameters:tt) => {
         $crate::start_resource(stringify!($requirement), |name| $requests.irq(name))
+            .map($crate::OwnedHandle::from)
     };
     (@request $requests:ident $requirement:ident mmio $parameters:tt) => {
         $crate::start_resource(stringify!($requirement), |name| $requests.mmio(name))
+            .map($crate::mmio_window)
     };
     (@request $requests:ident $requirement:ident region) => {
         $crate::start_resource(stringify!($requirement), |name| $requests.region(name))
+            .map($crate::OwnedHandle::from)
     };
 }
 
@@ -156,20 +159,30 @@ pub fn start_session<P: ipc::Protocol>(
     }
 }
 
-pub fn start_resource<K: ObjectKind>(
+pub fn start_resource<R>(
     requirement: &'static str,
     request: impl FnOnce(
         Str<'static, REQUIREMENT_NAME_MAX>,
-    ) -> Result<Result<ReceivedHandle<K>, ResourceError>, IpcError>,
-) -> Result<OwnedHandle<K>, StartupError> {
+    ) -> Result<Result<R, ResourceError>, IpcError>,
+) -> Result<R, StartupError> {
     let name = Str::new(requirement).ok_or(failed(
         requirement,
         StartupFailure::Ipc(IpcError::InvalidValue),
     ))?;
     match request(name) {
-        Ok(Ok(handle)) => Ok(OwnedHandle::from(handle)),
+        Ok(Ok(resource)) => Ok(resource),
         Ok(Err(error)) => Err(failed(requirement, StartupFailure::Resource(error))),
         Err(error) => Err(failed(requirement, StartupFailure::Ipc(error))),
+    }
+}
+
+#[must_use]
+pub fn mmio_window(
+    window: component_abi::MmioWindow<ReceivedHandle<kind::MemoryRegion>>,
+) -> MmioWindow {
+    MmioWindow {
+        region: OwnedHandle::from(window.region),
+        offset: window.offset,
     }
 }
 

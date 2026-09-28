@@ -1,6 +1,6 @@
 use fdt::{
     devicetree::{DeviceTree, Node},
-    devicetreeext::{NodeExt, PropExt},
+    devicetreeext::{NodeExt, PropExt, translate_window},
 };
 
 use crate::{
@@ -22,9 +22,14 @@ pub struct DeviceTreePlatform<'a> {
 
 struct Located<'a> {
     node: Node<'a>,
-    bus: Node<'a>,
+    ancestors: Ancestors<'a>,
     interrupt_parent: Option<u32>,
-    translated_bus: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Ancestors<'a> {
+    nodes: [Node<'a>; DESCRIPTION_DEPTH_MAX],
+    len: usize,
 }
 
 struct Controller<'a> {
@@ -53,11 +58,9 @@ impl<'a> DeviceTreePlatform<'a> {
         let root = self.root()?;
         let mut search = Search { selector, seen: 0 };
         locate(
-            root,
+            &mut Ancestors::new(root),
             root.interrupt_parent(),
-            false,
             &mut search,
-            DESCRIPTION_DEPTH_MAX,
         )
         .ok_or(ResolveError::DeviceNotFound)
     }
@@ -107,10 +110,12 @@ impl PlatformDescription for DeviceTreePlatform<'_> {
 
     fn mmio(&self, device: DeviceSelector<'_>, index: u16) -> Result<DeviceMmio, ResolveError> {
         let device = self.device(device)?;
-        if device.translated_bus {
-            return Err(ResolveError::BusTranslation);
-        }
-        let cells = device.bus.cells_size().ok_or(ResolveError::Malformed)?;
+        let path = device.ancestors.path();
+        let cells = path
+            .last()
+            .and_then(NodeExt::cells_size)
+            .ok_or(ResolveError::Malformed)?;
+
         let windows = device
             .node
             .prop("reg")
@@ -119,6 +124,8 @@ impl PlatformDescription for DeviceTreePlatform<'_> {
         let window = windows
             .get(usize::from(index))
             .ok_or(ResolveError::ResourceOutOfRange)?;
+        let window = translate_window(path, *window).ok_or(ResolveError::Untranslatable)?;
+
         Ok(DeviceMmio {
             base: window.offset as u64,
             size: window.size as u64,
@@ -126,42 +133,62 @@ impl PlatformDescription for DeviceTreePlatform<'_> {
     }
 }
 
+impl<'a> Ancestors<'a> {
+    const fn new(root: Node<'a>) -> Self {
+        Self {
+            nodes: [root; DESCRIPTION_DEPTH_MAX],
+            len: 1,
+        }
+    }
+
+    fn path(&self) -> &[Node<'a>] {
+        self.nodes.get(..self.len).unwrap_or_default()
+    }
+
+    fn push(&mut self, node: Node<'a>) -> Option<()> {
+        *self.nodes.get_mut(self.len)? = node;
+        self.len += 1;
+        Some(())
+    }
+
+    fn pop(&mut self) {
+        self.len -= 1;
+    }
+}
+
 fn locate<'a>(
-    bus: Node<'a>,
+    ancestors: &mut Ancestors<'a>,
     inherited: Option<u32>,
-    translated_bus: bool,
     search: &mut Search<'_>,
-    depth: usize,
 ) -> Option<Located<'a>> {
-    let depth = depth.checked_sub(1)?;
+    let bus = *ancestors.path().last()?;
+
     for child in bus.children() {
         let interrupt_parent = child.interrupt_parent().or(inherited);
+
         if child.is_compatible(search.selector.compatible) {
             if search.seen == search.selector.instance {
                 return Some(Located {
                     node: child,
-                    bus,
+                    ancestors: *ancestors,
                     interrupt_parent,
-                    translated_bus,
                 });
             }
             search.seen += 1;
         }
-        // Окна потомков лежат в координатах шины, и без `ranges` шина их в
-        // родительское пространство не отображает.
-        let identity = child
-            .prop("ranges")
-            .is_some_and(|ranges| ranges.value().is_empty());
-        if let Some(found) = locate(
-            child,
-            interrupt_parent,
-            translated_bus || !identity,
-            search,
-            depth,
-        ) {
-            return Some(found);
+
+        if ancestors.push(child).is_none() {
+            continue;
+        }
+
+        let found = locate(ancestors, interrupt_parent, search);
+        ancestors.pop();
+
+        if found.is_some() {
+            return found;
         }
     }
+
     None
 }
 

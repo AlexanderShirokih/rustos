@@ -1,10 +1,17 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::cast_possible_truncation)]
 
+use core::num::NonZeroUsize;
+
 use fdt::{
-    devicetree::DeviceTree,
-    devicetreeext::{NodeExt, PropExt, reserved_memory_ranges},
+    devicetree::{DeviceTree, Node},
+    devicetreeext::{
+        AddressSpace, BUS_PATH_MAX_NODES, NodeExt, PropExt, SkippedWindow, device_windows,
+        find_ram_regions, is_window_admissible, page_regions, reserved_memory_ranges,
+        translate_window,
+    },
 };
+use fdt_test::Token;
 
 // --- Построение DTB ---
 
@@ -514,8 +521,25 @@ fn reserved_memory_ranges_yields_static_only() {
 
     let ranges: Vec<_> = reserved_memory_ranges(&dt).unwrap().collect();
     assert_eq!(ranges.len(), 1);
-    assert_eq!(ranges[0].offset, 0x2000_0000);
-    assert_eq!(ranges[0].size, 0x1000);
+    assert_eq!(ranges[0].range.offset, 0x2000_0000);
+    assert_eq!(ranges[0].range.size, 0x1000);
+    assert!(!ranges[0].no_map);
+}
+
+#[test]
+fn find_ram_regions_yields_both_banks() {
+    let dtb = build_dtb_two_banks();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    let banks: Vec<_> = find_ram_regions(&dt)
+        .unwrap()
+        .map(|bank| (bank.offset, bank.size))
+        .collect();
+
+    assert_eq!(
+        banks,
+        [(0x8000_0000, 0x8000_0000), (0x1_0000_0000, 0x8000_0000)]
+    );
 }
 
 #[test]
@@ -680,32 +704,6 @@ fn find_by_alias_resolves_to_node() {
     assert!(dt.find("nonexistent_alias").is_none());
 }
 
-#[test]
-fn try_get_range_reads_bus_ranges() {
-    use fdt::devicetreeext::CellsSize;
-
-    let dtb = build_dtb_with_aliases_and_bus();
-    let dt = DeviceTree::from_bytes(&dtb).unwrap();
-    let soc = dt.find("/soc").unwrap();
-
-    // Родитель (root) по умолчанию #address-cells=2.
-    let parent_cells = CellsSize::default();
-    let range = soc.try_get_range(parent_cells).expect("soc has ranges");
-    assert_eq!(range.child_addr(), 0x0);
-    assert_eq!(range.parent_addr(), 0x1000_0000);
-    assert_eq!(range.size(), 0x0010_0000);
-}
-
-#[test]
-fn try_get_range_none_without_ranges_prop() {
-    use fdt::devicetreeext::CellsSize;
-
-    let dtb = build_dtb_with_children();
-    let dt = DeviceTree::from_bytes(&dtb).unwrap();
-    let mem = dt.find("/memory@0").unwrap();
-    assert!(mem.try_get_range(CellsSize::default()).is_none());
-}
-
 // --- as_usize / try_as_u64 ---
 
 fn build_dtb_with_scalar_props() -> Vec<u8> {
@@ -800,4 +798,590 @@ fn find_traverses_more_than_two_levels() {
     let leaf2 = c.children().next().unwrap();
     assert_eq!(leaf2.name(), "leaf");
     assert_eq!(leaf2.children().count(), 0);
+}
+
+fn build_dtb_with_buses() -> Vec<u8> {
+    fdt_test::build(&fdt_test::tree! {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        identity {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            ranges;
+            dev {
+                reg = <0x1000 0x100>;
+            };
+        };
+        shifted {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            ranges = <0x0 0x0 0x1000_0000 0x10_0000>;
+            dev {
+                reg = <0x2000 0x1000>;
+            };
+            tail {
+                reg = <0xf_f800 0x1000>;
+            };
+        };
+        split {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            ranges = <0x0 0x0 0x1000_0000 0x1000 0x10_0000 0x0 0x2000_0000 0x1000>;
+            dev {
+                reg = <0x10_0800 0x100>;
+            };
+        };
+        closed {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            dev {
+                reg = <0x40 0x10>;
+            };
+        };
+        outer {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            ranges = <0x0 0x0 0x4000_0000 0x100_0000>;
+            inner {
+                #address-cells = <1>;
+                #size-cells = <1>;
+                ranges = <0x0 0x10_0000 0x1_0000>;
+                dev {
+                    reg = <0x20 0x10>;
+                };
+            };
+        };
+        top {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            ranges = <0x0 0xffff_ffff 0xffff_f000 0x10_0000>;
+            dev {
+                reg = <0x2000 0x1000>;
+            };
+        };
+        pci {
+            #address-cells = <3>;
+            #size-cells = <2>;
+            ranges = <0x0200_0000 0x0 0x0 0x0 0x3000_0000 0x0 0x10_0000>;
+            dev {
+                reg = <0x0 0x0 0x1000 0x0 0x100>;
+            };
+        };
+    })
+}
+
+fn bus_path<'a>(dt: &'a DeviceTree<'a>, device: &str) -> Vec<Node<'a>> {
+    let (buses, _) = device.rsplit_once('/').unwrap();
+    let mut path = vec![dt.root().unwrap()];
+    for name in buses.split('/').filter(|name| !name.is_empty()) {
+        let bus = path
+            .last()
+            .unwrap()
+            .children()
+            .find(|child| child.name() == name);
+        path.push(bus.unwrap());
+    }
+    path
+}
+
+fn first_window(bus: &Node<'_>, device: &Node<'_>) -> AddressSpace {
+    let cells = bus.cells_size().unwrap();
+    let reg = device
+        .prop("reg")
+        .unwrap()
+        .try_as_reg_list::<4>(cells)
+        .unwrap();
+    *reg.get(0).unwrap()
+}
+
+fn translated_first_window(dt: &DeviceTree<'_>, device: &str) -> Option<(usize, usize)> {
+    let path = bus_path(dt, device);
+    let window = first_window(path.last()?, &dt.find(device)?);
+    translate_window(&path, window).map(|window| (window.offset, window.size))
+}
+
+#[test]
+fn an_empty_ranges_keeps_the_window() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(
+        translated_first_window(&dt, "/identity/dev"),
+        Some((0x1000, 0x100))
+    );
+}
+
+#[test]
+fn a_ranges_entry_shifts_the_window_into_the_parent_space() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(
+        translated_first_window(&dt, "/shifted/dev"),
+        Some((0x1000_2000, 0x1000))
+    );
+}
+
+#[test]
+fn the_window_is_translated_by_the_entry_that_contains_it() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(
+        translated_first_window(&dt, "/split/dev"),
+        Some((0x2000_0800, 0x100))
+    );
+}
+
+#[test]
+fn a_window_past_the_end_of_the_entry_is_untranslatable() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(translated_first_window(&dt, "/shifted/tail"), None);
+}
+
+#[test]
+fn a_window_behind_a_bus_without_ranges_is_untranslatable() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(translated_first_window(&dt, "/closed/dev"), None);
+}
+
+#[test]
+fn nested_buses_compose_their_ranges() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(
+        translated_first_window(&dt, "/outer/inner/dev"),
+        Some((0x4010_0020, 0x10))
+    );
+}
+
+#[test]
+fn a_translated_window_past_the_address_width_is_untranslatable() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(translated_first_window(&dt, "/top/dev"), None);
+}
+
+#[test]
+fn a_bus_with_three_address_cells_is_untranslatable() {
+    let dtb = build_dtb_with_buses();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    assert_eq!(translated_first_window(&dt, "/pci/dev"), None);
+}
+
+fn build_dtb_with_carveouts() -> Vec<u8> {
+    fdt_test::build(&fdt_test::tree! {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        memory@80000000 {
+            reg = <0x8000_0000 0x1000_0000>;
+        };
+        reserved-memory {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            ranges;
+            carveout@84000000 {
+                reg = <0x8400_0000 0x10_0000>;
+                no-map;
+            };
+            ramoops@88000000 {
+                reg = <0x8800_0000 0x10_0000>;
+            };
+        };
+    })
+}
+
+fn is_admissible(offset: usize, size: usize) -> bool {
+    let dtb = build_dtb_with_carveouts();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    is_window_admissible(&dt, AddressSpace { offset, size })
+}
+
+#[test]
+fn reserved_memory_ranges_report_no_map() {
+    let dtb = build_dtb_with_carveouts();
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+
+    let ranges: Vec<_> = reserved_memory_ranges(&dt)
+        .unwrap()
+        .map(|reserved| (reserved.range.offset, reserved.no_map))
+        .collect();
+
+    assert_eq!(ranges, [(0x8400_0000, true), (0x8800_0000, false)]);
+}
+
+#[test]
+fn a_window_outside_ram_is_admissible() {
+    assert!(is_admissible(0x0900_0000, 0x1000));
+}
+
+#[test]
+fn a_window_inside_a_no_map_region_is_admissible() {
+    assert!(is_admissible(0x8400_0000, 0x10_0000));
+}
+
+#[test]
+fn a_window_over_plain_ram_is_rejected() {
+    assert!(!is_admissible(0x8200_0000, 0x1000));
+}
+
+#[test]
+fn a_window_across_a_no_map_edge_is_rejected() {
+    assert!(!is_admissible(0x840f_f000, 0x2000));
+}
+
+#[test]
+fn a_window_inside_a_mapped_reservation_is_rejected() {
+    assert!(!is_admissible(0x8800_0000, 0x1000));
+}
+
+#[test]
+fn a_window_past_the_address_width_is_rejected() {
+    assert!(!is_admissible(usize::MAX - 0xfff, 0x2000));
+}
+
+const DEVICES_TREE: &[Token<'static>] = &fdt_test::tree! {
+    #address-cells = <1>;
+    #size-cells = <1>;
+    uart@1000 {
+        compatible;
+        reg = <0x1000 0x100>;
+    };
+    claimed@2000 {
+        compatible;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+        reg = <0x2000 0x1000>;
+        child@3000 {
+            compatible;
+            reg = <0x3000 0x1000>;
+        };
+    };
+    soc {
+        compatible;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges = <0x0 0x1000_0000 0x10_0000>;
+        timer@4000 {
+            compatible;
+            reg = <0x4000 0x100 0x5000 0x0>;
+        };
+        serial-bus@6000 {
+            compatible;
+            #address-cells = <1>;
+            #size-cells = <1>;
+            reg = <0x6000 0x100>;
+            device@0 {
+                compatible;
+                reg = <0x0 0x10>;
+            };
+        };
+    };
+    reserved-memory {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+        pool@8000000 {
+            compatible;
+            reg = <0x800_0000 0x10_0000>;
+        };
+    };
+    chosen {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+        framebuffer@9000 {
+            compatible;
+            reg = <0x9000 0x2000>;
+        };
+    };
+};
+
+fn windows_excluding(dtb: &[u8], excluded: &str) -> Vec<(usize, usize, bool)> {
+    let dt = DeviceTree::from_bytes(dtb).unwrap();
+
+    device_windows(dt.root().unwrap(), |node| node.name() == excluded)
+        .map(|window| (window.window.offset, window.window.size, window.excluded))
+        .collect()
+}
+
+#[test]
+fn device_windows_are_translated_into_the_root_space() {
+    let dtb = fdt_test::build(DEVICES_TREE);
+
+    assert_eq!(
+        windows_excluding(&dtb, ""),
+        [
+            (0x1000, 0x100, false),
+            (0x2000, 0x1000, false),
+            (0x3000, 0x1000, false),
+            (0x1000_4000, 0x100, false),
+            (0x1000_6000, 0x100, false),
+            (0x9000, 0x2000, false),
+        ]
+    );
+}
+
+#[test]
+fn an_excluded_node_and_its_subtree_give_marked_windows() {
+    let dtb = fdt_test::build(DEVICES_TREE);
+
+    assert_eq!(
+        windows_excluding(&dtb, "claimed@2000"),
+        [
+            (0x1000, 0x100, false),
+            (0x2000, 0x1000, true),
+            (0x3000, 0x1000, true),
+            (0x1000_4000, 0x100, false),
+            (0x1000_6000, 0x100, false),
+            (0x9000, 0x2000, false)
+        ]
+    );
+}
+
+fn build_dtb_with_bus_chain(buses: usize) -> Vec<u8> {
+    let bus = [
+        Token::Node("bus"),
+        Token::Cells("#address-cells", &[1]),
+        Token::Cells("#size-cells", &[1]),
+        Token::Cells("ranges", &[]),
+    ];
+    let device = [
+        Token::Node("device"),
+        Token::Cells("compatible", &[]),
+        Token::Cells("reg", &[0x1000, 0x100]),
+        Token::End,
+    ];
+
+    let mut tokens = vec![
+        Token::Cells("#address-cells", &[1]),
+        Token::Cells("#size-cells", &[1]),
+    ];
+    for _ in 0..buses {
+        tokens.extend_from_slice(&bus);
+    }
+    tokens.extend_from_slice(&device);
+    tokens.extend((0..buses).map(|_| Token::End));
+    fdt_test::build(&tokens)
+}
+
+#[test]
+fn a_device_under_the_longest_bus_path_has_windows() {
+    let dtb = build_dtb_with_bus_chain(BUS_PATH_MAX_NODES - 1);
+
+    assert_eq!(windows_excluding(&dtb, ""), [(0x1000, 0x100, false)]);
+}
+
+#[test]
+fn a_device_past_the_longest_bus_path_has_no_windows() {
+    let dtb = build_dtb_with_bus_chain(BUS_PATH_MAX_NODES);
+
+    assert!(windows_excluding(&dtb, "").is_empty());
+}
+
+#[test]
+fn reserved_memory_children_have_no_windows() {
+    let dtb = fdt_test::build(DEVICES_TREE);
+
+    assert!(
+        !windows_excluding(&dtb, "")
+            .iter()
+            .any(|(offset, _, _)| *offset == 0x800_0000)
+    );
+}
+
+const PAGE_SIZE: NonZeroUsize = NonZeroUsize::new(0x1000).unwrap();
+
+const REGIONS_TREE: &[Token<'static>] = &fdt_test::tree! {
+    #address-cells = <1>;
+    #size-cells = <1>;
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x8000_0000 0xfff_f800>;
+    };
+    rtc@9010200 {
+        compatible;
+        reg = <0x901_0200 0x100>;
+    };
+    claimed@9030000 {
+        compatible;
+        reg = <0x903_0000 0x100>;
+    };
+    sensor@9030800 {
+        compatible;
+        reg = <0x903_0800 0x100>;
+    };
+    virtio@a000000 {
+        compatible;
+        reg = <0xa00_0000 0x200 0xa00_0200 0x200 0xa00_0400 0x200 0xa00_0600 0x200>;
+    };
+    virtio@a000800 {
+        compatible;
+        reg = <0xa00_0800 0x200 0xa00_0a00 0x200 0xa00_0c00 0x200 0xa00_0e00 0x200>;
+    };
+    left@10000000 {
+        compatible;
+        reg = <0x1000_0000 0x1000>;
+    };
+    right@10001000 {
+        compatible;
+        reg = <0x1000_1000 0x1000>;
+    };
+    edge {
+        compatible;
+        reg = <0x8fff_fc00 0x100>;
+    };
+    display@b000000 {
+        compatible;
+        reg = <0xb00_0000 0x3000>;
+    };
+    overlay@b001000 {
+        compatible;
+        reg = <0xb00_1000 0x100>;
+    };
+    span@c000f80 {
+        compatible;
+        reg = <0xc00_0f80 0x100>;
+    };
+    claimed-bus@d000000 {
+        compatible;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+        reg = <0xd00_0000 0x100>;
+        child@d001000 {
+            compatible;
+            reg = <0xd00_1000 0x100>;
+        };
+    };
+    probe@d001800 {
+        compatible;
+        reg = <0xd00_1800 0x100>;
+    };
+};
+
+struct PageRegions {
+    regions: Vec<(usize, usize)>,
+    skipped: Vec<(usize, usize, SkippedWindow)>,
+}
+
+impl PageRegions {
+    fn build() -> Self {
+        let dtb = fdt_test::build(REGIONS_TREE);
+        let dt = DeviceTree::from_bytes(&dtb).unwrap();
+        let mut windows: Vec<_> = device_windows(dt.root().unwrap(), |node| {
+            node.name().starts_with("claimed")
+        })
+        .collect();
+        let mut skipped = Vec::new();
+
+        let regions = page_regions(&dt, &mut windows, PAGE_SIZE, |window, reason| {
+            skipped.push((window.offset, window.size, reason));
+        })
+        .map(|region| (region.offset, region.size))
+        .collect();
+
+        Self { regions, skipped }
+    }
+
+    fn regions_within(&self, start: usize, end: usize) -> Vec<(usize, usize)> {
+        self.regions
+            .iter()
+            .copied()
+            .filter(|(offset, size)| *offset < end && start < offset + size)
+            .collect()
+    }
+}
+
+#[test]
+fn a_window_is_widened_to_its_pages() {
+    assert!(PageRegions::build().regions.contains(&(0x901_0000, 0x1000)));
+}
+
+#[test]
+fn windows_sharing_a_page_form_one_region() {
+    assert_eq!(
+        PageRegions::build().regions_within(0xa00_0000, 0xa00_1000),
+        [(0xa00_0000, 0x1000)]
+    );
+}
+
+#[test]
+fn touching_windows_form_separate_regions() {
+    assert_eq!(
+        PageRegions::build().regions_within(0x1000_0000, 0x1000_2000),
+        [(0x1000_0000, 0x1000), (0x1000_1000, 0x1000)]
+    );
+}
+
+#[test]
+fn a_window_inside_another_window_keeps_the_outer_region() {
+    assert_eq!(
+        PageRegions::build().regions_within(0xb00_0000, 0xb00_3000),
+        [(0xb00_0000, 0x3000)]
+    );
+}
+
+#[test]
+fn a_window_across_a_page_boundary_takes_both_pages() {
+    assert_eq!(
+        PageRegions::build().regions_within(0xc00_0000, 0xc00_2000),
+        [(0xc00_0000, 0x2000)]
+    );
+}
+
+#[test]
+fn a_window_in_a_page_of_an_excluded_node_is_skipped() {
+    let regions = PageRegions::build();
+
+    assert!(regions.regions_within(0x903_0000, 0x903_1000).is_empty());
+    assert!(
+        regions
+            .skipped
+            .contains(&(0x903_0800, 0x100, SkippedWindow::SharesExcludedPage))
+    );
+}
+
+#[test]
+fn a_window_in_a_page_of_an_excluded_node_descendant_is_skipped() {
+    let regions = PageRegions::build();
+
+    assert!(regions.regions_within(0xd00_0000, 0xd00_2000).is_empty());
+    assert!(
+        regions
+            .skipped
+            .contains(&(0xd00_1800, 0x100, SkippedWindow::SharesExcludedPage))
+    );
+}
+
+#[test]
+fn a_window_whose_page_overlaps_ram_is_skipped() {
+    let regions = PageRegions::build();
+
+    assert!(regions.regions_within(0x8fff_f000, 0x9000_0000).is_empty());
+    assert!(
+        regions
+            .skipped
+            .contains(&(0x8fff_fc00, 0x100, SkippedWindow::Inadmissible))
+    );
+}
+
+#[test]
+fn regions_are_ordered_by_base_and_disjoint() {
+    let regions = PageRegions::build().regions;
+
+    assert!(
+        regions
+            .windows(2)
+            .all(|pair| matches!(pair, [left, right] if left.0 + left.1 <= right.0))
+    );
 }

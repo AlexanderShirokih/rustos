@@ -14,7 +14,8 @@ mod thread;
 
 pub use irq::{IrqControl, IrqLine};
 pub use memory::{
-    AnonymousMapping, Mapping, MemoryRegion, ReadOnlyMapping, RegionInfo, RegionKind, Resource,
+    AnonymousMapping, Mapping, MemoryRegion, MmioMapping, MmioWindow, ReadOnlyMapping, RegionInfo,
+    RegionKind, Resource,
 };
 pub use port::{Port, Reply, ServicePort};
 pub use process::Process;

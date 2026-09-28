@@ -57,6 +57,8 @@ const NAMESPACE: &str = "namespace";
 const RTC_REQUIREMENT: &str = "rtc";
 const LINE: &str = "line";
 const WINDOW: &str = "window";
+const FIRST_WINDOW: &str = "first";
+const SECOND_WINDOW: &str = "second";
 const IMAGE: &str = "image";
 const AREA: &str = "area";
 const SPARE_VIEW: &str = "spare";
@@ -111,6 +113,7 @@ const FORWARDING_EXPORTS: &[&str] = &[device_forwarding::Protocol::ID];
 const PL031: &[&str] = &["arm,pl031"];
 const ABSENT_CLOCK: &[&str] = &["acme,absent-clock"];
 const GPIO: &[&str] = &["arm,pl061"];
+const VIRTIO: &[&str] = &["virtio,mmio"];
 
 const RTC_DEVICES: &[RequirementSpec<'static>] =
     &device_requirements(device(PL031, 0), device(PL031, 0));
@@ -120,6 +123,20 @@ const SECOND_INSTANCE_DEVICES: &[RequirementSpec<'static>] =
     &device_requirements(device(PL031, 1), device(PL031, 0));
 const GPIO_LINE_DEVICES: &[RequirementSpec<'static>] =
     &device_requirements(device(GPIO, 0), device(PL031, 0));
+const FIRST_VIRTIO_DEVICES: &[RequirementSpec<'static>] =
+    &device_requirements(device(VIRTIO, 0), device(VIRTIO, 0));
+const SECOND_VIRTIO_DEVICES: &[RequirementSpec<'static>] =
+    &device_requirements(device(VIRTIO, 1), device(VIRTIO, 1));
+const VIRTIO_PAIR: &[RequirementSpec<'static>] = &[
+    RequirementSpec {
+        name: FIRST_WINDOW,
+        source: RequirementSourceSpec::Mmio(device(VIRTIO, 0)),
+    },
+    RequirementSpec {
+        name: SECOND_WINDOW,
+        source: RequirementSourceSpec::Mmio(device(VIRTIO, 1)),
+    },
+];
 const RTC_LINE: &[RequirementSpec<'static>] = &[RequirementSpec {
     name: LINE,
     source: RequirementSourceSpec::Irq(device(PL031, 0)),
@@ -230,6 +247,12 @@ const IRQ: ComponentSpec<'static> = ComponentSpec {
     exports: &[],
     restarts: 1,
     ..fixture("/irq-fixture", "irq-fixture")
+};
+
+const MMIO_PAIR: ComponentSpec<'static> = ComponentSpec {
+    requirements: VIRTIO_PAIR,
+    exports: &[],
+    ..fixture("/mmio-pair-fixture", "mmio-pair-fixture")
 };
 
 const ROUTER: ComponentSpec<'static> = ComponentSpec {
@@ -986,6 +1009,48 @@ fn a_second_record_naming_a_taken_window_is_refused() {
 
     kernel_tests::kassert!(answers.contains(&Ok(Ok(()))));
     kernel_tests::kassert!(answers.contains(&Ok(Err(SessionError::Unavailable))));
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_second_record_naming_a_window_in_a_taken_page_is_refused() {
+    let first = ComponentSpec {
+        name: "first-virtio-forwarding",
+        requirements: FIRST_VIRTIO_DEVICES,
+        ..FORWARDING
+    };
+    let second = ComponentSpec {
+        name: "second-virtio-forwarding",
+        requirements: SECOND_VIRTIO_DEVICES,
+        ..FORWARDING
+    };
+    for alone in [first, second] {
+        let composition = scenario(&[alone]);
+        let importer = composition.importer(&[forwarding_of(alone.name)]);
+        kernel_tests::kassert_eq!(forwarding(&importer, alone.name), Ok(Ok(())));
+        finish(composition);
+    }
+
+    let composition = scenario(&[first, second]);
+    let importer = composition.importer(&[forwarding_of(first.name), forwarding_of(second.name)]);
+    let answers = [
+        forwarding(&importer, first.name),
+        forwarding(&importer, second.name),
+    ];
+
+    kernel_tests::kassert!(answers.contains(&Ok(Ok(()))));
+    kernel_tests::kassert!(answers.contains(&Ok(Err(SessionError::Unavailable))));
+    finish(composition);
+}
+
+#[kernel_test]
+fn windows_of_one_record_in_one_page_share_the_region_at_their_offsets() {
+    let composition = scenario(&[MMIO_PAIR]);
+
+    kernel_tests::kassert_eq!(
+        await_component_lines(MMIO_PAIR.name, 1),
+        ["regions 0xa000000 0xa000000 offsets 0x0 0x200"]
+    );
     finish(composition);
 }
 

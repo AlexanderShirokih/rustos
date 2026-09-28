@@ -10,6 +10,7 @@ syscall = { workspace = true }
 
 [dev-dependencies]
 fdt = { workspace = true }
+fdt-test = { workspace = true }
 
 [lints]
 workspace = true

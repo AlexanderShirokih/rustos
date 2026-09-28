@@ -6,7 +6,11 @@ use core::num::NonZeroUsize;
 use drivers_aarch64::drivers;
 use drivers_common::scanner::EmbeddedDriversScanner;
 use drivers_common_aarch64::{
-    adapt_to_fdt_tree, device_windows::enumerate_device_windows, tree_ext::AddressSpace,
+    adapt_to_fdt_tree, device_windows::enumerate_device_windows, fdt_adapter::FdtNode,
+};
+use fdt::{
+    devicetree::DeviceTree,
+    devicetreeext::{self, SkippedWindow},
 };
 use hal_common::cpu::CpuTopology;
 use io::buffered_writer::BufferedWriter;
@@ -17,7 +21,7 @@ use kernelspace::{
 };
 use klog::{info, warn};
 use memory::{
-    AccessMask, MemoryRegion, page_round_up,
+    AccessMask, MemoryRegion, PAGE_SIZE,
     physical_address::{PageAlignedAddress, PhysicalAddress},
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
@@ -172,20 +176,12 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
         .scan_and_probe(root, drivers())
         .map_err(|_| PrimaryBootError::DtbScanDepth)?;
 
-    // Device-MMIO окна для userspace-драйверов: узлы, под которые ядро
-    // подобрало драйвер (GIC, PL011), исключены. Малформленные окна
-    // пропускаются, не валя boot.
+    // Device-MMIO регионы для userspace-драйверов из целых страниц: окна узлов, под которые
+    // ядро подобрало драйвер (GIC, PL011), и их поддеревья исключены. Окно в странице такого
+    // узла либо его потомка и окно поверх RAM вне `no-map` региона пропускаются, загрузка
+    // продолжается.
     let claimed: BTreeSet<usize> = driver_scanner.claimed_node_ids().collect();
-    let mut device_regions = Vec::new();
-    for window in enumerate_device_windows(&root, &claimed) {
-        match device_window_to_region(&window) {
-            Some(region) => device_regions.push(region),
-            None => warn!(
-                "device window {:#x}+{:#x} skipped: misaligned base",
-                window.offset, window.size
-            ),
-        }
-    }
+    let device_regions = collect_device_regions(device_tree, &root, &claimed);
 
     let memory_mapper: &'static (dyn memory::memory_mapper::MemoryMapper + Send + Sync) =
         result.memory_mapper;
@@ -295,16 +291,42 @@ fn init_cpu_topology(device_tree: &'static fdt::devicetree::DeviceTree<'static>)
     );
 }
 
-fn device_window_to_region(window: &AddressSpace) -> Option<Arc<MemoryRegion>> {
-    let base = PageAlignedAddress::from_usize(window.offset)?;
-    // Округление вверх опирается на постраничную изоляцию device-окон от
-    // kernel-owned MMIO, а она держится на плоской раскладке платформы.
-    let size = page_round_up(NonZeroUsize::new(window.size)?)?;
-    Some(Arc::new(MemoryRegion::create_physical_device(
-        base,
-        size,
-        AccessMask::RW,
-    )))
+fn collect_device_regions(
+    device_tree: &DeviceTree,
+    root: &FdtNode,
+    claimed: &BTreeSet<usize>,
+) -> Vec<Arc<MemoryRegion>> {
+    let mut windows = enumerate_device_windows(root, claimed);
+    let regions =
+        devicetreeext::page_regions(device_tree, &mut windows, PAGE_SIZE, |window, reason| {
+            warn!(
+                "device window {:#x}+{:#x} skipped: {}",
+                window.offset,
+                window.size,
+                skip_reason(reason)
+            );
+        });
+
+    regions
+        .filter_map(|region| {
+            let base = PageAlignedAddress::from_usize(region.offset)?;
+            let size = NonZeroUsize::new(region.size)?;
+            Some(Arc::new(MemoryRegion::create_physical_device(
+                base,
+                size,
+                AccessMask::RW,
+            )))
+        })
+        .collect()
+}
+
+const fn skip_reason(reason: SkippedWindow) -> &'static str {
+    match reason {
+        SkippedWindow::SharesExcludedPage => "shares a page with a kernel-owned device",
+        SkippedWindow::Inadmissible => {
+            "pages overlap RAM outside a no-map region or exceed the address space"
+        }
+    }
 }
 
 type InitialProcess = fn(

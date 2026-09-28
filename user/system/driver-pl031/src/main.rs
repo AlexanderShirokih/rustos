@@ -19,8 +19,7 @@ use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqLine, Port};
 use rtc_abi::rtc;
 use runtime::{
-    PortTransport, Priority, Timeout, UserMemFlags, log_fmt, log_line, process_exit, spawn_owned,
-    start_component,
+    PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned, start_component,
 };
 use syscall::{Handle, kind};
 
@@ -112,7 +111,7 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     )
     .map_err(|_| Error::Runtime)?;
 
-    let mapping = requirements.window.map_full(UserMemFlags::ReadWrite)?;
+    let mapping = requirements.window.map()?;
     let mut driver = Pl031 {
         device: mapping.mmio(),
         line: requirements.line,

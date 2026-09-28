@@ -1,9 +1,15 @@
 //! Сверка узла FDT со списком строк совместимости и доступ к его MMIO-окнам из probe-функции.
 
+use alloc::vec::Vec;
+
 use drivers_common::{
     DeviceNode, NodeProperty,
     probe::{ProbeContext, ProbeError},
     services::mmio::MmioAddress,
+};
+use fdt::{
+    devicetree::Node,
+    devicetreeext::{self, translate_window},
 };
 
 use crate::{
@@ -13,52 +19,36 @@ use crate::{
 
 pub type FdtProbeContext<'a> = ProbeContext<FdtNode<'a>>;
 
-/// Добавляет `ProbeContext`-у чтение `reg`-записи узла как переведённого через
-/// bus/root [`AddressSpace`].
+/// Добавляет `ProbeContext`-у чтение `reg`-записи узла в адресном пространстве корня.
 pub trait ProbeContextExt {
-    fn get_address(&self, reg_index: usize) -> AddressSpace;
+    /// Запись `reg_index` свойства `reg` узла, переведённая через `ranges` шин на пути к корню.
+    /// `None`, если записи нет либо адрес не транслируется.
+    fn get_address(&self, reg_index: usize) -> Option<AddressSpace>;
 
     fn get_mmio_address(&self, reg_index: usize) -> Option<MmioAddress> {
-        self.get_address(reg_index).as_mmio()
+        self.get_address(reg_index)?.as_mmio()
     }
 }
 
-impl<N> ProbeContextExt for ProbeContext<N>
-where
-    N: NodeAddressExt,
-{
-    fn get_address(&self, reg_index: usize) -> AddressSpace {
-        let node = self.node();
-        let bus = self.parent(node);
-        let root = bus.and_then(|parent| self.parent(parent));
+impl ProbeContextExt for FdtProbeContext<'_> {
+    fn get_address(&self, reg_index: usize) -> Option<AddressSpace> {
+        let (node, buses) = self.hierarchy().split_last()?;
+        let cells = buses.last()?.cells_size().unwrap_or_default();
+        let window = node.reg_iter(cells).nth(reg_index)?;
+        let path: Vec<Node<'_>> = buses.iter().map(FdtNode::inner).collect();
 
-        let parent_cell_size = bus
-            .and_then(super::tree_ext::NodeAddressExt::cells_size)
-            .unwrap_or_default();
-        let root_cell_size = root
-            .and_then(super::tree_ext::NodeAddressExt::cells_size)
-            .unwrap_or_default();
+        let translated = translate_window(
+            &path,
+            devicetreeext::AddressSpace {
+                offset: window.offset,
+                size: window.size,
+            },
+        )?;
 
-        let bus_range = bus
-            .and_then(|parent| parent.range_to_parent(root_cell_size))
-            .unwrap_or_default();
-
-        let address_space = node
-            .reg_iter(parent_cell_size)
-            .nth(reg_index)
-            .unwrap_or(AddressSpace { offset: 0, size: 0 });
-
-        // Трансляция child -> parent: parent + (offset - child).
-        // FDT недоверен, поэтому saturating_sub даёт 0 при offset < child вместо
-        // underflow, а saturating_add защищает от переполнения адреса.
-        let translated = bus_range
-            .parent
-            .saturating_add(address_space.offset.saturating_sub(bus_range.child));
-
-        AddressSpace {
-            offset: translated,
-            size: address_space.size,
-        }
+        Some(AddressSpace {
+            offset: translated.offset,
+            size: translated.size,
+        })
     }
 }
 

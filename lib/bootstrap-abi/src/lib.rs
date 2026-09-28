@@ -5,8 +5,8 @@
 //! Клиента и сервис даёт модуль [`bootstrap`]. Handle этого порта ядро выдаёт первому
 //! процессу при запуске, аргументом точки входа.
 //!
-//! [`bootstrap::Client::acquire_device_memory_by_base`] ищет окно устройства по его
-//! физическому адресу. [`bootstrap::Client::log_str`] режет строку длиннее кадра по границе
+//! [`bootstrap::Client::acquire_device_memory_containing`] ищет окно набора, которое содержит
+//! окно устройства. [`bootstrap::Client::log_str`] режет строку длиннее кадра по границе
 //! символа.
 
 #![cfg_attr(not(test), no_std)]
@@ -17,7 +17,7 @@ extern crate std;
 mod device_window;
 mod log;
 
-pub use device_window::DeviceWindow;
+pub use device_window::{ContainingWindow, DeviceWindow};
 use syscall::kind;
 
 /// Граница тега источника в [`bootstrap::log`].

@@ -4,8 +4,8 @@
 //! даёт [`DeviceTreePlatform`]. Биндинги контроллеров прерываний [`ControllerBindings`] эта
 //! реализация берёт у крейта архитектуры. Отказ поиска назван [`ResolveError`].
 //!
-//! [`acquire_mmio`] берёт у ядра capability на окно памяти устройства по найденному
-//! [`DeviceMmio`].
+//! [`acquire_mmio`] берёт у ядра capability на окно памяти, которое содержит найденный
+//! [`DeviceMmio`], и смещение устройства в этом окне.
 #![cfg_attr(not(test), no_std)]
 
 mod binding;

@@ -27,6 +27,7 @@ members = [
     "lib/device-resolver",
     "lib/device-resolver-aarch64",
     "lib/fdt",
+    "lib/fdt-test",
     "lib/filesystem",
     "lib/filesystem-abi",
     "lib/filesystem-client",
@@ -88,6 +89,7 @@ device-resolver-aarch64 = { path = "lib/device-resolver-aarch64" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }
+fdt-test = { path = "lib/fdt-test" }
 filesystem = { path = "lib/filesystem" }
 filesystem-abi = { path = "lib/filesystem-abi" }
 filesystem-client = { path = "lib/filesystem-client" }

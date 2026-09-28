@@ -144,13 +144,12 @@ mod tests {
     extern crate alloc;
 
     use alloc::{vec, vec::Vec as StdVec};
+    use core::slice;
 
     use fdt::devicetree::DeviceTree;
+    use fdt_test::Token::{Bytes, Cells, End, Node, Strings};
 
     use super::*;
-    use crate::test_util::{
-        StringPool, begin_node, build_fdt, end_node, end_tree, push_prop_bytes,
-    };
 
     struct CpuNode {
         name: &'static str,
@@ -189,40 +188,26 @@ mod tests {
     }
 
     fn build_cpus_dtb(address_cells: Option<u32>, cpus: &[CpuNode]) -> StdVec<u8> {
-        let mut pool = StringPool::new();
-        let addr_off = pool.intern("#address-cells");
-        let devtype_off = pool.intern("device_type");
-        let reg_off = pool.intern("reg");
-        let status_off = pool.intern("status");
-
-        let mut structure = StdVec::new();
-        begin_node(&mut structure, "");
-        begin_node(&mut structure, "cpus");
-        if let Some(cells) = address_cells {
-            push_prop_bytes(&mut structure, addr_off, &cells.to_be_bytes());
+        let address_cells = address_cells.map(|cells| [cells]);
+        let mut tokens = vec![Node("cpus")];
+        if let Some(cells) = &address_cells {
+            tokens.push(Cells("#address-cells", cells));
         }
 
         for cpu in cpus {
-            begin_node(&mut structure, cpu.name);
-            if let Some(device_type) = cpu.device_type {
-                let mut value = device_type.as_bytes().to_vec();
-                value.push(0);
-                push_prop_bytes(&mut structure, devtype_off, &value);
+            tokens.push(Node(cpu.name));
+            if let Some(device_type) = &cpu.device_type {
+                tokens.push(Strings("device_type", slice::from_ref(device_type)));
             }
-            if let Some(status) = cpu.status {
-                let mut value = status.as_bytes().to_vec();
-                value.push(0);
-                push_prop_bytes(&mut structure, status_off, &value);
+            if let Some(status) = &cpu.status {
+                tokens.push(Strings("status", slice::from_ref(status)));
             }
-            push_prop_bytes(&mut structure, reg_off, &cpu.reg);
-            end_node(&mut structure);
+            tokens.push(Bytes("reg", &cpu.reg));
+            tokens.push(End);
         }
 
-        end_node(&mut structure);
-        end_node(&mut structure);
-        end_tree(&mut structure);
-
-        build_fdt(&structure, pool.bytes())
+        tokens.push(End);
+        fdt_test::build(&tokens)
     }
 
     const TEST_CPUS: usize = 16;
@@ -348,13 +333,7 @@ mod tests {
 
     #[test]
     fn boot_cpu_is_present_without_cpus_node() {
-        let mut pool = StringPool::new();
-        let _ = pool.intern("unused");
-        let mut structure = StdVec::new();
-        begin_node(&mut structure, "");
-        end_node(&mut structure);
-        end_tree(&mut structure);
-        let bytes = build_fdt(&structure, pool.bytes());
+        let bytes = fdt_test::build(&[]);
 
         let topology = parse(&bytes, 0x0003);
 

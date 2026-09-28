@@ -200,6 +200,17 @@ ipc::wire_value! {
     }
 }
 
+ipc::wire_value! {
+    /// Окно регистров устройства: регион и смещение первого регистра от его начала.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MmioWindow<M = ipc::wire::Cap<kind::MemoryRegion>> {
+        /// Регион, который целиком содержит регистры устройства.
+        pub region: M,
+        /// Смещение первого регистра устройства от начала региона.
+        pub offset: u64,
+    }
+}
+
 const _: () = assert!(
     max_body_len(&[<SessionRequirement<'static> as WireTyped>::WIRE_TYPE]) <= BODY_MAX,
     "session request frame exceeds the body budget"
@@ -227,10 +238,11 @@ ipc::protocol! {
             requirement: Str<{ REQUIREMENT_NAME_MAX }>,
         ) -> own Result<ipc::wire::Cap<kind::IrqLine>, ResourceError>;
 
-        /// Выдаёт MMIO-окно требования `requirement` на запись до конца incarnation вызывающего.
+        /// Выдаёт окно регистров требования `requirement`: регион на запись до конца incarnation
+        /// вызывающего и смещение регистров устройства в нём.
         call(defer) fn mmio(
             requirement: Str<{ REQUIREMENT_NAME_MAX }>,
-        ) -> own Result<ipc::wire::Cap<kind::MemoryRegion>, ResourceError>;
+        ) -> own Result<MmioWindow, ResourceError>;
 
         /// Выдаёт регион образа требования `requirement` на чтение до конца incarnation
         /// вызывающего.
@@ -259,11 +271,15 @@ mod tests {
     use syscall::{Handle, ObjectKind, kind};
 
     use super::{
-        AcceptError, PROTOCOL_ID_MAX, ResourceError, SESSION_SCOPE_MAX, SessionError,
+        AcceptError, MmioWindow, PROTOCOL_ID_MAX, ResourceError, SESSION_SCOPE_MAX, SessionError,
         SessionRequest, SessionRequirement, SessionScope, WireValue, component_startup, value,
     };
 
     const SESSION_CAP: Cap<kind::Port> = cap(0x28);
+    const MMIO_WINDOW: MmioWindow = MmioWindow {
+        region: cap(0x29),
+        offset: 0x200,
+    };
     const SCOPE: &str = "/boot/demo";
     const EXPORT: &str = "FileSystem";
     const REQUIREMENT: &str = "files";
@@ -303,8 +319,9 @@ mod tests {
             &mut self,
             _frame: &MockResources,
             _requirement: Str<'_, { super::REQUIREMENT_NAME_MAX }>,
-            _reply: component_startup::mmio::Reply<MockReply>,
+            reply: component_startup::mmio::Reply<MockReply>,
         ) {
+            let _ = reply.send(Ok::<_, ResourceError>(MMIO_WINDOW));
         }
 
         fn region(
@@ -441,6 +458,25 @@ mod tests {
         assert_eq!(answer, Ok(Ok(SESSION_CAP)));
         assert_eq!(parent.requirements, [(REQUIREMENT.into(), EXPORT.into())]);
         assert_eq!(parent.exports, [String::from(EXPORT)]);
+    }
+
+    #[test]
+    fn an_mmio_reply_carries_the_region_and_the_offset_of_the_registers() {
+        let (child_end, listener) = ipc_test::pair();
+        let mut parent = Parent::default();
+
+        let answer = std::thread::scope(|scope| {
+            let child = scope.spawn(|| {
+                component_startup::Client::new(child_end)
+                    .mmio(Str::new(REQUIREMENT).expect("name within the bound"))
+            });
+            listener
+                .serve(|frame| component_startup::dispatch(&mut parent, frame))
+                .expect("dispatch ok");
+            child.join().expect("child joins")
+        });
+
+        assert_eq!(answer, Ok(Ok(MMIO_WINDOW)));
     }
 
     #[test]

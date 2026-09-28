@@ -3,14 +3,16 @@
 use alloc::{string::String, vec::Vec};
 
 use bootstrap_abi::bootstrap;
+use component_abi::{MmioWindow, ResourceError};
 use device_resolver::{
-    DeviceMmio, DeviceSelector, DeviceTreePlatform, InterruptLine, PlatformDescription,
-    ResolveError, acquire_mmio,
+    DeviceSelector, DeviceTreePlatform, InterruptLine, PlatformDescription, ResolveError,
+    acquire_mmio,
 };
 use device_resolver_aarch64::PLATFORM_BINDINGS;
 use fdt::devicetree::DeviceTree;
 use kernel_objects::{
-    BorrowedHandle, IrqControl, IrqLine, MemoryRegion, ObjectKind, ReadOnlyMapping, kind,
+    BorrowedHandle, IrqControl, IrqLine, MemoryRegion, ObjectKind, OwnedHandle, ReadOnlyMapping,
+    kind,
 };
 use runtime::PortTransport;
 use syscall::Handle;
@@ -20,7 +22,7 @@ pub(crate) struct DeviceGrants {
     kernel: Handle<kind::Port>,
     platform: Option<Platform>,
     lines: Vec<Root<InterruptLine, IrqLine>>,
-    windows: Vec<Root<DeviceMmio, MemoryRegion>>,
+    windows: Vec<Root<HeldWindow, MemoryRegion>>,
 }
 
 struct Platform {
@@ -37,16 +39,24 @@ struct Root<D, H> {
     handle: H,
 }
 
+#[derive(Clone, Copy)]
+struct HeldWindow {
+    region_base: u64,
+    offset: u64,
+}
+
 pub(crate) trait DeviceKind: ObjectKind + Sized + 'static {
+    type Grant;
+
     fn device(source: RequirementSource<'_>) -> Option<PlanDevice<'_>>;
 
-    fn root<R>(
+    fn root(
         grants: &mut DeviceGrants,
         record: u16,
         requirement: &str,
         device: PlanDevice<'_>,
-        grant: impl FnOnce(BorrowedHandle<'_, Self>) -> R,
-    ) -> Result<R, DeviceRefusal>;
+        grant: impl FnOnce(BorrowedHandle<'_, Self>) -> Result<OwnedHandle<Self>, ResourceError>,
+    ) -> Result<Result<Self::Grant, ResourceError>, DeviceRefusal>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,39 +123,47 @@ impl DeviceGrants {
         requirement: &str,
         device: PlanDevice<'_>,
         grant: impl FnOnce(BorrowedHandle<'_, kind::MemoryRegion>) -> R,
-    ) -> Result<R, DeviceRefusal> {
+    ) -> Result<(R, u64), DeviceRefusal> {
         if let Some(root) = self
             .windows
             .iter()
             .find(|root| root.is(record, requirement))
         {
-            return Ok(grant(root.handle.borrow()));
+            return Ok((grant(root.handle.borrow()), root.device.offset));
         }
         let platform = self.platform.as_ref().ok_or(DeviceRefusal::Platform)?;
         let window = platform.first_match(device, |description, selector| {
             description.mmio(selector, device.resource)
         })?;
+        let client = bootstrap::Client::new(PortTransport::new(self.kernel));
+        let found =
+            acquire_mmio::<_, MemoryRegion>(&client, window).map_err(DeviceRefusal::Resolve)?;
+        let held = HeldWindow {
+            region_base: window.base - found.offset,
+            offset: found.offset,
+        };
+        // Регионы набора ядра не пересекаются, и совпадение базы означает общий регион.
         if self
             .windows
             .iter()
-            .any(|root| overlaps(root.device, window))
+            .any(|root| root.device.region_base == held.region_base && root.record != record)
         {
             return Err(DeviceRefusal::WindowTaken);
         }
-        let client = bootstrap::Client::new(PortTransport::new(self.kernel));
-        let handle: MemoryRegion = acquire_mmio(&client, window).map_err(DeviceRefusal::Resolve)?;
-        let answer = grant(handle.borrow());
+        let answer = grant(found.window.borrow());
         self.windows.push(Root {
             record,
             requirement: String::from(requirement),
-            device: window,
-            handle,
+            device: held,
+            handle: found.window,
         });
-        Ok(answer)
+        Ok((answer, held.offset))
     }
 }
 
 impl DeviceKind for kind::IrqLine {
+    type Grant = OwnedHandle<Self>;
+
     fn device(source: RequirementSource<'_>) -> Option<PlanDevice<'_>> {
         match source {
             RequirementSource::Irq(device) => Some(device),
@@ -153,18 +171,20 @@ impl DeviceKind for kind::IrqLine {
         }
     }
 
-    fn root<R>(
+    fn root(
         grants: &mut DeviceGrants,
         record: u16,
         requirement: &str,
         device: PlanDevice<'_>,
-        grant: impl FnOnce(BorrowedHandle<'_, Self>) -> R,
-    ) -> Result<R, DeviceRefusal> {
+        grant: impl FnOnce(BorrowedHandle<'_, Self>) -> Result<OwnedHandle<Self>, ResourceError>,
+    ) -> Result<Result<Self::Grant, ResourceError>, DeviceRefusal> {
         grants.line(record, requirement, device, grant)
     }
 }
 
 impl DeviceKind for kind::MemoryRegion {
+    type Grant = MmioWindow<OwnedHandle<Self>>;
+
     fn device(source: RequirementSource<'_>) -> Option<PlanDevice<'_>> {
         match source {
             RequirementSource::Mmio(device) => Some(device),
@@ -172,14 +192,15 @@ impl DeviceKind for kind::MemoryRegion {
         }
     }
 
-    fn root<R>(
+    fn root(
         grants: &mut DeviceGrants,
         record: u16,
         requirement: &str,
         device: PlanDevice<'_>,
-        grant: impl FnOnce(BorrowedHandle<'_, Self>) -> R,
-    ) -> Result<R, DeviceRefusal> {
-        grants.window(record, requirement, device, grant)
+        grant: impl FnOnce(BorrowedHandle<'_, Self>) -> Result<OwnedHandle<Self>, ResourceError>,
+    ) -> Result<Result<Self::Grant, ResourceError>, DeviceRefusal> {
+        let (granted, offset) = grants.window(record, requirement, device, grant)?;
+        Ok(granted.map(|region| MmioWindow { region, offset }))
     }
 }
 
@@ -198,11 +219,11 @@ impl DeviceRefusal {
             Self::Resolve(ResolveError::NoMmio) => "device described without mmio windows",
             Self::Resolve(ResolveError::ResourceOutOfRange) => "device resource out of range",
             Self::Resolve(ResolveError::UnknownController) => "interrupt controller unknown",
-            Self::Resolve(ResolveError::BusTranslation) => "device behind a translating bus",
+            Self::Resolve(ResolveError::Untranslatable) => "device address not translatable",
             Self::Resolve(ResolveError::Malformed) => "device description malformed",
             Self::Resolve(ResolveError::MmioUnavailable) => "mmio window not granted by the kernel",
             Self::LineTaken => "irq line held by another requirement",
-            Self::WindowTaken => "mmio window overlaps another requirement",
+            Self::WindowTaken => "mmio region held by another record",
             Self::Mint => "irq line not minted",
         }
     }
@@ -250,10 +271,4 @@ impl Platform {
         }
         Err(DeviceRefusal::Resolve(failure))
     }
-}
-
-fn overlaps(held: DeviceMmio, window: DeviceMmio) -> bool {
-    let held_end = held.base.saturating_add(held.size);
-    let window_end = window.base.saturating_add(window.size);
-    held.base < window_end && window.base < held_end
 }

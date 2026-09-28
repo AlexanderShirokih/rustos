@@ -424,7 +424,7 @@ impl<'a> RootSystem<'a> {
         &mut self,
         badge: u64,
         requirement: &str,
-    ) -> Result<OwnedHandle<K>, ResourceError> {
+    ) -> Result<K::Grant, ResourceError> {
         let (record, device) = self
             .record_requirement(badge, requirement)
             .and_then(|(record, source)| Some((record, K::device(source)?)))
@@ -498,7 +498,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
         reply: component_startup::irq::Reply<Debt>,
     ) {
-        let _ = reply.send(self.device(frame.badge, requirement.as_str()));
+        let _ = reply.send(self.device::<kind::IrqLine>(frame.badge, requirement.as_str()));
     }
 
     fn mmio(
@@ -507,7 +507,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
         reply: component_startup::mmio::Reply<Debt>,
     ) {
-        let _ = reply.send(self.device(frame.badge, requirement.as_str()));
+        let _ = reply.send(self.device::<kind::MemoryRegion>(frame.badge, requirement.as_str()));
     }
 
     fn region(

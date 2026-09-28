@@ -9,5 +9,8 @@ collections = { workspace = true }
 fdt = { workspace = true }
 memory = { workspace = true }
 
+[dev-dependencies]
+fdt-test = { workspace = true }
+
 [lints]
 workspace = true

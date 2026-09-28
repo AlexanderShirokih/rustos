@@ -621,9 +621,11 @@ port_send(peer_h, PORT_TIMEOUT_INFINITE);
 Драйвер фреймбуфера выбирает профиль перед маппингом окна:
 
 ```rust
-let window_h = /* device-окно из ответа на требование mmio */;
+let (window_h, window_offset) = /* регион и смещение из ответа на требование mmio */;
+let (region_size, _meta) = memory_region_inspect(window_h);
 let framebuffer_h = memory_with_profile(window_h, 1 /* WriteCombining */)?;
-let va = memory_map(framebuffer_h, size, 0 /* ReadWrite */);
+let va = memory_map(framebuffer_h, region_size as u64, 0 /* ReadWrite */);
+let framebuffer = va + window_offset;
 ```
 
 Запись через `WriteCombining` доходит до устройства пакетами и в
@@ -676,10 +678,17 @@ Bootstrap-канал (`acquire_device_memory(index)`, см.
 [userland.md](userland.md)), rootkeeper выдаёт её драйверу по его требованию
 `mmio`.
 
+Регион набора состоит из целых страниц, и окна с общей страницей входят в один
+регион. Ядро выдаёт окно поверх RAM, только если оно целиком лежит в регионе,
+который описание платформы исключает из отображения. Ядро пропускает с
+предупреждением в журнале остальные окна поверх RAM и окна в страницах устройств
+под своим драйвером.
+
 - `MemoryRegionInspect` отдаёт размер региона (primary) и его физическую базу
-  `base_pa` (secondary, для корреляции с FDT-узлом устройства);
+  `base_pa` (secondary, для сопоставления с устройством из описания
+  платформы);
 - `MemoryMap` маппит регистры в адресное пространство драйвера;
-- доступ к регистрам — volatile-чтения/записи по полученному VA;
+- доступ к регистрам — volatile-чтения/записи по полученному VA со смещением окна;
 - прерывание линии устройства обслуживается через [IRQ](#irq).
 
 Закрытие memory-капы (или завершение процесса) снимает маппинг тем же
@@ -689,9 +698,10 @@ Bootstrap-канал (`acquire_device_memory(index)`, см.
 Пример: драйвер маппит регистры устройства и обслуживает его прерывание.
 
 ```rust
+let (device_region_h, window_offset) = /* регион и смещение из ответа на требование mmio */;
 let (region_size, _meta) = memory_region_inspect(device_region_h);
 let regs_va = memory_map(device_region_h, region_size as u64, 0 /* ReadWrite */);
-let regs = regs_va as *mut u32;
+let regs = (regs_va + window_offset) as *mut u32;
 
 let irq_h = irq_mint(irq_control_h, DEVICE_IRQ)?;
 loop {

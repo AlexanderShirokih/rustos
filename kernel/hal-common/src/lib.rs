@@ -11,12 +11,8 @@
 //! device tree и решения о подъёме процессоров покрыты обычными тестами на host.
 
 #![cfg_attr(not(test), no_std)]
-#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 
 pub mod boot;
 pub mod cpu;
 pub mod scanner;
 pub mod smp;
-
-#[cfg(test)]
-mod test_util;

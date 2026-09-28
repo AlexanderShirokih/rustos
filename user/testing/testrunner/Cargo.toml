@@ -104,6 +104,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "mmio-pair-fixture"
+path = "src/mmio_pair_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "refusal-probe-fixture"
 path = "src/refusal_probe_fixture.rs"
 test = false

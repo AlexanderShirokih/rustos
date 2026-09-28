@@ -56,7 +56,7 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER;
     let (Ok(line), Ok(window)) = (
         requirements.line.duplicate(rights, None),
-        requirements.window.duplicate(rights, None),
+        requirements.window.region.duplicate(rights, None),
     ) else {
         process_exit(FAILED_EXIT_CODE)
     };

@@ -47,6 +47,7 @@ version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
  "fdt",
+ "fdt-test",
  "ipc",
  "syscall",
 ]
@@ -57,6 +58,7 @@ version = "0.1.0"
 dependencies = [
  "device-resolver",
  "fdt",
+ "fdt-test",
  "syscall",
 ]
 
@@ -76,6 +78,7 @@ version = "0.1.0"
 dependencies = [
  "drivers-common",
  "fdt",
+ "fdt-test",
 ]
 
 [[package]]
@@ -83,7 +86,12 @@ name = "fdt"
 version = "0.1.0"
 dependencies = [
  "collections",
+ "fdt-test",
 ]
+
+[[package]]
+name = "fdt-test"
+version = "0.1.0"
 
 [[package]]
 name = "filesystem"
@@ -138,6 +146,7 @@ version = "0.1.0"
 dependencies = [
  "collections",
  "fdt",
+ "fdt-test",
  "memory",
 ]
 

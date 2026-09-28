@@ -7,5 +7,8 @@ publish.workspace = true
 [dependencies]
 collections = { workspace = true }
 
+[dev-dependencies]
+fdt-test = { workspace = true }
+
 [lints]
 workspace = true

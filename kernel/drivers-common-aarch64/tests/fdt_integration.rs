@@ -1,133 +1,46 @@
 //! Интеграционные тесты адаптера через реальный `FdtTree`/`FdtNode`,
 //! построенный из настоящего DTB-blob.
-//!
-//! Это исполняет реальные реализации `RegIter`, `range_to_parent`,
-//! `try_read_cell`, `is_compatible` и трансляцию адресов в `get_address`.
 
 #![allow(clippy::unwrap_used)]
-#![allow(clippy::cast_possible_truncation, clippy::panic)]
+#![allow(clippy::panic)]
+
+use std::collections::BTreeSet;
 
 use drivers_common::{DeviceNode, probe::ProbeContext};
 use drivers_common_aarch64::{
     ProbeContextExt, adapt_to_fdt_tree,
+    device_windows::enumerate_device_windows,
     fdt_adapter::FdtNode,
     is_compatible, require_compatible,
-    tree_ext::{CellsSize, NodeAddressExt},
+    tree_ext::{AddressSpace, CellsSize, NodeAddressExt},
 };
 use fdt::devicetree::DeviceTree;
 
-// DTB-билдер
-
-fn push_u32(buf: &mut Vec<u8>, val: u32) {
-    buf.extend_from_slice(&val.to_be_bytes());
-}
-
-fn align4(buf: &mut Vec<u8>) {
-    while !buf.len().is_multiple_of(4) {
-        buf.push(0);
-    }
-}
-
-struct Strings {
-    bytes: Vec<u8>,
-}
-
-impl Strings {
-    fn new() -> Self {
-        Self { bytes: Vec::new() }
-    }
-
-    fn intern(&mut self, name: &str) -> u32 {
-        let off = self.bytes.len() as u32;
-        self.bytes.extend_from_slice(name.as_bytes());
-        self.bytes.push(0);
-        off
-    }
-}
-
-fn push_prop_u32(buf: &mut Vec<u8>, name_off: u32, val: u32) {
-    push_u32(buf, 0x3);
-    push_u32(buf, 4);
-    push_u32(buf, name_off);
-    push_u32(buf, val);
-}
-
-fn push_prop_bytes(buf: &mut Vec<u8>, name_off: u32, val: &[u8]) {
-    push_u32(buf, 0x3);
-    push_u32(buf, val.len() as u32);
-    push_u32(buf, name_off);
-    buf.extend_from_slice(val);
-    align4(buf);
-}
-
-fn write_dtb(structure: &[u8], strings: &[u8]) -> Vec<u8> {
-    let off_rsvmap: u32 = 40;
-    let off_struct = off_rsvmap + 16;
-    let off_strings = off_struct + structure.len() as u32;
-    let total = off_strings + strings.len() as u32;
-
-    let mut buf = Vec::new();
-    push_u32(&mut buf, 0xD00D_FEED);
-    push_u32(&mut buf, total);
-    push_u32(&mut buf, off_struct);
-    push_u32(&mut buf, off_strings);
-    push_u32(&mut buf, off_rsvmap);
-    push_u32(&mut buf, 17);
-    push_u32(&mut buf, 16);
-    push_u32(&mut buf, 0);
-    push_u32(&mut buf, strings.len() as u32);
-    push_u32(&mut buf, structure.len() as u32);
-    buf.extend_from_slice(&[0u8; 16]);
-    buf.extend_from_slice(structure);
-    buf.extend_from_slice(strings);
-    buf
-}
-
-fn build_soc_dtb() -> Vec<u8> {
-    let mut s = Strings::new();
-    let s_addr = s.intern("#address-cells");
-    let s_size = s.intern("#size-cells");
-    let s_ranges = s.intern("ranges");
-    let s_compat = s.intern("compatible");
-    let s_reg = s.intern("reg");
-
-    let mut st = Vec::new();
-    push_u32(&mut st, 0x1); // begin root
-    push_u32(&mut st, 0x0);
-    push_prop_u32(&mut st, s_addr, 2);
-    push_prop_u32(&mut st, s_size, 1);
-
-    // soc
-    push_u32(&mut st, 0x1);
-    st.extend_from_slice(b"soc\0");
-    align4(&mut st);
-    push_prop_u32(&mut st, s_addr, 1);
-    push_prop_u32(&mut st, s_size, 1);
-    // ranges: child(1) parent(2) size(1)
-    let mut ranges = Vec::new();
-    push_u32(&mut ranges, 0x0); // child
-    push_u32(&mut ranges, 0x0); // parent hi
-    push_u32(&mut ranges, 0x1000_0000); // parent lo
-    push_u32(&mut ranges, 0x0010_0000); // size
-    push_prop_bytes(&mut st, s_ranges, &ranges);
-
-    // serial@2000
-    push_u32(&mut st, 0x1);
-    st.extend_from_slice(b"serial@2000\0");
-    align4(&mut st);
-    push_prop_bytes(&mut st, s_compat, b"arm,pl011\0arm,primecell\0");
-    let mut reg = Vec::new();
-    push_u32(&mut reg, 0x2000);
-    push_u32(&mut reg, 0x1000);
-    push_prop_bytes(&mut st, s_reg, &reg);
-    push_u32(&mut st, 0x2); // end serial
-
-    push_u32(&mut st, 0x2); // end soc
-    push_u32(&mut st, 0x2); // end root
-    push_u32(&mut st, 0x9); // end
-
-    write_dtb(&st, &s.bytes)
-}
+const SOC_TREE: &[fdt_test::Token<'static>] = &fdt_test::tree! {
+    #address-cells = <2>;
+    #size-cells = <1>;
+    soc {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges = <0x0 0x0 0x1000_0000 0x10_0000>;
+        serial@2000 {
+            compatible = "arm,pl011", "arm,primecell";
+            reg = <0x2000 0x1000>;
+        };
+        intc@3000 {
+            compatible = "vendor,intc";
+            reg = <0x3000 0x100 0x4000 0x1000>;
+        };
+        bus@5000 {
+            #address-cells = <1>;
+            #size-cells = <1>;
+            dev@0 {
+                compatible = "vendor,dev";
+                reg = <0x0 0x10>;
+            };
+        };
+    };
+};
 
 fn find_child<'a>(node: &FdtNode<'a>, name: &str) -> FdtNode<'a> {
     node.children()
@@ -139,7 +52,7 @@ fn find_child<'a>(node: &FdtNode<'a>, name: &str) -> FdtNode<'a> {
 
 #[test]
 fn real_fdt_reg_iter_reads_reg_property() {
-    let dtb = build_soc_dtb();
+    let dtb = fdt_test::build(SOC_TREE);
     let dt = DeviceTree::from_bytes(&dtb).unwrap();
     let tree = adapt_to_fdt_tree(&dt);
     let root = tree.root().unwrap();
@@ -163,24 +76,8 @@ fn real_fdt_reg_iter_reads_reg_property() {
 }
 
 #[test]
-fn real_fdt_range_to_parent_reads_ranges() {
-    let dtb = build_soc_dtb();
-    let dt = DeviceTree::from_bytes(&dtb).unwrap();
-    let tree = adapt_to_fdt_tree(&dt);
-    let root = tree.root().unwrap();
-    let soc = find_child(&root, "soc");
-
-    // Родитель (root) использует #address-cells=2.
-    let parent_cells = root.cells_size().unwrap();
-    let range = soc.range_to_parent(parent_cells).expect("soc has ranges");
-    assert_eq!(range.child, 0x0);
-    assert_eq!(range.parent, 0x1000_0000);
-    assert_eq!(range.size, 0x0010_0000);
-}
-
-#[test]
 fn real_fdt_is_compatible_matches_string_list() {
-    let dtb = build_soc_dtb();
+    let dtb = fdt_test::build(SOC_TREE);
     let dt = DeviceTree::from_bytes(&dtb).unwrap();
     let tree = adapt_to_fdt_tree(&dt);
     let root = tree.root().unwrap();
@@ -200,28 +97,28 @@ fn real_fdt_is_compatible_matches_string_list() {
 
 #[test]
 fn real_fdt_get_address_translates_through_bus() {
-    let dtb = build_soc_dtb();
+    let dtb = fdt_test::build(SOC_TREE);
     let dt = DeviceTree::from_bytes(&dtb).unwrap();
     let tree = adapt_to_fdt_tree(&dt);
     let root = tree.root().unwrap();
     let soc = find_child(&root, "soc");
     let serial = find_child(&soc, "serial@2000");
 
-    // hierarchy: root -> soc -> serial.
     let ctx = ProbeContext::new(serial, vec![root, soc, serial], None);
-    let reg = ctx.get_address(0);
-    // 0x1000_0000 (parent) + 0x2000 (offset) - 0x0 (child) = 0x1000_2000.
-    assert_eq!(reg.offset, 0x1000_2000);
-    assert_eq!(reg.size, 0x1000);
 
-    // mmio-обёртка.
-    let mmio = ctx.get_mmio_address(0).expect("valid mmio");
-    assert_eq!(mmio.base(), 0x1000_2000);
+    assert_eq!(
+        ctx.get_address(0),
+        Some(AddressSpace {
+            offset: 0x1000_2000,
+            size: 0x1000,
+        })
+    );
+    assert_eq!(ctx.get_mmio_address(0).unwrap().base(), 0x1000_2000);
 }
 
 #[test]
 fn real_fdt_get_address_reg_index_out_of_bounds() {
-    let dtb = build_soc_dtb();
+    let dtb = fdt_test::build(SOC_TREE);
     let dt = DeviceTree::from_bytes(&dtb).unwrap();
     let tree = adapt_to_fdt_tree(&dt);
     let root = tree.root().unwrap();
@@ -229,25 +126,83 @@ fn real_fdt_get_address_reg_index_out_of_bounds() {
     let serial = find_child(&soc, "serial@2000");
 
     let ctx = ProbeContext::new(serial, vec![root, soc, serial], None);
-    // reg_index=5 за пределами -> address_space по умолчанию {0,0},
-    // транслируется в parent (0x1000_0000) + 0 - child(0) = 0x1000_0000.
-    let reg = ctx.get_address(5);
-    assert_eq!(reg.size, 0);
-    assert_eq!(reg.offset, 0x1000_0000);
+
+    assert_eq!(ctx.get_address(5), None);
 }
 
 #[test]
 fn real_fdt_get_address_without_parent_bus() {
-    let dtb = build_soc_dtb();
+    let dtb = fdt_test::build(SOC_TREE);
     let dt = DeviceTree::from_bytes(&dtb).unwrap();
     let tree = adapt_to_fdt_tree(&dt);
     let root = tree.root().unwrap();
     let soc = find_child(&root, "soc");
 
-    // soc как одиночный узел (нет родителя в иерархии): bus_range = default {0,0,0},
-    // reg у soc нет -> address_space {0,0} -> offset 0.
     let ctx = ProbeContext::new(soc, vec![soc], None);
-    let reg = ctx.get_address(0);
-    assert_eq!(reg.offset, 0);
-    assert_eq!(reg.size, 0);
+
+    assert_eq!(ctx.get_address(0), None);
+}
+
+#[test]
+fn real_fdt_get_address_reads_each_reg_entry() {
+    let dtb = fdt_test::build(SOC_TREE);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let root = adapt_to_fdt_tree(&dt).root().unwrap();
+    let soc = find_child(&root, "soc");
+    let intc = find_child(&soc, "intc@3000");
+
+    let ctx = ProbeContext::new(intc, vec![root, soc, intc], None);
+
+    assert_eq!(
+        ctx.get_address(1),
+        Some(AddressSpace {
+            offset: 0x1000_4000,
+            size: 0x1000,
+        })
+    );
+}
+
+#[test]
+fn real_fdt_get_address_behind_a_bus_without_ranges_is_none() {
+    let dtb = fdt_test::build(SOC_TREE);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let root = adapt_to_fdt_tree(&dt).root().unwrap();
+    let soc = find_child(&root, "soc");
+    let bus = find_child(&soc, "bus@5000");
+    let dev = find_child(&bus, "dev@0");
+
+    let ctx = ProbeContext::new(dev, vec![root, soc, bus, dev], None);
+
+    assert_eq!(ctx.get_address(0), None);
+}
+
+#[test]
+fn a_claimed_node_gives_marked_windows() {
+    let dtb = fdt_test::build(SOC_TREE);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let root = adapt_to_fdt_tree(&dt).root().unwrap();
+    let intc = find_child(&find_child(&root, "soc"), "intc@3000");
+    let windows = |claimed: &BTreeSet<usize>| -> Vec<(usize, usize, bool)> {
+        enumerate_device_windows(&root, claimed)
+            .iter()
+            .map(|window| (window.window.offset, window.window.size, window.excluded))
+            .collect()
+    };
+
+    assert_eq!(
+        windows(&BTreeSet::new()),
+        [
+            (0x1000_2000, 0x1000, false),
+            (0x1000_3000, 0x100, false),
+            (0x1000_4000, 0x1000, false)
+        ]
+    );
+    assert_eq!(
+        windows(&BTreeSet::from([intc.id()])),
+        [
+            (0x1000_2000, 0x1000, false),
+            (0x1000_3000, 0x100, true),
+            (0x1000_4000, 0x1000, true)
+        ]
+    );
 }

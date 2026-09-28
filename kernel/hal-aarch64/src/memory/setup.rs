@@ -2,7 +2,7 @@
 
 use fdt::{
     devicetree::DeviceTree,
-    devicetreeext::{AddressSpace, NodeExt, PropExt, reserved_memory_ranges},
+    devicetreeext::{find_ram_regions, reserved_memory_ranges},
 };
 use hal_aarch64_paging::preset::{KernelData, KernelRoData, KernelText};
 use hal_common::boot::BootPayloadRange;
@@ -83,11 +83,17 @@ pub(crate) fn build_memory_layout(
 
     // Статические reg-диапазоны под /reserved-memory.
     if let Some(reserved_regions) = reserved_memory_ranges(dt) {
-        for region in reserved_regions {
+        for reserved in reserved_regions {
+            let tag = if reserved.no_map {
+                RegionTag::Unmapped
+            } else {
+                RegionTag::Other
+            };
+
             layout.add(MemoryRegion::new(
-                RegionTag::Other,
-                region.start(),
-                region.end(),
+                tag,
+                reserved.range.start(),
+                reserved.range.end(),
                 KernelRoData::flags(),
             ))?;
         }
@@ -117,27 +123,4 @@ pub(crate) fn build_memory_layout(
     }
 
     Ok(layout)
-}
-
-fn find_ram_regions(dt: &DeviceTree) -> Option<impl Iterator<Item = AddressSpace>> {
-    let root = dt.root()?;
-
-    Some(
-        root.children()
-            .filter(|node| {
-                node.prop("device_type")
-                    .and_then(|device_type| {
-                        device_type.as_cstr().map(|str| str.starts_with("memory"))
-                    })
-                    .unwrap_or_else(|| node.name().starts_with("memory"))
-            })
-            .filter_map(|node| node.prop("reg"))
-            .flat_map(move |prop| {
-                let cells_size = root.cells_size().unwrap_or_default();
-                prop.try_as_reg_list::<8>(cells_size)
-                    .unwrap_or_default()
-                    .into_iter()
-            })
-            .filter(|offset_size| offset_size.size > 0),
-    )
 }
