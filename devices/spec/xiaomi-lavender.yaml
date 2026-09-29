@@ -7,6 +7,10 @@ boot:
   format: android_boot_v1
   offset: 0x40080000
   base: 0x40000000
+  ext:
+    # ABL распаковывает ядро по смещению 0x80000 от начала boot.img, ramdisk
+    # в файле кладётся за концом распакованного ядра.
+    kernel_image_pad: 0x80000
 
 run: [
   "fastboot boot target/build/boot.img"

@@ -44,6 +44,13 @@ pub(crate) struct BootSection {
     pub(crate) offset: u64,
     pub(crate) dtb: Option<String>,
     pub(crate) base: Option<u64>,
+    #[serde(default)]
+    pub(crate) ext: BootExt,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct BootExt {
+    pub(crate) kernel_image_pad: Option<u64>,
 }
 
 pub(crate) struct BuildContext {

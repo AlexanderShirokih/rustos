@@ -1,13 +1,13 @@
 //! Сборка артефактов ядра по `boot.format`: kernel.bin, kernel.gz, boot.img.
 
 use std::{
-    fs::File,
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use flate2::{Compression, write::GzEncoder};
 
 use crate::{
@@ -118,6 +118,15 @@ fn make_boot_img(ctx: &BuildContext, version: BootImageVersion) -> Result<()> {
         // Заголовок первой версии не содержит поля dtb, и дерево присоединяется хвостом за ядром.
         BootImageVersion::V1 => {
             concat_files(&[&ctx.kernel_gz(), &dtb_path], &ctx.kernel_gz_dtb())?;
+
+            if let Some(pad) = ctx.spec.boot.ext.kernel_image_pad {
+                let image = fs::read(ctx.kernel_bin())
+                    .with_context(|| format!("Failed to read {}", ctx.kernel_bin().display()))?;
+                let block_size = kernel_block_size_past_padded_image(&image, pad)?;
+
+                pad_file(&ctx.kernel_gz_dtb(), block_size)?;
+            }
+
             cmd.arg(ctx.kernel_gz_dtb());
         }
         BootImageVersion::V2 => {
@@ -160,6 +169,40 @@ fn concat_files(sources: &[&Path], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+fn kernel_block_size_past_padded_image(image: &[u8], pad: u64) -> Result<u64> {
+    if image.get(56..60) != Some(b"ARM\x64".as_slice()) {
+        bail!("kernel.bin has no arm64 Image header");
+    }
+
+    let image_size = image
+        .get(16..24)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_le_bytes)
+        .context("kernel.bin has no image_size in the arm64 Image header")?;
+
+    Ok(image_size + pad)
+}
+
+fn pad_file(path: &Path, min_size: u64) -> Result<()> {
+    let size = fs::metadata(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?
+        .len();
+
+    if size >= min_size {
+        return Ok(());
+    }
+
+    let padding = usize::try_from(min_size - size)
+        .with_context(|| format!("Padding of {} does not fit in memory", path.display()))?;
+
+    OpenOptions::new()
+        .append(true)
+        .open(path)
+        .with_context(|| format!("Failed to open {}", path.display()))?
+        .write_all(&vec![0; padding])
+        .with_context(|| format!("Failed to write {}", path.display()))
+}
+
 pub(crate) fn build_binary(ctx: &BuildContext) -> Result<PathBuf> {
     cargo_build(ctx)?;
     make_kernel_bin(ctx)?;
@@ -172,4 +215,61 @@ pub(crate) fn build_android(ctx: &BuildContext, version: BootImageVersion) -> Re
     make_kernel_gz(ctx)?;
     make_boot_img(ctx, version)?;
     Ok(ctx.boot_img())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_file(name: &str, content: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("xtask-pad-{}-{name}", std::process::id()));
+        fs::write(&path, content).unwrap();
+
+        path
+    }
+
+    fn image_header(image_size: u64, magic: [u8; 4]) -> Vec<u8> {
+        let mut header = vec![0; 64];
+        header[16..24].copy_from_slice(&image_size.to_le_bytes());
+        header[56..60].copy_from_slice(&magic);
+
+        header
+    }
+
+    #[test]
+    fn kernel_block_covers_image_size_and_pad() {
+        let header = image_header(0x000c_a2d0, *b"ARM\x64");
+
+        assert_eq!(
+            kernel_block_size_past_padded_image(&header, 0x80000).unwrap(),
+            0x0014_a2d0
+        );
+    }
+
+    #[test]
+    fn kernel_block_size_rejects_image_without_magic() {
+        let header = image_header(0x000c_a2d0, [0; 4]);
+
+        assert!(kernel_block_size_past_padded_image(&header, 0x80000).is_err());
+    }
+
+    #[test]
+    fn pad_file_extends_short_file_with_zeros() {
+        let path = temp_file("short", b"abc");
+
+        pad_file(&path, 8).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"abc\0\0\0\0\0");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn pad_file_leaves_long_file_untouched() {
+        let path = temp_file("long", b"abcdef");
+
+        pad_file(&path, 4).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"abcdef");
+        fs::remove_file(path).unwrap();
+    }
 }
