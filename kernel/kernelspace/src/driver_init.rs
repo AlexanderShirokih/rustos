@@ -34,10 +34,13 @@ pub struct InitSummary {
     pub deferred_left: usize,
 }
 
+/// Поднимает драйверы проходами, пока все не поднялись. `on_initialized` вызывается после
+/// каждого поднятого драйвера и получает сервисы, опубликованные к этому моменту.
 pub fn run_retry_passes(
     mut pending: Vec<PendingDriver>,
     services: &mut BootServices,
     registry: &mut RuntimeDriverRegistry,
+    mut on_initialized: impl FnMut(&BootServices),
 ) -> Result<InitSummary, InitSchedulerError> {
     let mut passes = 0usize;
     let mut initialized = 0usize;
@@ -58,6 +61,7 @@ pub fn run_retry_passes(
                     info!("Running driver {}. OK", pending_driver.name);
 
                     registry.insert(pending_driver.name, pending_driver.driver);
+                    on_initialized(services);
                 }
 
                 Err(DriverRunError::MissingService { service }) => {
@@ -174,9 +178,8 @@ mod tests {
     impl Driver for PublishConsoleDriver {
         fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
             self.logs.lock().push(self.name);
-            services
-                .set_console(self.value.clone())
-                .map_err(DriverRunError::from_boot_services_error)
+            services.set_console(self.value.clone());
+            Ok(())
         }
     }
 
@@ -318,8 +321,8 @@ mod tests {
             ),
         ];
 
-        let summary =
-            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
+        let summary = run_retry_passes(pending, &mut services, &mut registry, |_| {})
+            .expect("must initialize");
 
         assert_eq!(summary.passes, 1);
         assert_eq!(summary.initialized, 2);
@@ -351,8 +354,8 @@ mod tests {
             ),
         ];
 
-        let summary =
-            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
+        let summary = run_retry_passes(pending, &mut services, &mut registry, |_| {})
+            .expect("must initialize");
 
         assert_eq!(summary.passes, 1);
         assert_eq!(summary.initialized, 2);
@@ -383,8 +386,8 @@ mod tests {
             ),
         ];
 
-        let summary =
-            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
+        let summary = run_retry_passes(pending, &mut services, &mut registry, |_| {})
+            .expect("must initialize");
 
         assert_eq!(summary.passes, 2);
         assert_eq!(summary.initialized, 2);
@@ -421,8 +424,8 @@ mod tests {
             ),
         ];
 
-        let summary =
-            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
+        let summary = run_retry_passes(pending, &mut services, &mut registry, |_| {})
+            .expect("must initialize");
 
         assert_eq!(summary.passes, 2);
         assert_eq!(summary.initialized, 3);
@@ -459,8 +462,8 @@ mod tests {
             ),
         ];
 
-        let summary =
-            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
+        let summary = run_retry_passes(pending, &mut services, &mut registry, |_| {})
+            .expect("must initialize");
 
         assert_eq!(summary.passes, 2);
         assert_eq!(summary.initialized, 2);
@@ -476,7 +479,8 @@ mod tests {
         let mut registry = RuntimeDriverRegistry::new();
         let pending = vec![pending("missing-driver", Box::new(AlwaysMissingDriver))];
 
-        let err = run_retry_passes(pending, &mut services, &mut registry).expect_err("must fail");
+        let err =
+            run_retry_passes(pending, &mut services, &mut registry, |_| {}).expect_err("must fail");
         assert_eq!(
             err,
             InitSchedulerError::Unresolved {
@@ -504,7 +508,8 @@ mod tests {
             ),
         ];
 
-        let err = run_retry_passes(pending, &mut services, &mut registry).expect_err("must fail");
+        let err =
+            run_retry_passes(pending, &mut services, &mut registry, |_| {}).expect_err("must fail");
         assert_eq!(
             err,
             InitSchedulerError::Fatal {
@@ -524,31 +529,66 @@ mod tests {
         let pending = vec![
             pending(
                 "publisher-a",
-                Box::new(PublishConsoleDriver {
+                Box::new(PublishInterruptsDriver {
                     name: "publisher-a",
                     logs: logs.clone(),
-                    value: Arc::new(TestConsole),
+                    value: Arc::new(TestInterruptHandle),
                 }),
             ),
             pending(
                 "publisher-b",
-                Box::new(PublishConsoleDriver {
+                Box::new(PublishInterruptsDriver {
                     name: "publisher-b",
                     logs: logs.clone(),
-                    value: Arc::new(TestConsole),
+                    value: Arc::new(TestInterruptHandle),
                 }),
             ),
         ];
 
-        let err = run_retry_passes(pending, &mut services, &mut registry).expect_err("must fail");
+        let err =
+            run_retry_passes(pending, &mut services, &mut registry, |_| {}).expect_err("must fail");
 
         match err {
             InitSchedulerError::Fatal { driver, reason } => {
                 assert_eq!(driver, "publisher-b");
-                assert!(reason.contains("ConsoleService"));
+                assert!(reason.contains("InterruptsService"));
             }
             InitSchedulerError::Unresolved { .. } => panic!("unexpected scheduler error"),
         }
+    }
+
+    #[test]
+    fn on_initialized_sees_console_before_the_next_driver_runs() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let mut services = BootServices::new();
+        let mut registry = RuntimeDriverRegistry::new();
+        let mut console_seen = Vec::new();
+
+        let pending = vec![
+            pending(
+                "console-provider",
+                Box::new(PublishConsoleDriver {
+                    name: "console-provider",
+                    logs: logs.clone(),
+                    value: Arc::new(TestConsole),
+                }),
+            ),
+            pending("fatal-driver", Box::new(FatalDriver)),
+        ];
+
+        let err = run_retry_passes(pending, &mut services, &mut registry, |services| {
+            console_seen.push(services.console().is_some());
+        })
+        .expect_err("must fail");
+
+        assert_eq!(console_seen, vec![true]);
+        assert_eq!(
+            err,
+            InitSchedulerError::Fatal {
+                driver: "fatal-driver",
+                reason: "boom".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -566,8 +606,8 @@ mod tests {
             }),
         )];
 
-        let summary =
-            run_retry_passes(pending, &mut services, &mut registry).expect("must initialize");
+        let summary = run_retry_passes(pending, &mut services, &mut registry, |_| {})
+            .expect("must initialize");
         assert_eq!(summary.initialized, 1);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
 

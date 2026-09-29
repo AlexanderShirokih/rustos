@@ -132,9 +132,8 @@ impl Driver for UartPl011Driver {
         let uart = UartPl011::new(bound);
         uart.mmio.write_reg(CR, CR_UARTEN | CR_TXE | CR_RXE);
 
-        services
-            .set_console(Arc::new(uart))
-            .map_err(DriverRunError::from_boot_services_error)
+        services.set_console(Arc::new(uart));
+        Ok(())
     }
 }
 

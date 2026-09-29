@@ -110,15 +110,10 @@ impl BootServices {
             .ok_or(BootServicesError::Missing(ServiceKind::Console))
     }
 
-    pub fn set_console(
-        &mut self,
-        service: Arc<dyn ConsoleService>,
-    ) -> Result<(), BootServicesError> {
-        if self.console.is_some() {
-            return Err(BootServicesError::Duplicate(ServiceKind::Console));
-        }
-        self.console = Some(service);
-        Ok(())
+    /// Ставит `service` консолью ядра, если консоль ещё не задана. Заданная консоль
+    /// остаётся при любом числе последующих вызовов.
+    pub fn set_console(&mut self, service: Arc<dyn ConsoleService>) {
+        self.console.get_or_insert(service);
     }
 
     pub fn interrupts(&self) -> Option<Arc<dyn InterruptsService>> {
@@ -335,9 +330,7 @@ mod tests {
         services
             .set_mmio(Arc::new(TestMmioService))
             .expect("mmio registration must succeed");
-        services
-            .set_console(Arc::new(TestConsole))
-            .expect("console registration must succeed");
+        services.set_console(Arc::new(TestConsole));
         services
             .set_interrupts(Arc::new(TestInterruptsService))
             .expect("interrupts registration must succeed");
@@ -358,20 +351,34 @@ mod tests {
     #[test]
     fn duplicate_registration_preserves_existing_service() {
         let mut services = BootServices::new();
-        let first: Arc<dyn ConsoleService> = Arc::new(TestConsole);
-        let second: Arc<dyn ConsoleService> = Arc::new(TestConsole);
+        let first: Arc<dyn TimerService> = Arc::new(TestTimerService::new());
+        let second: Arc<dyn TimerService> = Arc::new(TestTimerService::new());
 
         services
-            .set_console(first.clone())
+            .set_timer(first.clone())
             .expect("first registration must succeed");
         let err = services
-            .set_console(second)
+            .set_timer(second)
             .expect_err("duplicate registration must fail");
 
-        assert_eq!(err, BootServicesError::Duplicate(ServiceKind::Console));
+        assert_eq!(err, BootServicesError::Duplicate(ServiceKind::Timer));
+        let resolved = services
+            .require_timer()
+            .expect("original timer must stay installed");
+        assert!(Arc::ptr_eq(&first, &resolved));
+    }
+
+    #[test]
+    fn second_console_is_ignored() {
+        let mut services = BootServices::new();
+        let first: Arc<dyn ConsoleService> = Arc::new(TestConsole);
+
+        services.set_console(first.clone());
+        services.set_console(Arc::new(TestConsole));
+
         let resolved = services
             .require_console()
-            .expect("original console must stay installed");
+            .expect("first console must stay installed");
         assert!(Arc::ptr_eq(&first, &resolved));
     }
 }

@@ -1,6 +1,11 @@
 extern crate alloc;
 
-use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, btree_map::IntoValues},
+    vec::Vec,
+};
+use core::{iter::Chain, option};
 
 use crate::{
     DeviceNode, NodeProperty,
@@ -149,11 +154,17 @@ impl Default for EmbeddedDriversScanner {
     }
 }
 
+/// Обход отдаёт драйвер узла, назначенного консолью, первым, остальные - в порядке узлов
+/// дерева. Так консоль поднимается раньше других драйверов, и их отказ печатается в неё.
 impl IntoIterator for EmbeddedDriversScanner {
     type Item = DriverHandle;
-    type IntoIter = alloc::collections::btree_map::IntoValues<usize, DriverHandle>;
+    type IntoIter = Chain<option::IntoIter<DriverHandle>, IntoValues<usize, DriverHandle>>;
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.handles.into_values()
+    fn into_iter(mut self) -> Self::IntoIter {
+        let console = self
+            .console_node
+            .and_then(|node| self.handles.remove(&node));
+
+        console.into_iter().chain(self.handles.into_values())
     }
 }

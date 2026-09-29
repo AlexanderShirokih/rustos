@@ -81,6 +81,14 @@ fn never_match(_ctx: &mut ProbeContext<SimpleNode>) -> ProbeResult {
     Err(ProbeError::Unsupported("never"))
 }
 
+fn match_console(ctx: &mut ProbeContext<SimpleNode>) -> ProbeResult {
+    if ctx.is_console() {
+        Ok(Box::new(NoopFactory))
+    } else {
+        Err(ProbeError::Unsupported("not the console"))
+    }
+}
+
 #[test]
 fn probe_context_fold_sums_over_hierarchy() {
     // Иерархия из трёх узлов (id=10, 20, 30). fold суммирует id всех узлов,
@@ -237,4 +245,38 @@ fn occupied_entry_keeps_first_registration_per_node() {
     // отбрасывается, но узлу id=7 на верхнем уровне хэндл уже выдан).
     let handles: Vec<_> = scanner.into_iter().collect();
     assert_eq!(handles.len(), 2);
+}
+
+#[test]
+fn designated_console_driver_is_yielded_first() {
+    static CHILDREN: [SimpleNode; 2] = [
+        SimpleNode {
+            id: 3,
+            children: &[],
+        },
+        SimpleNode {
+            id: 5,
+            children: &[],
+        },
+    ];
+    let root = SimpleNode {
+        id: 0,
+        children: &CHILDREN,
+    };
+    let drivers = [
+        DriverDescriptor {
+            name: "console",
+            probe: match_console as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
+        },
+        DriverDescriptor {
+            name: "other",
+            probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
+        },
+    ];
+
+    let mut scanner = EmbeddedDriversScanner::new(Some(5));
+    scanner.scan_and_probe(root, &drivers).unwrap();
+
+    let names: Vec<_> = scanner.into_iter().map(|handle| handle.name).collect();
+    assert_eq!(names, ["console", "other", "other"]);
 }

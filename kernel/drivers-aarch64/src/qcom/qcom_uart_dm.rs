@@ -210,9 +210,8 @@ impl Driver for UartDmDriver {
 
         let uart = UartDm::new(bound);
 
-        services
-            .set_console(Arc::new(uart))
-            .map_err(DriverRunError::from_boot_services_error)
+        services.set_console(Arc::new(uart));
+        Ok(())
     }
 }
 

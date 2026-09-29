@@ -5,8 +5,8 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt::Display;
 
-use drivers_common::scanner::EmbeddedDriversScanner;
-use io::buffered_writer::BufferedWriter;
+use drivers_common::{BootServices, RuntimeDriverRegistry, scanner::EmbeddedDriversScanner};
+use io::{buffered_writer::BufferedWriter, writer::Writer};
 use klog::{fatal, info};
 use scheduler::{ArchContext, ArchCpu, Bootstrapped, Scheduler, SchedulerConfig};
 
@@ -102,11 +102,7 @@ where
     ) {
         // Infallible не имеет значений: ветка нужна только для исчерпывающего match.
         Ok(never) => match never {},
-        Err(error) => {
-            // Отказ мог случиться до штатного подключения консоли.
-            bind_console(context, kout);
-            boot_failure(&error)
-        }
+        Err(error) => boot_failure(&error),
     }
 }
 
@@ -128,9 +124,9 @@ where
 
     let pending = collect_into_pending_drivers(driver_scanner)?;
 
-    run_all_drivers(context, pending)?;
-
-    bind_console(context, kout);
+    context.with_runtime_state(|services, registry| {
+        run_all_drivers(services, registry, pending, kout)
+    })?;
 
     install_interrupts_hook(context)?;
 
@@ -176,10 +172,19 @@ fn collect_into_pending_drivers(
 }
 
 fn run_all_drivers(
-    kernel: &mut KernelContext,
+    services: &mut BootServices,
+    registry: &mut RuntimeDriverRegistry,
     pending: Vec<PendingDriver>,
+    kout: &BufferedWriter,
 ) -> Result<(), BootError> {
-    match kernel.with_runtime_state(|caps, registry| run_retry_passes(pending, caps, registry)) {
+    let mut console_bound = false;
+    let result = run_retry_passes(pending, services, registry, |services| {
+        if !console_bound {
+            console_bound = bind_console(services, kout);
+        }
+    });
+
+    match result {
         Ok(_) => Ok(()),
 
         Err(InitSchedulerError::Fatal { driver, reason }) => {
@@ -193,16 +198,17 @@ fn run_all_drivers(
     }
 }
 
-fn bind_console(kernel: &mut KernelContext, buffered: &BufferedWriter) {
-    kernel.with_runtime_state(|services, _| {
-        if let Some(console) = services.console() {
-            let console = console as Arc<dyn io::writer::Writer + Send + Sync>;
-            // Сток паники указывает на драйвер консоли напрямую. Путь паники
-            // не проходит через локи `STDOUT` и `BufferedWriter`.
-            klog::set_panic_stdout(console.clone());
-            buffered.attach(&console);
-        }
-    });
+fn bind_console(services: &BootServices, buffered: &BufferedWriter) -> bool {
+    let Some(console) = services.console() else {
+        return false;
+    };
+    let console = console as Arc<dyn Writer + Send + Sync>;
+
+    // Сток паники указывает на драйвер консоли напрямую. Путь паники
+    // не проходит через локи `STDOUT` и `BufferedWriter`.
+    klog::set_panic_stdout(console.clone());
+    buffered.attach(&console);
+    true
 }
 
 fn install_interrupts_hook(kernel: &mut KernelContext) -> Result<(), BootError> {
@@ -220,4 +226,95 @@ fn install_interrupts_hook(kernel: &mut KernelContext) -> Result<(), BootError> 
         )));
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use alloc::{boxed::Box, string::String, sync::Arc, vec};
+    use std::sync::Mutex;
+
+    use drivers_common::{BootServices, Driver, DriverRunError, RuntimeDriverRegistry};
+    use io::{buffered_writer::BufferedWriter, writer::Writer};
+
+    use super::{BootError, run_all_drivers};
+    use crate::driver_init::PendingDriver;
+
+    #[derive(Default)]
+    struct ConsoleRecorder {
+        normal: Mutex<String>,
+        panic: Mutex<String>,
+    }
+
+    impl Writer for ConsoleRecorder {
+        fn write_all(&self, buf: &[u8]) {
+            self.normal
+                .lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(buf));
+        }
+
+        fn write_all_panic(&self, buf: &[u8]) {
+            self.panic
+                .lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(buf));
+        }
+
+        fn flush(&self) {}
+    }
+
+    struct ConsoleDriver(Arc<ConsoleRecorder>);
+
+    impl Driver for ConsoleDriver {
+        fn run(&mut self, services: &mut BootServices) -> Result<(), DriverRunError> {
+            services.set_console(self.0.clone());
+            Ok(())
+        }
+    }
+
+    struct PanickingDriver;
+
+    impl Driver for PanickingDriver {
+        fn run(&mut self, _services: &mut BootServices) -> Result<(), DriverRunError> {
+            klog::panic_logf(format_args!("reason-before-other-drivers"));
+            Err(DriverRunError::Fatal(String::from("boom")))
+        }
+    }
+
+    #[test]
+    fn console_receives_panic_and_failure_of_the_driver_after_it() {
+        let console = Arc::new(ConsoleRecorder::default());
+        let kout: &'static BufferedWriter = Box::leak(Box::new(BufferedWriter::new()));
+        klog::set_stdout(kout);
+        let mut services = BootServices::new();
+        let mut registry = RuntimeDriverRegistry::new();
+        let pending = vec![
+            PendingDriver {
+                name: "console",
+                driver: Box::new(ConsoleDriver(console.clone())),
+            },
+            PendingDriver {
+                name: "failing",
+                driver: Box::new(PanickingDriver),
+            },
+        ];
+
+        let error = run_all_drivers(&mut services, &mut registry, pending, kout)
+            .expect_err("the second driver fails");
+
+        assert!(matches!(
+            error,
+            BootError::DriverFatal {
+                driver: "failing",
+                ..
+            }
+        ));
+        let panic = console.panic.lock().unwrap().clone();
+        assert!(panic.contains("[FATAL] reason-before-other-drivers"));
+        let normal = console.normal.lock().unwrap().clone();
+        assert!(normal.contains("Running driver console. OK"));
+        assert!(normal.contains("Running driver failing. Fatal: boom"));
+    }
 }
