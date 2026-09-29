@@ -8,25 +8,10 @@ use core::{
 use capability::{HandleTable, ProcessObject};
 use collections::{LockCell, MutexCell, StaticString};
 use memory::{MemoryRegion, UserVmContext, user_vm_allocator::UserVmAllocator};
-use syscall::MAX_PROCESS_NAME_LEN;
+use syscall::{MAX_PROCESS_NAME_LEN, ProcessName};
 
 use super::address_space::AddressSpace;
 use crate::ProcessId;
-
-/// Имя процесса является непустой строкой не длиннее [`MAX_PROCESS_NAME_LEN`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessName<'a>(&'a str);
-
-impl<'a> ProcessName<'a> {
-    /// `None`, если имя пусто либо превышает [`MAX_PROCESS_NAME_LEN`].
-    pub fn new(name: &'a str) -> Option<Self> {
-        (!name.is_empty() && name.len() <= MAX_PROCESS_NAME_LEN).then_some(Self(name))
-    }
-
-    pub fn as_str(self) -> &'a str {
-        self.0
-    }
-}
 
 /// Возвращается из [`Process::set_user_vm`], если образ уже загружен.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,13 +294,6 @@ mod tests {
 
     fn name(value: &str) -> ProcessName<'_> {
         ProcessName::new(value).expect("valid process name")
-    }
-
-    #[test]
-    fn process_name_rejects_empty_and_oversized() {
-        assert!(ProcessName::new("").is_none());
-        assert!(ProcessName::new(&"x".repeat(MAX_PROCESS_NAME_LEN + 1)).is_none());
-        assert!(ProcessName::new(&"x".repeat(MAX_PROCESS_NAME_LEN)).is_some());
     }
 
     fn fresh_process() -> Process {

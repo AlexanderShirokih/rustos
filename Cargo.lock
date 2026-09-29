@@ -405,6 +405,5 @@ dependencies = [
 name = "userland-image"
 version = "0.1.0"
 dependencies = [
- "component-abi",
  "userland",
 ]

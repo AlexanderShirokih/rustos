@@ -31,14 +31,14 @@ const _: () = assert!(
     PATH_MAX / 2 <= DEPTH_MASK as usize
 );
 
-const _: () = assert!(userland::USERLAND_ENTRY_PATH_CAPACITY <= PATH_MAX);
+const _: () = assert!(userland_image::USERLAND_ENTRY_PATH_CAPACITY <= PATH_MAX);
 
 /// Отказ построения дерева по образу.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageFileSystemError {
     /// Образ не разобран кодеком.
     Decode(ImageDecodeError),
-    /// Путь записи не годится в путь контракта либо оказался корнем.
+    /// Путь записи не годится в путь контракта.
     EntryPath { index: usize },
     /// Образ не содержит ни одной записи.
     EmptyImage,
@@ -65,18 +65,14 @@ pub struct ImageFileSystem {
 }
 
 impl ImageFileSystem {
-    /// Строит дерево из записей образа. Если путь записи нарушает правила контракта либо
-    /// оказался корнем, возвращает `EntryPath`. Если образ не содержит ни одной записи, возвращает
-    /// `EmptyImage`.
+    /// Строит дерево из записей образа. Возвращает `EntryPath`, если путь нарушает правила
+    /// контракта, и `EmptyImage`, если образ не содержит записей.
     pub fn new(image: &'static [u8]) -> Result<Self, ImageFileSystemError> {
         let decoded = decode(image).map_err(ImageFileSystemError::Decode)?;
         let mut entries = Vec::new();
         for (index, entry) in decoded.entries().enumerate() {
             let path =
                 Path::new(entry.path()).map_err(|_| ImageFileSystemError::EntryPath { index })?;
-            if path.is_root() {
-                return Err(ImageFileSystemError::EntryPath { index });
-            }
             entries.push(Record {
                 path,
                 data: entry.data(),
@@ -957,15 +953,6 @@ mod tests {
         }]);
         assert_eq!(
             relative.err(),
-            Some(ImageFileSystemError::EntryPath { index: 0 })
-        );
-
-        let root = image_from(&[ImageRecord {
-            path: "/",
-            data: b"whole tree",
-        }]);
-        assert_eq!(
-            root.err(),
             Some(ImageFileSystemError::EntryPath { index: 0 })
         );
     }

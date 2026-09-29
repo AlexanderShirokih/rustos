@@ -1,76 +1,82 @@
-//! Демонстрационный компонент файловой подсистемы: читатель собственного каталога и клиент
-//! маршрутизатора имён.
-//!
-//! Через окно своего каталога программа перечисляет его записи и читает запись `/greeting`.
-//! Через маршрутизатор имён она создаёт каталог под `/tmp`, пишет в нём файл, читает его и
-//! перечисляет каталог. Каждая операция пишет строку в журнал.
+//! Программа читает файл из userland-образа, создаёт
+//! каталог под `/tmp`, пишет и читает файл, перечисляет каталог через маршрутизатор имён.
 
 use core::error::Error;
 
 use components::component_manifest;
-use filesystem_abi::{AccessMode, OpenFlags, Path, const_path, file_system, namespace};
+use filesystem_abi::{AccessMode, OpenFlags, Path, const_path, namespace};
 use filesystem_client::{Failure, FileSystem, FileSystemEnvironment, Listing};
 
 const NOTES_DIRECTORY: Path<'static> = const_path!("/tmp/files-demo");
-const NOTE_RECORD: Path<'static> = const_path!("/tmp/files-demo/note");
 
 component_manifest! {
     struct FilesStartup {
         requirements: {
-            area: session(file_system::Protocol),
             namespace: session(namespace::Protocol),
         },
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let requirements = components::requirements(FilesStartup::request)?;
+    let requirements = components::requirements::<FilesStartup>()?;
     println!("started");
 
-    // `windowed` открывает одну файловую систему, выданную компоненту по `bind` и `scope` плана.
-    // Путь отсчитывается от корня выданной области, узлы вне области недоступны.
-    // `routed` открывает маршрутизатор имён, и абсолютный путь разбирается по монтированиям системы
-    // (`/boot`, `/tmp`).
-    show_area(&mut FileSystem::windowed(requirements.area))?;
-    show_namespace(&mut FileSystem::routed(requirements.namespace))?;
+    let namespace = requirements
+        .namespace
+        .ok_or("namespace provider is unavailable")?;
+
+    let mut files = FileSystem::new(namespace);
+
+    print_greeting(&mut files)?;
+    test_tmp_filesystem(&mut files)?;
+
     println!("done");
     Ok(())
 }
 
-fn show_area(area: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Failure> {
-    print_entries("area", area.read_directory(const_path!("/"))?)?;
+fn print_greeting(files: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Failure> {
+    let mut greeting = files.open(
+        const_path!("/boot/files-demo/greeting.txt"),
+        AccessMode::Read,
+        OpenFlags::NONE,
+    )?;
 
-    let mut greeting = area.open(const_path!("/greeting"), AccessMode::Read, OpenFlags::NONE)?;
     let mut bytes = [0; 64];
     let count = greeting.read(&mut bytes)?;
-    println!("area read: {}", text(bytes.get(..count)));
+    println!("greeting text: {}", text(bytes.get(..count)));
+
     Ok(())
 }
 
-fn show_namespace(namespace: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Failure> {
+fn test_tmp_filesystem(namespace: &mut FileSystem<FileSystemEnvironment>) -> Result<(), Failure> {
     namespace.create_directory(NOTES_DIRECTORY)?;
+
     println!("tmp directory: {}", NOTES_DIRECTORY.as_str());
 
+    let note_path = NOTES_DIRECTORY.join_segment("note.txt")?;
+    let note_file = note_path.as_path();
+
     let mut note = namespace.open(
-        NOTE_RECORD,
+        note_file,
         AccessMode::Write,
         OpenFlags::CREATE | OpenFlags::TRUNCATE,
     )?;
+
     let written = note.write(b"written through /tmp")?;
     println!("tmp write: {written} bytes");
     drop(note);
 
-    let mut note = namespace.open(NOTE_RECORD, AccessMode::Read, OpenFlags::NONE)?;
+    let mut note = namespace.open(note_file, AccessMode::Read, OpenFlags::NONE)?;
     let mut bytes = [0; 64];
     let count = note.read(&mut bytes)?;
     println!("tmp read: {}", text(bytes.get(..count)));
 
-    print_entries("tmp", namespace.read_directory(NOTES_DIRECTORY)?)
+    print_entries(namespace.read_directory(NOTES_DIRECTORY)?)
 }
 
-fn print_entries(label: &str, mut listing: Listing<FileSystemEnvironment>) -> Result<(), Failure> {
+fn print_entries(mut listing: Listing<FileSystemEnvironment>) -> Result<(), Failure> {
     while let Some(entry) = listing.next_entry()? {
-        println!("{label} entry: {} {:?}", entry.name, entry.kind);
+        println!("entry: {} {:?}", entry.name, entry.kind);
     }
     Ok(())
 }
@@ -78,5 +84,5 @@ fn print_entries(label: &str, mut listing: Listing<FileSystemEnvironment>) -> Re
 fn text(bytes: Option<&[u8]>) -> &str {
     bytes
         .and_then(|bytes| str::from_utf8(bytes).ok())
-        .map_or("<not text>", str::trim_end)
+        .map_or("<not a text>", str::trim_end)
 }

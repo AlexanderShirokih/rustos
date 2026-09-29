@@ -2,13 +2,12 @@
 
 use alloc::{format, string::String, vec, vec::Vec};
 
-use component_abi::SessionError;
 use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor,
-    NodeKind, OpenFlags, Opened, Path, file_system, namespace, namespace_admin,
+    NodeKind, OpenFlags, Opened, Path, file_system, file_system_mount, namespace,
 };
 use ipc::{
-    Channel, Incoming, Outgoing, Protocol, Unsent,
+    Channel, Incoming, Outgoing, Unsent,
     wire::{
         FieldCursor, HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str, TERMINATOR,
     },
@@ -17,16 +16,13 @@ use kernel_objects::{
     Delivery, MemoryRegion, OwnedHandle, Port, Resource, Session, SessionTransport, Signal,
 };
 use kernel_tests::kernel_test;
-use rootkeeper::ImporterRequirement;
 use runtime::{PortTransport, Priority, Timeout, UserMemFlags, port_send, spawn_owned};
 use spin::Once;
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::{
-    composition::{
-        BOOT_PLAN_ENTRY, Composition, Importer, Mounted, admin, image, pause, request, view,
-    },
+    composition::{BOOT_PLAN_ENTRY, Composition, Importer, Mounted, admin, image, pause, view},
     fixture::{JOIN_TIMEOUT, spawn_entry},
     log_relay::component_log_session,
 };
@@ -36,7 +32,7 @@ const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 const VIEW_WAIT: Timeout = Timeout::from_secs(5);
 const OUTSIDE_WAIT: Timeout = Timeout::from_millis(100);
 
-const CLIENT_FIXTURE: &str = "/filesystem-client-fixture/program";
+const CLIENT_FIXTURE: &str = "/filesystem-client-fixture/exec";
 
 const RAM_MOUNT: &str = "/tmp";
 
@@ -44,52 +40,43 @@ const IMAGE_MOUNT: &str = "/boot";
 
 const SHADOW_MOUNT: &str = "/boot/testrunner";
 
-const RAM_FILESYSTEM_NAME: &str = "filesystem-ramfs";
-
 const ROOT_VIEW: &str = "root";
 const RAM_VIEW: &str = "tmp";
 const SPARE_VIEW: &str = "spare";
 const STUCK_VIEW: &str = "stuck";
 const UNCOVERED_VIEW: &str = "uncovered";
 const SHADOW_VIEW: &str = "shadow";
-const RAM_EXPORT: &str = "ramfs";
 const QUEUE_VIEW: &str = "queue";
 const EMPTY_SCOPE_ADMIN: &str = "empty-scope-admin";
 
 pub(crate) const STRESS_VIEW: &str = "stress";
 pub(crate) const FAILING_VIEW: &str = "failing";
 
-const NAMESPACE_REQUIREMENTS: &[ImporterRequirement<'static>] = &[
+const NAMESPACE_REQUIREMENTS: &[crate::composition::Import] = &[
     view(ROOT_VIEW, ""),
     view(RAM_VIEW, RAM_MOUNT),
     view(SPARE_VIEW, "/spare"),
     view(STUCK_VIEW, "/stuck"),
     view(UNCOVERED_VIEW, "/uncovered"),
     view("grafted", "/grafted"),
-    admin("grafted-admin", "/grafted"),
+    admin("grafted-admin"),
     view("paired-second", "/paired-second"),
-    admin("paired-second-admin", "/paired-second"),
+    admin("paired-second-admin"),
     view("paired-detached", "/paired-detached"),
-    admin("paired-detached-admin", "/paired-detached"),
+    admin("paired-detached-admin"),
     view(SHADOW_VIEW, SHADOW_MOUNT),
-    admin("shadow-admin", SHADOW_MOUNT),
+    admin("shadow-admin"),
     view("replaced", "/replaced"),
-    admin("replaced-admin", "/replaced"),
+    admin("replaced-admin"),
     view(STRESS_VIEW, "/stress"),
-    admin("stress-admin", "/stress"),
+    admin("stress-admin"),
     view("other", "/other"),
-    admin("other-admin", "/other"),
+    admin("other-admin"),
     view(QUEUE_VIEW, "/queue"),
-    admin("queue-admin", "/queue"),
+    admin("queue-admin"),
     view(FAILING_VIEW, "/failing"),
-    admin("failing-admin", "/failing"),
-    admin(EMPTY_SCOPE_ADMIN, ""),
-    ImporterRequirement {
-        name: RAM_EXPORT,
-        provider: RAM_FILESYSTEM_NAME,
-        protocol: file_system::Protocol::ID,
-        scope: "",
-    },
+    admin("failing-admin"),
+    admin(EMPTY_SCOPE_ADMIN),
 ];
 
 pub(crate) const BUFFER_SIZE: u32 = 4096;
@@ -150,8 +137,8 @@ fn resolved(importer: &Importer, requirement: &str, text: &str) -> Session<file_
     Session::from_session(session)
 }
 
-fn ram_export() -> Port {
-    importer().port::<file_system::Protocol>(RAM_EXPORT)
+fn ram_port() -> Port {
+    Port::from(ram_session().into_handle())
 }
 
 fn namespace_client(capability: &Port) -> namespace::Client<PortTransport> {
@@ -709,12 +696,12 @@ fn namespace_grafts_the_session_it_is_handed() {
     const GRAFT_ENTRY: &str = "/grafted-probe";
 
     open(
-        &connect(Session::from_handle(ram_export())),
+        &connect(Session::from_handle(ram_port())),
         GRAFT_ENTRY,
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    let _grafted = Mounted::new(importer(), GRAFT_VIEW, Session::from_handle(ram_export()));
+    let _grafted = Mounted::new(importer(), GRAFT_VIEW, Session::from_handle(ram_port()));
 
     let opened = open(
         &connect(session_for(GRAFT_MOUNT)),
@@ -733,9 +720,9 @@ fn namespace_grafts_the_session_it_is_handed() {
 #[kernel_test]
 fn namespace_rejects_admin_operations_on_the_service_port() {
     let capability = view_of(ROOT_VIEW);
-    let refused = namespace_admin::Client::new(PortTransport::new(&capability))
+    let refused = file_system_mount::Client::new(PortTransport::new(&capability))
         .with_wait(CALL_TIMEOUT)
-        .mount(Session::from_handle(ram_export()));
+        .mount(path("/invalid"), Session::from_handle(ram_port()));
     kernel_tests::kassert_eq!(refused.err(), Some(IpcError::PeerClosed));
 
     let mounted = namespace_client(&view_of(ROOT_VIEW))
@@ -940,11 +927,12 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
 }
 
 #[kernel_test]
-fn an_admin_session_with_an_empty_scope_is_refused() {
-    let refused =
-        request::<namespace_admin::Protocol>(importer().handle(), EMPTY_SCOPE_ADMIN, CALL_TIMEOUT)
-            .map(|answer| answer.map(drop));
-    kernel_tests::kassert_eq!(refused, Ok(Err(SessionError::Refused)));
+fn a_mount_with_an_empty_path_is_refused() {
+    let port = importer().port::<file_system_mount::Protocol>(EMPTY_SCOPE_ADMIN);
+    let answer = file_system_mount::Client::new(PortTransport::new(&port))
+        .with_wait(CALL_TIMEOUT)
+        .mount(Str::new("").expect("empty fits"), ram_session());
+    kernel_tests::kassert_eq!(answer, Ok(Err(FileSystemError::InvalidPath)));
 }
 
 #[kernel_test]
@@ -1019,7 +1007,7 @@ fn filesystem_lists_the_image_directory() {
         OpenFlags::DIRECTORY,
     );
     let names = walk_directory(&client, &buffer, own.fd);
-    for expected in ["program", "sample", "empty"] {
+    for expected in ["exec", "sample", "empty"] {
         kernel_tests::kassert!(names.iter().any(|name| name.as_str() == expected));
     }
 }
@@ -1618,7 +1606,7 @@ fn send_unparsed_frame_with_capability<K: kernel_objects::ObjectKind>(
 
 #[kernel_test]
 fn filesystem_closes_the_capability_of_an_unparsed_frame() {
-    let capability = ram_export();
+    let capability = ram_port();
     let signal = Signal::create().expect("signal to ride the frames");
     for _ in 0..LEAK_FRAMES {
         let rider = signal
@@ -1694,7 +1682,7 @@ fn take_and_drop_session() {
 }
 
 fn run_client_fixture() {
-    let client = spawn_entry(CLIENT_FIXTURE, ram_export());
+    let client = spawn_entry(CLIENT_FIXTURE, ram_port());
     client
         .join(JOIN_TIMEOUT)
         .expect("client fixture terminates");

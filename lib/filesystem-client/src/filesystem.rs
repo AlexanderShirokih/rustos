@@ -33,21 +33,9 @@ const WAIT: Timeout = Timeout::from_secs(2);
 /// и закрывает их вместе с собой.
 pub struct FileSystem<E: Environment> {
     environment: E,
-    sessions: Sessions<E>,
+    namespace: namespace::Client<E::Transport>,
+    cache: SessionCache<E>,
     wait: Timeout,
-}
-
-enum Sessions<E: Environment> {
-    Routed {
-        namespace: namespace::Client<E::Transport>,
-        cache: SessionCache<E>,
-    },
-    Window(Option<Window<E>>),
-}
-
-enum Window<E: Environment> {
-    Pending(E::Transport),
-    Open(Session<E>),
 }
 
 struct Pending {
@@ -59,23 +47,11 @@ struct Pending {
 impl<E: Environment> FileSystem<E> {
     /// Фасад поверх маршрутизатора имён. Маршрутизатор разбирает путь, фасад хранит
     /// сессии разобранных каталогов.
-    pub fn routed_with_environment(environment: E, namespace: E::Transport) -> Self {
+    pub fn with_environment(environment: E, namespace: E::Transport) -> Self {
         Self {
             environment,
-            sessions: Sessions::Routed {
-                namespace: namespace::Client::new(namespace).with_wait(WAIT),
-                cache: SessionCache::new(SESSIONS),
-            },
-            wait: WAIT,
-        }
-    }
-
-    /// Фасад поверх выданной сессии. Путь отсчитывается от корня этой сессии, а буфер данных она
-    /// получает при первой операции.
-    pub fn windowed_with_environment(environment: E, session: E::Transport) -> Self {
-        Self {
-            environment,
-            sessions: Sessions::Window(Some(Window::Pending(session))),
+            namespace: namespace::Client::new(namespace).with_wait(WAIT),
+            cache: SessionCache::new(SESSIONS),
             wait: WAIT,
         }
     }
@@ -84,12 +60,7 @@ impl<E: Environment> FileSystem<E> {
     #[must_use]
     pub fn with_wait(mut self, wait: Timeout) -> Self {
         self.wait = wait;
-        if let Sessions::Routed { namespace, cache } = self.sessions {
-            self.sessions = Sessions::Routed {
-                namespace: namespace.with_wait(wait),
-                cache,
-            };
-        }
+        self.namespace = self.namespace.with_wait(wait);
         self
     }
 
@@ -171,18 +142,10 @@ impl<E: Environment> FileSystem<E> {
     pub fn rename(&mut self, from: Path<'_>, to: Path<'_>) -> Result<()> {
         let Self {
             environment,
-            sessions,
+            namespace,
+            cache: _,
             wait,
         } = self;
-        let namespace = match sessions {
-            Sessions::Window(window) => {
-                open_window(window, environment, *wait)?;
-                // Корень окна и есть корень пары.
-                return rename_in(opened_window(window.as_ref())?, from, to);
-            }
-            Sessions::Routed { namespace, .. } => namespace,
-        };
-
         let pair = namespace.resolve_pair(route::wire(from)?, route::wire(to)?)??;
         let (from, to) = scoped(from, to, pair.root_len)?;
         rename_in(
@@ -223,7 +186,7 @@ impl<E: Environment> FileSystem<E> {
         operation: impl Fn(&E, &Session<E>, Path<'_>) -> Result<T>,
     ) -> Result<T> {
         let outcome = self.at_root(path.directory(), &operation);
-        if path.is_root() || !self.asks_the_router() {
+        if path.is_root() {
             return outcome;
         }
         match outcome {
@@ -241,17 +204,10 @@ impl<E: Environment> FileSystem<E> {
     ) -> Result<T> {
         let Self {
             environment,
-            sessions,
+            namespace,
+            cache,
             wait,
         } = self;
-        let (namespace, cache) = match sessions {
-            Sessions::Window(window) => {
-                open_window(window, environment, *wait)?;
-
-                return operation(environment, opened_window(window.as_ref())?, Path::ROOT);
-            }
-            Sessions::Routed { namespace, cache } => (namespace, cache),
-        };
         if let Some(session) = cache.promote(directory) {
             match operation(environment, session, directory) {
                 Err(failure) if failure.peer_gone() || failure.name_missing() => {
@@ -266,33 +222,6 @@ impl<E: Environment> FileSystem<E> {
         let outcome = operation(environment, &session, directory);
         cache.insert(directory, session);
         outcome
-    }
-
-    fn asks_the_router(&self) -> bool {
-        matches!(self.sessions, Sessions::Routed { .. })
-    }
-}
-
-fn open_window<E: Environment>(
-    window: &mut Option<Window<E>>,
-    environment: &E,
-    wait: Timeout,
-) -> Result<()> {
-    if !matches!(window, Some(Window::Pending(_))) {
-        return Ok(());
-    }
-    let Some(Window::Pending(transport)) = window.take() else {
-        return Err(FileSystemError::NoSession.into());
-    };
-
-    *window = Some(Window::Open(Session::over(environment, transport, wait)?));
-    Ok(())
-}
-
-fn opened_window<E: Environment>(window: Option<&Window<E>>) -> Result<&Session<E>> {
-    match window {
-        Some(Window::Open(session)) => Ok(session),
-        _ => Err(FileSystemError::NoSession.into()),
     }
 }
 

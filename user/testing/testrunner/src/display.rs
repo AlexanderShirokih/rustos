@@ -1,10 +1,10 @@
 //! Контракт `Display` на сервере `display-fixture`.
 
+use component_abi::RequirementDeclaration;
 use display_abi::{Area, DisplayError, display};
 use ipc::Protocol;
 use kernel_objects::{MemoryRegion, SessionTransport};
 use kernel_tests::kernel_test;
-use rootkeeper::ImporterRequirement;
 use runtime::Timeout;
 use userland_image::ComponentSpec;
 
@@ -26,15 +26,13 @@ const WHOLE_SCREEN: Area = Area {
 };
 
 const DISPLAY: ComponentSpec<'static> = ComponentSpec {
-    exports: &[display::Protocol::ID],
     ..fixture("/display-fixture", "display-fixture")
 };
 
-const SCREEN_REQUIREMENTS: &[ImporterRequirement<'static>] = &[ImporterRequirement {
-    name: SCREEN,
-    provider: DISPLAY.name,
-    protocol: display::Protocol::ID,
-    scope: "",
+const SCREEN_REQUIREMENTS: &[crate::composition::Import] = &[crate::composition::Import {
+    declaration: RequirementDeclaration::session(SCREEN, display::Protocol::ID),
+
+    namespace_root: None,
 }];
 
 fn session(importer: &Importer) -> display::Client<SessionTransport> {

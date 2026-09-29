@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_startup::component_manifest;
+use component_startup::{Requirements as _, component_manifest};
 use kernel_objects::Port;
 use runtime::{Timeout, log_line, process_exit, start_component};
 use syscall::{Handle, kind};
@@ -31,9 +31,13 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Ok(requirements) = ImporterStartup::request(parent) else {
         process_exit(FAILED_EXIT_CODE)
     };
+
+    let Some(probe) = requirements.probe else {
+        process_exit(FAILED_EXIT_CODE)
+    };
     log_line("started");
 
-    let _session = requirements.probe;
+    let _session = probe;
     let Ok(own) = Port::create() else {
         process_exit(FAILED_EXIT_CODE)
     };

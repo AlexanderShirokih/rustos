@@ -1,6 +1,8 @@
-use component_abi::{PROTOCOL_ID_MAX, RequirementKind, SESSION_SCOPE_MAX};
+use bootstrap_abi::image;
+use component_abi::{PROTOCOL_ID_MAX, RequirementMode};
+use ipc::Protocol as _;
 use syscall::{HANDLE_TABLE_CAPACITY, MAX_PROCESS_NAME_LEN};
-use userland_image::{BootPlan, PlanRequirement, RequirementSource, decode_plan};
+use userland_image::{BootPlan, decode_plan};
 
 use super::{
     PlanProgram, compile_plan,
@@ -16,16 +18,15 @@ const IMAGE_FS: &str = "filesystem-imagefs";
 const RAM_FS: &str = "filesystem-ramfs";
 const ROOTKEEPER: &str = "rootkeeper";
 const CONSUMER: &str = "namespace-consumer-fixture";
-const AREA: &str = "area-consumer";
-const AREA_REQUIREMENT: &str = "area";
 const HELPER: &str = "helper";
 const PLATFORM: &str = "platform";
 
 const NAMESPACE_PROTOCOL: &str = "Namespace";
-const NAMESPACE_ADMIN_PROTOCOL: &str = "NamespaceAdmin";
+const FILE_SYSTEM_MOUNT_PROTOCOL: &str = "FileSystemMount";
 const FILE_SYSTEM_PROTOCOL: &str = "FileSystem";
 const CLOCK_PROTOCOL: &str = "Clock";
 const HARDWARE_PROTOCOL: &str = "Hardware";
+const IMAGE_PROTOCOL: &str = image::Protocol::ID;
 
 const DEFAULT_MEMORY_LIMIT: &str = "256K";
 
@@ -34,8 +35,7 @@ struct Component {
     memory_limit: String,
     restarts: Option<u32>,
     name: Option<String>,
-    bind: Vec<(String, String)>,
-    scope: Vec<(String, String)>,
+    mountpoint: Option<String>,
 }
 
 impl Component {
@@ -45,8 +45,7 @@ impl Component {
             memory_limit: String::from(DEFAULT_MEMORY_LIMIT),
             restarts: None,
             name: None,
-            bind: Vec::new(),
-            scope: Vec::new(),
+            mountpoint: None,
         }
     }
 
@@ -70,15 +69,8 @@ impl Component {
         self
     }
 
-    fn bind(mut self, requirement: &str, instance: &str) -> Self {
-        self.bind
-            .push((String::from(requirement), String::from(instance)));
-        self
-    }
-
-    fn scope(mut self, requirement: &str, scope: &str) -> Self {
-        self.scope
-            .push((String::from(requirement), String::from(scope)));
+    fn mounted(mut self, path: &str) -> Self {
+        self.mountpoint = Some(path.into());
         self
     }
 
@@ -91,36 +83,18 @@ impl Component {
             Some(name) => format!("name = \"{name}\"\n"),
             None => String::new(),
         };
-        let bind = table(
-            "bind",
-            self.bind
-                .iter()
-                .map(|(requirement, to)| (requirement, format!("\"{to}\""))),
-        );
-        let scope = table(
-            "scope",
-            self.scope
-                .iter()
-                .map(|(requirement, area)| (requirement, format!("\"{area}\""))),
-        );
+        let mountpoint = self
+            .mountpoint
+            .as_ref()
+            .map_or_else(String::new, |path| format!("mountpoint = {path:?}\n"));
         format!(
             "\n[[components]]\n\
              executable = \"{}\"\n\
              memory_limit = \"{}\"\n\
-             {restarts}{name}{bind}{scope}",
+             {restarts}{name}{mountpoint}",
             self.executable, self.memory_limit
         )
     }
-}
-
-fn table<'a>(key: &str, entries: impl Iterator<Item = (&'a String, String)>) -> String {
-    let entries: Vec<String> = entries
-        .map(|(requirement, value)| format!("{requirement} = {value}"))
-        .collect();
-    if entries.is_empty() {
-        return String::new();
-    }
-    format!("{key} = {{ {} }}\n", entries.join(", "))
 }
 
 fn versioned(version: u16, components: &[Component]) -> String {
@@ -156,20 +130,16 @@ fn platform() -> Component {
     Component::new(PLATFORM)
 }
 
-fn requirement(name: &str, kind: RequirementKind, protocol: Option<&str>) -> ManifestRequirement {
+fn requirement(name: &str, mode: RequirementMode, protocol: &str) -> ManifestRequirement {
     ManifestRequirement {
         name: String::from(name),
-        kind,
-        protocol: protocol.map(String::from),
+        mode,
+        protocol: String::from(protocol),
     }
 }
 
 fn session(name: &str, protocol: &str) -> ManifestRequirement {
-    requirement(name, RequirementKind::Session, Some(protocol))
-}
-
-fn region(name: &str) -> ManifestRequirement {
-    requirement(name, RequirementKind::Region, None)
+    requirement(name, RequirementMode::One, protocol)
 }
 
 fn declaration(requirements: Vec<ManifestRequirement>, exports: &[&str]) -> ProgramManifest {
@@ -181,8 +151,8 @@ fn declaration(requirements: Vec<ManifestRequirement>, exports: &[&str]) -> Prog
 
 fn router_declaration() -> ProgramManifest {
     declaration(
-        vec![region("image")],
-        &[NAMESPACE_PROTOCOL, NAMESPACE_ADMIN_PROTOCOL],
+        vec![session("image", IMAGE_PROTOCOL)],
+        &[NAMESPACE_PROTOCOL, FILE_SYSTEM_MOUNT_PROTOCOL],
     )
 }
 
@@ -191,18 +161,14 @@ fn consumer_declaration() -> ProgramManifest {
 }
 
 fn image_filesystem_declaration() -> ProgramManifest {
-    declaration(vec![region("image")], &[FILE_SYSTEM_PROTOCOL])
-}
-
-fn ram_filesystem_declaration() -> ProgramManifest {
     declaration(
-        vec![session("namespace", NAMESPACE_ADMIN_PROTOCOL)],
+        vec![session("image", IMAGE_PROTOCOL)],
         &[FILE_SYSTEM_PROTOCOL],
     )
 }
 
-fn area_declaration() -> ProgramManifest {
-    declaration(vec![session(AREA_REQUIREMENT, FILE_SYSTEM_PROTOCOL)], &[])
+fn ram_filesystem_declaration() -> ProgramManifest {
+    declaration(vec![], &[FILE_SYSTEM_PROTOCOL])
 }
 
 struct ImageEntry {
@@ -229,7 +195,7 @@ impl Image {
                 bin: String::from(ROOTKEEPER),
                 path: image_path(ROOTKEEPER),
                 boot: true,
-                manifest: declaration(Vec::new(), &[HARDWARE_PROTOCOL]),
+                manifest: declaration(Vec::new(), &[HARDWARE_PROTOCOL, IMAGE_PROTOCOL]),
             }],
         };
         for (bin, manifest) in [
@@ -278,7 +244,7 @@ impl Image {
                 bin: &entry.bin,
                 path: &entry.path,
                 boot: entry.boot,
-                manifest: &entry.manifest,
+                data: Vec::leak(entry.manifest.program_bytes()),
             })
             .collect()
     }
@@ -310,13 +276,6 @@ fn image_with_two_helpers() -> Image {
         )
 }
 
-fn image_with_platform() -> Image {
-    Image::new().with(
-        PLATFORM,
-        declaration(vec![session("hardware", HARDWARE_PROTOCOL)], &[]),
-    )
-}
-
 fn compiled(source: &str) -> Vec<u8> {
     Image::new().compiled(source)
 }
@@ -327,30 +286,6 @@ fn rejected(source: &str) -> String {
 
 fn decoded(bytes: &[u8]) -> BootPlan<'_> {
     decode_plan(bytes).expect("compiled plan must decode")
-}
-
-fn requirements_of(bytes: &[u8], index: u16) -> Vec<PlanRequirement<'_>> {
-    decoded(bytes)
-        .component(index)
-        .expect("the plan carries the component")
-        .requirements()
-        .collect()
-}
-
-fn session_of<'a>(
-    name: &'a str,
-    provider: u16,
-    protocol: &'a str,
-    scope: &'a str,
-) -> PlanRequirement<'a> {
-    PlanRequirement {
-        name,
-        source: RequirementSource::Export {
-            provider,
-            protocol,
-            scope,
-        },
-    }
 }
 
 fn reason(error: &anyhow::Error) -> String {
@@ -368,202 +303,24 @@ fn plan_takes_every_requirement_from_the_program_declaration() {
 
     let filesystem = plan.component(1).expect("image filesystem");
     assert_eq!(filesystem.executable(), image_path(IMAGE_FS));
-    assert_eq!(
-        filesystem.requirements().collect::<Vec<_>>(),
-        [PlanRequirement {
-            name: "image",
-            source: RequirementSource::Region
-        }]
-    );
+    assert_eq!(filesystem.mountpoint(), None);
 }
 
 #[test]
-fn plan_binds_an_imported_protocol_to_its_exporter_in_either_order() {
-    for (components, importer, exporter) in [
-        ([router(), consumer()], 2, 1),
-        ([consumer(), router()], 1, 2),
+fn an_unbound_session_is_resolved_by_the_parent_instead_of_the_initial_composition() {
+    for components in [
+        vec![consumer()],
+        vec![router(), consumer()],
+        vec![router(), router().name(TWIN), consumer()],
     ] {
         let bytes = compiled(&plan(&components));
-
+        let plan = decoded(&bytes);
+        let index = u16::try_from(components.len()).expect("component count");
         assert_eq!(
-            requirements_of(&bytes, importer),
-            [session_of("names", exporter, NAMESPACE_PROTOCOL, "")]
+            plan.component(index).expect("consumer").executable(),
+            image_path(CONSUMER)
         );
     }
-}
-
-#[test]
-fn two_instances_of_one_program_bind_one_requirement_to_two_providers() {
-    let bytes = compiled(&plan(&[
-        router().name("names-a"),
-        router().name("names-b"),
-        consumer().name("consumer-a").bind("names", "names-a"),
-        consumer().name("consumer-b").bind("names", "names-b"),
-    ]));
-
-    assert_eq!(
-        requirements_of(&bytes, 3),
-        [session_of("names", 1, NAMESPACE_PROTOCOL, "")]
-    );
-    assert_eq!(
-        requirements_of(&bytes, 4),
-        [session_of("names", 2, NAMESPACE_PROTOCOL, "")]
-    );
-}
-
-#[test]
-fn plan_rejects_an_import_no_component_exports() {
-    assert_eq!(
-        rejected(&plan(&[rtc(), consumer()])),
-        format!(
-            "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE_PROTOCOL}' \
-             for requirement 'names', which no component of the composition exports"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_an_import_two_components_export() {
-    assert_eq!(
-        Image::new()
-            .with(TWIN, router_declaration())
-            .rejected(&plan(&[router(), router().executable(TWIN), consumer()])),
-        format!(
-            "boot plan component '{CONSUMER}' imports protocol '{NAMESPACE_PROTOCOL}' \
-             for requirement 'names', which 2 components export: {ROUTER}, {TWIN}; \
-             name one with 'bind'"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_key_on_a_name_outside_the_manifest() {
-    for (key, component) in [
-        ("bind", consumer().bind("files", ROUTER)),
-        ("scope", consumer().scope("files", "/")),
-    ] {
-        assert_eq!(
-            rejected(&plan(&[router(), component])),
-            format!(
-                "boot plan component '{CONSUMER}' sets '{key}' on requirement 'files', \
-                 which its manifest does not declare"
-            )
-        );
-    }
-}
-
-#[test]
-fn plan_rejects_a_session_key_on_a_requirement_that_takes_no_session() {
-    for (key, component) in [
-        ("bind", image_filesystem().bind("image", ROUTER)),
-        ("scope", image_filesystem().scope("image", "/")),
-    ] {
-        assert_eq!(
-            rejected(&plan(&[router(), component])),
-            format!(
-                "boot plan component '{IMAGE_FS}' sets '{key}' on requirement 'image', \
-                 which takes no session"
-            )
-        );
-    }
-}
-
-#[test]
-fn plan_rejects_a_bind_to_an_instance_outside_the_composition() {
-    assert_eq!(
-        rejected(&plan(&[router(), consumer().bind("names", "ghost")])),
-        format!(
-            "boot plan component '{CONSUMER}' binds requirement 'names' to instance 'ghost', \
-             which the composition does not contain"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_bind_to_an_instance_that_does_not_export_the_protocol() {
-    assert_eq!(
-        rejected(&plan(&[router(), rtc(), consumer().bind("names", DRIVER)])),
-        format!(
-            "boot plan component '{CONSUMER}' binds requirement 'names' to instance '{DRIVER}', \
-             which exports no protocol '{NAMESPACE_PROTOCOL}'"
-        )
-    );
-}
-
-#[test]
-fn plan_rejects_a_component_importing_what_it_exports() {
-    const SELF_BOUND: &str = "self-bound";
-    let self_bound = declaration(
-        vec![session("names", NAMESPACE_PROTOCOL)],
-        &[NAMESPACE_PROTOCOL],
-    );
-
-    assert_eq!(
-        Image::new()
-            .with(SELF_BOUND, self_bound)
-            .rejected(&plan(&[Component::new(SELF_BOUND)])),
-        "boot plan component 'self-bound' imports the protocol it exports itself"
-    );
-}
-
-#[test]
-fn plan_rejects_a_bind_to_the_component_itself() {
-    const SELF_BOUND: &str = "self-bound";
-    let self_bound = declaration(
-        vec![session("names", NAMESPACE_PROTOCOL)],
-        &[NAMESPACE_PROTOCOL],
-    );
-
-    assert_eq!(
-        Image::new().with(SELF_BOUND, self_bound).rejected(&plan(&[
-            router(),
-            Component::new(SELF_BOUND).bind("names", SELF_BOUND),
-        ])),
-        "boot plan component 'self-bound' binds requirement 'names' to itself"
-    );
-}
-
-#[test]
-fn a_plan_binding_the_log_requirement_is_refused() {
-    assert_eq!(
-        rejected(&plan(&[router(), consumer().bind("log", ROUTER)])),
-        format!(
-            "boot plan component '{CONSUMER}' sets 'bind' on requirement 'log', \
-             the name reserved for the log its parent serves"
-        )
-    );
-}
-
-#[test]
-fn plan_carries_the_mount_prefix_as_the_scope_of_the_namespace_requirement() {
-    let bytes = compiled(&plan(&[
-        router(),
-        ram_filesystem().scope("namespace", "/tmp"),
-    ]));
-
-    assert_eq!(
-        requirements_of(&bytes, 2),
-        [session_of("namespace", 1, NAMESPACE_ADMIN_PROTOCOL, "/tmp")]
-    );
-}
-
-#[test]
-fn plan_rejects_a_scope_past_its_bound() {
-    let wide = format!("/{}", "a".repeat(SESSION_SCOPE_MAX));
-
-    assert_eq!(
-        Image::new()
-            .with(AREA, area_declaration())
-            .rejected(&plan(&[
-                image_filesystem(),
-                Component::new(AREA).scope(AREA_REQUIREMENT, &wide),
-            ])),
-        format!(
-            "boot plan component '{AREA}' sets 'scope' on requirement '{AREA_REQUIREMENT}' with {} bytes; \
-             a scope is non-empty and at most {SESSION_SCOPE_MAX}",
-            wide.len()
-        )
-    );
 }
 
 #[test]
@@ -576,65 +333,69 @@ fn plan_carries_the_restart_count_of_a_component() {
 }
 
 #[test]
-fn the_rootkeeper_handle_estimate_counts_session_requirements_and_exports() {
-    let provider = declaration(Vec::new(), &[CLOCK_PROTOCOL]);
-    let two = declaration(
+fn the_rootkeeper_handle_estimate_counts_each_provider_and_grant() {
+    let root = declaration(vec![], &[CLOCK_PROTOCOL]).program_bytes();
+    let consumer = declaration(
         vec![
-            session("first", CLOCK_PROTOCOL),
-            session("second", CLOCK_PROTOCOL),
+            requirement("clock", RequirementMode::One, CLOCK_PROTOCOL),
+            requirement("clocks", RequirementMode::All, CLOCK_PROTOCOL),
+            requirement("image", RequirementMode::One, IMAGE_PROTOCOL),
         ],
-        &[],
-    );
-    let one = declaration(vec![session("only", CLOCK_PROTOCOL)], &[]);
-
+        &[CLOCK_PROTOCOL],
+    )
+    .program_bytes();
+    let root = component_abi::decode_manifest(userland::ProgramView::manifest(
+        &userland::decode_program(&root).unwrap(),
+    ))
+    .unwrap();
+    let consumer = component_abi::decode_manifest(userland::ProgramView::manifest(
+        &userland::decode_program(&consumer).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(rootkeeper_handles(&[root]), ROOTKEEPER_HANDLES);
     assert_eq!(
-        rootkeeper_handles(&[&provider, &two, &one]),
-        ROOTKEEPER_HANDLES + 3 * CHILD_HANDLES + 3 + 1 + 3
+        rootkeeper_handles(&[root, consumer]),
+        ROOTKEEPER_HANDLES + CHILD_HANDLES + 1 + 2 + 1 + 1 + 1 + 1
     );
 }
 
 #[test]
-fn the_rootkeeper_handle_estimate_counts_the_grants_a_component_holds() {
-    assert_eq!(
-        rootkeeper_handles(&[&image_filesystem_declaration()]),
-        ROOTKEEPER_HANDLES + CHILD_HANDLES + 1 + 2
-    );
-}
-
-#[test]
-fn plan_rejects_a_composition_past_the_rootkeeper_handle_estimate() {
-    const CLOCK: &str = "clock-source";
+fn plan_counts_boot_exports_before_accepting_all_requirements() {
     const IMPORTERS: usize = 10;
     const REQUIREMENTS: usize = 100;
 
     let importer = || {
         declaration(
             (0..REQUIREMENTS)
-                .map(|index| session(&format!("requirement-{index}"), CLOCK_PROTOCOL))
+                .map(|index| {
+                    requirement(
+                        &format!("requirement-{index}"),
+                        RequirementMode::All,
+                        HARDWARE_PROTOCOL,
+                    )
+                })
                 .collect(),
             &[],
         )
     };
-    let mut image = Image::new().with(CLOCK, declaration(Vec::new(), &[CLOCK_PROTOCOL]));
-    let mut components = vec![Component::new(CLOCK)];
+    let mut image = Image::new();
+    let mut components = Vec::new();
     for index in 0..IMPORTERS {
         let name = format!("importer-{index}");
         image = image.with(&name, importer());
         components.push(Component::new(&name));
     }
-    let declarations: Vec<ProgramManifest> = (0..IMPORTERS)
-        .map(|_| importer())
-        .chain([declaration(Vec::new(), &[CLOCK_PROTOCOL])])
-        .collect();
-    let handles = rootkeeper_handles(&declarations.iter().collect::<Vec<_>>());
+    let per_importer = CHILD_HANDLES + REQUIREMENTS + 1;
+    let handles = ROOTKEEPER_HANDLES + IMPORTERS * per_importer;
     assert!(handles > HANDLE_TABLE_CAPACITY as usize);
+    assert!(ROOTKEEPER_HANDLES + (IMPORTERS - 1) * per_importer <= HANDLE_TABLE_CAPACITY as usize);
 
+    image.compiled(&plan(&components[..IMPORTERS - 1]));
     assert_eq!(
         image.rejected(&plan(&components)),
         format!(
-            "boot plan composition of {} components requires up to {handles} rootkeeper handles; \
-             the table holds {HANDLE_TABLE_CAPACITY}",
-            IMPORTERS + 1
+            "boot plan composition of {IMPORTERS} components requires up to {handles} rootkeeper handles; \
+             the table holds {HANDLE_TABLE_CAPACITY}"
         )
     );
 }
@@ -643,14 +404,28 @@ fn plan_rejects_a_composition_past_the_rootkeeper_handle_estimate() {
 fn plan_rejects_an_export_past_the_protocol_id_bound() {
     const WIDE: &str = "wide-exporter";
     let protocol = "P".repeat(PROTOCOL_ID_MAX + 1);
-
+    let mut bytes = declaration(Vec::new(), &[&protocol[..PROTOCOL_ID_MAX]]).program_bytes();
+    let at = 31 + 40 + 16;
+    bytes[at] += 1;
+    bytes.insert(at + 1, b'P');
+    bytes[27..31].copy_from_slice(
+        &(16u32 + 1 + u32::try_from(protocol.len()).expect("protocol length fits")).to_le_bytes(),
+    );
+    let image = Image::new();
+    let mut programs = image.programs();
+    programs.push(PlanProgram {
+        package: WIDE,
+        bin: WIDE,
+        path: "/wide",
+        boot: false,
+        data: &bytes,
+    });
+    let error = compile_plan(&plan(&[Component::new(WIDE)]), &programs).expect_err("wide export");
     assert_eq!(
-        Image::new()
-            .with(WIDE, declaration(Vec::new(), &[&protocol]))
-            .rejected(&plan(&[Component::new(WIDE)])),
+        reason(&error),
         format!(
             "boot plan component '{WIDE}' exports protocol '{protocol}' of {} bytes; \
-             a protocol id holds at most {PROTOCOL_ID_MAX}",
+         a protocol id holds at most {PROTOCOL_ID_MAX}",
             protocol.len()
         )
     );
@@ -715,10 +490,7 @@ fn one_program_carries_two_named_instances() {
     assert_eq!(first.executable(), second.executable());
     assert_eq!(first.name(), "names-boot");
     assert_eq!(second.name(), "names-spare");
-    assert_eq!(
-        first.requirements().collect::<Vec<_>>(),
-        second.requirements().collect::<Vec<_>>()
-    );
+    assert_eq!(first.mountpoint(), second.mountpoint());
 }
 
 #[test]
@@ -893,44 +665,20 @@ fn a_program_without_a_manifest_declares_nothing() {
     let plan = decoded(&bytes);
     let component = plan.component(1).expect("component");
     assert_eq!(component.executable(), image_path(HELPER));
-    assert_eq!(component.requirements().count(), 0);
-    assert_eq!(component.exports().count(), 0);
+    assert_eq!(component.mountpoint(), None);
 }
 
 #[test]
-fn record_zero_is_the_boot_program_with_the_exports_of_its_manifest() {
+fn record_zero_preserves_boot_program_and_launch_parameters() {
     let bytes = compiled(&plan(&[router()]));
 
     let boot = decoded(&bytes).component(0).expect("record 0");
     assert_eq!(boot.executable(), image_path(ROOTKEEPER));
     assert_eq!(boot.name(), ROOTKEEPER);
-    assert_eq!(boot.exports().collect::<Vec<_>>(), [HARDWARE_PROTOCOL]);
-    assert_eq!(boot.requirements().count(), 0);
+
+    assert_eq!(boot.mountpoint(), None);
     assert_eq!(boot.memory_limit(), 0);
     assert_eq!(boot.restarts(), 0);
-}
-
-#[test]
-fn a_requirement_to_the_export_of_the_boot_program_binds_to_record_zero() {
-    for component in [platform(), platform().bind("hardware", ROOTKEEPER)] {
-        let bytes = image_with_platform().compiled(&plan(&[component]));
-
-        assert_eq!(
-            requirements_of(&bytes, 1),
-            [session_of("hardware", 0, HARDWARE_PROTOCOL, "")]
-        );
-    }
-}
-
-#[test]
-fn plan_rejects_a_scope_on_a_requirement_to_record_zero() {
-    assert_eq!(
-        image_with_platform().rejected(&plan(&[platform().scope("hardware", "all")])),
-        format!(
-            "boot plan component '{PLATFORM}' sets 'scope' on requirement 'hardware', \
-             which the boot program '{ROOTKEEPER}' provides"
-        )
-    );
 }
 
 #[test]
@@ -971,15 +719,15 @@ fn record_zero_is_named_by_the_image_path_of_the_boot_program() {
         declaration(vec![session("hardware", HARDWARE_PROTOCOL)], &[]),
     );
 
-    let bytes = image.compiled(&plan(&[platform().bind("hardware", "init")]));
+    let bytes = image.compiled(&plan(&[platform()]));
 
     assert_eq!(
         decoded(&bytes).component(0).expect("record 0").name(),
         "init"
     );
     assert_eq!(
-        requirements_of(&bytes, 1),
-        [session_of("hardware", 0, HARDWARE_PROTOCOL, "")]
+        decoded(&bytes).component(1).expect("platform").mountpoint(),
+        None
     );
 }
 
@@ -995,5 +743,66 @@ fn plan_rejects_a_component_named_as_record_zero() {
 fn plan_rejects_an_unknown_key() {
     let source = format!("{}slots = [{{ source = \"image\" }}]\n", plan(&[router()]));
 
+    assert!(rejected(&source).starts_with("Failed to parse boot plan TOML"));
+}
+
+#[test]
+fn all_preserves_runtime_selection_instead_of_serializing_initial_exporters() {
+    let image = Image::new().with(
+        "multiplicity-consumer",
+        declaration(
+            vec![requirement(
+                "names",
+                RequirementMode::All,
+                NAMESPACE_PROTOCOL,
+            )],
+            &[NAMESPACE_PROTOCOL],
+        ),
+    );
+    let bytes = image.compiled(&plan(&[
+        router(),
+        Component::new("multiplicity-consumer"),
+        router().name(TWIN),
+    ]));
+    assert_eq!(
+        decoded(&bytes).component(2).expect("consumer").mountpoint(),
+        None
+    );
+}
+
+#[test]
+fn session_and_all_preserve_their_selection_without_initial_exporters() {
+    for mode in [RequirementMode::One, RequirementMode::All] {
+        let image = Image::new().with(
+            "multiplicity-consumer",
+            declaration(vec![requirement("names", mode, NAMESPACE_PROTOCOL)], &[]),
+        );
+        let bytes = image.compiled(&plan(&[Component::new("multiplicity-consumer")]));
+        assert_eq!(
+            decoded(&bytes).component(1).expect("consumer").mountpoint(),
+            None
+        );
+    }
+}
+
+#[test]
+fn plan_carries_explicit_mount_paths_and_refuses_non_filesystem_mounts() {
+    let bytes = compiled(&plan(&[router(), ram_filesystem().mounted("/tmp")]));
+    assert_eq!(
+        decoded(&bytes).component(2).expect("ramfs").mountpoint(),
+        Some("/tmp")
+    );
+    assert!(rejected(&plan(&[router().mounted("/tmp")])).contains("must export FileSystem"));
+    for path in ["", "relative", "/../outside"] {
+        assert!(rejected(&plan(&[ram_filesystem().mounted(path)])).contains("mountpoint"));
+    }
+}
+
+#[test]
+fn plan_rejects_the_removed_generic_scope_configuration() {
+    let source = format!(
+        "{}scope = {{ namespace = \"/boot\" }}\n",
+        plan(&[image_filesystem()])
+    );
     assert!(rejected(&source).starts_with("Failed to parse boot plan TOML"));
 }

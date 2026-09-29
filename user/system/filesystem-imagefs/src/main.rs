@@ -9,10 +9,12 @@ runtime::process_heap!();
 
 use core::{convert::Infallible, panic::PanicInfo};
 
-use component_startup::component_manifest;
+use bootstrap_abi::image;
+use component_startup::{Requirements as _, component_manifest};
 use filesystem::ImageFileSystem;
-use filesystem_abi::{file_system, namespace_admin};
+use filesystem_abi::file_system;
 use filesystem_server::{Error, Result, serve};
+use kernel_objects::MemoryRegion;
 use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, kind};
 
@@ -20,7 +22,7 @@ const LOG_TAG: &str = "imagefs";
 
 component_manifest! {
     struct ImageFileSystemStartup {
-        requirements: { namespace: session(namespace_admin::Protocol), image: region },
+        requirements: { image: session(image::Protocol) },
         exports: [file_system::Protocol],
     }
 }
@@ -35,15 +37,17 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     start_component(parent, LOG_TAG);
     let requirements = ImageFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
-    serve(
-        parent,
-        requirements.namespace,
-        Some(requirements.image),
-        |backing| {
-            let backing = backing.ok_or(Error::Start)?;
-            Ok(ImageFileSystem::new(backing)?)
-        },
-    )
+    let image = requirements.image.ok_or(Error::Start)?.client();
+    let region = image
+        .region()
+        .ok()
+        .and_then(core::result::Result::ok)
+        .map(MemoryRegion::from)
+        .ok_or(Error::Start)?;
+    serve(parent, Some(region), |backing| {
+        let backing = backing.ok_or(Error::Start)?;
+        Ok(ImageFileSystem::new(backing)?)
+    })
 }
 
 #[panic_handler]

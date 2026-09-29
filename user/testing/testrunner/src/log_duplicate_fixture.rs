@@ -19,7 +19,7 @@ const RESTART_EXIT_CODE: u64 = 1;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let requests = Client::new(PortTransport::new(parent));
-    let Ok(Ok(log)) = session::<log::Protocol>(&requests, LOG_REQUIREMENT) else {
+    let Ok(Ok(log)) = session::<log::Protocol>(&requests, LOG_REQUIREMENT, 0) else {
         process_exit(RESTART_EXIT_CODE)
     };
     let duplicate = log.handle().duplicate(Rights::WRITE, None).map(drop);

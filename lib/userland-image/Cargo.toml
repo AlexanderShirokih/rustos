@@ -5,13 +5,15 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-# Сериализаторы образа и плана (`encode`, `encode_program`, `encode_plan`);
+# Сериализаторы образа и плана (`encode`, `encode_plan`);
 # требует `alloc`. По умолчанию выключен, чтобы no_std-парсер не тянул аллокатор.
 alloc = []
 
 [dependencies]
-component-abi = { workspace = true }
 userland = { workspace = true }
+
+[dev-dependencies]
+userland = { workspace = true, features = ["alloc"] }
 
 [lints]
 workspace = true

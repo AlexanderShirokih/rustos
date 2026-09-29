@@ -14,7 +14,7 @@ use memory::{
     user_vm_allocator::UserVmAllocator,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
-use syscall::MAX_PROCESS_NAME_LEN;
+use syscall::{MAX_PROCESS_NAME_LEN, ProcessName};
 
 use super::{
     address_space::AddressSpace,
@@ -22,7 +22,7 @@ use super::{
         ArchContext, ArchCpu, CpuId, CpuLocalError, MAX_CPUS, TimerSource, with_preemption_disabled,
     },
     cpu::Cpu,
-    process::{Process, ProcessName, ProcessTable},
+    process::{Process, ProcessTable},
     ready_queue::QueuedThread,
     thread::{IpcBufferSlot, Thread, ThreadState},
     thread_table::ThreadTable,

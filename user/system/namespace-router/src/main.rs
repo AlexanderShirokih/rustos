@@ -1,5 +1,5 @@
 //! Маршрутизатор имён разбирает пути клиентов `Namespace` по монтированиям и выдаёт сессии
-//! файловых систем. Файловая система сама монтирует себя по своей сессии `NamespaceAdmin`.
+//! файловых систем. Держатель `FileSystemMount` задаёт путь и файловую сессию монтирования.
 
 #![no_std]
 #![no_main]
@@ -13,9 +13,10 @@ use alloc::boxed::Box;
 use core::{convert::Infallible, panic::PanicInfo};
 
 use component_startup::{
-    SessionError, component_manifest, component_startup as startup_contract, serve_export,
+    Requirements as _, SessionError, component_manifest, component_startup as startup_contract,
+    serve_export,
 };
-use filesystem_abi::{namespace, namespace_admin};
+use filesystem_abi::{file_system_mount, namespace};
 use ipc::{Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Port};
 use runtime::{
@@ -27,17 +28,17 @@ mod error;
 mod router;
 
 use error::Result;
-use router::{Router, admin_gone, open_admin, open_view, view_gone};
+use router::{Router, mount_gone, open_mount, open_view, view_gone};
 
 const LOG_TAG: &str = "router";
 
-const ADMIN_STACK_SIZE: u64 = 0x10000;
+const MOUNT_STACK_SIZE: u64 = 0x10000;
 const EXPORT_STACK_SIZE: u64 = 0x4000;
 
 component_manifest! {
     struct RouterStartup {
         requirements: {},
-        exports: [namespace::Protocol, namespace_admin::Protocol],
+        exports: [namespace::Protocol, file_system_mount::Protocol],
     }
 }
 
@@ -52,22 +53,22 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     start_component(parent, LOG_TAG);
     let requirements = RouterStartup::request(parent)?;
     let views: &'static Port = Box::leak(Box::new(Port::create()?));
-    let admins: &'static Port = Box::leak(Box::new(Port::create()?));
+    let mounts: &'static Port = Box::leak(Box::new(Port::create()?));
 
-    // Потоки администратора и экспортов работают до конца процесса. Поток администратора при
+    // Потоки монтирования и экспортов работают до конца процесса. Поток монтирования при
     // монтировании отвечает на ожидающие запросы видов вызовом `open_root`, поэтому его стек
     // равен стеку основного потока.
     let views_parent = requirements.parent;
-    let admins_parent = startup_contract::Client::new(PortTransport::new(parent));
+    let mount_parent = startup_contract::Client::new(PortTransport::new(parent));
     let _ = spawn_owned(
         move || {
-            listen(admins, admin_gone, |frame| {
-                let _ = namespace_admin::dispatch(&mut Router, frame);
+            listen(mounts, mount_gone, |frame| {
+                let _ = file_system_mount::dispatch(&mut Router { views }, frame);
             });
-            log_line("admin port closed");
+            log_line("mount port closed");
             process_exit(1)
         },
-        ADMIN_STACK_SIZE,
+        MOUNT_STACK_SIZE,
         Priority::new(1),
     )?;
     let _ = spawn_owned(
@@ -76,14 +77,14 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
         Priority::new(1),
     )?;
     let _ = spawn_owned(
-        move || export::<namespace_admin::Protocol>(&admins_parent, admins, open_admin),
+        move || export::<file_system_mount::Protocol>(&mount_parent, mounts, open_mount),
         EXPORT_STACK_SIZE,
         Priority::new(1),
     )?;
     log_line("started");
 
     listen(views, view_gone, |frame| {
-        let _ = namespace::dispatch(&mut Router, frame);
+        let _ = namespace::dispatch(&mut Router { views }, frame);
     });
     log_line("service port closed");
     process_exit(1)
@@ -106,9 +107,9 @@ fn listen(port: &Port, gone: fn(u64), mut received: impl FnMut(Incoming<'_, Deli
 fn export<P: ipc::Protocol>(
     parent: &startup_contract::Client<PortTransport>,
     port: &Port,
-    open: fn(&Port, &str) -> core::result::Result<Port, SessionError>,
+    open: fn(&Port) -> core::result::Result<Port, SessionError>,
 ) -> u32 {
-    let failure = serve_export::<P>(parent, |scope| open(port, scope));
+    let failure = serve_export::<P>(parent, || open(port));
     log_fmt(format_args!("export stopped: {failure:?}"));
     process_exit(1)
 }

@@ -1,8 +1,8 @@
 use anyhow::{Result, ensure};
-use component_abi::{PROTOCOL_ID_MAX, RequirementKind};
+use bootstrap_abi::image;
+use component_abi::{ComponentManifest, PROTOCOL_ID_MAX, RequirementMode};
+use ipc::Protocol as _;
 use syscall::{HANDLE_TABLE_CAPACITY, IPC_BUFFER_MAX_CAPS, MAX_SEGMENTS_PER_IMG};
-
-use crate::manifest::ProgramManifest;
 
 const BASE: usize = 7;
 const LAUNCH: usize = MAX_SEGMENTS_PER_IMG + 3;
@@ -14,17 +14,16 @@ pub(super) const CHILD_HANDLES: usize = 3;
 
 pub(super) fn validate_composition(
     names: &[&str],
-    declarations: &[&ProgramManifest],
+    declarations: &[ComponentManifest<'_>],
 ) -> Result<()> {
     for (name, declared) in names.iter().zip(declarations) {
         validate_component(name, declared)?;
     }
-    // Запись 0 rootkeeper не запускает, и в оценку она не входит.
-    validate_rootkeeper_limits(declarations.get(1..).unwrap_or_default())
+    Ok(())
 }
 
-fn validate_component(name: &str, declared: &ProgramManifest) -> Result<()> {
-    for export in &declared.exports {
+fn validate_component(name: &str, declared: &ComponentManifest<'_>) -> Result<()> {
+    for export in declared.exports() {
         ensure!(
             export.len() <= PROTOCOL_ID_MAX,
             "boot plan component '{name}' exports protocol '{export}' of {} bytes; \
@@ -35,40 +34,50 @@ fn validate_component(name: &str, declared: &ProgramManifest) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn rootkeeper_handles(declarations: &[&ProgramManifest]) -> usize {
-    // Оценка сверху. `BASE` покрывает порт `Bootstrap`, сессию `Hardware`, ресурс, регионы образа,
-    // порты `ComponentStartup` и журнала и поток relay. `LAUNCH` покрывает
-    // один запуск программы, и rootkeeper запускает программы по очереди. `FRAME` покрывает
-    // принятый кадр на каждый принимающий поток. Запись компонента держит `Process`, резерв и
-    // источник журнала в `CHILD_HANDLES`, а также по заявке на требование сессии, по `accept` на
-    // экспорт и копии выдач incarnation. Копию сессии `Hardware` на требование к записи 0
-    // покрывает слот требования сессии.
+pub(super) fn rootkeeper_handles(declarations: &[ComponentManifest<'_>]) -> usize {
+    // `BASE` покрывает порт `Bootstrap`, сессию `Hardware`, ресурс, регионы образа, порты
+    // `ComponentStartup` и журнала и поток relay. `LAUNCH` покрывает один запуск, `FRAME` -
+    // принятый кадр на каждый принимающий поток. `CHILD_HANDLES` покрывает процесс, резерв и
+    // источник журнала записи. Каждый провайдер требования занимает слот заявки либо копии
+    // выдачи записи 0, и регион образа по сессии `Image` - ещё один слот копии выдачи. Журнал
+    // занимает слот копии выдачи, экспорт - слот `accept`.
     let per_component: usize = declarations
         .iter()
-        .map(|declared| {
-            let session_requirements = count(declared, |kind| kind == RequirementKind::Session);
-            let held = 1 + count(declared, |kind| kind != RequirementKind::Session);
-            CHILD_HANDLES + session_requirements + declared.exports.len() + held
+        .skip(1)
+        .map(|component| {
+            let requirements: usize = component
+                .requirements()
+                .map(|requirement| match requirement.mode() {
+                    RequirementMode::One => 1,
+                    RequirementMode::All => declarations
+                        .iter()
+                        .filter(|provider| {
+                            provider
+                                .exports()
+                                .any(|export| export == requirement.protocol())
+                        })
+                        .count(),
+                })
+                .sum();
+            let image_region = usize::from(component.requirements().any(|requirement| {
+                requirement.mode() == RequirementMode::One
+                    && requirement.protocol() == image::Protocol::ID
+            }));
+
+            CHILD_HANDLES + requirements + image_region + component.exports().count() + 1
         })
         .sum();
+
     ROOTKEEPER_HANDLES + per_component
 }
 
-fn count(declared: &ProgramManifest, kind: impl Fn(RequirementKind) -> bool) -> usize {
-    declared
-        .requirements
-        .iter()
-        .filter(|requirement| kind(requirement.kind))
-        .count()
-}
-
-fn validate_rootkeeper_limits(declarations: &[&ProgramManifest]) -> Result<()> {
+pub(super) fn validate_rootkeeper_limits(declarations: &[ComponentManifest<'_>]) -> Result<()> {
     let handles = rootkeeper_handles(declarations);
     ensure!(
         handles <= HANDLE_TABLE_CAPACITY as usize,
         "boot plan composition of {} components requires up to {handles} rootkeeper handles; \
          the table holds {HANDLE_TABLE_CAPACITY}",
-        declarations.len()
+        declarations.len().saturating_sub(1)
     );
     Ok(())
 }

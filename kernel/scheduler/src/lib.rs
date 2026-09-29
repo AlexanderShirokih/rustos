@@ -37,7 +37,7 @@ pub use arch::{
     ArchContext, ArchCpu, CpuId, CpuLocalError, MAX_CPUS, StackError, ThreadStack,
     ThreadStackAllocator, TimerSource, with_preemption_disabled,
 };
-pub use process::{Process, ProcessName};
+pub use process::Process;
 pub use scheduler::{
     Bootstrapped, CpuBootstrapError, DEFAULT_QUANTUM_NS, Running, Scheduler, SchedulerConfig,
     SchedulerStage, Uninit, lowest_priority,
@@ -45,6 +45,7 @@ pub use scheduler::{
 pub use service::{
     CpuEntry, CurrentIpcContext, ORPHANED_EXIT_CODE, SchedulerHandle, UserProcessLauncher,
 };
+pub use syscall::ProcessName;
 pub use thread::{Thread, ThreadState};
 pub use types::{
     Priority, ProcessId, SchedulerService, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,

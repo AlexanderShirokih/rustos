@@ -151,10 +151,12 @@ dependencies = [
 name = "filesystem-imagefs"
 version = "0.1.0"
 dependencies = [
+ "bootstrap-abi",
  "component-startup",
  "filesystem",
  "filesystem-abi",
  "filesystem-server",
+ "kernel-objects",
  "runtime",
  "syscall",
  "userland-build",
@@ -326,6 +328,7 @@ dependencies = [
  "bootstrap-abi",
  "component-abi",
  "component-startup",
+ "filesystem-abi",
  "ipc",
  "kernel-objects",
  "log-abi",
@@ -333,6 +336,7 @@ dependencies = [
  "managed-component",
  "runtime",
  "syscall",
+ "userland",
  "userland-build",
  "userland-image",
 ]
@@ -475,7 +479,6 @@ version = "0.1.0"
 name = "userland-image"
 version = "0.1.0"
 dependencies = [
- "component-abi",
  "userland",
 ]
 

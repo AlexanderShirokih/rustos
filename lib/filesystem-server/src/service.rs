@@ -89,16 +89,6 @@ impl FileSystemState {
         self.sessions.open(ClientId::from_raw(badge)).map(|_| ())
     }
 
-    pub(crate) fn open_session_at(
-        &mut self,
-        badge: u64,
-        scope: &str,
-    ) -> Result<(), FileSystemError> {
-        let root = Path::new(scope)?;
-        self.backend.lookup(root)?;
-        self.open_session_scoped(badge, window_scope(root))
-    }
-
     fn open_session_scoped(&mut self, badge: u64, scope: String) -> Result<(), FileSystemError> {
         let session = self.sessions.open(ClientId::from_raw(badge))?;
         session.attachment_mut().scope = scope;

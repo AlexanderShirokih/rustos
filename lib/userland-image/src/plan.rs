@@ -1,13 +1,12 @@
-use component_abi::{LOG_REQUIREMENT, SESSION_SCOPE_MAX};
-use userland::entry_name;
+use crate::entry_name;
 
 /// Путь записи образа, из которой rootkeeper читает план загрузочной композиции.
 pub const BOOT_PLAN_PATH: &str = "/rootkeeper/plan";
 
 /// Имя записи с программой в каталоге компонента.
-pub const COMPONENT_PROGRAM_NAME: &str = "program";
+pub const COMPONENT_PROGRAM_NAME: &str = "exec";
 
-/// Имя записи `program` внутри каталога компонента - имя этого каталога. Любая другая
+/// Имя записи `exec` внутри каталога компонента - имя этого каталога. Любая другая
 /// запись, в том числе другой файл того же каталога, названа собственным именем.
 #[must_use]
 pub fn component_name(record: &str) -> &str {
@@ -24,91 +23,28 @@ pub fn component_name(record: &str) -> &str {
 pub const BOOT_PLAN_MAGIC: [u8; 8] = *b"RKPLAN\0\0";
 pub const BOOT_PLAN_VERSION: u16 = 1;
 
-pub(crate) const PLAN_HEADER_SIZE: usize = 16;
-pub(crate) const COMPONENT_HEADER_SIZE: usize = 24;
-pub(crate) const REQUIREMENT_HEADER_SIZE: usize = 10;
+pub(crate) const PLAN_HEADER_SIZE: usize = 12;
+pub(crate) const COMPONENT_HEADER_SIZE: usize = 18;
 
 pub(crate) const COMPONENT_RESTARTS: usize = 0;
 pub(crate) const COMPONENT_EXECUTABLE_LEN: usize = 4;
 pub(crate) const COMPONENT_NAME_LEN: usize = 6;
-pub(crate) const COMPONENT_REQUIREMENT_COUNT: usize = 8;
-pub(crate) const COMPONENT_EXPORT_COUNT: usize = 10;
-pub(crate) const COMPONENT_RESERVED: usize = 12;
-pub(crate) const COMPONENT_MEMORY_LIMIT: usize = 16;
-
-pub(crate) const REQUIREMENT_KIND: usize = 0;
-pub(crate) const REQUIREMENT_RESERVED: usize = 1;
-pub(crate) const REQUIREMENT_NAME_LEN: usize = 2;
-pub(crate) const REQUIREMENT_PROVIDER: usize = 4;
-pub(crate) const REQUIREMENT_PROTOCOL_LEN: usize = 6;
-pub(crate) const REQUIREMENT_SCOPE_LEN: usize = 8;
-
-pub(crate) const REQUIREMENT_KIND_REGION: u8 = 0;
-pub(crate) const REQUIREMENT_KIND_EXPORT: u8 = 1;
-
-pub(crate) const NAME_LEN_SIZE: usize = 2;
-
-/// Строки записи в порядке объявления: длина `u16` LE и байты каждой.
-#[derive(Debug, Clone)]
-pub struct PlanNames<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-    remaining: u16,
-}
-
-impl<'a> Iterator for PlanNames<'a> {
-    type Item = &'a str;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let len = usize::from(read_u16(self.bytes, self.cursor).ok()?);
-        let at = self.cursor + NAME_LEN_SIZE;
-        let name = core::str::from_utf8(self.bytes.get(at..at + len)?).ok()?;
-        self.remaining -= 1;
-        self.cursor = at + len;
-        Some(name)
-    }
-}
-
-/// Источник capability, которую родитель выдаёт на запрос требования.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequirementSource<'a> {
-    /// Сессия экспорта `protocol` в области `scope`. `provider` - номер провайдера в плане,
-    /// провайдер 0 - загрузочная программа. Пустая область называет весь экспорт.
-    Export {
-        provider: u16,
-        protocol: &'a str,
-        scope: &'a str,
-    },
-    /// Read-only регион userland-образа.
-    Region,
-}
-
-/// Требование компонента с именем из манифеста и его источник.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlanRequirement<'a> {
-    pub name: &'a str,
-    pub source: RequirementSource<'a>,
-}
+pub(crate) const COMPONENT_MOUNTPOINT_LEN: usize = 8;
+pub(crate) const COMPONENT_MEMORY_LIMIT: usize = 10;
 
 /// Компонент загрузочной композиции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanComponent<'a> {
     executable: &'a str,
     name: &'a str,
-    requirements: &'a [u8],
-    requirement_count: u16,
-    exports: &'a [u8],
-    export_count: u16,
+    mountpoint: Option<&'a str>,
     memory_limit: u64,
     restarts: u32,
 }
 
 /// План загрузочной композиции, разобранный из записи образа.
 ///
-/// Запись 0 - загрузочная программа образа с путём, именем и экспортами. У неё нет требований,
+/// Запись 0 - загрузочная программа образа с путём и именем. У неё нет монтирования,
 /// предела памяти и перезапусков, и родитель её не запускает. Записи с номера 1 - компоненты
 /// композиции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,15 +61,7 @@ pub struct PlanComponents<'a> {
     remaining: u16,
 }
 
-/// Требования компонента в порядке манифеста.
-#[derive(Debug, Clone)]
-pub struct PlanRequirements<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-    remaining: u16,
-}
-
-/// Причина отказа декодера записи плана.
+/// Причина отказа декодера записи (или чтении) плана.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanDecodeError {
     /// Первые байты записи не равны [`BOOT_PLAN_MAGIC`].
@@ -148,11 +76,6 @@ pub enum PlanDecodeError {
 
 struct ParsedComponent<'a> {
     component: PlanComponent<'a>,
-    end: usize,
-}
-
-struct ParsedRequirement<'a> {
-    requirement: PlanRequirement<'a>,
     end: usize,
 }
 
@@ -178,32 +101,10 @@ impl<'a> PlanComponent<'a> {
         self.name
     }
 
-    /// Требования компонента в порядке манифеста.
+    /// Путь монтирования экспорта `FileSystem` при загрузке, если он задан.
     #[must_use]
-    pub const fn requirements(&self) -> PlanRequirements<'a> {
-        PlanRequirements {
-            bytes: self.requirements,
-            cursor: 0,
-            remaining: self.requirement_count,
-        }
-    }
-
-    /// Источник требования `name`.
-    #[must_use]
-    pub fn requirement(&self, name: &str) -> Option<RequirementSource<'a>> {
-        self.requirements()
-            .find(|requirement| requirement.name == name)
-            .map(|requirement| requirement.source)
-    }
-
-    /// Протоколы экспортов компонента, по `Protocol::ID` на экспорт.
-    #[must_use]
-    pub const fn exports(&self) -> PlanNames<'a> {
-        PlanNames {
-            bytes: self.exports,
-            cursor: 0,
-            remaining: self.export_count,
-        }
+    pub const fn mountpoint(&self) -> Option<&'a str> {
+        self.mountpoint
     }
 
     /// Предел памяти компонента в байтах. Родитель отрезает компоненту бюджет не меньше
@@ -270,9 +171,6 @@ impl<'a> BootPlan<'a> {
         if count == 0 {
             return Err(PlanDecodeError::InvalidLayout("boot_record"));
         }
-        if read_u32(header, 12)? != 0 {
-            return Err(PlanDecodeError::InvalidLayout("reserved"));
-        }
 
         let mut cursor = PLAN_HEADER_SIZE;
         for index in 0..count {
@@ -281,7 +179,7 @@ impl<'a> BootPlan<'a> {
             if index == 0 {
                 if component.memory_limit != 0
                     || component.restarts != 0
-                    || component.requirement_count != 0
+                    || component.mountpoint.is_some()
                 {
                     return Err(PlanDecodeError::InvalidLayout("boot_record"));
                 }
@@ -294,38 +192,7 @@ impl<'a> BootPlan<'a> {
             return Err(PlanDecodeError::InvalidLayout("trailing_bytes"));
         }
 
-        let plan = Self { bytes, count };
-        for component in plan.components() {
-            // Родитель ищет источник требования по имени, поэтому имя в записи не повторяется, а
-            // имя `log` зарезервировано за журналом, который сам выдаёт родитель.
-            for (index, requirement) in component.requirements().enumerate() {
-                if requirement.name == LOG_REQUIREMENT
-                    || component
-                        .requirements()
-                        .take(index)
-                        .any(|earlier| earlier.name == requirement.name)
-                {
-                    return Err(PlanDecodeError::InvalidLayout("requirement_name"));
-                }
-                if let RequirementSource::Export {
-                    provider, protocol, ..
-                } = requirement.source
-                {
-                    plan.validate_export(provider, protocol)?;
-                }
-            }
-        }
-        Ok(plan)
-    }
-
-    fn validate_export(&self, provider: u16, protocol: &str) -> Result<(), PlanDecodeError> {
-        let exporter = self
-            .component(provider)
-            .ok_or(PlanDecodeError::InvalidLayout("requirement_provider"))?;
-        if !exporter.exports().any(|export| export == protocol) {
-            return Err(PlanDecodeError::InvalidLayout("requirement_protocol"));
-        }
-        Ok(())
+        Ok(Self { bytes, count })
     }
 }
 
@@ -345,20 +212,6 @@ impl<'a> Iterator for PlanComponents<'a> {
     }
 }
 
-impl<'a> Iterator for PlanRequirements<'a> {
-    type Item = PlanRequirement<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let parsed = parse_requirement(self.bytes, self.cursor).ok()?;
-        self.remaining -= 1;
-        self.cursor = parsed.end;
-        Some(parsed.requirement)
-    }
-}
-
 fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanDecodeError> {
     let header = bytes
         .get(at..at + COMPONENT_HEADER_SIZE)
@@ -366,38 +219,23 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
     let restarts = read_u32(header, COMPONENT_RESTARTS)?;
     let executable_len = usize::from(read_u16(header, COMPONENT_EXECUTABLE_LEN)?);
     let name_len = usize::from(read_u16(header, COMPONENT_NAME_LEN)?);
-    let requirement_count = read_u16(header, COMPONENT_REQUIREMENT_COUNT)?;
-    let export_count = read_u16(header, COMPONENT_EXPORT_COUNT)?;
-    if read_u32(header, COMPONENT_RESERVED)? != 0 {
-        return Err(PlanDecodeError::InvalidLayout("reserved"));
-    }
+    let mount_len = usize::from(read_u16(header, COMPONENT_MOUNTPOINT_LEN)?);
     let memory_limit = read_u64(header, COMPONENT_MEMORY_LIMIT)?;
 
     let cursor = at + COMPONENT_HEADER_SIZE;
     let (executable, cursor) = parse_str(bytes, cursor, executable_len, "executable")?;
-    let (name, mut cursor) = parse_str(bytes, cursor, name_len, "name")?;
-
-    let requirements_at = cursor;
-    for _ in 0..requirement_count {
-        cursor = parse_requirement(bytes, cursor)?.end;
-    }
-    let requirements = bytes
-        .get(requirements_at..cursor)
-        .ok_or(truncated(bytes, cursor))?;
-
-    let exports_at = cursor;
-    cursor = parse_names(bytes, cursor, export_count, "export")?;
-    let exports = bytes
-        .get(exports_at..cursor)
-        .ok_or(truncated(bytes, cursor))?;
+    let (name, cursor) = parse_str(bytes, cursor, name_len, "name")?;
+    let (mountpoint, cursor) = if mount_len == 0 {
+        (None, cursor)
+    } else {
+        let (path, cursor) = parse_str(bytes, cursor, mount_len, "mountpoint")?;
+        (Some(path), cursor)
+    };
 
     let component = PlanComponent {
         executable,
         name,
-        requirements,
-        requirement_count,
-        exports,
-        export_count,
+        mountpoint,
         memory_limit,
         restarts,
     };
@@ -406,90 +244,6 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
         component,
         end: cursor,
     })
-}
-
-fn parse_requirement(bytes: &[u8], at: usize) -> Result<ParsedRequirement<'_>, PlanDecodeError> {
-    let header = bytes
-        .get(at..at + REQUIREMENT_HEADER_SIZE)
-        .ok_or(truncated(bytes, at + REQUIREMENT_HEADER_SIZE))?;
-    let kind = *header
-        .get(REQUIREMENT_KIND)
-        .ok_or(truncated(bytes, at + REQUIREMENT_KIND + 1))?;
-    if !matches!(kind, REQUIREMENT_KIND_REGION | REQUIREMENT_KIND_EXPORT) {
-        return Err(PlanDecodeError::InvalidLayout("requirement_kind"));
-    }
-    if *header
-        .get(REQUIREMENT_RESERVED)
-        .ok_or(truncated(bytes, at + REQUIREMENT_RESERVED + 1))?
-        != 0
-    {
-        return Err(PlanDecodeError::InvalidLayout("reserved"));
-    }
-    let name_len = usize::from(read_u16(header, REQUIREMENT_NAME_LEN)?);
-    let provider = read_u16(header, REQUIREMENT_PROVIDER)?;
-    let protocol_len = usize::from(read_u16(header, REQUIREMENT_PROTOCOL_LEN)?);
-    let scope_len = usize::from(read_u16(header, REQUIREMENT_SCOPE_LEN)?);
-
-    let export_kind = kind == REQUIREMENT_KIND_EXPORT;
-    // Провайдера, протокол и область называет только требование сессии.
-    if !export_kind && provider != 0 {
-        return Err(PlanDecodeError::InvalidLayout("requirement_provider"));
-    }
-    if !export_kind && protocol_len != 0 {
-        return Err(PlanDecodeError::InvalidLayout("requirement_protocol"));
-    }
-    if (!export_kind && scope_len != 0) || scope_len > SESSION_SCOPE_MAX {
-        return Err(PlanDecodeError::InvalidLayout("requirement_scope"));
-    }
-
-    let (name, cursor) = parse_str(
-        bytes,
-        at + REQUIREMENT_HEADER_SIZE,
-        name_len,
-        "requirement_name",
-    )?;
-    let (source, end) = match kind {
-        REQUIREMENT_KIND_EXPORT => {
-            let (protocol, end) = parse_str(bytes, cursor, protocol_len, "requirement_protocol")?;
-            let (scope, end) = parse_scope(bytes, end, scope_len)?;
-            (
-                RequirementSource::Export {
-                    provider,
-                    protocol,
-                    scope,
-                },
-                end,
-            )
-        }
-        _ => (RequirementSource::Region, cursor),
-    };
-
-    Ok(ParsedRequirement {
-        requirement: PlanRequirement { name, source },
-        end,
-    })
-}
-
-fn parse_names(
-    bytes: &[u8],
-    at: usize,
-    names: u16,
-    field: &'static str,
-) -> Result<usize, PlanDecodeError> {
-    let mut cursor = at;
-    for _ in 0..names {
-        let len = usize::from(read_u16(bytes, cursor)?);
-        let (_, next) = parse_str(bytes, cursor + NAME_LEN_SIZE, len, field)?;
-        cursor = next;
-    }
-    Ok(cursor)
-}
-
-fn parse_scope(bytes: &[u8], at: usize, len: usize) -> Result<(&str, usize), PlanDecodeError> {
-    if len == 0 {
-        return Ok(("", at));
-    }
-    parse_str(bytes, at, len, "requirement_scope")
 }
 
 fn parse_str<'a>(
@@ -543,260 +297,114 @@ fn truncated(bytes: &[u8], needed: usize) -> PlanDecodeError {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     use super::*;
-    use crate::{
-        ComponentSpec, PlanEncodeError, RequirementSourceSpec, RequirementSpec, encode_plan,
-    };
-
-    const BOOT_EXPORTS: &[&str] = &["Hardware"];
-    const ROUTER_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
-    const FILE_SYSTEM_EXPORTS: &[&str] = &["FileSystem"];
-
-    const AREA: &str = "/boot/clock";
+    use crate::{ComponentSpec, PlanEncodeError, encode_plan};
 
     fn boot() -> ComponentSpec<'static> {
         ComponentSpec {
             executable: "/rootkeeper",
             name: "rootkeeper",
-            requirements: &[],
-            exports: BOOT_EXPORTS,
+            mountpoint: None,
             memory_limit: 0,
             restarts: 0,
         }
     }
-
-    fn rtc() -> ComponentSpec<'static> {
-        ComponentSpec {
-            executable: "/boot/driver-pl031",
-            name: "clock",
-            requirements: &[
-                RequirementSpec {
-                    name: "calibration",
-                    source: RequirementSourceSpec::Region,
-                },
-                RequirementSpec {
-                    name: "names",
-                    source: RequirementSourceSpec::Export {
-                        provider: 2,
-                        protocol: "Namespace",
-                        scope: "",
-                    },
-                },
-            ],
-            exports: &[],
-            memory_limit: 256 * 1024,
-            restarts: 0,
-        }
-    }
-
     fn router() -> ComponentSpec<'static> {
         ComponentSpec {
-            executable: "/boot/namespace-router",
+            executable: "/namespace-router",
             name: "router-a",
-            requirements: &[],
-            exports: ROUTER_EXPORTS,
+            mountpoint: None,
             memory_limit: 8 * 1024 * 1024,
             restarts: 2,
         }
     }
-
-    fn image_filesystem() -> ComponentSpec<'static> {
-        ComponentSpec {
-            executable: "/boot/filesystem-imagefs",
-            name: "imagefs",
-            requirements: &[RequirementSpec {
-                name: "image",
-                source: RequirementSourceSpec::Region,
-            }],
-            exports: FILE_SYSTEM_EXPORTS,
-            memory_limit: 8 * 1024 * 1024,
-            restarts: 1,
-        }
-    }
-
-    fn importer<'a>(requirements: &'a [RequirementSpec<'a>]) -> ComponentSpec<'a> {
-        ComponentSpec {
-            executable: "/boot/importer",
-            name: "importer",
-            requirements,
-            exports: &[],
-            memory_limit: 64 * 1024,
-            restarts: 0,
-        }
-    }
-
-    fn session_requirement(
-        name: &'static str,
-        provider: u16,
-        protocol: &'static str,
-        scope: &'static str,
-    ) -> RequirementSpec<'static> {
-        RequirementSpec {
-            name,
-            source: RequirementSourceSpec::Export {
-                provider,
-                protocol,
-                scope,
-            },
-        }
-    }
-
     fn plan_bytes() -> Vec<u8> {
-        encode_plan(&[boot(), rtc(), router(), image_filesystem()]).expect("encode plan")
+        encode_plan(&[boot(), router()]).expect("encode plan")
     }
-
     fn after_boot() -> usize {
         encode_plan(&[boot()]).expect("encode plan").len()
     }
-
-    fn first_requirement_at(component: &ComponentSpec<'_>) -> usize {
-        after_boot() + COMPONENT_HEADER_SIZE + component.executable.len() + component.name.len()
-    }
-
     fn broken(bytes: &[u8], at: usize, field: &[u8]) -> Option<PlanDecodeError> {
         let mut broken = bytes.to_vec();
         broken[at..at + field.len()].copy_from_slice(field);
         decode_plan(&broken).err()
     }
 
-    fn without_boot(bytes: &[u8]) -> Vec<u8> {
-        let count = read_u16(bytes, 10).expect("plan header") - 1;
-        let mut shorter = bytes[..PLAN_HEADER_SIZE].to_vec();
-        shorter[10..12].copy_from_slice(&count.to_le_bytes());
-        shorter.extend_from_slice(&bytes[after_boot()..]);
-        shorter
-    }
-
     #[test]
-    fn round_trip_exposes_every_component_and_its_params() {
-        let bytes = plan_bytes();
-        let plan = decode_plan(&bytes).expect("decode plan");
-        assert_eq!(plan.len(), 4);
-
-        let boot = plan.component(0).expect("boot record");
-        assert_eq!(boot.executable(), "/rootkeeper");
-        assert_eq!(boot.memory_limit(), 0);
-        assert_eq!(boot.requirements().count(), 0);
-        assert_eq!(boot.exports().collect::<Vec<_>>(), BOOT_EXPORTS);
-
-        let rtc = plan.component(1).expect("first component");
-        assert_eq!(rtc.executable(), "/boot/driver-pl031");
-        assert_eq!(rtc.name(), "clock");
-        assert_eq!(rtc.memory_limit(), 256 * 1024);
-        assert_eq!(rtc.restarts(), 0);
-        assert_eq!(rtc.requirements().count(), 2);
-        assert_eq!(rtc.exports().count(), 0);
-
-        let router = plan.component(2).expect("second component");
-        assert_eq!(router.name(), "router-a");
-        assert_eq!(router.restarts(), 2);
-        assert_eq!(router.requirements().count(), 0);
-        assert_eq!(router.exports().collect::<Vec<_>>(), ROUTER_EXPORTS);
-
-        let filesystem = plan.component(3).expect("third component");
-        assert_eq!(filesystem.restarts(), 1);
-        assert_eq!(
-            filesystem.exports().collect::<Vec<_>>(),
-            FILE_SYSTEM_EXPORTS
-        );
-        assert_eq!(
-            filesystem.requirements().collect::<Vec<_>>(),
-            vec![PlanRequirement {
-                name: "image",
-                source: RequirementSource::Region
-            }]
-        );
-        assert!(plan.component(4).is_none());
-    }
-
-    #[test]
-    fn round_trip_carries_every_requirement_by_its_name() {
-        let bytes = plan_bytes();
-        let plan = decode_plan(&bytes).expect("decode plan");
-        let rtc = plan.component(1).expect("first component");
-
-        assert_eq!(
-            rtc.requirements()
-                .map(|requirement| requirement.name)
-                .collect::<Vec<_>>(),
-            vec!["calibration", "names"]
-        );
-        assert_eq!(
-            rtc.requirement("calibration"),
-            Some(RequirementSource::Region)
-        );
-        assert_eq!(
-            rtc.requirement("names"),
-            Some(RequirementSource::Export {
-                provider: 2,
-                protocol: "Namespace",
-                scope: ""
-            })
-        );
-        assert_eq!(rtc.requirement("absent"), None);
-    }
-
-    #[test]
-    fn round_trip_carries_the_provider_and_protocol_of_a_session_requirement() {
-        let requirements = [
-            session_requirement("names", 1, "Namespace", AREA),
-            session_requirement("admin", 1, "NamespaceAdmin", ""),
-        ];
-        let bytes = encode_plan(&[boot(), router(), importer(&requirements)]).expect("encode plan");
-
-        let plan = decode_plan(&bytes).expect("decode plan");
-        let importer = plan.component(2).expect("second component");
-        assert_eq!(
-            importer.requirements().collect::<Vec<_>>(),
-            vec![
-                PlanRequirement {
-                    name: "names",
-                    source: RequirementSource::Export {
-                        provider: 1,
-                        protocol: "Namespace",
-                        scope: AREA
-                    }
-                },
-                PlanRequirement {
-                    name: "admin",
-                    source: RequirementSource::Export {
-                        provider: 1,
-                        protocol: "NamespaceAdmin",
-                        scope: ""
-                    }
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn a_requirement_to_the_boot_record_decodes() {
-        let requirements = [session_requirement("hardware", 0, "Hardware", "")];
-        let bytes = encode_plan(&[boot(), importer(&requirements)]).expect("encode plan");
-
-        let plan = decode_plan(&bytes).expect("decode plan");
-        assert_eq!(
-            plan.component(1).expect("importer").requirement("hardware"),
-            Some(RequirementSource::Export {
-                provider: 0,
-                protocol: "Hardware",
-                scope: ""
-            })
-        );
-    }
-
-    #[test]
-    fn a_requirement_provided_by_its_own_exporting_record_decodes() {
-        let requirements = [session_requirement("names", 1, "Namespace", "")];
-        let component = ComponentSpec {
-            requirements: &requirements,
-            ..router()
+    fn round_trip_carries_mount_paths_without_requirement_bindings() {
+        let filesystem = ComponentSpec {
+            executable: "/filesystem-ramfs",
+            name: "tmp",
+            mountpoint: Some("/tmp"),
+            memory_limit: 4 * 1024 * 1024,
+            restarts: 1,
         };
-        let bytes = encode_plan(&[boot(), component]).expect("encode plan");
+        let bytes = encode_plan(&[boot(), filesystem]).expect("encode plan");
+        let plan = decode_plan(&bytes).expect("decode plan");
+        assert_eq!(plan.component(0).expect("boot").mountpoint(), None);
+        let mounted = plan.component(1).expect("filesystem");
+        assert_eq!(mounted.executable(), filesystem.executable);
+        assert_eq!(mounted.name(), filesystem.name);
+        assert_eq!(mounted.mountpoint(), Some("/tmp"));
+        assert_eq!(mounted.restarts(), 1);
+    }
 
-        assert!(decode_plan(&bytes).is_ok());
+    #[test]
+    fn encode_rejects_empty_mount_paths_and_a_boot_mount() {
+        assert_eq!(
+            encode_plan(&[ComponentSpec {
+                mountpoint: Some("/boot"),
+                ..boot()
+            }]),
+            Err(PlanEncodeError::BootRecord)
+        );
+        assert_eq!(
+            encode_plan(&[
+                boot(),
+                ComponentSpec {
+                    mountpoint: Some(""),
+                    ..router()
+                }
+            ]),
+            Err(PlanEncodeError::EmptyString)
+        );
+    }
+    #[test]
+    fn decode_rejects_a_boot_record_with_runtime_properties() {
+        let bytes = plan_bytes();
+        for (offset, value) in [
+            (COMPONENT_RESTARTS, 1u32.to_le_bytes().to_vec()),
+            (COMPONENT_MEMORY_LIMIT, 1u64.to_le_bytes().to_vec()),
+        ] {
+            assert_eq!(
+                broken(&bytes, PLAN_HEADER_SIZE + offset, &value),
+                Some(PlanDecodeError::InvalidLayout("boot_record"))
+            );
+        }
+        let mut mounted = bytes;
+        let at = PLAN_HEADER_SIZE + COMPONENT_MOUNTPOINT_LEN;
+        mounted[at..at + 2].copy_from_slice(&2u16.to_le_bytes());
+        mounted.splice(after_boot()..after_boot(), *b"/x");
+        assert_eq!(
+            decode_plan(&mounted).expect_err("boot cannot mount"),
+            PlanDecodeError::InvalidLayout("boot_record")
+        );
+    }
+
+    #[test]
+    fn encode_rejects_zero_memory_for_an_ordinary_component() {
+        assert_eq!(
+            encode_plan(&[
+                boot(),
+                ComponentSpec {
+                    memory_limit: 0,
+                    ..router()
+                }
+            ]),
+            Err(PlanEncodeError::ZeroMemory)
+        );
     }
 
     #[test]
@@ -805,13 +413,6 @@ mod tests {
 
         let plan = decode_plan(&bytes).expect("decode plan");
         assert_eq!(plan.len(), 1);
-        assert_eq!(
-            plan.component(0)
-                .expect("boot record")
-                .exports()
-                .collect::<Vec<_>>(),
-            BOOT_EXPORTS
-        );
     }
 
     #[test]
@@ -845,13 +446,13 @@ mod tests {
     #[test]
     fn a_program_record_is_named_by_the_directory_that_holds_it() {
         assert_eq!(
-            component_name("/boot/namespace-router/program"),
+            component_name("/boot/namespace-router/exec"),
             "namespace-router"
         );
         assert_eq!(component_name("/boot/namespace-router/mounts"), "mounts");
         assert_eq!(component_name("/boot/rootkeeper"), "rootkeeper");
-        assert_eq!(component_name("/program"), "program");
-        assert_eq!(component_name("program"), "program");
+        assert_eq!(component_name("/exec"), "exec");
+        assert_eq!(component_name("exec"), "exec");
     }
 
     #[test]
@@ -867,10 +468,10 @@ mod tests {
     #[test]
     fn decode_rejects_another_version() {
         let mut bytes = plan_bytes();
-        bytes[8..10].copy_from_slice(&9u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
         assert_eq!(
             decode_plan(&bytes).expect_err("version must match"),
-            PlanDecodeError::InvalidVersion(9)
+            PlanDecodeError::InvalidVersion(2)
         );
     }
 
@@ -881,36 +482,6 @@ mod tests {
         assert_eq!(
             decode_plan(&bytes).expect_err("plan carries the boot record"),
             PlanDecodeError::InvalidLayout("boot_record")
-        );
-    }
-
-    #[test]
-    fn decode_rejects_a_boot_record_that_a_component_could_run_with() {
-        let bytes = plan_bytes();
-        assert_eq!(
-            broken(
-                &bytes,
-                PLAN_HEADER_SIZE + COMPONENT_MEMORY_LIMIT,
-                &1u64.to_le_bytes()
-            ),
-            Some(PlanDecodeError::InvalidLayout("boot_record"))
-        );
-        assert_eq!(
-            broken(&bytes, PLAN_HEADER_SIZE + COMPONENT_RESTARTS, &[1]),
-            Some(PlanDecodeError::InvalidLayout("boot_record"))
-        );
-
-        let region = [RequirementSpec {
-            name: "image",
-            source: RequirementSourceSpec::Region,
-        }];
-        let mut bytes =
-            without_boot(&encode_plan(&[boot(), importer(&region)]).expect("encode plan"));
-        let at = PLAN_HEADER_SIZE + COMPONENT_MEMORY_LIMIT;
-        bytes[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
-        assert_eq!(
-            decode_plan(&bytes),
-            Err(PlanDecodeError::InvalidLayout("boot_record"))
         );
     }
 
@@ -946,236 +517,12 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_a_reserved_field_in_use() {
-        let bytes = plan_bytes();
-        for at in [
-            12,
-            PLAN_HEADER_SIZE + COMPONENT_RESERVED,
-            first_requirement_at(&rtc()) + REQUIREMENT_RESERVED,
-        ] {
-            assert_eq!(
-                broken(&bytes, at, &[1]),
-                Some(PlanDecodeError::InvalidLayout("reserved"))
-            );
-        }
-    }
-
-    #[test]
     fn decode_rejects_a_string_that_is_not_utf8() {
         let bytes = plan_bytes();
         let executable_at = PLAN_HEADER_SIZE + COMPONENT_HEADER_SIZE;
         assert_eq!(
             broken(&bytes, executable_at, &[0xFF]),
             Some(PlanDecodeError::InvalidLayout("executable"))
-        );
-    }
-
-    #[test]
-    fn decode_rejects_a_requirement_of_an_unknown_kind() {
-        let bytes = plan_bytes();
-        let kind_at = first_requirement_at(&rtc()) + REQUIREMENT_KIND;
-        for kind in [2, 9] {
-            assert_eq!(
-                broken(&bytes, kind_at, &[kind]),
-                Some(PlanDecodeError::InvalidLayout("requirement_kind"))
-            );
-        }
-    }
-
-    #[test]
-    fn decode_rejects_a_requirement_name_repeated_in_a_record() {
-        let region = RequirementSpec {
-            name: "image",
-            source: RequirementSourceSpec::Region,
-        };
-        let bytes = encode_plan(&[boot(), importer(&[region, region])]).expect("encode plan");
-
-        assert_eq!(
-            decode_plan(&bytes),
-            Err(PlanDecodeError::InvalidLayout("requirement_name"))
-        );
-    }
-
-    #[test]
-    fn decode_rejects_a_requirement_named_log() {
-        let requirement = RequirementSpec {
-            name: LOG_REQUIREMENT,
-            source: RequirementSourceSpec::Region,
-        };
-        let bytes = encode_plan(&[boot(), importer(&[requirement])]).expect("encode plan");
-
-        assert_eq!(
-            decode_plan(&bytes),
-            Err(PlanDecodeError::InvalidLayout("requirement_name"))
-        );
-    }
-
-    #[test]
-    fn decode_rejects_a_session_requirement_whose_provider_is_outside_the_plan() {
-        let requirements = [session_requirement("names", 3, "Namespace", "")];
-        let bytes = encode_plan(&[boot(), importer(&requirements), router()]).expect("encode plan");
-
-        assert_eq!(
-            decode_plan(&bytes),
-            Err(PlanDecodeError::InvalidLayout("requirement_provider"))
-        );
-    }
-
-    #[test]
-    fn decode_rejects_a_session_requirement_whose_provider_does_not_export_its_protocol() {
-        let requirements = [session_requirement("files", 2, "FileSystem", "")];
-        let bytes = encode_plan(&[boot(), importer(&requirements), router()]).expect("encode plan");
-
-        assert_eq!(
-            decode_plan(&bytes),
-            Err(PlanDecodeError::InvalidLayout("requirement_protocol"))
-        );
-    }
-
-    #[test]
-    fn decode_rejects_session_fields_on_a_region_requirement() {
-        let bytes = plan_bytes();
-        let region_at = first_requirement_at(&rtc());
-        assert_eq!(
-            broken(
-                &bytes,
-                region_at + REQUIREMENT_PROVIDER,
-                &1u16.to_le_bytes()
-            ),
-            Some(PlanDecodeError::InvalidLayout("requirement_provider"))
-        );
-        assert_eq!(
-            broken(
-                &bytes,
-                region_at + REQUIREMENT_PROTOCOL_LEN,
-                &1u16.to_le_bytes()
-            ),
-            Some(PlanDecodeError::InvalidLayout("requirement_protocol"))
-        );
-        assert_eq!(
-            broken(
-                &bytes,
-                region_at + REQUIREMENT_SCOPE_LEN,
-                &1u16.to_le_bytes()
-            ),
-            Some(PlanDecodeError::InvalidLayout("requirement_scope"))
-        );
-    }
-
-    #[test]
-    fn decode_rejects_a_scope_past_the_bound() {
-        let requirements = [session_requirement("names", 2, "Namespace", AREA)];
-        let component = importer(&requirements);
-        let bytes = encode_plan(&[boot(), component, router()]).expect("encode plan");
-        let scope_at = first_requirement_at(&component) + REQUIREMENT_SCOPE_LEN;
-        let past = u16::try_from(SESSION_SCOPE_MAX + 1).expect("bound fits the field");
-
-        assert_eq!(
-            broken(&bytes, scope_at, &past.to_le_bytes()),
-            Some(PlanDecodeError::InvalidLayout("requirement_scope"))
-        );
-    }
-
-    #[test]
-    fn encode_rejects_a_plan_without_the_boot_record() {
-        assert_eq!(
-            encode_plan(&[]).expect_err("plan carries the boot record"),
-            PlanEncodeError::BootRecord
-        );
-        assert_eq!(
-            encode_plan(&[router()]).expect_err("record 0 runs no component"),
-            PlanEncodeError::BootRecord
-        );
-
-        let region = [RequirementSpec {
-            name: "image",
-            source: RequirementSourceSpec::Region,
-        }];
-        for boot in [
-            ComponentSpec {
-                memory_limit: 1,
-                ..boot()
-            },
-            ComponentSpec {
-                restarts: 1,
-                ..boot()
-            },
-            ComponentSpec {
-                requirements: &region,
-                ..boot()
-            },
-        ] {
-            assert_eq!(
-                encode_plan(&[boot]).expect_err("record 0 runs no component"),
-                PlanEncodeError::BootRecord
-            );
-        }
-    }
-
-    #[test]
-    fn encode_rejects_a_composition_that_cannot_run() {
-        let zero_memory = ComponentSpec {
-            memory_limit: 0,
-            ..router()
-        };
-        assert_eq!(
-            encode_plan(&[boot(), zero_memory]).expect_err("memory limit must be non-zero"),
-            PlanEncodeError::ZeroMemory
-        );
-
-        let no_executable = ComponentSpec {
-            executable: "",
-            ..router()
-        };
-        assert_eq!(
-            encode_plan(&[boot(), no_executable]).expect_err("executable must be non-empty"),
-            PlanEncodeError::EmptyString
-        );
-
-        let nameless = ComponentSpec {
-            name: "",
-            ..router()
-        };
-        assert_eq!(
-            encode_plan(&[boot(), nameless]).expect_err("instance name must be non-empty"),
-            PlanEncodeError::EmptyString
-        );
-
-        let nameless_requirement = [session_requirement("", 2, "Namespace", "")];
-        assert_eq!(
-            encode_plan(&[boot(), importer(&nameless_requirement)])
-                .expect_err("requirements have names"),
-            PlanEncodeError::EmptyString
-        );
-
-        let no_protocol = [session_requirement("names", 2, "", "")];
-        assert_eq!(
-            encode_plan(&[boot(), importer(&no_protocol)])
-                .expect_err("a session requirement names a protocol"),
-            PlanEncodeError::EmptyString
-        );
-
-        let long_scope = "/".repeat(SESSION_SCOPE_MAX + 1);
-        let wide_scope = [RequirementSpec {
-            name: "names",
-            source: RequirementSourceSpec::Export {
-                provider: 2,
-                protocol: "Namespace",
-                scope: &long_scope,
-            },
-        }];
-        assert_eq!(
-            encode_plan(&[boot(), importer(&wide_scope)]).expect_err("scope fits its bound"),
-            PlanEncodeError::ScopeTooLong
-        );
-
-        let nameless_export = ComponentSpec {
-            exports: &[""],
-            ..router()
-        };
-        assert_eq!(
-            encode_plan(&[boot(), nameless_export]).expect_err("exports name protocols"),
-            PlanEncodeError::EmptyString
         );
     }
 }

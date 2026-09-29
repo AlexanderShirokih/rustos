@@ -1,8 +1,8 @@
 //! Контракты файловой подсистемы, её типы ответов и правила пути.
 //!
 //! Модуль [`namespace`] разбирает путь клиента в монтирование. [`file_system`] работает с
-//! узлами внутри одного монтирования. [`namespace_admin`] монтирует файловую систему под
-//! областью сессии.
+//! узлами внутри одного монтирования. [`file_system_mount`] монтирует файловую систему по
+//! абсолютному пути.
 //!
 //! Здесь же лежат флаги открытия [`OpenFlags`], отказ [`FileSystemError`], разбор пути без
 //! аллокации [`Path`] и раскладка записи каталога в буфере данных [`DirEntry`].
@@ -17,10 +17,10 @@
     )
 )]
 
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-mod admin;
 mod cursor;
 mod descriptor;
 mod entry;
@@ -29,12 +29,12 @@ mod flags;
 mod kind;
 mod limits;
 mod mode;
+mod mount;
 mod path;
 mod protocol;
 mod reply;
 mod router;
 
-pub use admin::*;
 pub use cursor::DirCursor;
 pub use descriptor::NodeDescriptor;
 pub use entry::{DecodedEntry, DirEntry, ENTRY_HEADER_SIZE};
@@ -43,7 +43,8 @@ pub use flags::OpenFlags;
 pub use kind::NodeKind;
 pub use limits::{NAME_MAX, PATH_MAX};
 pub use mode::AccessMode;
-pub use path::{Component, Path, SEPARATOR, common_directory, rebase};
+pub use mount::*;
+pub use path::{Component, Path, PathBuf, SEPARATOR, common_directory, rebase};
 pub use protocol::*;
 pub use reply::{Listed, NodeInfo, Opened, Written};
 pub use router::*;

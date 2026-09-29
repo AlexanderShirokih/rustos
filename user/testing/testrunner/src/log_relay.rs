@@ -55,7 +55,7 @@ fn source(name: &str) -> LogBuffer<LOG_SOURCE_MAX> {
     buffer
 }
 
-const LOG_CLIENT_FIXTURE: &str = "/log-client-fixture/program";
+const LOG_CLIENT_FIXTURE: &str = "/log-client-fixture/exec";
 
 const RELAY_SOURCE: &str = "log-relay";
 

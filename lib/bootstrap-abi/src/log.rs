@@ -45,9 +45,9 @@ mod tests {
             _frame: &MockResources,
         ) -> impl ipc::IntoWireValue<
             MockResources,
-            Read = Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32>,
+            Read = Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, u32>,
         > {
-            Err::<MockHandle<crate::kind::MemoryRegion>, u32>(1)
+            Err::<MockHandle<syscall::kind::MemoryRegion>, u32>(1)
         }
 
         fn acquire_hardware(
@@ -57,7 +57,7 @@ mod tests {
             MockResources,
             Read = Result<ipc::wire::Session<crate::hardware::Protocol>, u32>,
         > {
-            Err::<ipc::wire::Session<crate::hardware::Protocol, MockHandle<crate::kind::Port>>, u32>(
+            Err::<ipc::wire::Session<crate::hardware::Protocol, MockHandle<syscall::kind::Port>>, u32>(
                 1,
             )
         }

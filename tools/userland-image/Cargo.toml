@@ -6,14 +6,16 @@ publish.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+bootstrap-abi = { workspace = true }
 component-abi = { workspace = true }
 filesystem-abi = { workspace = true }
+ipc = { workspace = true }
 object = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 syscall = { workspace = true }
 toml = { workspace = true }
-userland = { workspace = true }
+userland = { workspace = true, features = ["alloc"] }
 userland-image = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]

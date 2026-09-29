@@ -7,9 +7,9 @@
 use kernel_objects::{Process, Resource, Signal};
 use kernel_tests::kernel_test;
 use runtime::{Timeout, signal_set};
-use syscall::{SIGNALED, SyscallError, SyscallOp, WakeCount};
-use userland::{Entry, Segment, SegmentPermissions};
-use userland_loader::load_entry;
+use syscall::{ProcessName, SIGNALED, SyscallError, SyscallOp, WakeCount};
+use userland::{Program, Segment, SegmentPermissions};
+use userland_loader::load_program;
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const CHILD_CODE_VA: u64 = 0x2000_0000;
@@ -43,7 +43,6 @@ fn data_abort_child_code() -> [u8; 12] {
 
 fn load_synthetic_child(
     resource: &Resource,
-    path: &str,
     name: &str,
     code: &[u8],
     bootstrap: Signal,
@@ -54,22 +53,28 @@ fn load_synthetic_child(
         permissions: SegmentPermissions::ReadExecute,
         bytes: code,
     }];
-    let entry = Entry {
-        path,
+    let program = Program {
+        manifest: &[],
         entry_va: CHILD_CODE_VA,
         stack_size: PAGE_SIZE,
         segments: &segments,
     };
-    load_entry(&entry, name, resource, bootstrap).expect("load_entry spawns child")
+    load_program(
+        &program,
+        ProcessName::new(name).expect("fixture process name"),
+        resource,
+        bootstrap,
+    )
+    .expect("load_program spawns child")
 }
 
 #[kernel_test]
-fn load_entry_passes_bootstrap_handle() {
+fn load_program_passes_bootstrap_handle() {
     let resource = Resource::self_resource().expect("self metering resource");
     let code = clean_exit_child_code();
     let bootstrap = Signal::create().expect("signal create");
     let passed = bootstrap.as_raw();
-    let process = load_synthetic_child(&resource, "/child", "child", &code, bootstrap);
+    let process = load_synthetic_child(&resource, "child", &code, bootstrap);
 
     kernel_tests::kassert_eq!(
         signal_set(passed, SIGNALED, 0, WakeCount::None),
@@ -86,7 +91,6 @@ fn synchronous_fault_terminates_child_and_runner_continues() {
     let fault_code = data_abort_child_code();
     let faulting = load_synthetic_child(
         &resource,
-        "/faulting-child",
         "faulting-child",
         &fault_code,
         Signal::create().expect("signal create"),
@@ -100,7 +104,6 @@ fn synchronous_fault_terminates_child_and_runner_continues() {
     let canary_code = clean_exit_child_code();
     let canary = load_synthetic_child(
         &resource,
-        "/post-fault-canary",
         "post-fault-canary",
         &canary_code,
         Signal::create().expect("signal create"),

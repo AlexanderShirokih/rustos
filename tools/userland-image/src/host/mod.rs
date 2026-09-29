@@ -75,7 +75,7 @@ pub fn build_userland(
             bin: &entry.program.bin,
             path: &entry.program.path,
             boot: entry.program.boot,
-            manifest: &entry.manifest,
+            data: &entry.bytes,
         })
         .collect();
     if let Some(plan) = &manifest.plan {

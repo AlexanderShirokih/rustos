@@ -168,7 +168,7 @@ fn map_recv_error(error: SyscallError) -> RecvError {
             // SAFETY: см. `load_buffer`. Здесь только чтение поля буфера.
             |ptr| unsafe { (*ptr).badge },
         )),
-        SyscallError::OutOfHandles | SyscallError::ResourceExhausted => RecvError::Discarded,
+        SyscallError::OutOfHandles => RecvError::Discarded,
         _ => RecvError::Closed,
     }
 }

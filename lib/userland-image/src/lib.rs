@@ -1,11 +1,8 @@
-//! Читает и пишет формат `userland.img`: таблицу записей образа, блоб программы и запись
-//! плана загрузочной композиции.
+//! Кодек `userland.img`: таблица записей с путями и байтами, план начальной композиции.
 //!
-//! [`decode`] разбирает образ и блобы его программ, [`decode_plan`] - план композиции. Разбор
-//! идёт без аллокации, разобранное ссылается прямо в исходные байты.
-//!
-//! Под фичей `alloc` открываются кодировщики `encode`, `encode_program` и `encode_plan`,
-//! которыми сборка на host собирает образ.
+//! [`decode`] разбирает образ, [`decode_plan`] - план. Разбор заимствует исходные байты
+//! без аллокации. Потребитель записи сам определяет и разбирает формат её содержимого.
+//! Фича `alloc` открывает кодировщики `encode` и `encode_plan`.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(clippy::cast_possible_truncation))]
@@ -16,24 +13,21 @@ extern crate alloc;
 #[cfg(any(test, feature = "alloc"))]
 mod builder;
 mod image;
+mod path;
 mod plan;
 #[cfg(any(test, feature = "alloc"))]
 mod plan_builder;
-mod program;
 
 #[cfg(any(test, feature = "alloc"))]
-pub use builder::{ImageEncodeError, ImageRecord, encode, encode_program};
+pub use builder::{ImageEncodeError, ImageRecord, encode};
 pub use image::{
     DecodedEntries, DecodedEntry, DecodedImage, ImageDecodeError, USERLAND_IMAGE_MAGIC,
     USERLAND_IMAGE_VERSION, decode,
 };
+pub use path::{USERLAND_ENTRY_PATH_CAPACITY, entry_name};
 pub use plan::{
     BOOT_PLAN_MAGIC, BOOT_PLAN_PATH, BOOT_PLAN_VERSION, BootPlan, COMPONENT_PROGRAM_NAME,
-    PlanComponent, PlanComponents, PlanDecodeError, PlanNames, PlanRequirement, PlanRequirements,
-    RequirementSource, component_name, decode_plan,
+    PlanComponent, PlanComponents, PlanDecodeError, component_name, decode_plan,
 };
 #[cfg(any(test, feature = "alloc"))]
-pub use plan_builder::{
-    ComponentSpec, PlanEncodeError, RequirementSourceSpec, RequirementSpec, encode_plan,
-};
-pub use program::{DecodedProgram, ProgramDecodeError, USERLAND_PROGRAM_MAGIC};
+pub use plan_builder::{ComponentSpec, PlanEncodeError, encode_plan};

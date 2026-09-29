@@ -7,9 +7,9 @@ use core::sync::atomic::Ordering::Relaxed;
 use kernel_objects::Resource;
 use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Timeout, UserMemFlags};
-use syscall::Rights;
+use syscall::{ProcessName, Rights};
 use userland_image::component_name;
-use userland_loader::load_entry;
+use userland_loader::load_program;
 
 use crate::{
     fixture::program,
@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-const OVERFLOW_FIXTURE: &str = "/stack-overflow-fixture/program";
+const OVERFLOW_FIXTURE: &str = "/stack-overflow-fixture/exec";
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const DEEPEST_FRAME_SPAN: u64 = 512;
@@ -37,9 +37,9 @@ fn thread_stack_overflow_faults_on_the_guard_page() {
     let lease = region
         .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
         .expect("report region for the fixture");
-    let process = load_entry(
+    let process = load_program(
         &program(OVERFLOW_FIXTURE),
-        component_name(OVERFLOW_FIXTURE),
+        ProcessName::new(component_name(OVERFLOW_FIXTURE)).expect("fixture process name"),
         &resource,
         lease,
     )

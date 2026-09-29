@@ -9,9 +9,9 @@ runtime::process_heap!();
 
 use core::{convert::Infallible, panic::PanicInfo};
 
-use component_startup::component_manifest;
+use component_startup::{Requirements as _, component_manifest};
 use filesystem::RamFileSystem;
-use filesystem_abi::{file_system, namespace_admin};
+use filesystem_abi::file_system;
 use filesystem_server::{Error, Result, serve};
 use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, kind};
@@ -20,7 +20,7 @@ const LOG_TAG: &str = "ramfs";
 
 component_manifest! {
     struct RamFileSystemStartup {
-        requirements: { namespace: session(namespace_admin::Protocol) },
+        requirements: {},
         exports: [file_system::Protocol],
     }
 }
@@ -34,10 +34,8 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 
 fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     start_component(parent, LOG_TAG);
-    let requirements = RamFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
-    serve(parent, requirements.namespace, None, |_| {
-        Ok(RamFileSystem::new())
-    })
+    let _requirements = RamFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
+    serve(parent, None, |_| Ok(RamFileSystem::new()))
 }
 
 #[panic_handler]

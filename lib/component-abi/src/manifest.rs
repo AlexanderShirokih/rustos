@@ -18,22 +18,21 @@ const OFFSET_REQUIREMENT_COUNT: usize = 10;
 const OFFSET_EXPORT_COUNT: usize = 12;
 const OFFSET_RESERVED: usize = 13;
 
-/// Вид требования. Компонент запрашивает требование операцией протокола
-/// [`component_startup`](crate::component_startup), имя которой совпадает с именем вида.
+/// Кратность сессий протокола требования.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequirementKind {
-    /// Read-only регион данных образа.
-    Region = 0,
-    /// Сессия экспорта другого компонента.
-    Session = 1,
+pub enum RequirementMode {
+    /// Сессия экспорта протокола, если провайдер доступен.
+    One = 0,
+    /// Все зарегистрированные экспортёры протокола.
+    All = 1,
 }
 
 /// Требование из объявления манифеста, вход [`manifest_len`] и [`encode_manifest`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequirementDeclaration {
     name: &'static str,
-    kind: RequirementKind,
+    mode: RequirementMode,
     protocol: &'static str,
 }
 
@@ -41,8 +40,8 @@ pub struct RequirementDeclaration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManifestRequirement<'a> {
     name: &'a str,
-    kind: RequirementKind,
-    protocol: Option<&'a str>,
+    mode: RequirementMode,
+    protocol: &'a str,
 }
 
 /// Имена записи в порядке объявления: длина `u8` и байты каждого.
@@ -84,33 +83,48 @@ pub enum ManifestDecodeError {
     InvalidLayout(&'static str),
 }
 
-impl RequirementKind {
-    const fn from_byte(byte: u8) -> Option<Self> {
+impl RequirementMode {
+    /// Вид по его байту в записи. `None` для байта вне видов.
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
-            0 => Some(Self::Region),
-            1 => Some(Self::Session),
+            0 => Some(Self::One),
+            1 => Some(Self::All),
             _ => None,
         }
     }
 }
 
 impl RequirementDeclaration {
-    /// Read-only регион данных образа.
     #[must_use]
-    pub const fn region(name: &'static str) -> Self {
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> RequirementMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn protocol(&self) -> &'static str {
+        self.protocol
+    }
+
+    #[must_use]
+    pub const fn all(name: &'static str, protocol: &'static str) -> Self {
         Self {
             name,
-            kind: RequirementKind::Region,
-            protocol: "",
+            mode: RequirementMode::All,
+            protocol,
         }
     }
 
-    /// Сессия экспорта протокола с идентификатором `protocol`.
     #[must_use]
     pub const fn session(name: &'static str, protocol: &'static str) -> Self {
         Self {
             name,
-            kind: RequirementKind::Session,
+            mode: RequirementMode::One,
             protocol,
         }
     }
@@ -124,13 +138,13 @@ impl<'a> ManifestRequirement<'a> {
     }
 
     #[must_use]
-    pub const fn kind(&self) -> RequirementKind {
-        self.kind
+    pub const fn mode(&self) -> RequirementMode {
+        self.mode
     }
 
-    /// Идентификатор протокола сессии. У региона образа `None`.
+    /// Идентификатор протокола сессии.
     #[must_use]
-    pub const fn protocol(&self) -> Option<&'a str> {
+    pub const fn protocol(&self) -> &'a str {
         self.protocol
     }
 }
@@ -198,10 +212,11 @@ pub const fn manifest_len(requirements: &[RequirementDeclaration], exports: &[&s
     }
     let mut pending = requirements;
     while let [requirement, tail @ ..] = pending {
-        len += COMPONENT_REQUIREMENT_HEADER_SIZE + 1 + requirement.name.len();
-        if matches!(requirement.kind, RequirementKind::Session) {
-            len += 1 + requirement.protocol.len();
-        }
+        len += COMPONENT_REQUIREMENT_HEADER_SIZE
+            + 1
+            + requirement.name.len()
+            + 1
+            + requirement.protocol.len();
         pending = tail;
     }
     len
@@ -214,12 +229,22 @@ pub const fn encode_manifest<const LEN: usize>(
     requirements: &[RequirementDeclaration],
     exports: &[&str],
 ) -> [u8; LEN] {
+    let mut bytes = [0; LEN];
+    encode_manifest_into(&mut bytes, requirements, exports);
+    bytes
+}
+
+/// Кодирует манифест в буфер длиной [`manifest_len`]. Те же ограничения, что у [`encode_manifest`].
+pub const fn encode_manifest_into(
+    bytes: &mut [u8],
+    requirements: &[RequirementDeclaration],
+    exports: &[&str],
+) {
     assert!(
-        LEN == manifest_len(requirements, exports),
+        bytes.len() == manifest_len(requirements, exports),
         "record length covers the header, every export and every requirement"
     );
 
-    let mut bytes = [0; LEN];
     let (header_bytes, mut rest) = bytes.split_at_mut(COMPONENT_MANIFEST_HEADER_SIZE);
 
     let mut export_count: u8 = 0;
@@ -246,16 +271,13 @@ pub const fn encode_manifest<const LEN: usize>(
             declaration.name.len() <= REQUIREMENT_NAME_MAX,
             "requirement name fits REQUIREMENT_NAME_MAX"
         );
-        rest = write_bytes(rest, &[declaration.kind as u8]);
+        assert!(
+            declaration.protocol.len() <= PROTOCOL_ID_MAX,
+            "requirement protocol fits PROTOCOL_ID_MAX"
+        );
+        rest = write_bytes(rest, &[declaration.mode as u8]);
         rest = write_name(rest, declaration.name);
-
-        if matches!(declaration.kind, RequirementKind::Session) {
-            assert!(
-                declaration.protocol.len() <= PROTOCOL_ID_MAX,
-                "requirement protocol fits PROTOCOL_ID_MAX"
-            );
-            rest = write_name(rest, declaration.protocol);
-        }
+        rest = write_name(rest, declaration.protocol);
         requirement_count += 1;
         pending = tail;
     }
@@ -271,7 +293,6 @@ pub const fn encode_manifest<const LEN: usize>(
     header[OFFSET_REQUIREMENT_COUNT + 1] = count[1];
     header[OFFSET_EXPORT_COUNT] = export_count;
     header_bytes.copy_from_slice(&header);
-    bytes
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -425,29 +446,23 @@ fn parse_requirement(
     bytes: &[u8],
     at: usize,
 ) -> Result<ParsedRequirement<'_>, ManifestDecodeError> {
-    let kind = *bytes.get(at).ok_or(ManifestDecodeError::Truncated {
+    let mode = *bytes.get(at).ok_or(ManifestDecodeError::Truncated {
         needed: at + COMPONENT_REQUIREMENT_HEADER_SIZE,
         actual: bytes.len(),
     })?;
-    let kind = RequirementKind::from_byte(kind)
-        .ok_or(ManifestDecodeError::InvalidLayout("requirement kind"))?;
+    let mode = RequirementMode::from_byte(mode)
+        .ok_or(ManifestDecodeError::InvalidLayout("requirement mode"))?;
     let (name, cursor) = parse_name(
         bytes,
         at + COMPONENT_REQUIREMENT_HEADER_SIZE,
         "requirement name",
     )?;
-    let (protocol, end) = match kind {
-        RequirementKind::Region => (None, cursor),
-        RequirementKind::Session => {
-            let (protocol, end) = parse_name(bytes, cursor, "requirement protocol")?;
-            (Some(protocol), end)
-        }
-    };
+    let (protocol, end) = parse_name(bytes, cursor, "requirement protocol")?;
 
     Ok(ParsedRequirement {
         requirement: ManifestRequirement {
             name,
-            kind,
+            mode,
             protocol,
         },
         end,
@@ -470,15 +485,11 @@ mod tests {
     use super::*;
 
     const NO_EXPORTS: &[&str] = &[];
-    const TWO_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
+    const TWO_EXPORTS: &[&str] = &["Namespace", "FileSystemMount"];
 
     const SESSION_REQUIREMENTS: &[RequirementDeclaration] =
         &[RequirementDeclaration::session("files", "FileSystem")];
     const SESSION_LEN: usize = manifest_len(SESSION_REQUIREMENTS, NO_EXPORTS);
-
-    const REGION_REQUIREMENTS: &[RequirementDeclaration] =
-        &[RequirementDeclaration::region("image")];
-    const REGION_LEN: usize = manifest_len(REGION_REQUIREMENTS, NO_EXPORTS);
 
     fn session_record() -> [u8; SESSION_LEN] {
         encode_manifest(SESSION_REQUIREMENTS, NO_EXPORTS)
@@ -487,9 +498,9 @@ mod tests {
     #[test]
     fn a_record_carries_every_requirement_and_export_in_the_order_of_the_declaration() {
         const REQUIREMENTS: &[RequirementDeclaration] = &[
-            RequirementDeclaration::region("image"),
+            RequirementDeclaration::session("image", "Image"),
             RequirementDeclaration::session("files", "FileSystem"),
-            RequirementDeclaration::region("fonts"),
+            RequirementDeclaration::all("displays", "Display"),
         ];
         const LEN: usize = manifest_len(REQUIREMENTS, TWO_EXPORTS);
         let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, TWO_EXPORTS);
@@ -501,7 +512,7 @@ mod tests {
             .map(|requirement| {
                 (
                     requirement.name(),
-                    requirement.kind(),
+                    requirement.mode(),
                     requirement.protocol(),
                 )
             })
@@ -509,28 +520,20 @@ mod tests {
         assert_eq!(
             requirements,
             [
-                ("image", RequirementKind::Region, None),
-                ("files", RequirementKind::Session, Some("FileSystem")),
-                ("fonts", RequirementKind::Region, None),
+                ("image", RequirementMode::One, "Image"),
+                ("files", RequirementMode::One, "FileSystem"),
+                ("displays", RequirementMode::All, "Display"),
             ]
         );
     }
 
     #[test]
-    fn a_region_requirement_ends_with_its_name() {
-        let bytes: [u8; REGION_LEN] = encode_manifest(REGION_REQUIREMENTS, NO_EXPORTS);
+    fn a_requirement_is_its_mode_byte_name_and_protocol() {
+        let bytes = session_record();
 
         assert_eq!(
             &bytes[COMPONENT_MANIFEST_HEADER_SIZE..],
-            [
-                RequirementKind::Region as u8,
-                5,
-                b'i',
-                b'm',
-                b'a',
-                b'g',
-                b'e'
-            ]
+            b"\x00\x05files\x0aFileSystem"
         );
     }
 
@@ -573,8 +576,8 @@ mod tests {
     #[test]
     fn a_requirement_name_repeated_in_a_record_is_refused() {
         const REQUIREMENTS: &[RequirementDeclaration] = &[
-            RequirementDeclaration::region("files"),
-            RequirementDeclaration::region("files"),
+            RequirementDeclaration::session("files", "FileSystem"),
+            RequirementDeclaration::all("files", "FileSystem"),
         ];
         const LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
         let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS);
@@ -675,13 +678,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_requirement_kind_is_refused() {
+    fn an_unknown_requirement_mode_is_refused() {
         let mut bytes = session_record();
-        for kind in [2, 3, 9] {
-            bytes[COMPONENT_MANIFEST_HEADER_SIZE] = kind;
+        for mode in [2, 9] {
+            bytes[COMPONENT_MANIFEST_HEADER_SIZE] = mode;
             assert_eq!(
                 decode_manifest(&bytes),
-                Err(ManifestDecodeError::InvalidLayout("requirement kind"))
+                Err(ManifestDecodeError::InvalidLayout("requirement mode"))
             );
         }
     }

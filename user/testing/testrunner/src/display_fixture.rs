@@ -14,7 +14,7 @@ mod display_fixture_protocol;
 use alloc::{boxed::Box, vec::Vec};
 use core::panic::PanicInfo;
 
-use component_startup::{component_manifest, serve_export, whole_export};
+use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
 use display_fixture_protocol::DIMENSION;
 use ipc::{

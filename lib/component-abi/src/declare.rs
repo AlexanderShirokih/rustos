@@ -34,18 +34,18 @@ macro_rules! __component_manifest_record {
     (@requirement log $($declaration:tt)*) => {
         compile_error!("`log` is the name reserved for the log its parent serves")
     };
-    (@requirement $name:ident region) => {
-        $crate::RequirementDeclaration::region(stringify!($name))
-    };
     (@requirement $name:ident session($protocol:path)) => {
         $crate::RequirementDeclaration::session(stringify!($name), <$protocol as $crate::__Protocol>::ID)
+    };
+    (@requirement $name:ident all($protocol:path)) => {
+        $crate::RequirementDeclaration::all(stringify!($name), <$protocol as $crate::__Protocol>::ID)
     };
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        COMPONENT_MANIFEST_SECTION, RequirementKind, decode_manifest, encode_manifest, manifest_len,
+        COMPONENT_MANIFEST_SECTION, RequirementMode, decode_manifest, encode_manifest, manifest_len,
     };
 
     const NO_EXPORTS: &[&str] = &[];
@@ -57,8 +57,8 @@ mod tests {
     }
 
     ipc::protocol! {
-        mod namespace_admin {
-            name = "NamespaceAdmin";
+        mod file_system_mount {
+            name = "FileSystemMount";
         }
     }
 
@@ -76,20 +76,20 @@ mod tests {
 
     const TYPED_EXPORTS: &[&str] = &[
         crate::__component_manifest_record!(@export file_system::Protocol),
-        crate::__component_manifest_record!(@export namespace_admin::Protocol),
+        crate::__component_manifest_record!(@export file_system_mount::Protocol),
     ];
     const EXPORTS_LEN: usize = manifest_len(&[], TYPED_EXPORTS);
 
     const REQUIREMENTS: &[crate::RequirementDeclaration] = &[
-        crate::__component_manifest_record!(@requirement image region),
+        crate::__component_manifest_record!(@requirement admin session(file_system_mount::Protocol)),
         crate::__component_manifest_record!(@requirement files session(file_system::Protocol)),
-        crate::__component_manifest_record!(@requirement fonts region),
+        crate::__component_manifest_record!(@requirement mounts all(file_system::Protocol)),
     ];
     const REQUIREMENTS_LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
 
     crate::__component_manifest_record! {
         exports = [file_system::Protocol]
-        requirements { image: region, admin: session(namespace_admin::Protocol) }
+        requirements { files: all(file_system::Protocol), admin: session(file_system_mount::Protocol) }
     }
 
     #[test]
@@ -100,10 +100,10 @@ mod tests {
         assert_eq!(typed, literal);
         let manifest = decode_manifest(&typed).expect("record decodes");
         let requirement = manifest.requirements().next().expect("session requirement");
-        assert_eq!(requirement.kind(), RequirementKind::Session);
+        assert_eq!(requirement.mode(), RequirementMode::One);
         assert_eq!(
             requirement.protocol(),
-            Some(<file_system::Protocol as ipc::Protocol>::ID)
+            <file_system::Protocol as ipc::Protocol>::ID
         );
     }
 
@@ -116,7 +116,7 @@ mod tests {
             manifest.exports().collect::<std::vec::Vec<_>>(),
             [
                 <file_system::Protocol as ipc::Protocol>::ID,
-                <namespace_admin::Protocol as ipc::Protocol>::ID
+                <file_system_mount::Protocol as ipc::Protocol>::ID
             ]
         );
     }
@@ -128,14 +128,14 @@ mod tests {
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let requirements: std::vec::Vec<_> = manifest
             .requirements()
-            .map(|requirement| (requirement.name(), requirement.kind()))
+            .map(|requirement| (requirement.name(), requirement.mode()))
             .collect();
         assert_eq!(
             requirements,
             [
-                ("image", RequirementKind::Region),
-                ("files", RequirementKind::Session),
-                ("fonts", RequirementKind::Region)
+                ("admin", RequirementMode::One),
+                ("files", RequirementMode::One),
+                ("mounts", RequirementMode::All)
             ]
         );
     }

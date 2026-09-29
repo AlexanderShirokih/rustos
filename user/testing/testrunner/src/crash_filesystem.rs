@@ -8,11 +8,9 @@ extern crate alloc;
 
 use core::{convert::Infallible, panic::PanicInfo};
 
-use component_startup::component_manifest;
+use component_startup::{Requirements as _, component_manifest};
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
-use filesystem_abi::{
-    DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system, namespace_admin,
-};
+use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system};
 use filesystem_server::{Error, Result as ServerResult, serve};
 use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, USER_VA_END, kind};
@@ -23,7 +21,7 @@ const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct CrashFileSystemStartup {
-        requirements: { namespace: session(namespace_admin::Protocol) },
+        requirements: {},
         exports: [file_system::Protocol],
     }
 }
@@ -153,13 +151,13 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 
 fn run(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
     start_component(parent, LOG_TAG);
-    let requirements = CrashFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
+    let _requirements = CrashFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
     let backend = |_| {
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),
         })
     };
-    serve(parent, requirements.namespace, None, backend)
+    serve(parent, None, backend)
 }
 
 #[panic_handler]

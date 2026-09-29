@@ -57,10 +57,10 @@ mod local {
 
 fn main() -> Result<(), StartupError> {
     println!("selftest started");
-    let startup = components::requirements(SelftestStartup::request)?;
+    let startup = components::requirements::<SelftestStartup>()?;
     the_start_handle_is_handed_out_once();
     filesystem::a_path_before_the_root_is_not_connected();
-    filesystem::the_root_is_installed(startup.namespace.into_handle());
+    filesystem::the_root_is_installed(startup.namespace.expect("namespace provider").into_handle());
     filesystem::a_second_root_is_handed_back();
     an_owned_handle_closes_its_capability();
     heap_serves_growing_collections();

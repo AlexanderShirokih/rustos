@@ -18,5 +18,3 @@ scope = { namespace = "/tmp" }
 [[components]]
 executable = "files-demo"
 memory_limit = "2M"
-bind = { area = "filesystem-imagefs" }
-scope = { area = "/files-demo" }

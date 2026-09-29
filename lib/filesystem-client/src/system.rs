@@ -14,14 +14,9 @@ use crate::{
 pub struct FileSystemEnvironment;
 
 impl FileSystem<FileSystemEnvironment> {
-    /// Фасад над сессией файловой системы. Путь отсчитывается от корня её области.
-    pub fn windowed(session: kernel_objects::Session<file_system::Protocol>) -> Self {
-        Self::windowed_with_environment(FileSystemEnvironment, session.client().into_channel())
-    }
-
     /// Фасад над маршрутизатором имён. Путь разбирается по монтированиям.
-    pub fn routed(namespace: kernel_objects::Session<namespace::Protocol>) -> Self {
-        Self::routed_with_environment(FileSystemEnvironment, namespace.client().into_channel())
+    pub fn new(namespace: kernel_objects::Session<namespace::Protocol>) -> Self {
+        Self::with_environment(FileSystemEnvironment, namespace.client().into_channel())
     }
 }
 

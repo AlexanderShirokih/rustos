@@ -1,7 +1,5 @@
 use userland::USERLAND_PAGE_SIZE;
 
-use crate::program::{DecodedProgram, ProgramDecodeError, decode_program};
-
 pub const USERLAND_IMAGE_MAGIC: [u8; 8] = *b"USRLIMG\0";
 pub const USERLAND_IMAGE_VERSION: u16 = 1;
 pub(crate) const IMAGE_HEADER_SIZE: usize = 24;
@@ -208,11 +206,6 @@ impl<'a> DecodedEntry<'a> {
     pub fn data_offset(&self) -> u64 {
         self.data_offset
     }
-
-    /// Разбирает содержимое записи как программу.
-    pub fn program(&self) -> Result<DecodedProgram<'a>, ProgramDecodeError> {
-        decode_program(self.path, self.data)
-    }
 }
 
 impl<'a> Iterator for DecodedEntries<'a> {
@@ -251,6 +244,8 @@ fn parse_entry(
         .ok_or(invalid_layout(Some(index), "path_bounds"))?;
     let path =
         core::str::from_utf8(path_bytes).map_err(|_| invalid_layout(Some(index), "path_utf8"))?;
+
+    crate::path::validate_entry_path(path).map_err(|detail| invalid_layout(Some(index), detail))?;
 
     if !header.data_offset.is_multiple_of(USERLAND_PAGE_SIZE) {
         return Err(invalid_layout(Some(index), "data_alignment"));
@@ -319,10 +314,12 @@ fn out_of_bounds(entry_index: usize, header: RecordHeader) -> ImageDecodeError {
 
 #[cfg(test)]
 mod tests {
-    use userland::{Entry, EntryView, Segment, SegmentPermissions};
+    use userland::{
+        Program, ProgramView, Segment, SegmentPermissions, decode_program, encode_program,
+    };
 
     use super::*;
-    use crate::{ImageEncodeError, ImageRecord, encode, encode_program};
+    use crate::{ImageEncodeError, ImageRecord, encode};
 
     const BOOT_PATH: &str = "/boot/rootkeeper";
 
@@ -341,8 +338,8 @@ mod tests {
                 bytes: b"RW",
             },
         ];
-        encode_program(&Entry {
-            path: BOOT_PATH,
+        encode_program(&Program {
+            manifest: &[],
             entry_va: 0x4000_0000,
             stack_size: 0x4000,
             segments: &segments,
@@ -400,6 +397,57 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_invalid_file_paths_with_the_record_index() {
+        for (path, detail) in [
+            ("", "path_empty"),
+            ("/", "path_name"),
+            ("/data/", "path_name"),
+            ("/data/café", "path_ascii"),
+            ("x".repeat(256).as_str(), "path_length"),
+        ] {
+            let mut bytes = image_bytes();
+            let offset = bytes.len();
+            bytes.extend_from_slice(path.as_bytes());
+            patch(&mut bytes, IMAGE_HEADER_SIZE + RECORD_SIZE, offset as u64);
+            let length_at = IMAGE_HEADER_SIZE + RECORD_SIZE + 8;
+            bytes[length_at..length_at + 2].copy_from_slice(&(path.len() as u16).to_le_bytes());
+            let total = bytes.len() as u64;
+            patch(&mut bytes, 16, total);
+            assert_eq!(
+                decode(&bytes).expect_err("invalid path must fail"),
+                ImageDecodeError::InvalidLayout {
+                    entry_index: Some(1),
+                    detail
+                },
+                "path {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_rejects_invalid_file_paths() {
+        for path in ["", "/", "/data/", "/data/café", &"x".repeat(256)] {
+            assert_eq!(
+                encode(
+                    &[
+                        ImageRecord {
+                            path: BOOT_PATH,
+                            data: b"boot"
+                        },
+                        ImageRecord {
+                            path,
+                            data: b"file"
+                        },
+                    ],
+                    BOOT_PATH
+                ),
+                Err(ImageEncodeError::InvalidPath),
+                "path {path:?}"
+            );
+        }
+    }
+
+    #[test]
     fn round_trip_exposes_records_and_program() {
         let bytes = image_bytes();
         let image = decode(&bytes).expect("decode");
@@ -407,7 +455,7 @@ mod tests {
         let boot = image.boot_entry();
         assert_eq!(boot.path(), BOOT_PATH);
 
-        let program = boot.program().expect("boot record carries a program");
+        let program = decode_program(boot.data()).expect("boot record carries a program");
         let segments: Vec<_> = program.segments().collect();
         assert_eq!(program.entry_va(), 0x4000_0000);
         assert_eq!(program.stack_size(), 0x4000);
@@ -416,6 +464,23 @@ mod tests {
 
         let sample = image.entry("/data/sample").expect("file record");
         assert_eq!(sample.data(), b"hello");
+    }
+
+    #[test]
+    fn longest_entry_path_round_trips_and_keeps_its_name() {
+        let name = "n".repeat(crate::USERLAND_ENTRY_PATH_CAPACITY - "/boot/".len());
+        let path = format!("/boot/{name}");
+        let bytes = encode(
+            &[ImageRecord {
+                path: &path,
+                data: b"file",
+            }],
+            &path,
+        )
+        .expect("max path");
+        let image = decode(&bytes).expect("max path decodes");
+        assert_eq!(image.boot_entry().path(), path);
+        assert_eq!(crate::entry_name(image.boot_entry().path()), name);
     }
 
     #[test]
@@ -563,7 +628,7 @@ mod tests {
         ];
         assert_eq!(
             encode(&records, BOOT_PATH).expect_err("duplicate paths must fail"),
-            ImageEncodeError::DuplicatePath
+            ImageEncodeError::InvalidPath
         );
     }
 

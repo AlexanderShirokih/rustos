@@ -119,6 +119,7 @@ dependencies = [
 name = "mobile-fuzz"
 version = "0.0.0"
 dependencies = [
+ "component-abi",
  "fdt",
  "filesystem",
  "filesystem-abi",
@@ -162,6 +163,5 @@ dependencies = [
 name = "userland-image"
 version = "0.1.0"
 dependencies = [
- "component-abi",
  "userland",
 ]

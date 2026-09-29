@@ -27,15 +27,15 @@ pub struct MintedSession {
 }
 
 /// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`. `open`
-/// строит порт сессии по области заявки либо отказывает.
+/// строит порт сессии либо отказывает.
 pub fn serve_export<P: ipc::Protocol>(
     parent: &component_startup::Client<PortTransport>,
-    mut open: impl FnMut(&str) -> Result<Port, SessionError>,
+    mut open: impl FnMut() -> Result<Port, SessionError>,
 ) -> ExportError {
     loop {
         match accept::<P>(parent) {
             Ok(Ok(request)) => {
-                let session = open(request.scope.as_str());
+                let session = open();
                 let _ = request.reply.send(session);
             }
             Ok(Err(error)) => return ExportError::Accept(error),
@@ -44,16 +44,11 @@ pub fn serve_export<P: ipc::Protocol>(
     }
 }
 
-/// Обработчик [`serve_export`] для экспорта без областей. Пустая область даёт копию порта
-/// `export` под новым значком, непустая - `SessionError::Refused`.
-pub fn whole_export(export: &Port) -> impl FnMut(&str) -> Result<Port, SessionError> + '_ {
+/// Обработчик [`serve_export`], выдающий порт `export` под новым значком.
+pub fn whole_export(export: &Port) -> impl FnMut() -> Result<Port, SessionError> + '_ {
     let next_badge = AtomicU64::new(0);
 
-    move |scope| {
-        if !scope.is_empty() {
-            return Err(SessionError::Refused);
-        }
-
+    move || {
         mint_session(export, &next_badge)
             .map(|minted| minted.port)
             .map_err(|_| SessionError::NoSpace)

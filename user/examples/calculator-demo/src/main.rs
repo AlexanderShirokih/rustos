@@ -16,10 +16,6 @@ use syscall::Timeout;
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
-const TURN: Duration = Duration::from_secs(1);
-
-const MULTIPLIER: u64 = 7;
-
 component_manifest! {
     struct DemoStartup {
         requirements: {
@@ -30,10 +26,15 @@ component_manifest! {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let requirements = components::requirements(DemoStartup::request)?;
+    let requirements = components::requirements::<DemoStartup>()?;
 
-    let calculator = requirements.calculator.client().with_wait(CALL_TIMEOUT);
-    let clock = requirements.clock.client().with_wait(CALL_TIMEOUT);
+    let calculator = requirements
+        .calculator
+        .ok_or("calculator provider is unavailable")?;
+    let clock = requirements.clock.ok_or("RTC provider is unavailable")?;
+
+    let calculator = calculator.client().with_wait(CALL_TIMEOUT);
+    let clock = clock.client().with_wait(CALL_TIMEOUT);
 
     println!("started");
     run(&calculator, &clock)?;
@@ -45,12 +46,15 @@ fn run(
     clock: &rtc::Client<SessionTransport>,
 ) -> Result<(), IpcError> {
     let mut step: u64 = 1;
+    let multiplier = 7;
+
     loop {
-        // Уход провайдера виден отказом транспорта на его сессии.
-        let product = calculator.multiply(step, MULTIPLIER)?;
+        let product = calculator.multiply(step, multiplier)?;
         let now = clock.now()?;
-        println!("{step} * {MULTIPLIER} = {product}, rtc {now}s");
-        thread::sleep(TURN);
+
+        println!("{step} * {multiplier} = {product}, rtc {now}s");
+        thread::sleep(Duration::from_secs(1));
+
         step = step.wrapping_add(1);
     }
 }

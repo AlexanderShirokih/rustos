@@ -175,3 +175,8 @@ source = "user/testing/testrunner/assets/area.txt"
 [[programs]]
 package = "std-selftest"
 path = "/std-selftest"
+
+[[programs]]
+package = "testrunner"
+bin = "multiplicity-fixture"
+path = "/multiplicity-fixture"

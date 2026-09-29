@@ -5,11 +5,11 @@
 use kernel_objects::{Error, Port, Process, Signal, ThreadEntry, kind};
 use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, signal_set};
-use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
+use syscall::{Handle, ProcessName, Rights, SIGNALED, SyscallError, WakeCount};
 
 use crate::fixture::spawn_entry;
 
-const FORWARD_FIXTURE: &str = "/start-handle-forward-fixture/program";
+const FORWARD_FIXTURE: &str = "/start-handle-forward-fixture/exec";
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -19,7 +19,8 @@ fn is_closed(handle: Handle<kind::Signal>) -> bool {
 
 #[kernel_test]
 fn start_error_closes_passed_handles() {
-    let process = Process::create("start-error").expect("process create must succeed");
+    let process = Process::create(ProcessName::new("start-error").expect("process name"))
+        .expect("process create must succeed");
 
     let owned = Signal::create().expect("signal create");
     let stale = owned.as_raw();

@@ -1,22 +1,22 @@
 //! Обвязка тестов с планом: `RootSystem` плана под замком, поток оборота, импортёры и
 //! монтирования тестов.
 
-use alloc::{format, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use core::{
     num::NonZeroU64,
     ops::ControlFlow,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use component_abi::{SessionError, component_startup as startup_contract};
-use filesystem_abi::{FileSystemError, file_system, namespace, namespace_admin};
+use component_abi::{RequirementDeclaration, SessionError, component_startup as startup_contract};
+use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
 use ipc::{
     Protocol,
     wire::{IpcError, Str},
 };
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
-use rootkeeper::{BUDGET_RETURN_TIMEOUT, ImporterRequirement, RootSystem, SystemImage, turn};
+use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SystemImage, turn};
 use runtime::{JoinHandle, Mutex, PortTransport, Priority, Timeout, spawn_owned};
 use spin::Once;
 use syscall::{Handle, SIGNALED, SyscallError, kind};
@@ -51,28 +51,31 @@ pub(crate) struct TurnThread {
 
 pub(crate) struct Importer {
     port: Port,
+    namespace_roots: BTreeMap<String, String>,
 }
 
 pub(crate) struct Mounted {
     admin: Option<Port>,
     thread: Option<JoinHandle>,
+    path: String,
 }
 
-pub(crate) const fn view(name: &'static str, scope: &'static str) -> ImporterRequirement<'static> {
-    ImporterRequirement {
-        name,
-        provider: ROUTER_NAME,
-        protocol: namespace::Protocol::ID,
-        scope,
+pub(crate) struct Import {
+    pub(crate) declaration: RequirementDeclaration,
+    pub(crate) namespace_root: Option<&'static str>,
+}
+
+pub(crate) const fn view(name: &'static str, root: &'static str) -> Import {
+    Import {
+        declaration: RequirementDeclaration::all(name, namespace::Protocol::ID),
+        namespace_root: Some(root),
     }
 }
 
-pub(crate) const fn admin(name: &'static str, scope: &'static str) -> ImporterRequirement<'static> {
-    ImporterRequirement {
-        name,
-        provider: ROUTER_NAME,
-        protocol: namespace_admin::Protocol::ID,
-        scope,
+pub(crate) const fn admin(name: &'static str) -> Import {
+    Import {
+        declaration: RequirementDeclaration::all(name, file_system_mount::Protocol::ID),
+        namespace_root: None,
     }
 }
 
@@ -108,13 +111,50 @@ impl Composition {
         }
     }
 
-    pub(crate) fn importer(&self, requirements: &[ImporterRequirement<'_>]) -> Importer {
+    pub(crate) fn importer(&self, requirements: &[Import]) -> Importer {
+        let declarations: Vec<_> = requirements
+            .iter()
+            .map(|requirement| rootkeeper::ImporterRequirement {
+                declaration: requirement.declaration,
+            })
+            .collect();
         let port = self
             .system
             .lock()
-            .importer(requirements)
-            .expect("importer requirements bind to the plan");
-        Importer { port }
+            .importer(&declarations)
+            .expect("importer requirements are valid");
+        let namespace_roots = requirements
+            .iter()
+            .filter_map(|requirement| {
+                requirement.namespace_root.map(|root| {
+                    (
+                        String::from(requirement.declaration.name()),
+                        String::from(if root.is_empty() { "/" } else { root }),
+                    )
+                })
+            })
+            .collect();
+        Importer {
+            port,
+            namespace_roots,
+        }
+    }
+
+    pub(crate) fn add(
+        &self,
+        component: rootkeeper::Component<'static>,
+        log: Session<log::Protocol>,
+    ) {
+        self.try_add(component, log)
+            .expect("runtime component added");
+    }
+
+    pub(crate) fn try_add(
+        &self,
+        component: rootkeeper::Component<'static>,
+        log: Session<log::Protocol>,
+    ) -> Result<u16, rootkeeper::AddFailure> {
+        self.system.lock().add(component, log)
     }
 
     pub(crate) fn terminate(&self, name: &str, code: u32) {
@@ -155,9 +195,24 @@ impl Drop for TurnThread {
 
 impl Importer {
     pub(crate) fn session<P: Protocol>(&self, requirement: &str) -> Session<P> {
-        request(self.handle(), requirement, IMPORTER_WAIT)
+        self.session_at(requirement, 0)
+    }
+
+    pub(crate) fn session_at<P: Protocol>(&self, requirement: &str, index: u16) -> Session<P> {
+        let session = request_at::<P>(self.handle(), requirement, index, IMPORTER_WAIT)
             .expect("session call")
-            .expect("session granted")
+            .expect("session granted");
+        if P::ID == namespace::Protocol::ID
+            && let Some(root) = self.namespace_roots.get(requirement)
+        {
+            let client = namespace::Client::new(PortTransport::new(session.handle()));
+            let scoped = client
+                .open_root(Str::new(root).expect("view root fits"))
+                .expect("open_root call")
+                .expect("view opened");
+            return Session::from_handle(Port::from(scoped.into_handle()));
+        }
+        session
     }
 
     pub(crate) fn port<P: Protocol>(&self, requirement: &str) -> Port {
@@ -175,15 +230,24 @@ impl Mounted {
         requirement: &str,
         filesystem: Session<file_system::Protocol>,
     ) -> Self {
-        let admin = importer.port::<namespace_admin::Protocol>(&format!("{requirement}-admin"));
+        let admin = importer.port::<file_system_mount::Protocol>(&format!("{requirement}-admin"));
         let view = importer.port::<namespace::Protocol>(requirement);
+        let path = importer
+            .namespace_roots
+            .get(requirement)
+            .expect("mount test has a view")
+            .clone();
+        let mounted_path = path.clone();
         let raw = admin.as_raw();
         let thread = spawn_owned(
             move || {
-                let ended = namespace_admin::Client::new(PortTransport::new(raw))
+                let ended = file_system_mount::Client::new(PortTransport::new(raw))
                     .with_wait(Timeout::INFINITE)
-                    .mount(filesystem);
-                if ended == Ok(Ok(())) {
+                    .mount(
+                        Str::new(&mounted_path).expect("mount path fits"),
+                        filesystem,
+                    );
+                if matches!(ended, Ok(Ok(_))) {
                     MOUNT_ENDED
                 } else {
                     MOUNT_FAILED
@@ -200,6 +264,7 @@ impl Mounted {
         Self {
             admin: Some(admin),
             thread: Some(thread),
+            path,
         }
     }
 
@@ -208,9 +273,10 @@ impl Mounted {
         filesystem: Session<file_system::Protocol>,
     ) -> Result<Result<(), FileSystemError>, IpcError> {
         let admin = self.admin.as_ref().expect("admin session is held");
-        namespace_admin::Client::new(PortTransport::new(admin))
+        file_system_mount::Client::new(PortTransport::new(admin))
             .with_wait(IMPORTER_WAIT)
-            .mount(filesystem)
+            .mount(Str::new(&self.path).expect("mount path fits"), filesystem)
+            .map(|ended| ended.map(drop))
     }
 
     pub(crate) fn ended(&self, wait: Timeout) -> bool {
@@ -237,8 +303,17 @@ pub(crate) fn request<P: Protocol>(
     requirement: &str,
     wait: Timeout,
 ) -> Result<Result<Session<P>, SessionError>, IpcError> {
+    request_at(importer, requirement, 0, wait)
+}
+
+pub(crate) fn request_at<P: Protocol>(
+    importer: Handle<kind::Port>,
+    requirement: &str,
+    index: u16,
+    wait: Timeout,
+) -> Result<Result<Session<P>, SessionError>, IpcError> {
     let parent = startup_contract::Client::new(PortTransport::new(importer)).with_wait(wait);
-    component_startup::session::<P>(&parent, requirement)
+    component_startup::session::<P>(&parent, requirement, index)
 }
 
 fn await_budget(plan: &BootPlan<'_>) {

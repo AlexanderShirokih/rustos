@@ -22,12 +22,6 @@ code_in_crate_root|kernel/memory/src/lib.rs|PAGE_SIZE|ec26ff2a
 code_in_crate_root|kernel/memory/src/lib.rs|page_round_up|c977c6f7
 code_in_crate_root|kernel/memory/src/lib.rs|tests|4dfda322
 code_in_crate_root|kernel/syscall/src/lib.rs|<file-root>|19e3df34
-code_in_crate_root|lib/bootstrap-abi/src/lib.rs|<file-root>|22258312
-code_in_crate_root|lib/bootstrap-abi/src/lib.rs|<file-root>|98c71a2d
-code_in_crate_root|lib/bootstrap-abi/src/lib.rs|<file-root>|98c71a2d#2
-code_in_crate_root|lib/bootstrap-abi/src/lib.rs|LOG_MESSAGE_MAX|b4dbf8bc
-code_in_crate_root|lib/bootstrap-abi/src/lib.rs|LOG_TAG_MAX|c349525f
-code_in_crate_root|lib/bootstrap-abi/src/lib.rs|tests|4dfda322
 code_in_crate_root|lib/components/src/lib.rs|requirements|2873cfe1
 code_in_crate_root|lib/fdt-test/src/lib.rs|BEGIN_NODE|4f07cf23
 code_in_crate_root|lib/fdt-test/src/lib.rs|EMPTY_RESERVATION_MAP_SIZE|ba8f5d16
@@ -45,10 +39,7 @@ code_in_crate_root|lib/fdt-test/src/lib.rs|push_prop|379add87
 code_in_crate_root|lib/fdt-test/src/lib.rs|push_u32|f46387f4
 code_in_crate_root|lib/fdt-test/src/lib.rs|tree|511eb395
 code_in_crate_root|lib/fdt-test/src/lib.rs|wrap|d04f72c5
-code_in_crate_root|lib/filesystem-server/src/lib.rs|EXPORT_STACK_SIZE|34e67a78
-code_in_crate_root|lib/filesystem-server/src/lib.rs|FAILED_EXIT_CODE|88025627
 code_in_crate_root|lib/filesystem-server/src/lib.rs|IMAGE|5870b63a
-code_in_crate_root|lib/filesystem-server/src/lib.rs|MOUNT_STACK_SIZE|636495d3
 code_in_crate_root|lib/filesystem-server/src/lib.rs|Shared|c213e3d4
 code_in_crate_root|lib/filesystem-server/src/lib.rs|serve_sessions|319c6740
 code_in_crate_root|lib/filesystem-server/src/lib.rs|serve|8be24894
@@ -108,27 +99,11 @@ code_in_crate_root|lib/userland-loader/src/lib.rs|<PendingProcess as Drop>|76c9b
 code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|76c9b637
 code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|c7c338b1
 code_in_crate_root|lib/userland-loader/src/lib.rs|STARTUP_FAILURE_EXIT_CODE|b339c684
-code_in_crate_root|lib/userland-loader/src/lib.rs|load_entry|d86fa40a
+code_in_crate_root|lib/userland-loader/src/lib.rs|load_program|f1190502
 code_in_crate_root|lib/userland-loader/src/lib.rs|permissions_to_flags|7ef9b161
 code_in_crate_root|lib/userland-loader/src/lib.rs|round_up_to_page|54ca5bdb
 code_in_crate_root|lib/userland-loader/src/lib.rs|state_taken|b2044f72
 code_in_crate_root|lib/userland-loader/src/lib.rs|terminate_and_join|4d8d9b4f
-code_in_crate_root|lib/userland/src/lib.rs|<Entry<'a> as EntryView<'a>>|76c9b637
-code_in_crate_root|lib/userland/src/lib.rs|<Segment<'a> as SegmentView<'a>>|76c9b637
-code_in_crate_root|lib/userland/src/lib.rs|EntryView|48e18cf6
-code_in_crate_root|lib/userland/src/lib.rs|Entry|be21fb73
-code_in_crate_root|lib/userland/src/lib.rs|SegmentPermissions|5c7a254e
-code_in_crate_root|lib/userland/src/lib.rs|SegmentPermissions|76c9b637
-code_in_crate_root|lib/userland/src/lib.rs|SegmentView|5b939337
-code_in_crate_root|lib/userland/src/lib.rs|Segment|753b7e66
-code_in_crate_root|lib/userland/src/lib.rs|USERLAND_ENTRY_PATH_CAPACITY|7fb49f57
-code_in_crate_root|lib/userland/src/lib.rs|USERLAND_PAGE_SIZE|93218819
-code_in_crate_root|lib/userland/src/lib.rs|UserVmWindow|59f3ae6b
-code_in_crate_root|lib/userland/src/lib.rs|UserlandValidationError|6409deba
-code_in_crate_root|lib/userland/src/lib.rs|entry_name|6e1ab51f
-code_in_crate_root|lib/userland/src/lib.rs|tests|4dfda322
-code_in_crate_root|lib/userland/src/lib.rs|user_vm_window|849e30ff
-code_in_crate_root|lib/userland/src/lib.rs|validate_entry|a3585d70
 expect_in_kernel|kernel/capability/src/runtime.rs|runtime|7190aad8
 expect_in_kernel|kernel/syscall/src/runtime.rs|runtime|7190aad8
 tuple_in_public_signature|kernel/capability/src/api.rs|signal_wait_many|6aa77431
@@ -146,5 +121,5 @@ tuple_in_public_signature|lib/io/src/crlf.rs|Crlf<'a>::pack_u32_le|09f708a2
 tuple_in_public_signature|lib/kernel-objects/src/object/port.rs|OwnedHandle<kind::Port>::recv_bytes|0ac8677f
 tuple_in_public_signature|lib/syscall-user/src/svc.rs|memory_region_inspect|e79b63e0
 tuple_in_public_signature|lib/syscall-user/src/svc.rs|signal_wait_many|e79b63e0
-tuple_in_public_signature|lib/userland/src/lib.rs|user_vm_window|a0da3b7c
+tuple_in_public_signature|lib/userland/src/model.rs|user_vm_window|a0da3b7c
 tuple_in_public_signature|tools/style/src/rules/attached.rs|body_of|9182441d

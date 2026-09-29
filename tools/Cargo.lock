@@ -86,6 +86,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
+name = "bootstrap-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
+
+[[package]]
 name = "borsh"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -826,7 +834,6 @@ version = "0.1.0"
 name = "userland-image"
 version = "0.1.0"
 dependencies = [
- "component-abi",
  "userland",
 ]
 
@@ -835,8 +842,10 @@ name = "userland-image-tool"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bootstrap-abi",
  "component-abi",
  "filesystem-abi",
+ "ipc",
  "object",
  "serde",
  "serde_json",

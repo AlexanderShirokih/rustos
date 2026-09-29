@@ -1,12 +1,15 @@
 //! Сессии `Platform` и линии и регионы, которые они взяли.
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 
 use bootstrap_abi::hardware;
 use device_resolver::{
     DeviceSelector, DeviceTreePlatform, InterruptLine, PlatformDescription, ResolveError,
 };
-use ipc::{IntoWireValue, wire::Cap};
+use ipc::{
+    IntoWireValue,
+    wire::{Cap, Str},
+};
 use kernel_objects::{
     Delivery, Error, IrqControl, IrqLine, MemoryRegion, ObjectKind, OwnedHandle, SessionTransport,
     kind,
@@ -17,7 +20,6 @@ use syscall::{Rights, SyscallError};
 
 pub(crate) struct SessionRecord {
     badge: u64,
-    compatible: String,
     lines: Vec<HeldLine>,
     regions: Vec<HeldRegion>,
 }
@@ -51,10 +53,9 @@ enum Refusal {
 }
 
 impl SessionRecord {
-    pub(crate) const fn new(badge: u64, compatible: String) -> Self {
+    pub(crate) const fn new(badge: u64) -> Self {
         Self {
             badge,
-            compatible,
             lines: Vec::new(),
             regions: Vec::new(),
         }
@@ -81,14 +82,20 @@ impl Platform {
         self.sessions.lock().retain(|record| record.badge != badge);
     }
 
-    fn line(&self, badge: u64, instance: u16, index: u16) -> Result<IrqLine, Refusal> {
+    fn line(
+        &self,
+        badge: u64,
+        compatible: &str,
+        instance: u16,
+        index: u16,
+    ) -> Result<IrqLine, Refusal> {
         let mut sessions = self.sessions.lock();
         let record = sessions
             .iter_mut()
             .find(|record| record.badge == badge)
             .ok_or(Refusal::NoSession)?;
         let selector = DeviceSelector {
-            compatible: &record.compatible,
+            compatible,
             instance,
         };
         let interrupt = self
@@ -117,16 +124,16 @@ impl Platform {
     fn window(
         &self,
         badge: u64,
+        compatible: &str,
         instance: u16,
         index: u16,
     ) -> Result<MmioWindow<OwnedHandle<kind::MemoryRegion>>, Refusal> {
         let mut sessions = self.sessions.lock();
-        let record = sessions
-            .iter()
-            .find(|record| record.badge == badge)
-            .ok_or(Refusal::NoSession)?;
+        if !sessions.iter().any(|record| record.badge == badge) {
+            return Err(Refusal::NoSession);
+        }
         let selector = DeviceSelector {
-            compatible: &record.compatible,
+            compatible,
             instance,
         };
         let mmio = self
@@ -167,16 +174,18 @@ impl Platform {
         })
     }
 
-    fn refuse(&self, badge: u64, operation: &str, instance: u16, index: u16, refusal: Refusal) {
-        let sessions = self.sessions.lock();
-        let compatible = sessions
-            .iter()
-            .find(|record| record.badge == badge)
-            .map_or("", |record| record.compatible.as_str());
+    fn refuse(
+        compatible: &str,
+        operation: &str,
+        instance: u16,
+        index: u16,
+        refusal: Refusal,
+    ) -> PlatformError {
         log_fmt(format_args!(
             "{compatible} {instance} {operation} {index} refused: {}",
             refusal.reason()
         ));
+        refusal.error()
     }
 }
 
@@ -184,26 +193,23 @@ impl platform::Service<Delivery> for Platform {
     fn irq(
         &mut self,
         frame: &Delivery,
+        compatible: Str<'_, 255>,
         instance: u16,
         index: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::IrqLine>, PlatformError>> {
-        self.line(frame.badge, instance, index).map_err(|refusal| {
-            self.refuse(frame.badge, "irq", instance, index, refusal);
-            refusal.error()
-        })
+        self.line(frame.badge, compatible.as_str(), instance, index)
+            .map_err(|refusal| Self::refuse(compatible.as_str(), "irq", instance, index, refusal))
     }
 
     fn mmio(
         &mut self,
         frame: &Delivery,
+        compatible: Str<'_, 255>,
         instance: u16,
         index: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<MmioWindow, PlatformError>> {
-        self.window(frame.badge, instance, index)
-            .map_err(|refusal| {
-                self.refuse(frame.badge, "mmio", instance, index, refusal);
-                refusal.error()
-            })
+        self.window(frame.badge, compatible.as_str(), instance, index)
+            .map_err(|refusal| Self::refuse(compatible.as_str(), "mmio", instance, index, refusal))
     }
 }
 

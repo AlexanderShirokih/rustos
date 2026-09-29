@@ -201,3 +201,9 @@ userland-build = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "multiplicity-fixture"
+path = "src/multiplicity_fixture.rs"
+test = false
+bench = false

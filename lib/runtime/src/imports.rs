@@ -25,6 +25,7 @@ fn import<P: ipc::Protocol>(
     let requirement = SessionRequirement {
         name: Str::new(name)?,
         protocol: Str::new(P::ID)?,
+        index: 0,
     };
     let requests = component_startup::Client::new(PortTransport::new(parent))
         .with_wait(STARTUP_REQUEST_TIMEOUT);

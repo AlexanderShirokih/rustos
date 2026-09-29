@@ -6,12 +6,11 @@ runtime::process_heap!();
 
 use core::{num::NonZeroU64, panic::PanicInfo, sync::atomic::AtomicU64};
 
-use component_abi::{SESSION_SCOPE_MAX, component_startup as startup_contract};
-use component_startup::{SessionRequest, accept, component_manifest, mint_session};
-use ipc::{
-    Listener as _, RecvError,
-    wire::{MESSAGE_INLINE_MAX, Str},
+use component_abi::component_startup as startup_contract;
+use component_startup::{
+    Requirements as _, SessionRequest, accept, component_manifest, mint_session,
 };
+use ipc::{Listener as _, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::Port;
 use runtime::{PortTransport, Timeout, log_line, process_exit, start_component};
 use syscall::{Handle, Rights, kind};
@@ -49,12 +48,16 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Ok(requirements) = StepsStartup::request(parent) else {
         process_exit(FAILED_EXIT_CODE)
     };
+
+    let Some(steps) = requirements.steps else {
+        process_exit(FAILED_EXIT_CODE)
+    };
     let logged = runtime::log::installed();
     let Ok(export) = Port::create() else {
         process_exit(FAILED_EXIT_CODE)
     };
 
-    let steps = requirements.steps.client();
+    let steps = steps.client();
     let mut fixture = Fixture {
         parent,
         export,
@@ -64,17 +67,9 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let mut last = (outcome::STARTED, u64::from(logged));
     loop {
         let (code, value) = last;
-        let scope = match &fixture.held {
-            Some(request) if code == outcome::ACCEPTED => request.scope.as_str(),
-            _ => "",
-        };
-        let Some(scope) = Str::<SESSION_SCOPE_MAX>::new(scope) else {
-            process_exit(FAILED_EXIT_CODE)
-        };
         let report = Report {
             outcome: code,
             value,
-            scope,
         };
         let Ok(step) = steps.next(report) else {
             process_exit(FAILED_EXIT_CODE)

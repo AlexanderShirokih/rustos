@@ -5,20 +5,19 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{num::NonZeroU64, ops::ControlFlow};
 
 use component_abi::{
-    AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
-    SessionError, SessionRequest, SessionRequirement, SessionScope,
-    component_startup as startup_contract,
+    AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, SessionError, SessionRequest,
+    SessionRequirement, component_startup as startup_contract,
 };
 use ipc::{
     Listener as _, Protocol as _, RecvError,
     wire::{MESSAGE_INLINE_MAX, Str},
 };
-use kernel_objects::{Delivery, Error, IssuedHandle, OwnedHandle, Port, Resource, Session, kind};
+use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
 use log_abi::log;
 use managed_component::{Children, Departure, GrantError, Status};
 use runtime::{Instant, Mutex, PortTransport, Timeout};
-use syscall::{Handle, Rights};
-use userland_image::DecodedProgram;
+use syscall::{Handle, ProcessName, Rights};
+use userland::DecodedProgram;
 
 use crate::{
     composition::{TurnThread, pause},
@@ -48,7 +47,6 @@ pub(crate) enum Answer {
     Export {
         provider: u16,
         protocol: &'static str,
-        scope: &'static str,
     },
     Grant {
         protocol: &'static str,
@@ -103,7 +101,6 @@ impl Answer {
         Self::Export {
             provider,
             protocol: P::ID,
-            scope: "",
         }
     }
 }
@@ -176,7 +173,7 @@ impl Parent {
         state.children.add(
             Key::Record(key),
             child.program,
-            child.name,
+            ProcessName::new(child.name).expect("fixture process name"),
             resource,
             child.budget,
             BUDGET_DEADLINE,
@@ -331,11 +328,6 @@ impl State {
         }
         caller
     }
-
-    fn refuse_resource<R>(&mut self, badge: u64) -> Result<R, ResourceError> {
-        self.caller(badge);
-        Err(ResourceError::Refused)
-    }
 }
 
 impl startup_contract::Service<Delivery> for State {
@@ -368,22 +360,13 @@ impl startup_contract::Service<Delivery> for State {
             Some(Answer::Export {
                 provider,
                 protocol: exported,
-                scope,
             }) if *exported == protocol => {
                 let provider = Key::Record(*provider);
-                let scope = SessionScope::new(scope);
-                match (self.children.status(provider), scope) {
-                    (None | Some(Status::Removed), _) => {
-                        let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
-                    }
-                    (_, None) => {
-                        let _ = reply.send(Err::<Port, _>(SessionError::Refused));
-                    }
-                    (_, Some(scope)) => {
-                        self.requests += 1;
-                        self.children
-                            .request(provider, exported, badge, name, scope, reply);
-                    }
+                if matches!(self.children.status(provider), None | Some(Status::Removed)) {
+                    let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
+                } else {
+                    self.requests += 1;
+                    self.children.request(provider, badge, requirement, reply);
                 }
             }
             Some(Answer::Grant {
@@ -411,15 +394,6 @@ impl startup_contract::Service<Delivery> for State {
                 let _ = reply.send(Err::<Port, _>(SessionError::Refused));
             }
         }
-    }
-
-    fn region(
-        &mut self,
-        frame: &Delivery,
-        _requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
-        reply: startup_contract::region::Reply<Debt>,
-    ) {
-        let _ = reply.send(self.refuse_resource::<OwnedHandle<kind::MemoryRegion>>(frame.badge));
     }
 
     fn accept(

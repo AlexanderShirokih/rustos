@@ -25,7 +25,7 @@ extern crate alloc;
 
 use core::{fmt::Write as _, panic::PanicInfo};
 
-use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, hardware};
+use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, hardware, image};
 use component_startup::component_manifest;
 use io::writer::Writer;
 use kernel_objects::Session;
@@ -53,7 +53,7 @@ mod heap_bench;
 mod ipc_buffer;
 mod ipc_raw;
 mod irq_provision;
-mod load_entry;
+mod load_program;
 mod log_fixture_protocol;
 mod log_relay;
 mod memory_capability_target;
@@ -93,7 +93,7 @@ mod vm;
 mod watched_capability;
 
 component_manifest! {
-    exports: [hardware::Protocol],
+    exports: [hardware::Protocol, image::Protocol],
 }
 
 static BOOTSTRAP_HANDLE: Once<Handle<kind::Port>> = Once::new();

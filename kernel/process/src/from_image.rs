@@ -7,15 +7,15 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use userland::{
-    EntryView, SegmentPermissions, SegmentView, UserlandValidationError, validate_entry,
+    ProgramView, SegmentPermissions, SegmentView, UserlandValidationError, validate_program,
 };
 
 use crate::image::{UserImage, UserSegment};
 
-/// Ошибки [`user_image_parts_from_entry`].
+/// Ошибки [`user_image_parts_from_program`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserImageFromModelError {
-    /// Семантическая модель не прошла `validate_entry`. Причина хранится в связанном
+    /// Семантическая модель не прошла `validate_program`. Причина хранится в связанном
     /// `UserlandValidationError`.
     Semantic(UserlandValidationError),
     /// Размер сегмента (`mem_size`) не помещается в `usize` либо переполняет `usize`
@@ -43,20 +43,17 @@ impl UserImageParts<'_> {
     }
 }
 
-/// Собирает части [`UserImage`] из записи программы образа.
-///
-/// `user_va_end` - верх user-диапазона архитектуры, его передаёт вызывающий. Вершина стека
-/// равна `user_va_end`, размер стека берётся из заголовка программы. Стек занимает
-/// `[user_va_end - stack_size, user_va_end)`, и сегмент программы в этом диапазоне отвергает
-/// [`UserImage::validate`].
-pub fn user_image_parts_from_entry<'a, E: EntryView<'a>>(
-    entry: &E,
+/// Преобразует модель программы в образ ядра. `user_va_end` задаёт верхнюю границу
+/// пользовательского диапазона и вершину стека. [`UserImage::validate`] проверяет
+/// пересечение сегментов со стеком.
+pub fn user_image_parts_from_program<'a, E: ProgramView<'a>>(
+    program: &E,
     user_va_end: usize,
 ) -> Result<UserImageParts<'a>, UserImageFromModelError> {
-    validate_entry(entry).map_err(UserImageFromModelError::Semantic)?;
+    validate_program(program).map_err(UserImageFromModelError::Semantic)?;
 
     let mut segments = Vec::new();
-    for segment in entry.segments() {
+    for segment in program.segments() {
         let va_base = usize::try_from(segment.va_base())
             .map_err(|_| UserImageFromModelError::FieldOverflow)?;
         let va_base = PageAlignedVirtualAddress::from_usize(va_base).ok_or(
@@ -76,9 +73,9 @@ pub fn user_image_parts_from_entry<'a, E: EntryView<'a>>(
     }
 
     let entry_va =
-        usize::try_from(entry.entry_va()).map_err(|_| UserImageFromModelError::FieldOverflow)?;
-    let user_stack_size =
-        usize::try_from(entry.stack_size()).map_err(|_| UserImageFromModelError::FieldOverflow)?;
+        usize::try_from(program.entry_va()).map_err(|_| UserImageFromModelError::FieldOverflow)?;
+    let user_stack_size = usize::try_from(program.stack_size())
+        .map_err(|_| UserImageFromModelError::FieldOverflow)?;
 
     Ok(UserImageParts {
         segments,
@@ -107,7 +104,7 @@ fn round_up_to_frame(value: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use memory::mem_flags::{AccessMode, Executable};
-    use userland::{Entry, Segment, SegmentPermissions};
+    use userland::{Program, Segment, SegmentPermissions};
 
     use super::*;
 
@@ -144,15 +141,15 @@ mod tests {
                 bytes: b"DATA",
             },
         ];
-        let entry = Entry {
-            path: "/test",
+        let program = Program {
+            manifest: &[],
             entry_va: 0x40_0000,
             stack_size: 0x8000,
             segments: &segments,
         };
 
-        let parts =
-            user_image_parts_from_entry(&entry, TEST_USER_VA_END).expect("convert semantic entry");
+        let parts = user_image_parts_from_program(&program, TEST_USER_VA_END)
+            .expect("convert semantic program");
         let image = parts.image();
 
         assert_eq!(image.segments[0].init_bytes, b"CODE");
@@ -173,15 +170,15 @@ mod tests {
             permissions: SegmentPermissions::ReadExecute,
             bytes: b"CODE",
         }];
-        let entry = Entry {
-            path: "/test",
+        let program = Program {
+            manifest: &[],
             entry_va: 0x40_0001,
             stack_size: 0x4000,
             segments: &segments,
         };
 
         assert_eq!(
-            user_image_parts_from_entry(&entry, TEST_USER_VA_END).map(|_| ()),
+            user_image_parts_from_program(&program, TEST_USER_VA_END).map(|_| ()),
             Err(UserImageFromModelError::Semantic(
                 UserlandValidationError::MisalignedSegment
             ))
@@ -190,7 +187,7 @@ mod tests {
 
     #[test]
     fn reports_segment_size_overflow() {
-        // u64::MAX проходит validate_entry (u64-арифметика), но переполняет
+        // u64::MAX проходит validate_program (u64-арифметика), но переполняет
         // usize в round_up_to_frame -> SegmentSizeOverflow без паники.
         let segments = [Segment {
             va_base: 0,
@@ -198,15 +195,15 @@ mod tests {
             permissions: SegmentPermissions::ReadExecute,
             bytes: b"CODE",
         }];
-        let entry = Entry {
-            path: "/test",
+        let program = Program {
+            manifest: &[],
             entry_va: 0,
             stack_size: 0x4000,
             segments: &segments,
         };
 
         assert_eq!(
-            user_image_parts_from_entry(&entry, TEST_USER_VA_END).map(|_| ()),
+            user_image_parts_from_program(&program, TEST_USER_VA_END).map(|_| ()),
             Err(UserImageFromModelError::SegmentSizeOverflow)
         );
     }

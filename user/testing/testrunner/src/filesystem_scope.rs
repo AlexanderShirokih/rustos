@@ -61,7 +61,7 @@ fn filesystem_scopes_a_session_to_an_image_directory() {
     // Корень окна - сам каталог: его записи те же, что у каталога родительской сессии.
     let root = open(&scoped, "/", AccessMode::Read, OpenFlags::DIRECTORY);
     let names = walk_directory(&scoped, &buffer, root.fd);
-    for expected in ["sample", "program"] {
+    for expected in ["sample", "exec"] {
         kernel_tests::kassert!(names.iter().any(|name| name.as_str() == expected));
     }
 }

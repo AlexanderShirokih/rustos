@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_startup::component_manifest;
+use component_startup::{Requirements as _, component_manifest};
 use kernel_objects::MemoryRegion;
 use platform_abi::platform;
 use runtime::{log_fmt, log_line, process_exit, start_component};
@@ -28,8 +28,18 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Ok(requirements) = IrqStartup::request(parent) else {
         process_exit(RESTART_EXIT_CODE)
     };
-    let platform = requirements.platform.client();
-    let (Ok(Ok(_line)), Ok(Ok(window))) = (platform.irq(0, 0), platform.mmio(0, 0)) else {
+
+    let Some(platform) = requirements.platform else {
+        process_exit(RESTART_EXIT_CODE)
+    };
+    let platform = platform.client();
+    let Some(compatible) = ipc::wire::Str::new("arm,pl031") else {
+        process_exit(RESTART_EXIT_CODE)
+    };
+    let (Ok(Ok(_line)), Ok(Ok(window))) = (
+        platform.irq(compatible, 0, 0),
+        platform.mmio(compatible, 0, 0),
+    ) else {
         log_line("resources refused");
         process_exit(RESTART_EXIT_CODE)
     };

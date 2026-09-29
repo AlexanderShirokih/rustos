@@ -4,8 +4,8 @@
 // Модуль подключён к прогону и к фикстуре, и каждый бинарь пользуется своим подмножеством.
 #![allow(dead_code)]
 
-use component_abi::{AcceptError, SESSION_SCOPE_MAX, SessionError};
-use ipc::wire::{IpcError, Str};
+use component_abi::{AcceptError, SessionError};
+use ipc::wire::IpcError;
 use syscall::Timeout;
 
 pub const STEP_LINE: &str = "step logged";
@@ -49,10 +49,9 @@ ipc::wire_value! {
 
 ipc::wire_value! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct Report<'a> {
+    pub struct Report {
         pub outcome: u32,
         pub value: u64,
-        pub scope: Str<'a, SESSION_SCOPE_MAX>,
     }
 }
 
@@ -144,6 +143,7 @@ pub const fn session_error_code(error: SessionError) -> u64 {
         SessionError::NoSpace => 1,
         SessionError::Refused => 2,
         SessionError::Unavailable => 3,
+        SessionError::Unbound => 4,
     }
 }
 
@@ -153,6 +153,7 @@ pub const fn session_error_of(code: u64) -> Option<SessionError> {
         1 => Some(SessionError::NoSpace),
         2 => Some(SessionError::Refused),
         3 => Some(SessionError::Unavailable),
+        4 => Some(SessionError::Unbound),
         _ => None,
     }
 }

@@ -22,7 +22,7 @@ mod startup;
 pub use ipc::Protocol as __Protocol;
 pub use manifest::{
     COMPONENT_MANIFEST_SECTION, ComponentManifest, ManifestDecodeError, ManifestNames,
-    ManifestRequirement, ManifestRequirements, RequirementDeclaration, RequirementKind,
-    decode_manifest, encode_manifest, manifest_len,
+    ManifestRequirement, ManifestRequirements, RequirementDeclaration, RequirementMode,
+    decode_manifest, encode_manifest, encode_manifest_into, manifest_len,
 };
 pub use startup::*;

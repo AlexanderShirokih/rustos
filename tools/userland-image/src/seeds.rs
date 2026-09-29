@@ -1,10 +1,11 @@
 //! Валидные образы, которыми затравливается корпус fuzz-цели `userland_image_decode`.
 
 use anyhow::{Result, anyhow};
-use userland::{Entry, Segment, SegmentPermissions, USERLAND_PAGE_SIZE};
-use userland_image::{ImageRecord, encode, encode_program};
+use component_abi::encode_manifest;
+use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE, encode_program};
+use userland_image::{BOOT_PLAN_PATH, ComponentSpec, ImageRecord, encode, encode_plan};
 
-const BOOT_PATH: &str = "/boot/rootkeeper";
+const BOOT_PATH: &str = "/boot/rootkeeper/exec";
 
 /// Затравка корпуса: имя файла и байты валидного образа.
 pub struct ImageSeed {
@@ -48,10 +49,24 @@ pub fn userland_image_seeds() -> Result<Vec<ImageSeed>> {
 
 fn image(files: &[ImageRecord<'_>]) -> Result<Vec<u8>> {
     let program = boot_program()?;
-    let mut records = vec![ImageRecord {
-        path: BOOT_PATH,
-        data: &program,
-    }];
+    let plan = encode_plan(&[ComponentSpec {
+        executable: "/boot/rootkeeper",
+        name: "rootkeeper",
+        mountpoint: None,
+        memory_limit: 0,
+        restarts: 0,
+    }])
+    .map_err(|error| anyhow!("seed plan: {error:?}"))?;
+    let mut records = vec![
+        ImageRecord {
+            path: BOOT_PATH,
+            data: &program,
+        },
+        ImageRecord {
+            path: BOOT_PLAN_PATH,
+            data: &plan,
+        },
+    ];
     records.extend_from_slice(files);
 
     encode(&records, BOOT_PATH)
@@ -74,8 +89,8 @@ fn boot_program() -> Result<Vec<u8>> {
         },
     ];
 
-    encode_program(&Entry {
-        path: BOOT_PATH,
+    encode_program(&Program {
+        manifest: &encode_manifest::<16>(&[], &[]),
         entry_va: 0x4000_0000,
         stack_size: 4 * USERLAND_PAGE_SIZE,
         segments: &segments,
@@ -85,7 +100,7 @@ fn boot_program() -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use userland::EntryView;
+    use userland::{ProgramView, decode_program};
     use userland_image::decode;
 
     use super::*;
@@ -94,11 +109,12 @@ mod tests {
     fn every_seed_decodes_down_to_program_segments() {
         for seed in userland_image_seeds().expect("seeds are encodable") {
             let image = decode(&seed.bytes).expect("seed decodes");
-            let program = image
-                .boot_entry()
-                .program()
-                .expect("boot record carries a program");
+            let program =
+                decode_program(image.boot_entry().data()).expect("boot record carries a program");
             assert_eq!(program.segments().count(), 2);
+            component_abi::decode_manifest(program.manifest()).expect("seed manifest");
+            userland_image::decode_plan(image.entry(BOOT_PLAN_PATH).expect("seed plan").data())
+                .expect("plan decodes");
         }
     }
 }

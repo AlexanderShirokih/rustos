@@ -1,6 +1,6 @@
-//! Загрузка программы из её [`EntryView`] в новый процесс из userspace.
+//! Загрузка программы из её [`ProgramView`] в новый процесс из userspace.
 //!
-//! [`load_entry`] создаёт процесс программы в регионах, оплаченных ресурсом вызывающего, и
+//! [`load_program`] создаёт процесс программы в регионах, оплаченных ресурсом вызывающего, и
 //! передаёт ему одну начальную capability. Отказ после создания процесса завершает процесс.
 
 #![no_std]
@@ -15,10 +15,10 @@ use kernel_objects::{
 };
 use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags};
 use syscall::{
-    SEGMENT_ABI_VERSION, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
+    ProcessName, SEGMENT_ABI_VERSION, SyscallError, USER_VA_END, UserImageDescAbi, UserSegmentAbi,
     encode_image_desc, encode_segment,
 };
-use userland::{EntryView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, user_vm_window};
+use userland::{ProgramView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE, user_vm_window};
 
 const STARTUP_FAILURE_EXIT_CODE: u32 = 1;
 
@@ -75,14 +75,12 @@ fn terminate_and_join(process: &Process) -> Result<()> {
     process.join(Timeout::POLL)
 }
 
-/// Загружает `entry` в новый процесс и стартует его первый поток.
-///
-/// Сегменты копируются в свежие приватные регионы. `resource` оплачивает их и
-/// становится метеринг-ресурсом потомка. `name` называет процесс. `initial` -
-/// начальная capability. `Ok` означает, что хэндл передан потомку.
-pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
-    entry: &E,
-    name: &str,
+/// Загружает программу в новый процесс с именем `name`, передаёт `initial` и запускает поток.
+/// `resource` оплачивает приватные копии сегментов и служит ресурсом потомка.
+/// `Ok` означает передачу хендла потомку. Отказ после создания процесса завершает его.
+pub fn load_program<'a, E: ProgramView<'a>, K: kernel_objects::ObjectKind>(
+    program: &E,
+    name: ProcessName<'_>,
     resource: &Resource,
     initial: OwnedHandle<K>,
 ) -> Result<Process> {
@@ -93,7 +91,7 @@ pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
     let mut segment_abi: Vec<u8> = Vec::new();
     let mut segment_count: u32 = 0;
 
-    for seg in entry.segments() {
+    for seg in program.segments() {
         let mapped = round_up_to_page(seg.mem_size());
         let region = resource.create_virtual(mapped, MemoryAccess::RWX)?;
         let mapping = region.map(mapped, UserMemFlags::ReadWrite)?;
@@ -125,9 +123,11 @@ pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
     // Стек - на потолке user-AS; окно кучи (user_vm) - промежуток между концом
     // сегментов и низом стека, выведенный из самого образа.
     let stack_top = USER_VA_END;
-    let stack_size = round_up_to_page(entry.stack_size());
+    let stack_size = round_up_to_page(program.stack_size());
     let window = user_vm_window(
-        entry.segments().map(|seg| (seg.va_base(), seg.mem_size())),
+        program
+            .segments()
+            .map(|seg| (seg.va_base(), seg.mem_size())),
         stack_top,
         stack_size,
     )
@@ -152,7 +152,7 @@ pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
         version: SEGMENT_ABI_VERSION,
         segment_count,
         segments_va: segment_abi.as_ptr() as u64,
-        entry_va: entry.entry_va(),
+        entry_va: program.entry_va(),
         user_vm_base: window.start,
         user_vm_size: window.end - window.start,
     };
@@ -163,7 +163,7 @@ pub fn load_entry<'a, E: EntryView<'a>, K: kernel_objects::ObjectKind>(
     }
     let thread = match pending.process()?.start(
         ThreadEntry {
-            entry_pc: entry.entry_va(),
+            entry_pc: program.entry_va(),
             user_sp: stack_top,
             arg: 0,
             priority: Priority::new(1),

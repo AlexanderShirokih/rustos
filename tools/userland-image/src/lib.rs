@@ -10,6 +10,7 @@
 #![allow(clippy::std_instead_of_core)]
 
 mod host;
+#[cfg(test)]
 mod manifest;
 mod plan;
 mod seeds;

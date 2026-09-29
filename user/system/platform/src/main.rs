@@ -13,12 +13,12 @@ runtime::process_heap!();
 
 extern crate alloc;
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::{panic::PanicInfo, sync::atomic::AtomicU64};
 
 use bootstrap_abi::hardware;
 use component_startup::{
-    MintedSession, SessionError, component_manifest, mint_session, serve_export,
+    MintedSession, Requirements as _, SessionError, component_manifest, mint_session, serve_export,
 };
 use device_resolver::DeviceTreePlatform;
 use device_resolver_aarch64::PLATFORM_BINDINGS;
@@ -70,7 +70,7 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
     let requirements = PlatformStartup::request(parent)
         .inspect_err(|error| log_fmt(format_args!("{error}")))
         .ok()?;
-    let hardware = requirements.hardware.client();
+    let hardware = requirements.hardware?.client();
     let lines = IrqControl::from(hardware.acquire_irq_control().ok()?.ok()?);
     let fdt = hardware.acquire_boot_fdt().ok()?.ok()?;
     let offset = usize::try_from(fdt.offset).ok()?;
@@ -90,8 +90,7 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
     let exporter = requirements.parent;
     spawn_owned(
         move || {
-            let failure =
-                serve_export::<platform::Protocol>(&exporter, |scope| open(shared, scope));
+            let failure = serve_export::<platform::Protocol>(&exporter, || open(shared));
             log_fmt(format_args!("export stopped: {failure:?}"));
             process_exit(FAILED_EXIT_CODE)
         },
@@ -111,17 +110,11 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
     ))
 }
 
-fn open(shared: &Shared, scope: &str) -> Result<Port, SessionError> {
-    if scope.is_empty() {
-        return Err(SessionError::Refused);
-    }
+fn open(shared: &Shared) -> Result<Port, SessionError> {
     let MintedSession { badge, port } =
         mint_session(&shared.service, &shared.next_badge).map_err(|_| SessionError::NoSpace)?;
     // Запись сессии создаётся до передачи порта драйверу, и первый кадр сессии её находит.
-    shared
-        .sessions
-        .lock()
-        .push(SessionRecord::new(badge.get(), String::from(scope)));
+    shared.sessions.lock().push(SessionRecord::new(badge.get()));
     Ok(port)
 }
 

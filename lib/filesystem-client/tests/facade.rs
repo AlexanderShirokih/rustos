@@ -201,11 +201,6 @@ impl World {
         filesystem.tree().get(&tail).cloned()
     }
 
-    fn session_end(self: &Arc<Self>, path: &str) -> MockChannel {
-        let (filesystem, root) = self.covering(path).expect("a mount covers the path");
-        self.session_end_in(Arc::clone(filesystem), root)
-    }
-
     fn session_end_in(self: &Arc<Self>, filesystem: Arc<Filesystem>, root: String) -> MockChannel {
         let (client, server) = ipc_test::pair();
         let world = Arc::clone(self);
@@ -732,6 +727,19 @@ impl Router {
 }
 
 impl namespace::Service<MockResources> for Router {
+    fn open_root(
+        &mut self,
+        _frame: &MockResources,
+        _path: Str<'_, PATH_MAX>,
+    ) -> impl ipc::IntoWireValue<
+        MockResources,
+        Read = Result<ipc::wire::Session<namespace::Protocol>, FileSystemError>,
+    > {
+        Err::<ipc::wire::Session<namespace::Protocol, MockHandle<kind::Port>>, _>(
+            FileSystemError::NoSession,
+        )
+    }
+
     fn resolve(
         &mut self,
         _frame: &MockResources,
@@ -901,21 +909,11 @@ fn routed(world: &Arc<World>) -> FileSystem<TestEnvironment> {
     thread::spawn(move || {
         let _ = server.serve_all(|frame| namespace::dispatch(&mut router, frame));
     });
-    FileSystem::routed_with_environment(
+    FileSystem::with_environment(
         TestEnvironment {
             world: Arc::clone(world),
         },
         TrackedEnd::new(world, client),
-    )
-}
-
-fn windowed(world: &Arc<World>, root: &str) -> FileSystem<TestEnvironment> {
-    let end = world.session_end(root);
-    FileSystem::windowed_with_environment(
-        TestEnvironment {
-            world: Arc::clone(world),
-        },
-        TrackedEnd::new(world, end),
     )
 }
 
@@ -1057,9 +1055,9 @@ fn descriptor_closes_with_the_node() {
 fn a_mapping_failure_releases_the_session_transport() {
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     world.mappings_allowed.store(0, Ordering::SeqCst);
-    let mut filesystem = windowed(&world, "/data");
+    let mut filesystem = routed(&world);
 
-    let outcome = filesystem.open(path("/first"), AccessMode::Read, OpenFlags::NONE);
+    let outcome = filesystem.open(path("/data/first"), AccessMode::Read, OpenFlags::NONE);
 
     assert!(matches!(
         outcome.err(),
@@ -1067,7 +1065,7 @@ fn a_mapping_failure_releases_the_session_transport() {
     ));
     // Буфер сессии не отобразился, поэтому её транспорт закрыт вместе с попыткой, а
     // дескрипторов она не открыла.
-    assert_eq!(world.transports.load(Ordering::SeqCst), 0);
+    assert_eq!(world.transports.load(Ordering::SeqCst), 1);
     assert_eq!(world.live.load(Ordering::SeqCst), 0);
 }
 
@@ -1075,15 +1073,15 @@ fn a_mapping_failure_releases_the_session_transport() {
 fn a_buffer_capability_the_reply_did_not_carry_is_refused() {
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     world.claims_fail.store(true, Ordering::SeqCst);
-    let mut filesystem = windowed(&world, "/data");
+    let mut filesystem = routed(&world);
 
-    let outcome = filesystem.open(path("/first"), AccessMode::Read, OpenFlags::NONE);
+    let outcome = filesystem.open(path("/data/first"), AccessMode::Read, OpenFlags::NONE);
 
     assert_eq!(
         outcome.err(),
         Some(Failure::Transport(IpcError::InvalidValue))
     );
-    assert_eq!(world.transports(), 0);
+    assert_eq!(world.transports(), 1);
     assert_eq!(world.descriptors(), 0);
 }
 
@@ -1393,28 +1391,6 @@ fn a_refused_descriptor_of_the_scoped_session_leaves_no_session_behind() {
 }
 
 #[test]
-fn a_window_facade_keeps_its_capability_after_a_refused_scope() {
-    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
-    let mut filesystem = windowed(&world, "/data");
-    assert_eq!(read_all(&mut filesystem, "/first", 8), b"one");
-    let idle = world.transports();
-    world.scoping_fails.store(true, Ordering::SeqCst);
-
-    let outcome = filesystem.open(path("/first"), AccessMode::Read, OpenFlags::NONE);
-
-    assert!(matches!(
-        outcome.err(),
-        Some(Failure::FileSystem(FileSystemError::NotFound))
-    ));
-    // Выданное окно не заменяется, потому что у него нет маршрутизатора, а его сессия
-    // действует.
-    assert!(world.resolves().is_empty());
-    assert_eq!(world.transports(), idle);
-    world.scoping_fails.store(false, Ordering::SeqCst);
-    assert_eq!(read_all(&mut filesystem, "/first", 8), b"one");
-}
-
-#[test]
 fn metadata_reports_the_kind_and_the_size() {
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     let mut filesystem = routed(&world);
@@ -1712,15 +1688,6 @@ fn a_path_of_a_wrong_form_never_reaches_the_router() {
 }
 
 #[test]
-fn a_window_session_resolves_from_its_own_root() {
-    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
-    let mut filesystem = windowed(&world, "/data");
-
-    assert_eq!(read_all(&mut filesystem, "/first", 8), b"one");
-    assert!(world.resolves().is_empty());
-}
-
-#[test]
 fn a_mount_root_is_read_through_its_own_filesystem() {
     let world = World::mounted(&[
         (ROOT, &[("/boot", Node::Directory)]),
@@ -1805,13 +1772,6 @@ fn remove_tree_refuses_the_session_root() {
         Some(Failure::FileSystem(FileSystemError::InvalidPath))
     ));
     assert!(world.holds("/tmp/first"));
-
-    let mut window = windowed(&world, "/tmp");
-    assert!(matches!(
-        window.remove_tree(path(ROOT)).err(),
-        Some(Failure::FileSystem(FileSystemError::InvalidPath))
-    ));
-    assert!(world.holds("/tmp/first"));
 }
 
 #[test]
@@ -1869,20 +1829,6 @@ fn rename_across_mounts_leaves_the_parent_filesystem_untouched() {
     assert!(world.tree().contains_key("/data/left/first"));
     assert!(!world.tree().contains_key("/data/right/second"));
     assert!(world.holds("/data/left/first"));
-}
-
-#[test]
-fn rename_inside_a_window_stays_on_its_root() {
-    let world = World::new(&[("/window", Node::Directory), ("/window/first", file("one"))]);
-    let mut filesystem = windowed(&world, "/window");
-
-    filesystem
-        .rename(path("/first"), path("/second"))
-        .expect("rename");
-
-    assert!(world.tree().contains_key("/window/second"));
-    // Окно само определяет корень пары и не обращается к маршрутизатору.
-    assert!(world.resolves().is_empty());
 }
 
 #[test]

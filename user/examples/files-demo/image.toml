@@ -25,5 +25,5 @@ package = "files-demo"
 path = "/files-demo"
 
 [[files]]
-path = "/files-demo/greeting"
+path = "/files-demo/greeting.txt"
 source = "user/examples/files-demo/assets/greeting.txt"

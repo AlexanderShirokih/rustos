@@ -49,7 +49,7 @@ const BOOTSTRAP_CLIENT_BADGE: u64 = 0x7777_7777_7777_7777;
 
 const SESSION_PROBE: u64 = 0x6666_6666_6666_6666;
 
-const VEND_EXHAUSTION_FIXTURE: &str = "/vend-exhaustion-fixture/program";
+const VEND_EXHAUSTION_FIXTURE: &str = "/vend-exhaustion-fixture/exec";
 
 fn received_badge() -> u64 {
     let buffer = ipc_buffer_ptr().expect("thread owns an IPC buffer");
@@ -136,7 +136,7 @@ fn badge_departs_when_the_client_process_dies() {
     let client = port
         .duplicate(Rights::WRITE | Rights::TRANSFER, Some(DYING_CLIENT_BADGE))
         .expect("mint client capability");
-    let process = spawn_entry("/badge-client/program", client);
+    let process = spawn_entry("/badge-client/exec", client);
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
     kernel_tests::kassert_eq!(received_badge(), DYING_CLIENT_BADGE.get());

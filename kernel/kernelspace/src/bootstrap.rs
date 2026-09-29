@@ -23,11 +23,11 @@ use memory::{
     AccessMask, MemoryRegion, page_round_up,
     physical_address::{PageAlignedAddress, PhysicalAddress},
 };
-use process::{UserImageFromModelError, user_image_parts_from_entry};
+use process::{UserImageFromModelError, user_image_parts_from_program};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
 use syscall::{IPC_BUFFER_MAX_CAPS, IpcBuffer, ObjectKind, Timeout, decode_tag, encode_tag, kind};
-use userland::EntryView;
-use userland_image::{ImageDecodeError, ProgramDecodeError, component_name, decode};
+use userland::{ProgramDecodeError, decode_program};
+use userland_image::{ImageDecodeError, component_name, decode};
 
 use crate::{
     kernel_context::BootDtb,
@@ -95,13 +95,11 @@ pub fn spawn_process(
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
     let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
-    let program = image
-        .boot_entry()
-        .program()
-        .map_err(BootstrapSpawnError::Program)?;
-    let name = component_name(program.path());
+    let boot_entry = image.boot_entry();
+    let program = decode_program(boot_entry.data()).map_err(BootstrapSpawnError::Program)?;
+    let name = component_name(boot_entry.path());
     let parts =
-        user_image_parts_from_entry(&program, user_va_end).map_err(BootstrapSpawnError::Model)?;
+        user_image_parts_from_program(&program, user_va_end).map_err(BootstrapSpawnError::Model)?;
     let user_image = parts.image();
 
     // Ядро принимает на порту, поэтому держит capability с READ. Стартовый

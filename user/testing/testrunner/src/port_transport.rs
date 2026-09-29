@@ -21,7 +21,7 @@ use crate::{
     fixture::spawn_entry,
 };
 
-const ANSWER_EXHAUSTION_FIXTURE: &str = "/answer-exhaustion-fixture/program";
+const ANSWER_EXHAUSTION_FIXTURE: &str = "/answer-exhaustion-fixture/exec";
 
 const STACK_SIZE: u64 = 0x4000;
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);

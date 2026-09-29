@@ -1,4 +1,4 @@
-//! Контракт маршрутизатора имён. Контракт [`crate::namespace_admin`] на другом порту создаёт
+//! Контракт маршрутизатора имён. Контракт [`crate::file_system_mount`] на другом порту создаёт
 //! монтирования.
 
 use crate::{error::FileSystemError, limits::PATH_MAX};
@@ -20,6 +20,10 @@ ipc::protocol! {
     /// Маршрутизатор имён. Разбирает путь клиента по монтированиям на области сессии и под ней.
     pub mod namespace {
         name = "Namespace";
+
+        /// Выдаёт сессию маршрутизатора с корнем на `path` внутри текущей сессии.
+        call fn open_root(path: ipc::wire::Str<{ PATH_MAX }>)
+            -> own Result<ipc::wire::Session<crate::namespace::Protocol>, FileSystemError>;
 
         /// Отдаёт свежую сессию файловой системы с корнем на `path`. Путь отсчитывается от области
         /// сессии и разбирается по самому длинному префиксу монтирований. Пока путь не накрыт,
@@ -69,6 +73,18 @@ mod tests {
     }
 
     impl namespace::Service<MockResources> for Router {
+        fn open_root(
+            &mut self,
+            _frame: &MockResources,
+            _path: Str<'_, PATH_MAX>,
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<Session<namespace::Protocol>, FileSystemError>,
+        > {
+            Err::<Session<namespace::Protocol, MockHandle<kind::Port>>, _>(
+                FileSystemError::NoSession,
+            )
+        }
         fn resolve(
             &mut self,
             _frame: &MockResources,

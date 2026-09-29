@@ -35,6 +35,7 @@ userland-image-tool = { path = "userland-image" }
 style-tool = { path = "style" }
 
 # Крейты корневого workspace
+bootstrap-abi = { path = "../lib/bootstrap-abi" }
 component-abi = { path = "../lib/component-abi" }
 filesystem-abi = { path = "../lib/filesystem-abi" }
 ipc = { path = "../lib/ipc" }

@@ -1,44 +1,38 @@
 //! Требования, журнал, отказы, перезапуски, бюджет, выдача устройств `platform` и файловые
 //! системы записей композиции rootkeeper.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 
-use bootstrap_abi::hardware;
 use component_abi::{
-    AcceptError, LOG_REQUIREMENT, ResourceError, SessionError,
+    AcceptError, LOG_REQUIREMENT, RequirementDeclaration, SessionError,
     component_startup as startup_contract,
 };
 use component_startup::{accept, session};
 use filesystem_abi::{
-    AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, namespace, namespace_admin,
+    AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, file_system_mount, namespace,
 };
-use ipc::{
-    Protocol,
-    wire::{IpcError, Str},
-};
+use ipc::{Protocol, wire::IpcError};
 use kernel_objects::{Error, IrqLine, MemoryRegion, Port, Session, SessionTransport};
 use kernel_tests::kernel_test;
 use log_abi::log;
 use log_relay::SourceNames as _;
 use platform_abi::{PlatformError, platform};
 use rootkeeper::{
-    BootFailure, ImporterRequirement, Stopped,
+    BootFailure, Stopped,
     relay::{ComponentNames, log_badge},
 };
 use rtc_abi::rtc;
 use runtime::{JoinHandle, PortTransport, Priority, Timeout, spawn_owned};
-use syscall::SyscallError;
-use userland_image::{
-    ComponentSpec, PlanDecodeError, RequirementSource, RequirementSourceSpec, RequirementSpec,
-    USERLAND_PROGRAM_MAGIC,
-};
+use syscall::{ProcessName, SyscallError};
+use userland::USERLAND_PROGRAM_MAGIC;
+use userland_image::{ComponentSpec, PlanDecodeError};
 
 use crate::{
     composition::{
         BOOT_PLAN_ENTRY, Composition, Importer, Mounted, ROUTER_NAME, admin, encoded, image, pause,
-        request, view,
+        request, request_at, view,
     },
-    filesystem::{connect, open, path},
+    filesystem::{IMAGE_FILE, connect, open, path},
     log_relay::{
         await_component_lines, await_component_sources, component_scenario_session,
         start_component_relay, stop_component_relay,
@@ -52,13 +46,9 @@ const PROBE: &str = "probe";
 const HELD: &str = "held";
 const STARVED: &str = "starved";
 const FILES: &str = "files";
-const RAMFS: &str = "ramfs";
 const ROOT_VIEW: &str = "root";
-const NAMESPACE: &str = "namespace";
 const RTC_REQUIREMENT: &str = "rtc";
-const HARDWARE: &str = "hardware";
 const PLATFORM_REQUIREMENT: &str = "platform";
-const IMAGE: &str = "image";
 const AREA: &str = "area";
 const SPARE_VIEW: &str = "spare";
 const TMP_VIEW: &str = "tmp";
@@ -70,14 +60,7 @@ const RENAMED_PATH: &str = "/renamed";
 const IMAGE_MOUNT: &str = "/boot";
 const NESTED_SPARE_MOUNT: &str = "/boot/spare";
 const NESTED_SPARE_PATH: &str = "/boot/spare/x";
-const AREA_SCOPE: &str = "/scope-consumer-fixture";
-
-const BOOT_RECORD: u16 = 0;
-const PLATFORM_RECORD: u16 = 1;
-const PROBE_PROVIDER: u16 = 1;
-const ROUTER_RECORD: u16 = 1;
-const RAM_FS_RECORD: u16 = 2;
-const IMAGE_FS_RECORD: u16 = 3;
+const AREA_SCOPE: &str = "/boot/scope-consumer-fixture";
 
 const CALL_WAIT: Timeout = Timeout::from_secs(2);
 const REFUSAL_WAIT: Timeout = Timeout::from_secs(1);
@@ -106,10 +89,6 @@ const PING: u64 = 0x5A;
 
 const STARVED_MEMORY: u64 = 4096;
 
-const PROBE_EXPORTS: &[&str] = &[probe::Protocol::ID];
-const FILE_SYSTEM_EXPORTS: &[&str] = &[file_system::Protocol::ID];
-const ROUTER_EXPORTS: &[&str] = &[namespace::Protocol::ID, namespace_admin::Protocol::ID];
-
 const PL031: &str = "arm,pl031";
 const VIRTIO: &str = "virtio,mmio";
 const ABSENT: &str = "vendor,absent";
@@ -117,87 +96,25 @@ const ABSENT: &str = "vendor,absent";
 const VIRTIO_REGION: u64 = 0xa00_0000;
 const VIRTIO_STRIDE: u64 = 0x200;
 
-const PLATFORM_REQUIREMENTS: &[RequirementSpec<'static>] = &[RequirementSpec {
-    name: HARDWARE,
-    source: RequirementSourceSpec::Export {
-        provider: BOOT_RECORD,
-        protocol: hardware::Protocol::ID,
-        scope: "",
-    },
-}];
-
-const PL031_PLATFORM: &[RequirementSpec<'static>] = &[RequirementSpec {
-    name: PLATFORM_REQUIREMENT,
-    source: RequirementSourceSpec::Export {
-        provider: PLATFORM_RECORD,
-        protocol: platform::Protocol::ID,
-        scope: PL031,
-    },
-}];
-
-const RAM_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[namespace_requirement("/tmp")];
-const SPARE_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[namespace_requirement("/spare")];
-const NESTED_SPARE_FS_REQUIREMENTS: &[RequirementSpec<'static>] =
-    &[namespace_requirement(NESTED_SPARE_MOUNT)];
-const CRASH_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[namespace_requirement("/crash")];
-
-const IMAGE_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[
-    namespace_requirement(IMAGE_MOUNT),
-    RequirementSpec {
-        name: IMAGE,
-        source: RequirementSourceSpec::Region,
-    },
-];
-
-const AREA_REQUIREMENTS: &[RequirementSpec<'static>] = &[RequirementSpec {
-    name: AREA,
-    source: RequirementSourceSpec::Export {
-        provider: IMAGE_FS_RECORD,
-        protocol: file_system::Protocol::ID,
-        scope: AREA_SCOPE,
-    },
-}];
-
-const HOLDER_REQUIREMENTS: &[RequirementSpec<'static>] = &[RequirementSpec {
-    name: FILES,
-    source: RequirementSourceSpec::Export {
-        provider: RAM_FS_RECORD,
-        protocol: file_system::Protocol::ID,
-        scope: "",
-    },
-}];
-
-const PROBE_REQUIREMENTS: &[RequirementSpec<'static>] = &[RequirementSpec {
-    name: PROBE,
-    source: RequirementSourceSpec::Export {
-        provider: PROBE_PROVIDER,
-        protocol: probe::Protocol::ID,
-        scope: "",
-    },
-}];
-
 const PARENT: ComponentSpec<'static> = ComponentSpec {
     executable: "/testrunner",
     name: "testrunner",
-    requirements: &[],
-    exports: &[hardware::Protocol::ID],
+    mountpoint: None,
     memory_limit: 0,
     restarts: 0,
 };
 
 const EXPORT: ComponentSpec<'static> = fixture("/export-fixture", "export-fixture");
-const EXPORT_ENTRY: &str = "/export-fixture/program";
+const EXPORT_ENTRY: &str = "/export-fixture/exec";
 
 const IDLE_EXPORT: ComponentSpec<'static> = fixture("/idle-export-fixture", "idle-export-fixture");
 
 const REFUSAL_PROBE: ComponentSpec<'static> = ComponentSpec {
-    requirements: PROBE_REQUIREMENTS,
-    exports: &[],
+    mountpoint: None,
     ..fixture("/refusal-probe-fixture", "refusal-probe-fixture")
 };
 
 const LOG_DUPLICATE: ComponentSpec<'static> = ComponentSpec {
-    exports: &[],
     ..fixture("/log-duplicate-fixture", "log-duplicate-fixture")
 };
 
@@ -207,23 +124,20 @@ const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
 };
 
 const FAILING: ComponentSpec<'static> = ComponentSpec {
-    exports: &[],
     ..fixture("/failing-fixture", "failing-fixture")
 };
 
 const CLOSED: ComponentSpec<'static> = ComponentSpec {
-    exports: &[],
     ..fixture("/managed-startup-closed", "managed-startup-closed")
 };
 
 const PROBE_IMPORTER: ComponentSpec<'static> = ComponentSpec {
-    requirements: PROBE_REQUIREMENTS,
-    exports: &[],
+    mountpoint: None,
     ..fixture("/probe-importer-fixture", "probe-importer-fixture")
 };
 
 const HOLDER: ComponentSpec<'static> = ComponentSpec {
-    requirements: HOLDER_REQUIREMENTS,
+    mountpoint: None,
     memory_limit: 2 * MIB,
     restarts: 1,
     ..fixture("/budget-holder-fixture", "budget-holder-fixture")
@@ -232,8 +146,7 @@ const HOLDER: ComponentSpec<'static> = ComponentSpec {
 const PLATFORM: ComponentSpec<'static> = ComponentSpec {
     executable: "/platform",
     name: "platform",
-    requirements: PLATFORM_REQUIREMENTS,
-    exports: &[platform::Protocol::ID],
+    mountpoint: None,
     memory_limit: MIB,
     restarts: 1,
 };
@@ -241,15 +154,13 @@ const PLATFORM: ComponentSpec<'static> = ComponentSpec {
 const RTC: ComponentSpec<'static> = ComponentSpec {
     executable: "/driver-pl031",
     name: "driver-pl031",
-    requirements: PL031_PLATFORM,
-    exports: &[rtc::Protocol::ID],
+    mountpoint: None,
     memory_limit: MIB,
     restarts: 0,
 };
 
 const IRQ: ComponentSpec<'static> = ComponentSpec {
-    requirements: PL031_PLATFORM,
-    exports: &[],
+    mountpoint: None,
     restarts: 1,
     ..fixture("/irq-fixture", "irq-fixture")
 };
@@ -257,8 +168,7 @@ const IRQ: ComponentSpec<'static> = ComponentSpec {
 const ROUTER: ComponentSpec<'static> = ComponentSpec {
     executable: "/namespace-router",
     name: ROUTER_NAME,
-    requirements: &[],
-    exports: ROUTER_EXPORTS,
+    mountpoint: None,
     memory_limit: 2 * MIB,
     restarts: 0,
 };
@@ -266,8 +176,7 @@ const ROUTER: ComponentSpec<'static> = ComponentSpec {
 const RAM_FS: ComponentSpec<'static> = ComponentSpec {
     executable: "/filesystem-ramfs",
     name: "filesystem-ramfs",
-    requirements: RAM_FS_REQUIREMENTS,
-    exports: FILE_SYSTEM_EXPORTS,
+    mountpoint: Some("/tmp"),
     memory_limit: 4 * MIB,
     restarts: 0,
 };
@@ -275,33 +184,32 @@ const RAM_FS: ComponentSpec<'static> = ComponentSpec {
 const IMAGE_FS: ComponentSpec<'static> = ComponentSpec {
     executable: "/filesystem-imagefs",
     name: "filesystem-imagefs",
-    requirements: IMAGE_FS_REQUIREMENTS,
+    mountpoint: Some(IMAGE_MOUNT),
     ..RAM_FS
 };
 
 const SPARE_FS: ComponentSpec<'static> = ComponentSpec {
     executable: "/filesystem-ramfs",
     name: "spare-filesystem",
-    requirements: SPARE_FS_REQUIREMENTS,
+    mountpoint: Some("/spare"),
     ..RAM_FS
 };
 
 const NESTED_SPARE_FS: ComponentSpec<'static> = ComponentSpec {
-    requirements: NESTED_SPARE_FS_REQUIREMENTS,
+    mountpoint: Some(NESTED_SPARE_MOUNT),
     ..SPARE_FS
 };
 
 const CRASH_FS: ComponentSpec<'static> = ComponentSpec {
     executable: "/crash-filesystem",
     name: "crash-filesystem",
-    requirements: CRASH_FS_REQUIREMENTS,
+    mountpoint: Some("/crash"),
     restarts: 1,
     ..RAM_FS
 };
 
 const SCOPE_CONSUMER: ComponentSpec<'static> = ComponentSpec {
-    requirements: AREA_REQUIREMENTS,
-    exports: &[],
+    mountpoint: None,
     ..fixture("/scope-consumer-fixture", "scope-consumer-fixture")
 };
 
@@ -312,42 +220,17 @@ pub(crate) const fn fixture(
     ComponentSpec {
         executable,
         name,
-        requirements: &[],
-        exports: PROBE_EXPORTS,
+        mountpoint: None,
         memory_limit: MIB,
         restarts: 0,
     }
 }
 
-const fn namespace_requirement(scope: &'static str) -> RequirementSpec<'static> {
-    RequirementSpec {
-        name: NAMESPACE,
-        source: RequirementSourceSpec::Export {
-            provider: ROUTER_RECORD,
-            protocol: namespace_admin::Protocol::ID,
-            scope,
-        },
-    }
-}
+const fn probe_of(name: &'static str) -> crate::composition::Import {
+    crate::composition::Import {
+        declaration: RequirementDeclaration::all(name, probe::Protocol::ID),
 
-const fn probe_of(name: &'static str, provider: &'static str) -> ImporterRequirement<'static> {
-    ImporterRequirement {
-        name,
-        provider,
-        protocol: probe::Protocol::ID,
-        scope: "",
-    }
-}
-
-const fn file_system_of(
-    name: &'static str,
-    provider: &'static str,
-) -> ImporterRequirement<'static> {
-    ImporterRequirement {
-        name,
-        provider,
-        protocol: file_system::Protocol::ID,
-        scope: "",
+        namespace_root: None,
     }
 }
 
@@ -367,8 +250,12 @@ pub(crate) fn finish(composition: Composition) {
 }
 
 fn ping(importer: &Importer, requirement: &str) -> Result<u64, IpcError> {
+    ping_at(importer, requirement, 0)
+}
+
+fn ping_at(importer: &Importer, requirement: &str, index: u16) -> Result<u64, IpcError> {
     importer
-        .session::<probe::Protocol>(requirement)
+        .session_at::<probe::Protocol>(requirement, index)
         .client()
         .with_wait(CALL_WAIT)
         .ping(PING)
@@ -382,12 +269,10 @@ fn requested<P: Protocol>(
     request::<P>(importer.handle(), requirement, wait).map(|answer| answer.map(drop))
 }
 
-const fn platform_of(name: &'static str, scope: &'static str) -> ImporterRequirement<'static> {
-    ImporterRequirement {
-        name,
-        provider: PLATFORM.name,
-        protocol: platform::Protocol::ID,
-        scope,
+const fn platform_of(name: &'static str) -> crate::composition::Import {
+    crate::composition::Import {
+        declaration: RequirementDeclaration::all(name, platform::Protocol::ID),
+        namespace_root: None,
     }
 }
 
@@ -398,16 +283,31 @@ fn platform_session(importer: &Importer, requirement: &str) -> platform::Client<
         .with_wait(CALL_WAIT)
 }
 
-fn line(session: &platform::Client<SessionTransport>) -> Result<IrqLine, PlatformError> {
-    session.irq(0, 0).expect("irq call").map(IrqLine::from)
+fn line(
+    session: &platform::Client<SessionTransport>,
+    compatible: &str,
+) -> Result<IrqLine, PlatformError> {
+    session
+        .irq(
+            ipc::wire::Str::new(compatible).expect("compatible fits"),
+            0,
+            0,
+        )
+        .expect("irq call")
+        .map(IrqLine::from)
 }
 
 fn window(
     session: &platform::Client<SessionTransport>,
+    compatible: &str,
     instance: u16,
 ) -> Result<(MemoryRegion, u64), PlatformError> {
     session
-        .mmio(instance, 0)
+        .mmio(
+            ipc::wire::Str::new(compatible).expect("compatible fits"),
+            instance,
+            0,
+        )
         .expect("mmio call")
         .map(|window| (MemoryRegion::from(window.region), window.offset))
 }
@@ -448,11 +348,7 @@ fn answered(request: &JoinHandle) -> u32 {
 
 fn budget_scenario() -> (Composition, Importer) {
     let composition = scenario(&[ROUTER, RAM_FS, HOLDER, NEIGHBOUR]);
-    let importer = composition.importer(&[
-        probe_of(HELD, HOLDER.name),
-        probe_of(PROBE, NEIGHBOUR.name),
-        file_system_of(RAMFS, RAM_FS.name),
-    ]);
+    let importer = composition.importer(&[probe_of(HELD), probe_of(PROBE), view(TMP_VIEW, "/tmp")]);
     kernel_tests::kassert_eq!(await_component_lines(HOLDER.name, 1), ["budget held"]);
     (composition, importer)
 }
@@ -526,12 +422,6 @@ fn compiled_plan_carries_the_boot_composition() {
     let plan = image()
         .plan(BOOT_PLAN_ENTRY)
         .expect("compiled plan decodes");
-    let router = (0..plan.len())
-        .find(|&record| {
-            plan.component(record)
-                .is_some_and(|component| component.name() == ROUTER_NAME)
-        })
-        .expect("plan carries the router");
 
     for (name, scope) in [
         ("filesystem-imagefs", IMAGE_MOUNT),
@@ -543,13 +433,22 @@ fn compiled_plan_carries_the_boot_composition() {
             .components()
             .find(|component| component.name() == name)
             .expect("plan carries the file system");
-        kernel_tests::kassert_eq!(
-            component.requirement(NAMESPACE),
-            Some(RequirementSource::Export {
-                provider: router,
-                protocol: namespace_admin::Protocol::ID,
-                scope,
-            })
+        kernel_tests::kassert_eq!(component.mountpoint(), Some(scope));
+        let entries = image().entries().expect("image entries");
+        let path = format!("{}/exec", component.executable());
+        let program = userland::decode_program(entries.entry(&path).expect("program").data())
+            .expect("decode program");
+        let manifest = component_abi::decode_manifest(userland::ProgramView::manifest(&program))
+            .expect("manifest");
+        kernel_tests::kassert!(
+            manifest
+                .exports()
+                .any(|protocol| protocol == file_system::Protocol::ID)
+        );
+        kernel_tests::kassert!(
+            manifest
+                .requirements()
+                .all(|requirement| requirement.protocol() != file_system_mount::Protocol::ID)
         );
     }
 }
@@ -602,21 +501,12 @@ fn a_log_requirement_of_another_protocol_is_refused_at_once() {
 }
 
 #[kernel_test]
-fn a_region_asked_on_a_session_requirement_is_refused_at_once() {
-    kernel_tests::kassert!(
-        refusals()
-            .iter()
-            .any(|line| line == "region Ok(Err(Refused))")
-    );
-}
-
-#[kernel_test]
 fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
     let composition = started(&[ComponentSpec {
-        exports: PROBE_EXPORTS,
+        executable: "/export-fixture",
         ..PARENT
     }]);
-    let importer = composition.importer(&[probe_of(PROBE, PARENT.name)]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
 
     let answer = requested::<probe::Protocol>(&importer, PROBE, CALL_WAIT);
 
@@ -627,19 +517,15 @@ fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
 #[kernel_test]
 fn an_importer_cannot_take_the_requests_of_a_child_export() {
     let composition = scenario(&[EXPORT]);
-    let importer = composition.importer(&[probe_of(PROBE, EXPORT.name)]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
     let parent = startup_contract::Client::new(PortTransport::new(importer.handle()))
         .with_wait(REFUSAL_WAIT);
 
     let taken = accept::<probe::Protocol>(&parent).map(|answer| answer.map(drop));
-    let log = session::<log::Protocol>(&parent, LOG_REQUIREMENT).map(|answer| answer.map(drop));
-    let region = parent
-        .region(Str::new(PROBE).expect("requirement name fits"))
-        .map(|answer| answer.map(drop));
+    let log = session::<log::Protocol>(&parent, LOG_REQUIREMENT, 0).map(|answer| answer.map(drop));
 
     kernel_tests::kassert_eq!(taken, Ok(Err(AcceptError::Refused)));
     kernel_tests::kassert_eq!(log, Ok(Err(SessionError::Refused)));
-    kernel_tests::kassert_eq!(region, Ok(Err(ResourceError::Refused)));
     kernel_tests::kassert_eq!(ping(&importer, PROBE), Ok(PING));
     finish(composition);
 }
@@ -647,7 +533,7 @@ fn an_importer_cannot_take_the_requests_of_a_child_export() {
 #[kernel_test]
 fn an_importer_stays_waiting_while_its_provider_lives_without_accept() {
     let composition = scenario(&[IDLE_EXPORT]);
-    let importer = composition.importer(&[probe_of(PROBE, IDLE_EXPORT.name)]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
     kernel_tests::kassert_eq!(await_component_lines(IDLE_EXPORT.name, 1), ["started"]);
 
     let waited = requested::<probe::Protocol>(&importer, PROBE, SHORT_WAIT);
@@ -691,10 +577,7 @@ fn a_child_log_session_refuses_duplicate() {
 #[kernel_test]
 fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
     let composition = scenario(&[IDLE_EXPORT, NEIGHBOUR]);
-    let importer = composition.importer(&[
-        probe_of(HELD, IDLE_EXPORT.name),
-        probe_of(PROBE, NEIGHBOUR.name),
-    ]);
+    let importer = composition.importer(&[probe_of(HELD), probe_of(PROBE)]);
     kernel_tests::kassert_eq!(await_component_lines(IDLE_EXPORT.name, 1), ["started"]);
     let held = held_request(&importer, HELD, REQUEST_WAIT);
     pause(QUIET_WAIT);
@@ -704,7 +587,7 @@ fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
     kernel_tests::kassert_eq!(answered(&held), UNAVAILABLE);
     let again = requested::<probe::Protocol>(&importer, HELD, CALL_WAIT);
     kernel_tests::kassert_eq!(again, Ok(Err(SessionError::Unavailable)));
-    kernel_tests::kassert_eq!(ping(&importer, PROBE), Ok(PING));
+    kernel_tests::kassert_eq!(ping_at(&importer, PROBE, 1), Ok(PING));
     finish(composition);
 }
 
@@ -714,7 +597,7 @@ fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
         restarts: 2,
         ..EXPORT
     }]);
-    let importer = composition.importer(&[probe_of(PROBE, EXPORT.name)]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
     kernel_tests::kassert_eq!(await_component_lines(EXPORT.name, 1), ["started"]);
 
     composition.terminate(EXPORT.name, 0);
@@ -757,7 +640,7 @@ fn a_child_exit_is_handled_while_an_importer_waits_for_an_accept() {
         ..EXPORT
     };
     let composition = scenario(&[IDLE_EXPORT, leaving]);
-    let importer = composition.importer(&[probe_of(HELD, IDLE_EXPORT.name)]);
+    let importer = composition.importer(&[probe_of(HELD)]);
     kernel_tests::kassert_eq!(await_component_lines(IDLE_EXPORT.name, 1), ["started"]);
     kernel_tests::kassert_eq!(await_component_lines(leaving.name, 1), ["started"]);
     let held = held_request(&importer, HELD, HELD_WAIT);
@@ -805,7 +688,7 @@ fn a_component_out_of_restarts_does_not_stop_the_root() {
         },
         NEIGHBOUR,
     ]);
-    let importer = composition.importer(&[view(ROOT_VIEW, ""), probe_of(PROBE, NEIGHBOUR.name)]);
+    let importer = composition.importer(&[view(ROOT_VIEW, ""), probe_of(PROBE)]);
     kernel_tests::kassert_eq!(await_component_lines(ROUTER_NAME, 1), ["started"]);
 
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
@@ -822,10 +705,11 @@ fn a_component_out_of_restarts_does_not_stop_the_root() {
 fn a_child_is_served_while_another_waits_for_its_budget() {
     let (composition, importer) = budget_scenario();
 
-    let served = requested::<probe::Protocol>(&importer, PROBE, QUIET_WAIT);
+    let served = request_at::<probe::Protocol>(importer.handle(), PROBE, 1, QUIET_WAIT)
+        .map(|answer| answer.map(drop));
     kernel_tests::kassert_eq!(served, Ok(Ok(())));
 
-    let removed = connect(importer.session::<file_system::Protocol>(RAMFS))
+    let removed = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/")
         .unlink(path(HELD_PATH), NodeKind::File)
         .expect("unlink call");
     kernel_tests::kassert!(removed.is_ok());
@@ -842,7 +726,7 @@ fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
     let held = requested::<probe::Protocol>(&importer, HELD, BUDGET_WAIT);
 
     kernel_tests::kassert_eq!(held, Ok(Err(SessionError::Unavailable)));
-    kernel_tests::kassert_eq!(ping(&importer, PROBE), Ok(PING));
+    kernel_tests::kassert_eq!(ping_at(&importer, PROBE, 1), Ok(PING));
     finish(composition);
 }
 
@@ -856,26 +740,22 @@ fn a_launch_short_of_memory_removes_the_child_without_stopping_the_root() {
         },
         NEIGHBOUR,
     ]);
-    let importer = composition.importer(&[
-        probe_of(STARVED, EXPORT.name),
-        probe_of(PROBE, NEIGHBOUR.name),
-    ]);
+    let importer = composition.importer(&[probe_of(STARVED), probe_of(PROBE)]);
 
     let answer = requested::<probe::Protocol>(&importer, STARVED, CALL_WAIT);
 
     kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Unavailable)));
-    kernel_tests::kassert_eq!(ping(&importer, PROBE), Ok(PING));
+    kernel_tests::kassert_eq!(ping_at(&importer, PROBE, 1), Ok(PING));
     finish(composition);
 }
 
 #[kernel_test]
 fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
     let composition = scenario(&[PLATFORM, RTC]);
-    let importer = composition.importer(&[ImporterRequirement {
-        name: RTC_REQUIREMENT,
-        provider: RTC.name,
-        protocol: rtc::Protocol::ID,
-        scope: "",
+    let importer = composition.importer(&[crate::composition::Import {
+        declaration: RequirementDeclaration::all(RTC_REQUIREMENT, rtc::Protocol::ID),
+
+        namespace_root: None,
     }]);
     let clock = importer
         .session::<rtc::Protocol>(RTC_REQUIREMENT)
@@ -905,11 +785,14 @@ fn a_restarted_child_takes_the_same_line_and_region_again() {
 #[kernel_test]
 fn a_compatible_outside_the_platform_description_is_not_described() {
     let composition = scenario(&[PLATFORM]);
-    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, ABSENT)]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
 
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
 
-    kernel_tests::kassert_eq!(line(&session).map(drop), Err(PlatformError::NotDescribed));
+    kernel_tests::kassert_eq!(
+        line(&session, ABSENT).map(drop),
+        Err(PlatformError::NotDescribed)
+    );
     drop(session);
     finish(composition);
 }
@@ -917,12 +800,12 @@ fn a_compatible_outside_the_platform_description_is_not_described() {
 #[kernel_test]
 fn an_instance_outside_the_platform_description_is_not_described() {
     let composition = scenario(&[PLATFORM]);
-    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, PL031)]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
 
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
 
     kernel_tests::kassert_eq!(
-        window(&session, 1).map(drop),
+        window(&session, PL031, 1).map(drop),
         Err(PlatformError::NotDescribed)
     );
     drop(session);
@@ -932,21 +815,24 @@ fn an_instance_outside_the_platform_description_is_not_described() {
 #[kernel_test]
 fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes() {
     let composition = scenario(&[PLATFORM]);
-    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, PL031)]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let first = platform_session(&importer, PLATFORM_REQUIREMENT);
     let second = platform_session(&importer, PLATFORM_REQUIREMENT);
-    let held_line = line(&first).expect("first session takes the line");
-    let (held_region, _) = window(&first, 0).expect("first session takes the region");
+    let held_line = line(&first, PL031).expect("first session takes the line");
+    let (held_region, _) = window(&first, PL031, 0).expect("first session takes the region");
 
-    kernel_tests::kassert_eq!(line(&second).map(drop), Err(PlatformError::Taken));
-    kernel_tests::kassert_eq!(window(&second, 0).map(drop), Err(PlatformError::Taken));
+    kernel_tests::kassert_eq!(line(&second, PL031).map(drop), Err(PlatformError::Taken));
+    kernel_tests::kassert_eq!(
+        window(&second, PL031, 0).map(drop),
+        Err(PlatformError::Taken)
+    );
 
     drop(first);
 
     kernel_tests::kassert!(await_revoked(|| held_region.inspect()));
     kernel_tests::kassert!(await_revoked(|| held_line.ack()));
-    kernel_tests::kassert!(line(&second).is_ok());
-    kernel_tests::kassert!(window(&second, 0).is_ok());
+    kernel_tests::kassert!(line(&second, PL031).is_ok());
+    kernel_tests::kassert!(window(&second, PL031, 0).is_ok());
     drop(second);
     finish(composition);
 }
@@ -954,14 +840,17 @@ fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes
 #[kernel_test]
 fn a_window_in_the_region_of_another_session_is_taken() {
     let composition = scenario(&[PLATFORM]);
-    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, VIRTIO)]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let first = platform_session(&importer, PLATFORM_REQUIREMENT);
     let second = platform_session(&importer, PLATFORM_REQUIREMENT);
 
-    let taken = window(&first, 0);
+    let taken = window(&first, VIRTIO, 0);
 
     kernel_tests::kassert!(taken.is_ok());
-    kernel_tests::kassert_eq!(window(&second, 1).map(drop), Err(PlatformError::Taken));
+    kernel_tests::kassert_eq!(
+        window(&second, VIRTIO, 1).map(drop),
+        Err(PlatformError::Taken)
+    );
     drop((first, second, taken));
     finish(composition);
 }
@@ -969,11 +858,11 @@ fn a_window_in_the_region_of_another_session_is_taken() {
 #[kernel_test]
 fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets() {
     let composition = scenario(&[PLATFORM]);
-    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, VIRTIO)]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
 
-    let (first, first_offset) = window(&session, 0).expect("first window");
-    let (second, second_offset) = window(&session, 1).expect("second window");
+    let (first, first_offset) = window(&session, VIRTIO, 0).expect("first window");
+    let (second, second_offset) = window(&session, VIRTIO, 1).expect("second window");
 
     kernel_tests::kassert_eq!(region_base(&first), VIRTIO_REGION);
     kernel_tests::kassert_eq!(region_base(&second), VIRTIO_REGION);
@@ -985,24 +874,48 @@ fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets() {
 #[kernel_test]
 fn the_grants_of_a_platform_incarnation_are_revoked_when_it_ends() {
     let composition = scenario(&[PLATFORM]);
-    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, PL031)]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
-    let held_line = line(&session).expect("session takes the line");
-    let (held_region, _) = window(&session, 0).expect("session takes the region");
+    let held_line = line(&session, PL031).expect("session takes the line");
+    let (held_region, _) = window(&session, PL031, 0).expect("session takes the region");
 
     composition.terminate(PLATFORM.name, TERMINATE_EXIT_CODE);
 
     kernel_tests::kassert!(await_revoked(|| held_region.inspect()));
     kernel_tests::kassert!(await_revoked(|| held_line.ack()));
     let renewed = platform_session(&importer, PLATFORM_REQUIREMENT);
-    kernel_tests::kassert!(line(&renewed).is_ok());
-    kernel_tests::kassert!(window(&renewed, 0).is_ok());
+    kernel_tests::kassert!(line(&renewed, PL031).is_ok());
+    kernel_tests::kassert!(window(&renewed, PL031, 0).is_ok());
     drop((session, renewed));
     finish(composition);
 }
 
 #[kernel_test]
-fn a_scoped_requirement_is_granted_anew_to_every_incarnation() {
+fn the_image_region_of_an_image_file_system_incarnation_is_revoked_when_it_ends() {
+    let composition = scenario(&[ROUTER, IMAGE_FS]);
+    let importer = composition.importer(&[view(ROOT_VIEW, "")]);
+    let files = resolved(
+        &importer.port::<namespace::Protocol>(ROOT_VIEW),
+        IMAGE_MOUNT,
+    );
+    let opened = open(&files, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
+    let window = MemoryRegion::from(
+        files
+            .backing_memory(opened.fd)
+            .expect("backing_memory call")
+            .expect("window granted"),
+    );
+    kernel_tests::kassert!(window.inspect().is_ok());
+
+    composition.terminate(IMAGE_FS.name, TERMINATE_EXIT_CODE);
+
+    kernel_tests::kassert!(await_revoked(|| window.inspect()));
+    drop(files);
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_directory_session_is_opened_anew_for_every_incarnation() {
     let composition = scenario(&[
         ROUTER,
         RAM_FS,
@@ -1013,24 +926,37 @@ fn a_scoped_requirement_is_granted_anew_to_every_incarnation() {
         },
     ]);
 
+    let importer = composition.importer(&[
+        view(ROOT_VIEW, ""),
+        view(AREA, AREA_SCOPE),
+        admin("area-admin"),
+    ]);
+    let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
+    let directory = resolve(&root, AREA_SCOPE, VIEW_WAIT)
+        .expect("resolve call")
+        .expect("component directory exists");
+    let mounted = Mounted::new(&importer, AREA, directory);
+
     kernel_tests::kassert_eq!(
         await_component_lines(SCOPE_CONSUMER.name, 2),
         ["area read", "area read"]
     );
+    drop(mounted);
     finish(composition);
 }
 
 #[kernel_test]
 fn a_component_that_faults_is_restarted() {
     let composition = scenario(&[ROUTER, CRASH_FS]);
-    let importer = composition.importer(&[file_system_of(FILES, CRASH_FS.name)]);
-    let faulting = connect(importer.session::<file_system::Protocol>(FILES));
+    let importer = composition.importer(&[view(FILES, "/crash")]);
+    let filesystem = importer.port::<namespace::Protocol>(FILES);
+    let faulting = resolved(&filesystem, "/");
     write(&faulting);
 
     let renamed = faulting.rename(path(WRITTEN_PATH), path(RENAMED_PATH));
 
     kernel_tests::kassert!(renamed.is_err());
-    let restarted = connect(importer.session::<file_system::Protocol>(FILES));
+    let restarted = resolved(&filesystem, "/");
     kernel_tests::kassert_eq!(written(&restarted), Err(FileSystemError::NotFound));
     finish(composition);
 }
@@ -1094,9 +1020,8 @@ fn router_restart_keeps_file_system_components_and_their_sessions() {
         },
         RAM_FS,
     ]);
-    let importer =
-        composition.importer(&[file_system_of(FILES, RAM_FS.name), view(TMP_VIEW, "/tmp")]);
-    let files = connect(importer.session::<file_system::Protocol>(FILES));
+    let importer = composition.importer(&[view(TMP_VIEW, "/tmp")]);
+    let files = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/");
     write(&files);
 
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
@@ -1110,20 +1035,13 @@ fn router_restart_keeps_file_system_components_and_their_sessions() {
 #[kernel_test]
 fn a_removed_file_system_frees_its_prefix() {
     let composition = scenario(&[ROUTER, IMAGE_FS, NESTED_SPARE_FS]);
-    let importer = composition.importer(&[
-        view(ROOT_VIEW, ""),
-        view(SPARE_VIEW, NESTED_SPARE_MOUNT),
-        file_system_of(FILES, NESTED_SPARE_FS.name),
-    ]);
+    let importer =
+        composition.importer(&[view(ROOT_VIEW, ""), view(SPARE_VIEW, NESTED_SPARE_MOUNT)]);
     let spare = importer.port::<namespace::Protocol>(SPARE_VIEW);
     kernel_tests::kassert_eq!(resolution(&spare, "/", VIEW_WAIT), Ok(Ok(())));
 
     composition.terminate(NESTED_SPARE_FS.name, TERMINATE_EXIT_CODE);
 
-    kernel_tests::kassert_eq!(
-        requested::<file_system::Protocol>(&importer, FILES, CALL_WAIT),
-        Ok(Err(SessionError::Unavailable))
-    );
     kernel_tests::kassert_eq!(
         resolution(&spare, "/", OUTSIDE_WAIT),
         Err(IpcError::Timeout)
@@ -1141,27 +1059,159 @@ fn a_mount_ends_when_its_file_system_closes_its_port() {
     let composition = scenario(&[ROUTER, SPARE_FS]);
     let importer = composition.importer(&[
         view(OTHER_VIEW, "/other"),
-        admin("other-admin", "/other"),
-        file_system_of(FILES, SPARE_FS.name),
+        admin("other-admin"),
+        view(SPARE_VIEW, "/spare"),
     ]);
     let mounted = Mounted::new(
         &importer,
         OTHER_VIEW,
-        importer.session::<file_system::Protocol>(FILES),
+        Session::from_session(
+            resolve(
+                &importer.port::<namespace::Protocol>(SPARE_VIEW),
+                "/",
+                VIEW_WAIT,
+            )
+            .expect("resolve call")
+            .expect("spare mounted"),
+        ),
     );
     let other = importer.port::<namespace::Protocol>(OTHER_VIEW);
 
     composition.terminate(SPARE_FS.name, TERMINATE_EXIT_CODE);
 
     kernel_tests::kassert_eq!(
-        requested::<file_system::Protocol>(&importer, FILES, CALL_WAIT),
-        Ok(Err(SessionError::Unavailable))
-    );
-    kernel_tests::kassert_eq!(
         resolution(&other, "/", OUTSIDE_WAIT),
         Err(IpcError::Timeout)
     );
     kernel_tests::kassert!(mounted.ended(CALL_WAIT));
     drop(mounted);
+    finish(composition);
+}
+
+#[kernel_test]
+fn optional_and_all_start_with_empty_or_populated_provider_lists() {
+    for providers in [&[][..], &[1][..]] {
+        let consumer = ComponentSpec {
+            ..fixture("/multiplicity-fixture", "multiplicity")
+        };
+        let composition = if providers.is_empty() {
+            scenario(&[consumer])
+        } else {
+            scenario(&[EXPORT, consumer])
+        };
+        let provider_count = if providers.is_empty() {
+            "providers 0"
+        } else {
+            "providers 1"
+        };
+
+        kernel_tests::kassert_eq!(
+            await_component_lines(consumer.name, 4),
+            ["optional empty", "started", provider_count, "unbound"]
+        );
+        finish(composition);
+    }
+}
+
+#[kernel_test]
+fn a_started_consumer_discovers_a_provider_added_at_runtime() {
+    let consumer = ComponentSpec {
+        ..fixture("/multiplicity-fixture", "multiplicity")
+    };
+    let plan = encoded(&[PARENT, consumer]);
+    let names = ComponentNames::of(&plan);
+    start_component_relay(names.clone());
+    let composition = Composition::start(plan, component_scenario_session);
+    kernel_tests::kassert_eq!(
+        await_component_lines(consumer.name, 4),
+        ["optional empty", "started", "providers 0", "unbound"]
+    );
+
+    let entry = image()
+        .entries()
+        .expect("image entries")
+        .entry(EXPORT_ENTRY)
+        .expect("export program");
+    let program = userland::decode_program(entry.data()).expect("decoded program");
+    let badge = names.add(EXPORT.name).expect("log source added");
+    let log = component_scenario_session(badge).expect("log session");
+    composition.add(
+        rootkeeper::Component {
+            name: ProcessName::new(EXPORT.name).expect("fixture process name"),
+            program,
+            memory_limit: EXPORT.memory_limit,
+            restarts: 0,
+        },
+        log,
+    );
+
+    kernel_tests::kassert_eq!(
+        await_component_lines(consumer.name, 5),
+        [
+            "optional empty",
+            "started",
+            "providers 0",
+            "unbound",
+            "late provider"
+        ]
+    );
+    finish(composition);
+}
+
+#[kernel_test]
+fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
+    let plan = encoded(&[PARENT, EXPORT]);
+    let names = ComponentNames::of(&plan);
+    start_component_relay(names.clone());
+    let composition = Composition::start(plan, component_scenario_session);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let entry = image()
+        .entries()
+        .expect("entries")
+        .entry(EXPORT_ENTRY)
+        .expect("program");
+    let program = userland::decode_program(entry.data()).expect("program decodes");
+    let badge = names.add("registered").expect("log source");
+    let component = |program| rootkeeper::Component {
+        name: ProcessName::new("registered").expect("process name"),
+        program,
+        memory_limit: EXPORT.memory_limit,
+        restarts: 0,
+    };
+
+    let mut bytes = entry.data().to_vec();
+    let manifest_at = 31 + usize::from(u16::from_le_bytes([bytes[25], bytes[26]])) * 40;
+    bytes[manifest_at] ^= 1;
+    let damaged =
+        userland::decode_program(Vec::leak(bytes)).expect("program boundaries remain valid");
+    let failure = composition.try_add(
+        component(damaged),
+        component_scenario_session(badge).expect("log"),
+    );
+    kernel_tests::kassert!(matches!(failure, Err(rootkeeper::AddFailure::Declaration)));
+    kernel_tests::kassert_eq!(ping(&importer, PROBE), Ok(PING));
+
+    let record = composition
+        .try_add(
+            component(program),
+            component_scenario_session(badge).expect("log"),
+        )
+        .expect("same name can register after refusal");
+    kernel_tests::kassert_eq!(record, 2);
+    kernel_tests::kassert_eq!(ping_at(&importer, PROBE, 1), Ok(PING));
+    finish(composition);
+}
+
+#[kernel_test]
+fn two_instances_of_one_program_keep_their_mounts_separate() {
+    let composition = scenario(&[ROUTER, RAM_FS, SPARE_FS]);
+    let importer = composition.importer(&[view(TMP_VIEW, "/tmp"), view(SPARE_VIEW, "/spare")]);
+    let first = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/");
+    let second = resolved(&importer.port::<namespace::Protocol>(SPARE_VIEW), "/");
+
+    write(&first);
+
+    kernel_tests::kassert_eq!(written(&first), Ok(NodeKind::File));
+    kernel_tests::kassert_eq!(written(&second), Err(FileSystemError::NotFound));
     finish(composition);
 }

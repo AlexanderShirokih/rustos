@@ -6,9 +6,10 @@ use core::num::NonZeroU64;
 use bootstrap_abi::bootstrap;
 use kernel_objects::{MemoryRegion, Port, Process, Resource, Result};
 use runtime::{PortTransport, Timeout};
-use userland::{EntryView, SegmentView, USERLAND_PAGE_SIZE};
-use userland_image::{DecodedProgram, component_name, decode};
-use userland_loader::load_entry;
+use syscall::ProcessName;
+use userland::{DecodedProgram, ProgramView, SegmentView, USERLAND_PAGE_SIZE};
+use userland_image::{component_name, decode};
+use userland_loader::load_program;
 
 use crate::{composition::image, fixture_protocol::encode_request, ipc_raw};
 
@@ -16,7 +17,7 @@ const REQUEST_TIMEOUT: Timeout = Timeout::from_secs(5);
 /// Бюджет ожидания завершения потомка.
 pub const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-const FIXTURE_ENTRY: &str = "/port-fixture/program";
+const FIXTURE_ENTRY: &str = "/port-fixture/exec";
 
 const FIXTURE_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is non-zero");
 
@@ -77,11 +78,11 @@ impl Fixture {
         let region = MemoryRegion::from(cap);
         let mapping = region.map_full_read_only().expect("map image read-only");
         let image = decode(mapping.as_bytes()).expect("decode acquired image");
-        let program = image
+        let entry = image
             .entry(FIXTURE_ENTRY)
-            .expect("image carries the port fixture")
-            .program()
-            .expect("fixture record carries a program");
+            .expect("image carries the port fixture");
+        let program =
+            userland::decode_program(entry.data()).expect("fixture record carries a program");
 
         let mut budget_bytes = None;
         let own_resource;
@@ -103,9 +104,9 @@ impl Fixture {
             }
         };
         let service = Port::create_service(Some(FIXTURE_SESSION_BADGE))?;
-        let process = load_entry(
+        let process = load_program(
             &program,
-            component_name(FIXTURE_ENTRY),
+            ProcessName::new(component_name(FIXTURE_ENTRY)).expect("fixture process name"),
             resource,
             service.server,
         )?;
@@ -153,7 +154,7 @@ impl Fixture {
     }
 }
 
-fn image_bytes<'a, E: EntryView<'a>>(program: &E) -> u64 {
+fn image_bytes<'a, E: ProgramView<'a>>(program: &E) -> u64 {
     program
         .segments()
         .map(|segment| segment.mem_size().next_multiple_of(USERLAND_PAGE_SIZE))
@@ -161,20 +162,25 @@ fn image_bytes<'a, E: EntryView<'a>>(program: &E) -> u64 {
 }
 
 pub(crate) fn program(path: &str) -> DecodedProgram<'static> {
-    image()
+    let entry = image()
         .entries()
         .expect("userland image decodes")
         .entry(path)
-        .expect("image carries the entry")
-        .program()
-        .expect("image entry is a program")
+        .expect("image carries the entry");
+    userland::decode_program(entry.data()).expect("image entry is a program")
 }
 
 pub(crate) fn spawn_entry(path: &str, start: Port) -> Process {
     let resource = Resource::self_resource().expect("self metering resource");
-    load_entry(&program(path), component_name(path), &resource, start).expect("spawn from image")
+    load_program(
+        &program(path),
+        ProcessName::new(component_name(path)).expect("fixture process name"),
+        &resource,
+        start,
+    )
+    .expect("spawn from image")
 }
 
-pub(crate) fn process_bytes<'a, E: EntryView<'a>>(program: &E) -> u64 {
+pub(crate) fn process_bytes<'a, E: ProgramView<'a>>(program: &E) -> u64 {
     image_bytes(program) + program.stack_size().next_multiple_of(USERLAND_PAGE_SIZE)
 }

@@ -6,10 +6,15 @@
 
 extern crate alloc;
 
+mod boot;
+mod component;
+mod mount;
 pub mod relay;
 mod system;
 
+pub use boot::{BootFailure, run};
+pub use component::{Component, ImporterRequirement};
 pub use system::{
-    BUDGET_RETURN_TIMEOUT, BootFailure, BudgetFailure, ImporterRefusal, ImporterRequirement,
-    RootSystem, Stopped, SystemImage, run, turn,
+    AddFailure, BUDGET_RETURN_TIMEOUT, BudgetFailure, ImporterRefusal, RootSystem, Stopped,
+    SystemImage, turn,
 };

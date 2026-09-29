@@ -15,8 +15,9 @@ component_manifest! {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let requirements = components::requirements(ClockStartup::request)?;
-    let seconds = requirements.rtc.client().now()?;
+    let requirements = components::requirements::<ClockStartup>()?;
+    let rtc = requirements.rtc.ok_or("RTC provider is unavailable")?;
+    let seconds = rtc.client().now()?;
     println!("rtc reads {seconds}");
     Ok(())
 }

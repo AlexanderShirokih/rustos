@@ -1,4 +1,4 @@
-use component_abi::{ComponentManifest, RequirementKind};
+use component_abi::RequirementMode;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ProgramManifest {
@@ -10,61 +10,41 @@ pub(crate) struct ProgramManifest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestRequirement {
     pub name: String,
-    pub kind: RequirementKind,
-    /// Идентификатор протокола требования сессии.
-    pub protocol: Option<String>,
+    pub mode: RequirementMode,
+    /// Идентификатор протокола требования.
+    pub protocol: String,
 }
 
 impl ProgramManifest {
-    pub(crate) fn from_record(record: &ComponentManifest<'_>) -> Self {
-        // Строки копируются, потому что байты ELF доступны только на время чтения файла, а
-        // связывание идёт над всеми программами образа сразу.
-        Self {
-            requirements: record
-                .requirements()
-                .map(|requirement| ManifestRequirement {
-                    name: String::from(requirement.name()),
-                    kind: requirement.kind(),
-                    protocol: requirement.protocol().map(String::from),
-                })
-                .collect(),
-            exports: record.exports().map(String::from).collect(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use component_abi::{RequirementDeclaration, decode_manifest, encode_manifest, manifest_len};
-
-    use super::*;
-
-    #[test]
-    fn a_record_becomes_owned_strings() {
-        const REQUIREMENTS: &[RequirementDeclaration] = &[
-            RequirementDeclaration::region("image"),
-            RequirementDeclaration::session("names", "Namespace"),
-        ];
-        const EXPORTS: &[&str] = &["FileSystem", "FileSystemAdmin"];
-        const LEN: usize = manifest_len(REQUIREMENTS, EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, EXPORTS);
-
-        let manifest = ProgramManifest::from_record(&decode_manifest(&bytes).expect("decodes"));
-
-        assert_eq!(manifest.exports, ["FileSystem", "FileSystemAdmin"]);
-        assert_eq!(manifest.requirements.len(), 2);
-        let names: Vec<&str> = manifest
+    pub(crate) fn program_bytes(&self) -> Vec<u8> {
+        use component_abi::{RequirementDeclaration, encode_manifest_into, manifest_len};
+        use userland::{Program, Segment, SegmentPermissions, encode_program};
+        let requirements: Vec<_> = self
             .requirements
             .iter()
-            .map(|requirement| requirement.name.as_str())
+            .map(|requirement| {
+                let name = String::leak(requirement.name.clone());
+                let protocol = String::leak(requirement.protocol.clone());
+                match requirement.mode {
+                    RequirementMode::One => RequirementDeclaration::session(name, protocol),
+                    RequirementMode::All => RequirementDeclaration::all(name, protocol),
+                }
+            })
             .collect();
-        assert_eq!(names, ["image", "names"]);
-        assert_eq!(manifest.requirements[0].kind, RequirementKind::Region);
-        assert_eq!(manifest.requirements[0].protocol, None);
-        assert_eq!(manifest.requirements[1].kind, RequirementKind::Session);
-        assert_eq!(
-            manifest.requirements[1].protocol.as_deref(),
-            Some("Namespace")
-        );
+        let exports: Vec<_> = self.exports.iter().map(String::as_str).collect();
+        let mut manifest = vec![0; manifest_len(&requirements, &exports)];
+        encode_manifest_into(&mut manifest, &requirements, &exports);
+        encode_program(&Program {
+            manifest: &manifest,
+            entry_va: 4096,
+            stack_size: 4096,
+            segments: &[Segment {
+                va_base: 4096,
+                mem_size: 4096,
+                permissions: SegmentPermissions::ReadExecute,
+                bytes: b"CODE",
+            }],
+        })
+        .expect("fixture program")
     }
 }

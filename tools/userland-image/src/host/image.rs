@@ -1,7 +1,9 @@
 use anyhow::{Result, anyhow, bail, ensure};
 use filesystem_abi::{NAME_MAX, PATH_MAX};
-use userland::{Entry, Segment, USERLAND_ENTRY_PATH_CAPACITY};
-use userland_image::{COMPONENT_PROGRAM_NAME, ImageRecord, decode, encode, encode_program};
+use userland::{ProgramView, decode_program};
+use userland_image::{
+    COMPONENT_PROGRAM_NAME, ImageRecord, USERLAND_ENTRY_PATH_CAPACITY, decode, encode,
+};
 
 use super::{build::BuiltEntry, files::LoadedFile, program::validate_program};
 
@@ -33,16 +35,11 @@ pub(super) fn assemble_userland_image(
 ) -> Result<Vec<u8>> {
     let boot_path = validate_built_entries(entries, files)?;
 
-    let blobs = entries
-        .iter()
-        .map(build_program_blob)
-        .collect::<Result<Vec<_>>>()?;
     let records: Vec<ImageRecord<'_>> = entries
         .iter()
-        .zip(&blobs)
-        .map(|(entry, blob)| ImageRecord {
+        .map(|entry| ImageRecord {
             path: &entry.record_path,
-            data: blob,
+            data: &entry.bytes,
         })
         .chain(files.iter().map(|file| ImageRecord {
             path: &file.path,
@@ -55,37 +52,9 @@ pub(super) fn assemble_userland_image(
 
     let decoded =
         decode(&image).map_err(|err| anyhow!("assembled userland image is invalid: {err:?}"))?;
-    decoded
-        .boot_entry()
-        .program()
+    decode_program(decoded.boot_entry().data())
         .map_err(|err| anyhow!("boot record '{boot_path}' is not a program: {err:?}"))?;
     Ok(image)
-}
-
-fn build_program_blob(entry: &BuiltEntry) -> Result<Vec<u8>> {
-    let segments: Vec<Segment<'_>> = entry
-        .segments
-        .iter()
-        .map(|segment| Segment {
-            va_base: segment.va_base,
-            mem_size: segment.mem_size,
-            permissions: segment.permissions,
-            bytes: &segment.bytes,
-        })
-        .collect();
-
-    encode_program(&Entry {
-        path: &entry.program.path,
-        entry_va: entry.entry_va,
-        stack_size: entry.program.stack_size,
-        segments: &segments,
-    })
-    .map_err(|err| {
-        anyhow!(
-            "failed to serialize program '{}': {err:?}",
-            entry.program.path
-        )
-    })
 }
 
 fn validate_component_directories(entries: &[BuiltEntry], files: &[LoadedFile]) -> Result<()> {
@@ -123,7 +92,7 @@ fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -
     for entry in entries {
         validate_program(&entry.program)?;
         ensure!(
-            !entry.segments.is_empty(),
+            decode_program(&entry.bytes).is_ok(),
             "userland entry '{}' must contain at least one segment",
             entry.program.path
         );
@@ -151,9 +120,9 @@ fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -
     match boot_entries.as_slice() {
         [boot] => {
             ensure!(
-                boot.segments
-                    .iter()
-                    .any(|segment| !segment.bytes.is_empty()),
+                decode_program(&boot.bytes).is_ok_and(|program| program
+                    .segments()
+                    .any(|segment| !segment.bytes.is_empty())),
                 "boot entry '{}' payload must not be empty",
                 boot.program.path
             );
@@ -171,14 +140,14 @@ fn validate_built_entries<'a>(entries: &'a [BuiltEntry], files: &[LoadedFile]) -
 mod tests {
     use std::path::PathBuf;
 
-    use userland::{EntryView, SegmentPermissions};
+    use component_abi::encode_manifest;
+    use userland::{Program, ProgramView, Segment, SegmentPermissions, encode_program};
     use userland_image::decode;
 
     use super::{
         super::{build::BuiltSegment, program::ResolvedProgram},
         *,
     };
-    use crate::manifest::ProgramManifest;
 
     const BOOT_PATH: &str = "/boot/rootkeeper";
 
@@ -207,12 +176,26 @@ mod tests {
     }
 
     fn built_entry(path: &str, boot: bool, entry_va: u64, segments: &[BuiltSegment]) -> BuiltEntry {
+        let views: Vec<_> = segments
+            .iter()
+            .map(|segment| Segment {
+                bytes: &segment.bytes,
+                va_base: segment.va_base,
+                mem_size: segment.mem_size,
+                permissions: segment.permissions,
+            })
+            .collect();
+        let bytes = encode_program(&Program {
+            manifest: &encode_manifest::<16>(&[], &[]),
+            entry_va,
+            stack_size: 0x4000,
+            segments: &views,
+        })
+        .unwrap_or_default();
         BuiltEntry {
             record_path: component_record_path(path),
             program: resolved_program("package", path, boot, 0x4000),
-            entry_va,
-            segments: segments.to_vec(),
-            manifest: ProgramManifest::default(),
+            bytes,
         }
     }
 
@@ -363,10 +346,10 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "/boot/logger/program",
-                "/boot/rootkeeper/program",
+                "/boot/logger/exec",
+                "/boot/rootkeeper/exec",
                 "/boot/rootkeeper/sample",
-                "/boot/shell/program",
+                "/boot/shell/exec",
             ]
         );
         assert_eq!(image.boot_entry().path(), component_record_path(BOOT_PATH));
@@ -429,10 +412,8 @@ mod tests {
         .expect("assemble image");
 
         let image = decode(&image_bytes).expect("assembled image must parse");
-        let program = image
-            .boot_entry()
-            .program()
-            .expect("boot record carries a program");
+        let program =
+            decode_program(image.boot_entry().data()).expect("boot record carries a program");
         let segments: Vec<_> = program.segments().collect();
         assert_eq!(segments[0].bytes, b"CODE");
         assert_eq!(segments[1].bytes, b"RW");

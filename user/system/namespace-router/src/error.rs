@@ -41,9 +41,7 @@ impl From<StartupError> for Error {
     fn from(error: StartupError) -> Self {
         match error.failure {
             StartupFailure::Ipc(error) => Self::Ipc(error),
-            StartupFailure::Session(_)
-            | StartupFailure::Resource(_)
-            | StartupFailure::NoStartHandle => Self::Start,
+            StartupFailure::Session(_) | StartupFailure::NoStartHandle => Self::Start,
         }
     }
 }

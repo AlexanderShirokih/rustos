@@ -8,20 +8,20 @@ restarts = 2
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-scope = { namespace = "/boot" }
+mountpoint = "/boot"
 
 [[components]]
 executable = "unresponsive-filesystem"
 memory_limit = "1M"
-scope = { namespace = "/stuck" }
+mountpoint = "/stuck"
 
 [[components]]
 executable = "filesystem-ramfs"
 name = "spare-filesystem"
 memory_limit = "4M"
-scope = { namespace = "/spare" }
+mountpoint = "/spare"
 
 [[components]]
 executable = "filesystem-ramfs"
 memory_limit = "4M"
-scope = { namespace = "/tmp" }
+mountpoint = "/tmp"

@@ -15,10 +15,12 @@ test = false
 bench = false
 
 [dependencies]
+bootstrap-abi = { workspace = true }
 filesystem-abi = { workspace = true }
 component-startup = { workspace = true }
 filesystem = { workspace = true }
 filesystem-server = { workspace = true }
+kernel-objects = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 

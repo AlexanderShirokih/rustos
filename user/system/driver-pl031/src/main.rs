@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::{convert::Infallible, panic::PanicInfo};
 
-use component_startup::{component_manifest, serve_export, whole_export};
+use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
 use io::mmio::{Mmio, Reg};
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqLine, MemoryRegion, MmioWindow, Port, SessionTransport};
@@ -109,9 +109,10 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     )
     .map_err(|_| Error::Runtime)?;
 
-    let platform = requirements.platform.client();
-    let line = IrqLine::from(platform.irq(0, 0)??);
-    let window = platform.mmio(0, 0)??;
+    let platform = requirements.platform.ok_or(Error::Start)?.client();
+    let compatible = ipc::wire::Str::new("arm,pl031").ok_or(Error::Start)?;
+    let line = IrqLine::from(platform.irq(compatible, 0, 0)??);
+    let window = platform.mmio(compatible, 0, 0)??;
     let window = MmioWindow {
         region: MemoryRegion::from(window.region),
         offset: window.offset,

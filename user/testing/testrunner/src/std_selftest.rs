@@ -31,7 +31,7 @@ use crate::{
     parent::{Answer, Child, Parent},
 };
 
-const SELFTEST_ENTRY: &str = "/std-selftest/program";
+const SELFTEST_ENTRY: &str = "/std-selftest/exec";
 
 const INSTANCE_NAME: &str = "std-selftest";
 

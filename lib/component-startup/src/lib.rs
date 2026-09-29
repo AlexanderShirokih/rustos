@@ -10,6 +10,7 @@
 
 mod declare;
 mod export;
+mod providers;
 mod request;
 
 // Раскрытие `component_manifest!` вызывает макрос записи манифеста по этому пути, и
@@ -17,14 +18,14 @@ mod request;
 #[doc(hidden)]
 pub use component_abi;
 pub use component_abi::{
-    AcceptError, LOG_REQUIREMENT, ResourceError, STARTUP_REQUEST_TIMEOUT, SessionError,
-    component_startup,
+    AcceptError, LOG_REQUIREMENT, STARTUP_REQUEST_TIMEOUT, SessionError, component_startup,
 };
-pub use declare::{StartupError, StartupFailure};
+pub use declare::{Requirements, StartupError, StartupFailure};
 #[doc(hidden)]
-pub use declare::{start_parent, start_resource, start_session};
+pub use declare::{start_parent, start_session};
 pub use export::{ExportError, MintedSession, mint_session, serve_export, whole_export};
 pub use ipc::wire::IpcError;
-pub use kernel_objects::{MemoryRegion, OwnedHandle, Port, PortTransport, Session, kind};
+pub use kernel_objects::{OwnedHandle, Port, PortTransport, Session, kind};
+pub use providers::{ProviderSessions, Providers};
 pub use request::{SessionRequest, accept, session};
 pub use syscall::{Handle, ObjectKind};

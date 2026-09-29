@@ -17,8 +17,8 @@ use ipc::{
 use kernel_objects::{Delivery, IssuedHandle, Port, Resource, SessionTransport, Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{Mutex, PortTransport, Priority, Timeout, spawn, spawn_owned};
-use syscall::{Handle, kind as object_kind};
-use userland_loader::load_entry;
+use syscall::{Handle, ProcessName, kind as object_kind};
+use userland_loader::load_program;
 
 use crate::{fixture::program, watched_capability::Watched};
 
@@ -35,7 +35,7 @@ const SECOND_BADGE: NonZeroU64 = NonZeroU64::new(0x82).expect("badge is non-zero
 
 const PROBE_VALUE: u32 = 0x5A5A;
 
-const TABLE_FULL_ENTRY: &str = "/handle-table-full-fixture/program";
+const TABLE_FULL_ENTRY: &str = "/handle-table-full-fixture/exec";
 const TABLE_FULL_NAME: &str = "handle-table-full";
 
 const OUTCOME_ANSWERED: i64 = 1;
@@ -428,9 +428,9 @@ fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
     let watched = Watched::create(FIRST_BADGE);
     let service = Port::create_service(None).expect("port create");
     let resource = Resource::self_resource().expect("self metering resource");
-    let _fixture = load_entry(
+    let _fixture = load_program(
         &program(TABLE_FULL_ENTRY),
-        TABLE_FULL_NAME,
+        ProcessName::new(TABLE_FULL_NAME).expect("fixture process name"),
         &resource,
         service.server,
     )

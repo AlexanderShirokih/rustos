@@ -8,12 +8,12 @@ restarts = 2
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-scope = { namespace = "/boot" }
+mountpoint = "/boot"
 
 [[components]]
 executable = "filesystem-ramfs"
 memory_limit = "4M"
-scope = { namespace = "/tmp" }
+mountpoint = "/tmp"
 
 [[components]]
 executable = "platform"
@@ -22,7 +22,6 @@ memory_limit = "1M"
 [[components]]
 executable = "driver-pl031"
 memory_limit = "1M"
-scope = { platform = "arm,pl031" }
 
 [[components]]
 executable = "clock-std"

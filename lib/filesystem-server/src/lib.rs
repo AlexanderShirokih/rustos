@@ -1,8 +1,4 @@
-//! Процесс файловой системы: сессии экспорта `FileSystem` и монтирование себя в дерево имён по
-//! сессии администратора. После ухода маршрутизатора сервер монтирует себя снова.
-//!
-//! Крейт содержит общую часть файловых систем, а конкретная файловая система строит только
-//! свой бекенд.
+//! Обслуживание экспорта `FileSystem` и сессий файловой системы.
 
 #![no_std]
 
@@ -12,31 +8,24 @@ use alloc::boxed::Box;
 use core::{convert::Infallible, sync::atomic::AtomicU64};
 
 use filesystem::FileSystemBackend;
-use filesystem_abi::{file_system, namespace_admin};
+use filesystem_abi::file_system;
 use ipc::{
     Listener, RecvError,
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
-use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Resource, Session};
-use runtime::{Mutex, PortTransport, Priority, log_line, spawn_owned};
+use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Resource};
+use runtime::{Mutex, PortTransport, Priority, log_line, process_exit, spawn_owned};
 use spin::Once;
 use syscall::{Handle, Timeout, kind};
 
 mod buffer;
 mod error;
-mod export;
-mod mount;
 mod service;
+mod session;
 mod store;
 
 pub use error::{Error, Result};
 use service::{FileSystemState, Frame, Serving};
-
-const EXPORT_STACK_SIZE: u64 = 0x4000;
-
-const MOUNT_STACK_SIZE: u64 = 0x8000;
-
-const FAILED_EXIT_CODE: u64 = 1;
 
 static IMAGE: Once<ReadOnlyMapping> = Once::new();
 
@@ -46,18 +35,17 @@ struct Shared {
     next_badge: AtomicU64,
 }
 
-/// Поднимает файловую систему, монтирует её под областью сессии `namespace` и обслуживает
-/// экспорт `FileSystem` до закрытия его порта. `found` строит бекенд из байт региона `backing`
-/// либо автономный из `None`. Отказ монтирования завершает процесс кодом 1.
+/// Строит бекенд из `backing` либо из `None` и обслуживает экспорт и файловые сессии.
 pub fn serve<B>(
     start: Handle<kind::Port>,
-    namespace: Session<namespace_admin::Protocol>,
     backing: Option<MemoryRegion>,
     found: impl FnOnce(Option<&'static [u8]>) -> Result<B>,
 ) -> Result<Infallible>
 where
     B: FileSystemBackend + Send + 'static,
 {
+    const EXPORT_STACK_SIZE: u64 = 0x8000;
+
     let bytes = match backing.as_ref() {
         Some(backing) => {
             let mapping = backing.map_full_read_only()?;
@@ -76,15 +64,15 @@ where
         service: Port::create()?,
         next_badge: AtomicU64::new(0),
     }));
-    // Потоки экспорта и монтирования работают до конца процесса.
     let _ = spawn_owned(
-        move || export::serve(start, shared),
+        move || {
+            let parent = component_abi::component_startup::Client::new(PortTransport::new(start));
+            let _ = component_startup::serve_export::<file_system::Protocol>(&parent, || {
+                session::open_session(shared).map_err(|_| component_startup::SessionError::NoSpace)
+            });
+            process_exit(1)
+        },
         EXPORT_STACK_SIZE,
-        Priority::new(1),
-    )?;
-    let _ = spawn_owned(
-        move || mount::serve(start, namespace, shared),
-        MOUNT_STACK_SIZE,
         Priority::new(1),
     )?;
     log_line("started");

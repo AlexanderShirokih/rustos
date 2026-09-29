@@ -6,7 +6,7 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_startup::component_manifest;
+use component_startup::{Requirements as _, component_manifest};
 use runtime::{log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 

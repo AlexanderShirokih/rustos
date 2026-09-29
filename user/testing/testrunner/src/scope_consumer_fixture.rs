@@ -2,20 +2,20 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
-
-use component_startup::component_manifest;
-use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system};
+use component_startup::{Requirements as _, component_manifest};
+use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, namespace};
 use ipc::wire::Str;
-use kernel_objects::{MemoryRegion, SessionTransport};
-use runtime::{Timeout, UserMemFlags, log_fmt, log_line, process_exit, start_component};
-use syscall::{Handle, kind};
+use kernel_objects::{IssuedHandle, MemoryRegion, Port, SessionTransport};
+use runtime::{Timeout, UserMemFlags, log_line, start_component};
+use syscall::kind;
+
+mod fixture_start;
+
+use fixture_start::{Failed, fixture_start};
 
 const LOG_TAG: &str = "area";
 
-const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
+const FILESYSTEM_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const BUFFER_SIZE: u32 = 4096;
 
@@ -25,26 +25,34 @@ const RECORD_BODY: &[u8] = b"component area of the userland image\n";
 const ESCAPE_RELATIVE: &str = "/../testrunner/sample";
 const ESCAPE_ABSOLUTE: &str = "/testrunner/sample";
 
-const RESTART_EXIT_CODE: u64 = 1;
-
 component_manifest! {
     struct AreaStartup {
-        requirements: { area: session(file_system::Protocol) },
+        requirements: { area: session(namespace::Protocol) },
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    let Ok(requirements) = AreaStartup::request(parent) else {
-        process_exit(RESTART_EXIT_CODE);
-    };
+fixture_start!(run);
 
-    let area = requirements.area.client().with_wait(CALL_TIMEOUT);
+fn run(parent: IssuedHandle<kind::Port>) -> Result<(), Failed> {
+    let parent = Port::from(parent);
+    start_component(parent.as_raw(), LOG_TAG);
+    let requirements = AreaStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let area = requirements.area.ok_or(Failed)?;
+    let root = Str::new("/boot/scope-consumer-fixture").ok_or(Failed)?;
+    let session = area
+        .client()
+        .with_wait(Timeout::from_secs(5))
+        .resolve(root)
+        .map_err(|_| Failed)?
+        .map_err(|_| Failed)?;
+    let area = kernel_objects::Session::from_session(session)
+        .client()
+        .with_wait(FILESYSTEM_REQUEST_TIMEOUT);
+
     if inspect(&area) {
         log_line("area read");
     }
-    process_exit(RESTART_EXIT_CODE)
+    Err(Failed)
 }
 
 fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
@@ -93,10 +101,4 @@ fn escapes(
         return true;
     };
     client.open(path, AccessMode::Read, OpenFlags::NONE) != Ok(Err(refused))
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(RESTART_EXIT_CODE)
 }

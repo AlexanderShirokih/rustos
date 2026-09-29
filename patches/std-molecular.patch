@@ -298,7 +298,7 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +            && let Self::Installed(session) = mem::replace(self, Self::Empty)
 +        {
 +            let port = Port::from(session.into_issued().assume_kind());
-+            *self = Self::Ready(FileSystem::routed(Session::from_handle(port)));
++            *self = Self::Ready(FileSystem::new(Session::from_handle(port)));
 +        }
 +
 +        match self {

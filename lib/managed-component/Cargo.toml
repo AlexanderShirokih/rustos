@@ -7,7 +7,7 @@ publish.workspace = true
 workspace = "../../user"
 
 [lib]
-test = false
+test = true
 bench = false
 doctest = false
 

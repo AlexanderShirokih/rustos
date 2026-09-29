@@ -3,12 +3,12 @@
 use kernel_objects::{Resource, Signal};
 use kernel_tests::kernel_test;
 use runtime::Timeout;
-use syscall::{Rights, SIGNALED, SyscallError};
-use userland::{Entry, Segment, SegmentPermissions, USERLAND_PAGE_SIZE};
+use syscall::{ProcessName, Rights, SIGNALED, SyscallError};
+use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE};
 use userland_image::component_name;
-use userland_loader::load_entry;
+use userland_loader::load_program;
 
-const REPLY_HOLDER: &str = "/reply-holder/program";
+const REPLY_HOLDER: &str = "/reply-holder/exec";
 const ROLLBACK_PROBE_NAME: &str = "load-image-rollback";
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -33,8 +33,8 @@ fn load_image_error_reclaims_each_created_process() {
             bytes: &[],
         },
     ];
-    let invalid = Entry {
-        path: "/load-image-rollback",
+    let invalid = Program {
+        manifest: &[],
         entry_va: BASE,
         stack_size: USERLAND_PAGE_SIZE,
         segments: &segments,
@@ -46,7 +46,12 @@ fn load_image_error_reclaims_each_created_process() {
         fail_load_when_process_returns(
             || {
                 let initial = Signal::create().expect("initial capability");
-                load_entry(&invalid, ROLLBACK_PROBE_NAME, &resource, initial)
+                load_program(
+                    &invalid,
+                    ProcessName::new(ROLLBACK_PROBE_NAME).expect("fixture process name"),
+                    &resource,
+                    initial,
+                )
             },
             SyscallError::InvalidArgument,
             &timer,
@@ -68,7 +73,12 @@ fn start_error_reclaims_each_loaded_process() {
         fail_load_when_process_returns(
             || {
                 let initial = Signal::create().expect("initial capability");
-                load_entry(&child, component_name(REPLY_HOLDER), &write_only, initial)
+                load_program(
+                    &child,
+                    ProcessName::new(component_name(REPLY_HOLDER)).expect("fixture process name"),
+                    &write_only,
+                    initial,
+                )
             },
             SyscallError::AccessDenied,
             &timer,

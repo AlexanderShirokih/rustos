@@ -1,7 +1,7 @@
 //! Требования компонента для программы на стандартной библиотеке.
 //!
 //! Программа объявляет манифест макросом [`component_manifest!`] и получает его требования
-//! вызовом `components::requirements(Manifest::request)`. Журнал программе ставит точка
+//! вызовом `components::requirements::<Manifest>()`. Журнал программе ставит точка
 //! входа `std` до `main`, и крейт его не запрашивает.
 //!
 //! Владеющие типы программы и стандартной библиотеки объявлены в разных копиях графа.
@@ -11,18 +11,16 @@
 
 use std::os::molecular;
 
-use component_startup::{Handle, StartupFailure, kind};
+use component_startup::{Handle, Requirements, StartupFailure};
 pub use component_startup::{StartupError, component_manifest};
 
 mod handle;
 
 pub use handle::into_std_handle;
 
-/// Передаёт стартовый handle функции `request` манифеста и возвращает её требования. Без
+/// Запрашивает требования манифеста `T` по стартовому handle. Без
 /// стартового handle возвращает отказ [`StartupFailure::NoStartHandle`].
-pub fn requirements<T>(
-    request: impl FnOnce(Handle<kind::Port>) -> Result<T, StartupError>,
-) -> Result<T, StartupError> {
+pub fn requirements<T: Requirements>() -> Result<T, StartupError> {
     // Стартовая сессия нужна до конца процесса, и её запись остаётся процессу.
     let parent = molecular::take_start_handle()
         .map(molecular::OwnedHandle::leak)
@@ -31,5 +29,5 @@ pub fn requirements<T>(
             failure: StartupFailure::NoStartHandle,
         })?;
 
-    request(Handle::from_abi(parent))
+    T::request(Handle::from_abi(parent))
 }

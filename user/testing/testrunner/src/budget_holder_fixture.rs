@@ -9,8 +9,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::panic::PanicInfo;
 
-use component_startup::component_manifest;
-use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, PATH_MAX, file_system};
+use component_startup::{Requirements as _, component_manifest};
+use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, PATH_MAX, file_system, namespace};
 use ipc::wire::Str;
 use kernel_objects::{Port, Resource, SessionTransport};
 use runtime::{MemoryAccess, Timeout, log_line, process_exit, start_component};
@@ -32,7 +32,7 @@ const RESTART_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct BudgetHolderStartup {
-        requirements: { files: session(file_system::Protocol) },
+        requirements: { files: session(namespace::Protocol) },
         exports: [probe::Protocol],
     }
 }
@@ -43,7 +43,19 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Ok(requirements) = BudgetHolderStartup::request(parent) else {
         process_exit(RESTART_EXIT_CODE)
     };
-    let files = requirements.files.client().with_wait(CALL_TIMEOUT);
+
+    let Some(files) = requirements.files else {
+        process_exit(RESTART_EXIT_CODE)
+    };
+    let Some(root) = Str::new("/tmp") else {
+        process_exit(RESTART_EXIT_CODE)
+    };
+    let Ok(Ok(session)) = files.client().with_wait(CALL_TIMEOUT).resolve(root) else {
+        process_exit(RESTART_EXIT_CODE)
+    };
+    let files = kernel_objects::Session::from_session(session)
+        .client()
+        .with_wait(CALL_TIMEOUT);
     let (Some(started_path), Some(held_path)) = (Str::new(STARTED_PATH), Str::new(HELD_PATH))
     else {
         process_exit(RESTART_EXIT_CODE)

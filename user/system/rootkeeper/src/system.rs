@@ -1,39 +1,37 @@
-//! Композиция, которую rootkeeper поднимает при загрузке, и её родитель.
+//! Записи компонентов и обслуживание их требований родителем.
 
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::{
     fmt::{Arguments, Write as _},
-    num::NonZeroU64,
     ops::ControlFlow,
 };
 
-use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, hardware};
+use bootstrap_abi::{ImageError, LOG_MESSAGE_MAX, bootstrap, hardware, image};
 use component_abi::{
-    AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
-    SessionError, SessionRequest, SessionRequirement, SessionScope, component_startup,
+    AcceptError, ComponentManifest, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX,
+    RequirementDeclaration, RequirementMode, SessionError, SessionRequest, SessionRequirement,
+    component_startup, decode_manifest,
 };
 use ipc::{
-    Listener as _, Protocol as _, RecvError,
-    wire::{MESSAGE_INLINE_MAX, Str},
+    IntoWireValue, Listener as _, Protocol as _, RecvError,
+    wire::{Cap, MESSAGE_INLINE_MAX, Str},
 };
 use kernel_objects::{
     Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, kind,
 };
 use log_abi::{LogBuffer, log};
-use log_relay::{KernelLogSink, LogRelayThread};
-use managed_component::{Children, Departure, Outcome, Status};
+use managed_component::{Children, Departure, GrantError, Outcome, Status};
 use runtime::{Mutex, PortTransport, Timeout};
 use syscall::{Handle, Rights};
-use userland_image::{
-    BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, DecodedProgram, PlanComponent,
-    PlanDecodeError, RequirementSource, decode, decode_plan,
-};
+use userland::{DecodedProgram, ProgramView};
 
-use crate::relay::{ComponentNames, log_badge};
+use crate::component::{Component, ImporterRequirement, Record};
 
 const LOG_TAG: &str = "rootkeeper";
 
 const BOOT_RECORD: u16 = 0;
+
+const IMAGE_REGION_GRANT: &str = "image region";
 
 /// Срок возврата бюджета перед перезапуском записи.
 pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -51,21 +49,6 @@ pub enum Stopped {
     Subsystem = 3,
 }
 
-/// Причина, по которой композиция не поднялась.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BootFailure {
-    /// Userland-образ недоступен либо не разобран.
-    Image,
-    /// В образе нет записи плана загрузочной композиции.
-    PlanMissing,
-    /// Запись плана не разобрана.
-    Plan(PlanDecodeError),
-    /// В образе нет программы записи плана.
-    ProgramMissing,
-    /// Ресурса композиции не хватило.
-    Budget(BudgetFailure),
-}
-
 /// Ресурс композиции, которого не хватило.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetFailure {
@@ -81,60 +64,64 @@ pub enum BudgetFailure {
     Hardware,
 }
 
-/// Требование `name` импортёра. Импортёр получает по нему сессию экспорта `protocol` записи
-/// плана `provider` с областью `scope`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ImporterRequirement<'n> {
-    pub name: &'n str,
-    pub provider: &'n str,
-    pub protocol: &'n str,
-    pub scope: &'n str,
-}
-
 /// Отказ [`RootSystem::importer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImporterRefusal {
-    /// Требование с этим номером не связывается с экспортом плана.
+    /// Имя или протокол требования недопустимы.
     Requirement(usize),
     /// Порт импортёра не создан.
     Importer(Error),
 }
 
+#[derive(Debug)]
+pub enum AddFailure {
+    /// Имя записи уже зарегистрировано.
+    Name,
+    /// Число записей превышает диапазон номера компонента.
+    Capacity,
+    /// Описание требований, экспортов или бюджета недопустимо.
+    Declaration,
+    /// Резерв бюджета записи не создан.
+    Resource(Error),
+}
+
 /// Userland-образ, отображённый в адресное пространство rootkeeper.
 pub struct SystemImage {
-    region: MemoryRegion,
-    mapping: ReadOnlyMapping,
+    pub(crate) region: MemoryRegion,
+    pub(crate) mapping: ReadOnlyMapping,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Holder {
     Record(u16),
     Importer(usize),
+    Image(u64),
 }
 
-struct ImporterBinding<'a> {
+struct ImporterBinding {
     name: String,
-    export: Export<'a>,
+    protocol: String,
+    mode: RequirementMode,
+    provider: Option<u16>,
 }
 
 #[derive(Clone)]
 struct Export<'a> {
     provider: u16,
     protocol: &'a str,
-    scope: SessionScope,
 }
 
-/// Композиция плана и её родитель. Поток rootkeeper обслуживает композицию повтором [`turn`].
+/// Родитель зарегистрированных компонентов. Поток обслуживает записи повтором [`turn`].
 pub struct RootSystem<'a> {
     children: Children<'a, Holder, DecodedProgram<'a>>,
-    plan: BootPlan<'a>,
+    records: Vec<Record<'a>>,
     logs: Vec<Session<log::Protocol>>,
     hardware: Session<hardware::Protocol>,
     image: &'a SystemImage,
     kernel: Handle<kind::Port>,
     restarts_used: Vec<u32>,
-    importers: Vec<Vec<ImporterBinding<'a>>>,
-    _resource: Resource,
+    importers: Vec<Vec<ImporterBinding>>,
+    resource: Resource,
 }
 
 impl From<Stopped> for u64 {
@@ -143,121 +130,82 @@ impl From<Stopped> for u64 {
     }
 }
 
-impl BootFailure {
-    /// Код выхода rootkeeper, соответствующий отказу.
-    #[must_use]
-    pub const fn stopped(self) -> Stopped {
-        match self {
-            Self::Image | Self::PlanMissing | Self::Plan(_) | Self::ProgramMissing => {
-                Stopped::BadImage
-            }
-            Self::Budget(_) => Stopped::Startup,
-        }
-    }
-
-    const fn message(self) -> &'static str {
-        match self {
-            Self::Image => "userland image unavailable",
-            Self::PlanMissing => "boot plan record missing",
-            Self::Plan(_) => "boot plan not decoded",
-            Self::ProgramMissing => "component program missing",
-            Self::Budget(BudgetFailure::LogSession) => "log session not minted",
-            Self::Budget(BudgetFailure::Root) => "root resource unavailable",
-            Self::Budget(BudgetFailure::Reserve) => "component reserve not granted",
-            Self::Budget(BudgetFailure::StartupPort) => "startup port not created",
-            Self::Budget(BudgetFailure::Hardware) => "hardware session not granted",
-        }
-    }
-}
-
-impl SystemImage {
-    /// Забирает у ядра capability образа и отображает его read-only.
-    pub fn acquire(kernel: Handle<kind::Port>) -> Result<Self, BootFailure> {
-        let client = bootstrap::Client::new(PortTransport::new(kernel));
-        let region = client
-            .acquire_userland_image()
-            .map_err(|_| BootFailure::Image)?
-            .map(MemoryRegion::from)
-            .map_err(|_| BootFailure::Image)?;
-        let mapping = region
-            .map_full_read_only()
-            .map_err(|_| BootFailure::Image)?;
-        Ok(Self { region, mapping })
-    }
-
-    /// Таблица записей образа.
-    pub fn entries(&self) -> Result<DecodedImage<'_>, BootFailure> {
-        decode(self.mapping.as_bytes()).map_err(|_| BootFailure::Image)
-    }
-
-    /// Разбирает план загрузочной композиции из записи `entry`.
-    pub fn plan(&self, entry: &str) -> Result<BootPlan<'_>, BootFailure> {
-        let record = self
-            .entries()?
-            .entry(entry)
-            .ok_or(BootFailure::PlanMissing)?;
-        decode_plan(record.data()).map_err(BootFailure::Plan)
-    }
-}
-
 impl<'a> RootSystem<'a> {
-    /// Заводит записи плана `plan` с номера 1, которые запускает первый [`turn`]. Запись 0 -
-    /// программа самого rootkeeper, и её он не запускает. `log_sessions` создаёт источник
-    /// журнала записи по значку [`log_badge`](crate::relay::log_badge) её номера.
-    pub fn bring_up(
+    pub(crate) fn new(
         image: &'a SystemImage,
-        plan: BootPlan<'a>,
         kernel: Handle<kind::Port>,
-        log_sessions: impl Fn(NonZeroU64) -> Option<Session<log::Protocol>>,
-    ) -> Result<Self, BootFailure> {
-        let entries = image.entries()?;
-        let resource =
-            Resource::self_resource().map_err(|_| BootFailure::Budget(BudgetFailure::Root))?;
-        let mut children =
-            Children::new().map_err(|_| BootFailure::Budget(BudgetFailure::StartupPort))?;
-        let logs = (BOOT_RECORD + 1..plan.len())
-            .map(|record| log_sessions(log_badge(record)))
-            .collect::<Option<Vec<_>>>()
-            .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
+        name: &'a str,
+        manifest: ComponentManifest<'a>,
+    ) -> Result<Self, BudgetFailure> {
+        let resource = Resource::self_resource().map_err(|_| BudgetFailure::Root)?;
+        let children = Children::new().map_err(|_| BudgetFailure::StartupPort)?;
         let hardware = bootstrap::Client::new(PortTransport::new(kernel))
             .acquire_hardware()
             .ok()
             .and_then(Result::ok)
             .map(Session::from_session)
-            .ok_or(BootFailure::Budget(BudgetFailure::Hardware))?;
-
-        for (record, component) in (0..plan.len())
-            .zip(plan.components())
-            .skip(usize::from(BOOT_RECORD) + 1)
-        {
-            let path = format!("{}/{COMPONENT_PROGRAM_NAME}", component.executable());
-            let program = entries
-                .entry(&path)
-                .and_then(|entry| entry.program().ok())
-                .ok_or(BootFailure::ProgramMissing)?;
-            children
-                .add(
-                    Holder::Record(record),
-                    program,
-                    component.name(),
-                    &resource,
-                    component.memory_limit(),
-                    BUDGET_RETURN_TIMEOUT,
-                )
-                .map_err(|_| BootFailure::Budget(BudgetFailure::Reserve))?;
-        }
+            .ok_or(BudgetFailure::Hardware)?;
 
         Ok(Self {
             children,
-            plan,
-            logs,
+            records: alloc::vec![Record {
+                name,
+                manifest,
+                restarts: 0,
+            }],
+            logs: Vec::new(),
             hardware,
             image,
             kernel,
-            restarts_used: vec![0; usize::from(plan.len())],
+            restarts_used: alloc::vec![0],
             importers: Vec::new(),
-            _resource: resource,
+            resource,
         })
+    }
+
+    /// Добавляет запись, которую запускает следующий оборот. Номера прежних записей сохраняются.
+    pub fn add(
+        &mut self,
+        component: Component<'a>,
+        log: Session<log::Protocol>,
+    ) -> Result<u16, AddFailure> {
+        if self.record_named(component.name.as_str()).is_some() {
+            return Err(AddFailure::Name);
+        }
+        let manifest =
+            decode_manifest(component.program.manifest()).map_err(|_| AddFailure::Declaration)?;
+        if component.memory_limit == 0
+            || manifest.requirements().any(|requirement| {
+                requirement.name().len() > REQUIREMENT_NAME_MAX
+                    || requirement.protocol().len() > PROTOCOL_ID_MAX
+            })
+            || manifest
+                .exports()
+                .any(|protocol| protocol.len() > PROTOCOL_ID_MAX)
+        {
+            return Err(AddFailure::Declaration);
+        }
+
+        let record = u16::try_from(self.records.len()).map_err(|_| AddFailure::Capacity)?;
+        self.children
+            .add(
+                Holder::Record(record),
+                component.program,
+                component.name,
+                &self.resource,
+                component.memory_limit,
+                BUDGET_RETURN_TIMEOUT,
+            )
+            .map_err(AddFailure::Resource)?;
+
+        self.records.push(Record {
+            name: component.name.as_str(),
+            manifest,
+            restarts: component.restarts,
+        });
+        self.logs.push(log);
+        self.restarts_used.push(0);
+        Ok(record)
     }
 
     /// Создаёт клиентскую capability импортёра с требованиями `requirements`. Родитель отвечает
@@ -265,12 +213,11 @@ impl<'a> RootSystem<'a> {
     /// [`turn`], не вызывает по ней.
     pub fn importer(
         &mut self,
-        requirements: &[ImporterRequirement<'_>],
+        requirements: &[ImporterRequirement],
     ) -> Result<Port, ImporterRefusal> {
-        let mut bindings: Vec<ImporterBinding<'a>> = Vec::with_capacity(requirements.len());
+        let mut bindings: Vec<ImporterBinding> = Vec::with_capacity(requirements.len());
         for (index, requirement) in requirements.iter().enumerate() {
-            let binding = self
-                .importer_binding(requirement, &bindings)
+            let binding = Self::importer_binding(&requirement.declaration, &bindings)
                 .ok_or(ImporterRefusal::Requirement(index))?;
             bindings.push(binding);
         }
@@ -282,7 +229,38 @@ impl<'a> RootSystem<'a> {
         Ok(port)
     }
 
-    /// Завершает процесс работающей записи плана `name` кодом `code`. Следующий [`turn`] решает,
+    pub(crate) fn importer_for(
+        &mut self,
+        requirements: &[ImporterRequirement],
+        requirement: &str,
+        provider: &str,
+    ) -> Result<Port, ImporterRefusal> {
+        let (record, declared) = self
+            .record_named(provider)
+            .ok_or(ImporterRefusal::Requirement(0))?;
+        let binding = requirements
+            .iter()
+            .position(|binding| binding.declaration.name() == requirement)
+            .ok_or(ImporterRefusal::Requirement(0))?;
+        if !declared.manifest.exports().any(|protocol| {
+            requirements
+                .get(binding)
+                .is_some_and(|requirement| protocol == requirement.declaration.protocol())
+        }) {
+            return Err(ImporterRefusal::Requirement(binding));
+        }
+        let port = self.importer(requirements)?;
+        if let Some(binding) = self
+            .importers
+            .last_mut()
+            .and_then(|bindings| bindings.get_mut(binding))
+        {
+            binding.provider = Some(record);
+        }
+        Ok(port)
+    }
+
+    /// Завершает процесс работающей записи `name` кодом `code`. Следующий [`turn`] решает,
     /// что делать с записью.
     pub fn terminate(&mut self, name: &str, code: u32) {
         if let Some((record, _)) = self.record_named(name) {
@@ -290,34 +268,35 @@ impl<'a> RootSystem<'a> {
         }
     }
 
-    fn record_named(&self, name: &str) -> Option<(u16, PlanComponent<'a>)> {
-        (0..self.plan.len())
-            .zip(self.plan.components())
-            .find(|(_, component)| component.name() == name)
+    fn record_named(&self, name: &str) -> Option<(u16, &Record<'a>)> {
+        self.records
+            .iter()
+            .enumerate()
+            .find(|(_, component)| component.name == name)
+            .and_then(|(index, component)| Some((u16::try_from(index).ok()?, component)))
     }
 
     fn importer_binding(
-        &self,
-        requirement: &ImporterRequirement<'_>,
-        bound: &[ImporterBinding<'a>],
-    ) -> Option<ImporterBinding<'a>> {
-        if requirement.name == LOG_REQUIREMENT
-            || requirement.name.len() > REQUIREMENT_NAME_MAX
-            || bound.iter().any(|binding| binding.name == requirement.name)
+        requirement: &RequirementDeclaration,
+        bound: &[ImporterBinding],
+    ) -> Option<ImporterBinding> {
+        if requirement.name().is_empty()
+            || requirement.name() == LOG_REQUIREMENT
+            || requirement.name().len() > REQUIREMENT_NAME_MAX
+            || bound
+                .iter()
+                .any(|binding| binding.name == requirement.name())
         {
             return None;
         }
-        let (provider, component) = self.record_named(requirement.provider)?;
-        let protocol = component
-            .exports()
-            .find(|export| *export == requirement.protocol)?;
+        if requirement.protocol().is_empty() || requirement.protocol().len() > PROTOCOL_ID_MAX {
+            return None;
+        }
         Some(ImporterBinding {
-            name: String::from(requirement.name),
-            export: Export {
-                provider,
-                protocol,
-                scope: SessionScope::new(requirement.scope)?,
-            },
+            name: String::from(requirement.name()),
+            protocol: String::from(requirement.protocol()),
+            mode: requirement.mode(),
+            provider: None,
         })
     }
 
@@ -331,10 +310,11 @@ impl<'a> RootSystem<'a> {
         let Holder::Record(record) = departure.child else {
             return;
         };
-        let Some(component) = self.plan.component(record) else {
+        let Some(component) = self.records.get(usize::from(record)) else {
             return;
         };
-        let name = component.name();
+        let name = component.name;
+        let restarts = component.restarts;
         let retry = match departure.outcome {
             Outcome::Exit(code) => {
                 self.log(format_args!("{name} stopped with exit code {code}"));
@@ -357,7 +337,7 @@ impl<'a> RootSystem<'a> {
         let child = Holder::Record(record);
         if retry {
             if let Some(used) = self.restarts_used.get_mut(usize::from(record))
-                && *used < component.restarts()
+                && *used < restarts
             {
                 *used += 1;
                 self.children.restart(child);
@@ -368,27 +348,95 @@ impl<'a> RootSystem<'a> {
         self.children.remove(child);
     }
 
-    fn record_export(&self, record: u16, requirement: &str) -> Option<Export<'a>> {
-        match self.plan.component(record)?.requirement(requirement)? {
-            RequirementSource::Export {
-                provider,
-                protocol,
-                scope,
-            } => Some(Export {
-                provider,
-                protocol,
-                scope: SessionScope::new(scope)?,
-            }),
-            RequirementSource::Region => None,
+    fn record_export(
+        &self,
+        record: u16,
+        requirement: &str,
+        protocol: &str,
+        index: u16,
+    ) -> Result<Export<'a>, SessionError> {
+        let requirement = self
+            .records
+            .get(usize::from(record))
+            .and_then(|record| record.requirement(requirement))
+            .ok_or(SessionError::Refused)?;
+        if requirement.protocol() != protocol {
+            return Err(SessionError::Refused);
         }
+        self.resolve_export(protocol, requirement.mode(), index)
     }
 
-    fn importer_export(&self, importer: usize, requirement: &str) -> Option<Export<'a>> {
-        self.importers
-            .get(importer)?
+    fn resolve_export(
+        &self,
+        protocol: &str,
+        mode: RequirementMode,
+        index: u16,
+    ) -> Result<Export<'a>, SessionError> {
+        let provider = if mode == RequirementMode::All {
+            self.providers(protocol)
+                .nth(usize::from(index))
+                .ok_or(SessionError::Unbound)?
+        } else {
+            if index != 0 {
+                return Err(SessionError::Unbound);
+            }
+            let mut providers = self.providers(protocol).filter(|provider| {
+                *provider == BOOT_RECORD
+                    || !matches!(
+                        self.children.status(Holder::Record(*provider)),
+                        None | Some(Status::Removed)
+                    )
+            });
+            let provider = providers.next().ok_or(SessionError::Unbound)?;
+            if providers.next().is_some() {
+                return Err(SessionError::Refused);
+            }
+            provider
+        };
+        let protocol = self
+            .records
+            .get(usize::from(provider))
+            .and_then(|record| record.manifest.exports().find(|export| *export == protocol))
+            .ok_or(SessionError::Refused)?;
+        Ok(Export { provider, protocol })
+    }
+
+    fn providers<'s>(&'s self, protocol: &'s str) -> impl Iterator<Item = u16> + 's {
+        self.records
             .iter()
-            .find(|binding| binding.name == requirement)
-            .map(|binding| binding.export.clone())
+            .enumerate()
+            .filter(move |(_, record)| record.manifest.exports().any(|export| export == protocol))
+            .filter_map(|(index, _)| u16::try_from(index).ok())
+    }
+
+    fn importer_export(
+        &self,
+        importer: usize,
+        requirement: &str,
+        protocol: &str,
+        index: u16,
+    ) -> Result<Export<'a>, SessionError> {
+        let binding = self
+            .importers
+            .get(importer)
+            .and_then(|requirements| {
+                requirements
+                    .iter()
+                    .find(|binding| binding.name == requirement && binding.protocol == protocol)
+            })
+            .ok_or(SessionError::Refused)?;
+        if let Some(provider) = binding.provider {
+            if index != 0 {
+                return Err(SessionError::Unbound);
+            }
+            let protocol = self
+                .records
+                .get(usize::from(provider))
+                .and_then(|record| record.manifest.exports().find(|export| *export == protocol))
+                .ok_or(SessionError::Refused)?;
+            return Ok(Export { provider, protocol });
+        }
+        self.resolve_export(protocol, binding.mode, index)
     }
 
     fn log_session(
@@ -420,31 +468,20 @@ impl<'a> RootSystem<'a> {
         requirement: &str,
         protocol: &str,
     ) -> Result<Port, SessionError> {
-        if protocol != hardware::Protocol::ID {
-            return Err(SessionError::Refused);
-        }
-        self.children
-            .grant(
+        let session = match protocol {
+            hardware::Protocol::ID => self.children.grant(
                 badge,
                 requirement,
                 self.hardware.handle().borrow(),
                 Rights::WRITE | Rights::TRANSFER,
-            )
-            .map_err(SessionError::from)
-    }
-
-    fn record_requirement(
-        &self,
-        badge: u64,
-        requirement: &str,
-    ) -> Option<(u16, RequirementSource<'a>)> {
-        let Holder::Record(record) = self.children.caller(badge)? else {
-            return None;
+            ),
+            image::Protocol::ID => {
+                self.children
+                    .grant_importer(badge, requirement, Holder::Image(badge))
+            }
+            _ => return Err(SessionError::Refused),
         };
-        Some((
-            record,
-            self.plan.component(record)?.requirement(requirement)?,
-        ))
+        session.map_err(SessionError::from)
     }
 
     fn log(&self, line: Arguments<'_>) {
@@ -462,19 +499,29 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         let badge = frame.badge;
         let name = requirement.name.as_str();
         let protocol = requirement.protocol.as_str();
+        let index = requirement.index;
         let export = match self.children.caller(badge) {
             Some(Holder::Record(record)) if name == LOG_REQUIREMENT => {
-                let answer = self.log_session(record, badge, protocol);
+                let answer = if index == 0 {
+                    self.log_session(record, badge, protocol)
+                } else {
+                    Err(SessionError::Unbound)
+                };
                 let _ = reply.send(answer);
                 return;
             }
-            Some(Holder::Record(record)) => self.record_export(record, name),
-            Some(Holder::Importer(importer)) => self.importer_export(importer, name),
-            None => None,
+            Some(Holder::Record(record)) => self.record_export(record, name, protocol, index),
+            Some(Holder::Importer(importer)) => {
+                self.importer_export(importer, name, protocol, index)
+            }
+            Some(Holder::Image(_)) | None => Err(SessionError::Refused),
         };
-        let Some(export) = export.filter(|export| export.protocol == protocol) else {
-            let _ = reply.send(Err::<Port, _>(SessionError::Refused));
-            return;
+        let export = match export {
+            Ok(export) => export,
+            Err(error) => {
+                let _ = reply.send(Err::<Port, _>(error));
+                return;
+            }
         };
         if export.provider == BOOT_RECORD {
             let answer = self.boot_export(badge, name, export.protocol);
@@ -487,30 +534,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
             return;
         }
-        self.children
-            .request(provider, export.protocol, badge, name, export.scope, reply);
-    }
-
-    fn region(
-        &mut self,
-        frame: &Delivery,
-        requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
-        reply: component_startup::region::Reply<Debt>,
-    ) {
-        let requirement = requirement.as_str();
-        let answer = match self.record_requirement(frame.badge, requirement) {
-            Some((_, RequirementSource::Region)) => self
-                .children
-                .grant(
-                    frame.badge,
-                    requirement,
-                    self.image.region.borrow(),
-                    Rights::READ | Rights::DUPLICATE | Rights::TRANSFER,
-                )
-                .map_err(ResourceError::from),
-            _ => Err(ResourceError::Refused),
-        };
-        let _ = reply.send(answer);
+        self.children.request(provider, badge, requirement, reply);
     }
 
     fn accept(
@@ -523,13 +547,18 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         let provider = match self.children.caller(frame.badge) {
             Some(Holder::Record(record))
                 if self
-                    .plan
-                    .component(record)
-                    .is_some_and(|component| component.exports().any(|name| name == export)) =>
+                    .records
+                    .get(usize::from(record))
+                    .is_some_and(|component| {
+                        component
+                            .manifest
+                            .exports()
+                            .any(|protocol| protocol == export)
+                    }) =>
             {
                 Holder::Record(record)
             }
-            Some(Holder::Record(_) | Holder::Importer(_)) | None => {
+            Some(Holder::Record(_) | Holder::Importer(_) | Holder::Image(_)) | None => {
                 let _ = reply.send(Err::<
                     SessionRequest<component_startup::session::Reply<Debt>>,
                     _,
@@ -541,9 +570,31 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
     }
 }
 
-/// Один оборот обслуживания композиции `system`: запуск ждущих записей с номера 1, приём кадра
-/// не дольше `timeout` и его обслуживание. Запрос к экспорту записи 0 обслуживает сам оборот.
-/// На время приёма замок `system` отпущен. `Break` означает, что порт закрыт.
+impl image::Service<Delivery> for RootSystem<'_> {
+    fn region(
+        &mut self,
+        frame: &Delivery,
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, ImageError>> {
+        let Some(Holder::Image(incarnation)) = self.children.caller(frame.badge) else {
+            return Err(ImageError::Refused);
+        };
+        // Ключ выдачи содержит пробел, которого нет в имени требования.
+        self.children
+            .grant(
+                incarnation,
+                IMAGE_REGION_GRANT,
+                self.image.region.borrow(),
+                Rights::READ | Rights::DUPLICATE | Rights::TRANSFER,
+            )
+            .map_err(|error| match error {
+                GrantError::NotRunning => ImageError::Refused,
+                GrantError::Kernel(_) => ImageError::NoSpace,
+            })
+    }
+}
+
+/// Обслуживает один кадр композиции `system`, ожидая его не дольше `timeout`. На время ожидания
+/// замок `system` свободен. `Break` - порт закрыт.
 pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()> {
     let (port, wait) = {
         let mut guard = system.lock();
@@ -560,7 +611,13 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
     match PortTransport::new(port).recv(&mut bytes, wait) {
         Ok(incoming) => {
-            let _ = component_startup::dispatch(&mut *system.lock(), incoming);
+            let mut guard = system.lock();
+            // `dispatch` забирает кадр и разрушает кадр чужой операции, поэтому протокол
+            // выбирается по значку до разбора.
+            let _ = match guard.children.caller(incoming.resources.badge) {
+                Some(Holder::Image(_)) => image::dispatch(&mut *guard, incoming),
+                _ => component_startup::dispatch(&mut *guard, incoming),
+            };
         }
         Err(RecvError::SenderGone(badge)) => {
             let mut guard = system.lock();
@@ -574,40 +631,7 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
     ControlFlow::Continue(())
 }
 
-/// Поднимает композицию загрузочного плана и служит её родителем. Возвращается только при
-/// отказе подъёма либо выходе из оборота.
-pub fn run(kernel: Handle<kind::Port>) -> Stopped {
-    let image = match SystemImage::acquire(kernel) {
-        Ok(image) => image,
-        Err(failure) => return refuse_boot(kernel, failure),
-    };
-    let plan = match image.plan(BOOT_PLAN_PATH) {
-        Ok(plan) => plan,
-        Err(failure) => return refuse_boot(kernel, failure),
-    };
-    let Ok(relay) = LogRelayThread::start(ComponentNames::of(&plan), KernelLogSink::new(kernel))
-    else {
-        log_line(kernel, format_args!("log relay not started"));
-        return Stopped::Startup;
-    };
-    let system = match RootSystem::bring_up(&image, plan, kernel, |badge| relay.session(badge).ok())
-    {
-        Ok(system) => Mutex::new(system),
-        Err(failure) => return refuse_boot(kernel, failure),
-    };
-    log_line(kernel, format_args!("composition started"));
-
-    while turn(&system, Timeout::INFINITE).is_continue() {}
-    log_line(kernel, format_args!("startup port closed"));
-    Stopped::Subsystem
-}
-
-fn refuse_boot(kernel: Handle<kind::Port>, failure: BootFailure) -> Stopped {
-    log_line(kernel, format_args!("{}", failure.message()));
-    failure.stopped()
-}
-
-fn log_line(kernel: Handle<kind::Port>, line: Arguments<'_>) {
+pub(crate) fn log_line(kernel: Handle<kind::Port>, line: Arguments<'_>) {
     let mut message = LogBuffer::<LOG_MESSAGE_MAX>::new();
     let _ = message.write_fmt(line);
     let _ = bootstrap::Client::new(PortTransport::new(kernel)).log_str(LOG_TAG, message.as_str());

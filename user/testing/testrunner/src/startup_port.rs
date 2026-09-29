@@ -1,7 +1,7 @@
 //! Библиотека родителя на стартовом порту: заявки импортёров, уход и перезапуск детей, журнал
 //! детей и глубина ресурса родителя.
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 
 use component_abi::SessionError;
@@ -14,7 +14,7 @@ use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kin
 use kernel_tests::kernel_test;
 use managed_component::{Departure, GrantError, Outcome, Status};
 use runtime::{Instant, JoinHandle, PortTransport, Priority, Timeout, port_send, spawn_owned};
-use syscall::{MAX_RESOURCE_DEPTH, Rights, SyscallError};
+use syscall::{MAX_RESOURCE_DEPTH, ProcessName, Rights, SyscallError};
 
 use crate::{
     child_steps_protocol::{
@@ -31,13 +31,13 @@ use crate::{
 
 type Debt = IssuedHandle<kind::Reply>;
 
-const STEPS_ENTRY: &str = "/child-steps-fixture/program";
-const IMPORTER_ENTRY: &str = "/probe-importer-fixture/program";
-const TWO_REQUIREMENTS_ENTRY: &str = "/two-requirements-fixture/program";
-const HELPER_PANIC_ENTRY: &str = "/helper-panic-fixture/program";
-const CLOSED_ENTRY: &str = "/managed-startup-closed/program";
-const EXPORT_ENTRY: &str = "/export-fixture/program";
-const IDLE_EXPORT_ENTRY: &str = "/idle-export-fixture/program";
+const STEPS_ENTRY: &str = "/child-steps-fixture/exec";
+const IMPORTER_ENTRY: &str = "/probe-importer-fixture/exec";
+const TWO_REQUIREMENTS_ENTRY: &str = "/two-requirements-fixture/exec";
+const HELPER_PANIC_ENTRY: &str = "/helper-panic-fixture/exec";
+const CLOSED_ENTRY: &str = "/managed-startup-closed/exec";
+const EXPORT_ENTRY: &str = "/export-fixture/exec";
+const IDLE_EXPORT_ENTRY: &str = "/idle-export-fixture/exec";
 
 const PROVIDER: &str = "provider";
 const SECOND_PROVIDER: &str = "second-provider";
@@ -48,11 +48,8 @@ const CLOSED: &str = "closed";
 
 const STEPS_REQUIREMENT: &str = "steps";
 const PROBE_REQUIREMENT: &str = "probe";
-const AREA_REQUIREMENT: &str = "area";
 const FIRST_REQUIREMENT: &str = "first";
 const SECOND_REQUIREMENT: &str = "second";
-
-const AREA: &str = "/area";
 
 const STEP_WAIT: Timeout = Timeout::from_secs(5);
 const SHORT_WAIT: Timeout = Timeout::from_millis(100);
@@ -93,7 +90,6 @@ struct Steps {
 struct Reported {
     outcome: u32,
     value: u64,
-    scope: String,
 }
 
 #[derive(Default)]
@@ -103,16 +99,10 @@ struct Received {
 }
 
 impl child_steps::Service<Delivery> for Received {
-    fn next(
-        &mut self,
-        _frame: &Delivery,
-        report: Report<'_>,
-        reply: child_steps::next::Reply<Debt>,
-    ) {
+    fn next(&mut self, _frame: &Delivery, report: Report, reply: child_steps::next::Reply<Debt>) {
         self.report = Some(Reported {
             outcome: report.outcome,
             value: report.value,
-            scope: report.scope.as_str().into(),
         });
         self.reply = Some(reply);
     }
@@ -180,22 +170,17 @@ impl Steps {
 }
 
 fn report(outcome: u32, value: u64) -> Reported {
-    Reported {
-        outcome,
-        value,
-        scope: String::new(),
-    }
+    Reported { outcome, value }
 }
 
 fn started(logged: bool) -> Reported {
     report(outcome::STARTED, u64::from(logged))
 }
 
-fn accepted(scope: &str) -> Reported {
+fn accepted() -> Reported {
     Reported {
         outcome: outcome::ACCEPTED,
         value: 0,
-        scope: scope.into(),
     }
 }
 
@@ -299,7 +284,7 @@ fn an_undelivered_request_waits_for_the_next_accept() {
     let importer = probe_importer(&parent, provider);
     let asking = ask(&importer, PROBE_REQUIREMENT);
     kernel_tests::kassert!(parent.await_requests(1));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(finished(asking), GRANTED);
 }
@@ -320,7 +305,7 @@ fn a_session_the_importer_did_not_receive_is_closed_by_the_provider() {
         )),
         failed(IpcError::Timeout)
     );
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(
         steps.run(Step::answer_badged(SESSION_BADGE)),
         answered(false)
@@ -340,7 +325,7 @@ fn a_provider_refusal_reaches_the_importer() {
     let importer = probe_importer(&parent, provider);
 
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(
         steps.run(Step::answer_refusal(SessionError::Refused)),
         answered(true)
@@ -357,7 +342,7 @@ fn a_dropped_request_ends_the_importer_wait() {
     let importer = probe_importer(&parent, provider);
 
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::drop_request()), report(outcome::DROPPED, 0));
     kernel_tests::kassert_eq!(finished(asking), failed(IpcError::PeerClosed));
 }
@@ -380,7 +365,7 @@ fn a_repeated_session_request_takes_the_place_of_the_waiting_one() {
     );
     let repeat = ask(&importer, PROBE_REQUIREMENT);
     kernel_tests::kassert!(parent.await_requests(2));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(finished(repeat), GRANTED);
     kernel_tests::kassert_eq!(
@@ -403,7 +388,7 @@ fn a_session_request_replaced_by_a_repeat_is_answered_with_no_space() {
     kernel_tests::kassert!(parent.await_requests(2));
     kernel_tests::kassert_eq!(finished(first), refused(SessionError::NoSpace));
 
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(finished(second), GRANTED);
 }
@@ -423,7 +408,7 @@ fn a_repeated_accept_takes_the_place_of_the_waiting_one() {
     steps.send(Step::accept(Timeout::INFINITE));
     kernel_tests::kassert!(parent.await_accepts(2));
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert_eq!(steps.next(), accepted(""));
+    kernel_tests::kassert_eq!(steps.next(), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(finished(asking), GRANTED);
 }
@@ -469,7 +454,7 @@ fn a_waiting_request_outlives_the_departure_of_the_provider() {
 
     parent.restart(provider);
     kernel_tests::kassert_eq!(steps.next(), started(true));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(finished(asking), GRANTED);
 }
@@ -485,7 +470,7 @@ fn a_session_request_lost_with_the_provider_is_repeated_by_the_start() {
         Answer::export::<probe::Protocol>(provider),
     ));
 
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     steps.send(Step::exit(FAILURE_EXIT_CODE));
     kernel_tests::kassert_eq!(
         parent.departure(DEPARTURE_WAIT),
@@ -495,7 +480,7 @@ fn a_session_request_lost_with_the_provider_is_repeated_by_the_start() {
 
     parent.restart(provider);
     kernel_tests::kassert_eq!(steps.next(), started(true));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(parent.departure(QUIET_WAIT), None);
     kernel_tests::kassert_eq!(parent.status(importer), Some(Status::Running));
@@ -518,7 +503,7 @@ fn an_accept_is_paired_only_with_requests_routed_to_its_provider() {
         other.run(Step::accept(SHORT_WAIT)),
         step_failed(IpcError::Timeout)
     );
-    kernel_tests::kassert_eq!(routed.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(routed.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(routed.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(finished(asking), GRANTED);
 }
@@ -559,7 +544,7 @@ fn a_refused_requirement_ends_the_start_and_keeps_the_earlier_capabilities() {
             )
             .requirement(SECOND_REQUIREMENT, Answer::Refuse),
     );
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(""));
+    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(
         steps.run(Step::answer_badged(SESSION_BADGE)),
         answered(true)
@@ -722,60 +707,6 @@ fn a_log_session_of_a_departed_incarnation_is_revoked() {
 }
 
 #[kernel_test]
-fn a_provider_without_scopes_refuses_a_scoped_request() {
-    let parent = Parent::start();
-    let provider = parent.add(Child::new(EXPORT_ENTRY, PROVIDER).export::<probe::Protocol>());
-    let importer = parent.importer(vec![
-        (
-            AREA_REQUIREMENT,
-            Answer::Export {
-                provider,
-                protocol: probe::Protocol::ID,
-                scope: AREA,
-            },
-        ),
-        (
-            PROBE_REQUIREMENT,
-            Answer::export::<probe::Protocol>(provider),
-        ),
-    ]);
-
-    kernel_tests::kassert_eq!(
-        asked(&request::<probe::Protocol>(
-            importer.as_raw(),
-            AREA_REQUIREMENT,
-            WORKER_WAIT
-        )),
-        refused(SessionError::Refused)
-    );
-    let session = request::<probe::Protocol>(importer.as_raw(), PROBE_REQUIREMENT, WORKER_WAIT)
-        .expect("session call")
-        .expect("whole export granted");
-    kernel_tests::kassert_eq!(session.client().with_wait(WORKER_WAIT).ping(PING), Ok(PING));
-}
-
-#[kernel_test]
-fn a_provider_receives_the_scope_its_parent_named() {
-    let parent = Parent::start();
-    let mut steps = Steps::new();
-    let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
-    let importer = parent.importer(vec![(
-        AREA_REQUIREMENT,
-        Answer::Export {
-            provider,
-            protocol: probe::Protocol::ID,
-            scope: AREA,
-        },
-    )]);
-
-    let asking = ask(&importer, AREA_REQUIREMENT);
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted(AREA));
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(finished(asking), GRANTED);
-}
-
-#[kernel_test]
 fn an_idle_provider_calls_accept_once() {
     let parent = Parent::start();
     let mut steps = Steps::new();
@@ -787,7 +718,7 @@ fn an_idle_provider_calls_accept_once() {
         PROBE_REQUIREMENT,
         Answer::export::<probe::Protocol>(provider),
     ));
-    kernel_tests::kassert_eq!(steps.next(), accepted(""));
+    kernel_tests::kassert_eq!(steps.next(), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     steps.send(Step::wait());
 
@@ -842,7 +773,7 @@ fn a_repeated_key_in_add_is_refused() {
         .add(
             0u16,
             program,
-            PROVIDER,
+            ProcessName::new(PROVIDER).expect("fixture process name"),
             &resource,
             budget,
             Timeout::from_secs(1),
@@ -853,7 +784,7 @@ fn a_repeated_key_in_add_is_refused() {
         children.add(
             0u16,
             program,
-            PROVIDER,
+            ProcessName::new(PROVIDER).expect("fixture process name"),
             &resource,
             budget,
             Timeout::from_secs(1)
@@ -874,7 +805,7 @@ fn next_launch_is_infinite_without_a_waiting_record_and_poll_with_a_fresh_one() 
         .add(
             0u16,
             program,
-            PROVIDER,
+            ProcessName::new(PROVIDER).expect("fixture process name"),
             &resource,
             budget,
             Timeout::from_secs(1),

@@ -26,7 +26,7 @@ impl<F: ipc::ReceivedResources> calculator::Service<F> for Calculator {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let CalculatorStartup { parent } = components::requirements(CalculatorStartup::request)?;
+    let CalculatorStartup { parent } = components::requirements::<CalculatorStartup>()?;
     let service = Port::create()?;
 
     let port = &service;

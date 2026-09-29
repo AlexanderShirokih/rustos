@@ -1,6 +1,8 @@
 //! Абсолютный путь контракта: непустые компоненты без `.` и `..` в границах `PATH_MAX` и
 //! `NAME_MAX`. Разбор идёт по срезу исходной строки, без аллокации.
 
+use alloc::string::String;
+
 use crate::{
     error::FileSystemError,
     limits::{NAME_MAX, PATH_MAX},
@@ -34,6 +36,10 @@ macro_rules! const_path {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Path<'a>(&'a str);
 
+/// Проверенный абсолютный путь с собственной строкой.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathBuf(String);
+
 /// Компонент пути.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Component<'a>(&'a str);
@@ -64,6 +70,27 @@ impl<'a> Path<'a> {
 
     pub const fn is_root(self) -> bool {
         self.0.len() == 1
+    }
+
+    /// Возвращает новый путь, добавляя указанный сегмент к текущему.
+    pub fn join_segment(self, name: &str) -> Result<PathBuf, FileSystemError> {
+        let name = Component::new(name)?;
+        let separator = usize::from(!self.is_root());
+        let len = self.0.len() + separator + name.0.len();
+        if len > PATH_MAX {
+            return Err(FileSystemError::InvalidPath);
+        }
+
+        let mut text = String::new();
+        text.try_reserve_exact(len)
+            .map_err(|_| FileSystemError::NoSpace)?;
+        text.push_str(self.0);
+        if separator != 0 {
+            text.push(SEPARATOR);
+        }
+        text.push_str(name.0);
+
+        Ok(PathBuf(text))
     }
 
     /// Компоненты пути от корня. У корня перечисление пусто.
@@ -105,6 +132,12 @@ impl<'a> Path<'a> {
             return Some(Self::ROOT);
         }
         rest.starts_with(SEPARATOR).then_some(Self(rest))
+    }
+}
+
+impl PathBuf {
+    pub fn as_path(&self) -> Path<'_> {
+        Path(&self.0)
     }
 }
 
@@ -236,6 +269,50 @@ mod tests {
 
     fn rejected(text: &str) -> bool {
         Path::new(text) == Err(FileSystemError::InvalidPath)
+    }
+
+    #[test]
+    fn appended_segments_keep_the_path_contract() {
+        for directory in ["/", "/tmp/files-demo"] {
+            let path = Path::new(directory).expect("directory");
+            let joined = path.join_segment("note.txt").expect("segment");
+            let (parent, name) = joined.as_path().split_last().expect("child path");
+
+            assert_eq!(parent, path);
+            assert_eq!(name.as_str(), "note.txt");
+            assert_eq!(Path::new(joined.as_path().as_str()), Ok(joined.as_path()));
+        }
+
+        for name in ["", ".", "..", "a/b", "/a"] {
+            assert_eq!(
+                Path::ROOT.join_segment(name),
+                Err(FileSystemError::InvalidPath)
+            );
+        }
+        assert_eq!(
+            Path::ROOT.join_segment(&"x".repeat(NAME_MAX + 1)),
+            Err(FileSystemError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn appending_a_segment_checks_the_full_path_limit() {
+        let directory = std::format!(
+            "/{}/{}/{}/{}",
+            "a".repeat(NAME_MAX),
+            "b".repeat(NAME_MAX),
+            "c".repeat(NAME_MAX),
+            "d".repeat(PATH_MAX - 3 * (NAME_MAX + 1) - 3),
+        );
+        let directory = Path::new(&directory).expect("directory");
+
+        let joined = directory.join_segment("x").expect("path at the limit");
+
+        assert_eq!(joined.as_path().as_str().len(), PATH_MAX);
+        assert_eq!(
+            directory.join_segment("xx"),
+            Err(FileSystemError::InvalidPath)
+        );
     }
 
     #[test]

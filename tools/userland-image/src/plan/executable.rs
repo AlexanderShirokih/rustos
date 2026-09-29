@@ -16,11 +16,11 @@ pub(super) fn boot_program<'a>(programs: &[PlanProgram<'a>]) -> Result<PlanProgr
             boot.len()
         );
     };
-    if let Some(requirement) = boot.manifest.requirements.first() {
+    if let Some(requirement) = boot.manifest()?.requirements().next() {
         bail!(
             "boot program '{}' declares requirement '{}'; a program without a parent takes none",
             boot.bin,
-            requirement.name
+            requirement.name()
         );
     }
     Ok(boot)

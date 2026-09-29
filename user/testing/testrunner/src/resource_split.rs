@@ -6,7 +6,7 @@
 use kernel_objects::{Process, Resource, Signal, ThreadEntry};
 use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Priority};
-use syscall::{Rights, SyscallError};
+use syscall::{ProcessName, Rights, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::{
@@ -109,7 +109,8 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
     let write_only = resource
         .duplicate(Rights::WRITE, None)
         .expect("write-only resource capability");
-    let process = Process::create("resource-rights").expect("process create");
+    let process = Process::create(ProcessName::new("resource-rights").expect("process name"))
+        .expect("process create");
     let bootstrap = Signal::create().expect("signal create");
 
     let entry = ThreadEntry {

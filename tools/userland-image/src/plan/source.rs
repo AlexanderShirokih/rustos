@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
@@ -23,9 +21,7 @@ pub(super) struct ComponentEntry {
     #[serde(default)]
     pub(super) restarts: u32,
     #[serde(default)]
-    pub(super) bind: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(super) scope: BTreeMap<String, String>,
+    pub(super) mountpoint: Option<String>,
 }
 
 fn default_plan_version() -> u16 {

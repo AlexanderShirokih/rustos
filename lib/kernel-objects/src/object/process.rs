@@ -1,6 +1,6 @@
 //! Типизированная обёртка над процессом ядра.
 
-use syscall::{SIGNALED, Timeout, kind};
+use syscall::{ProcessName, SIGNALED, Timeout, kind};
 
 use crate::{
     error::{Error, Result, unit, value},
@@ -14,8 +14,8 @@ pub type Process = OwnedHandle<kind::Process>;
 
 impl OwnedHandle<kind::Process> {
     /// Создаёт пустой процесс с именем `name`.
-    pub fn create(name: &str) -> Result<Self> {
-        svc::process_create(name.as_bytes())
+    pub fn create(name: ProcessName<'_>) -> Result<Self> {
+        svc::process_create(name.as_str().as_bytes())
             .map(Self::from)
             .map_err(Error::Syscall)
     }
