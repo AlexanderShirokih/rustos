@@ -1,15 +1,14 @@
 //! Типизированная обёртка над rendezvous-эндпоинтом ядра и одноразовым reply.
 
-use core::num::{NonZeroU32, NonZeroU64};
+use core::num::NonZeroU64;
 
 use syscall::{
-    Handle, IPC_BUFFER_DATA_MAX, IpcBuffer, Rights, SyscallError, Timeout, decode_tag, encode_tag,
-    kind,
+    IPC_BUFFER_DATA_MAX, IpcBuffer, Rights, SyscallError, Timeout, decode_tag, encode_tag, kind,
 };
 use syscall_user::ipc_buffer_ptr;
 
 use crate::{
-    error::{Error, Result, unit, value},
+    error::{Error, Result, unit},
     handle::OwnedHandle,
     svc,
 };
@@ -69,9 +68,7 @@ pub struct ServicePort {
 impl OwnedHandle<kind::Port> {
     /// Создаёт `Port` в текущей таблице.
     pub fn create() -> Result<Self> {
-        svc::port_create()
-            .map(Self::from_handle)
-            .map_err(Error::Syscall)
+        svc::port_create().map(Self::from).map_err(Error::Syscall)
     }
 
     /// Создаёт порт и разделяет его стороны. Клиентская capability минтится как
@@ -98,12 +95,9 @@ impl OwnedHandle<kind::Port> {
     /// `Some(Reply)`, если встречный был `call`, иначе `None`. `SenderGone`:
     /// нет кадра, значок ушедшей стороны лежит в `IpcBuffer.badge`.
     pub fn recv(&self, timeout: Timeout) -> Result<Option<Reply>> {
-        let reply_raw = value(svc::port_recv(self.as_raw(), timeout))?;
-        #[allow(clippy::cast_possible_truncation)]
-        let reply_id = reply_raw as u32;
-        // Граница ABI: неотрицательный возврат называет reply-handle встречного `call`.
-        Ok(NonZeroU32::new(reply_id)
-            .map(|id| Reply::from_handle(Handle::<kind::Reply>::from_abi(id))))
+        svc::port_recv(self.as_raw(), timeout)
+            .map(|reply| reply.map(Reply::from))
+            .map_err(Error::Syscall)
     }
 
     /// Отправляет сообщение из IPC-буфера текущего потока и получает ответ туда же.
@@ -137,10 +131,10 @@ impl OwnedHandle<kind::Port> {
 }
 
 impl OwnedHandle<kind::Reply> {
-    /// Доставляет ответ из IPC-буфера сервера вызывателю. Ядро снимает reply-хэндл
-    /// безусловно, и повторный `Drop`-close подавлен.
+    /// Доставляет ответ из IPC-буфера сервера вызывателю. Ядро изымает reply-хэндл при
+    /// любом исходе.
     pub fn reply(self) -> Result<()> {
-        unit(svc::port_reply(self.into_raw()))
+        unit(svc::port_reply(self.into_issued()))
     }
 
     /// Отвечает телом без caps: пишет `body` в IPC-буфер и вызывает

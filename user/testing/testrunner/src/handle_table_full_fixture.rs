@@ -6,9 +6,8 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use kernel_objects::{Port, kind};
-use runtime::{Timeout, handle_close, thread_exit};
-use syscall::Handle;
+use kernel_objects::Port;
+use runtime::{Timeout, take_bootstrap, thread_exit};
 
 mod handle_table_fill;
 
@@ -17,8 +16,13 @@ use handle_table_fill::fill_handle_table;
 const FAILED_EXIT_CODE: u64 = 1;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(server: Handle<kind::Port>) -> ! {
-    let server = Port::from_handle(server);
+pub extern "C" fn _start(server: u32) -> ! {
+    // SAFETY: `server` - значение `x0` точки входа, и точка входа исполняется один раз.
+    unsafe { runtime::start(server) };
+    let Some(server) = take_bootstrap() else {
+        thread_exit(FAILED_EXIT_CODE);
+    };
+    let server = Port::from(server.assume_kind());
     let Ok(parking) = Port::create() else {
         thread_exit(FAILED_EXIT_CODE);
     };
@@ -26,7 +30,7 @@ pub extern "C" fn _start(server: Handle<kind::Port>) -> ! {
     let Some(spare) = fill_handle_table() else {
         thread_exit(FAILED_EXIT_CODE);
     };
-    let _ = handle_close(spare);
+    drop(spare);
 
     if server.recv(Timeout::INFINITE).is_ok() {
         thread_exit(FAILED_EXIT_CODE);

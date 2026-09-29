@@ -32,7 +32,7 @@ pub use ring_transport::{RingConsumer, RingProducer};
 pub use session_transport::SessionTransport;
 pub use syscall::{ObjectKind, Priority, WaitableKind, kind};
 pub(crate) use syscall_user as svc;
-pub use syscall_user::{Delivery, PortTransport, ReceivedHandle};
+pub use syscall_user::{Delivery, IssuedHandle, PortTransport};
 
 /// Сессия протокола `P`, владеющая портом. Клиент строится `client`, а передача владеющим
 /// значением переносит порт получателю.

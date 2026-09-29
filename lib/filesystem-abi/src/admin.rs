@@ -18,20 +18,18 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU32;
     use std::vec::Vec;
 
-    use ipc::wire::{Cap, Session};
-    use ipc_test::{MockReply, MockResources};
-    use syscall::Handle;
+    use ipc::wire::Session;
+    use ipc_test::{MockHandle, MockReply, MockResources};
+    use syscall::kind;
 
     use super::{FileSystemError, namespace_admin};
     use crate::file_system;
 
-    const SESSION: Session<file_system::Protocol> = match NonZeroU32::new(0x41) {
-        Some(id) => Session::from_handle(Cap::from_handle(Handle::from_abi(id))),
-        None => panic!("non-zero"),
-    };
+    type FileSystemSession = Session<file_system::Protocol, MockHandle<kind::Port>>;
+
+    const SESSION: FileSystemSession = Session::from_handle(MockHandle::new(0x41));
 
     #[derive(Default)]
     struct RouterSink {
@@ -42,10 +40,10 @@ mod tests {
         fn mount(
             &mut self,
             _frame: &MockResources,
-            filesystem: Session<file_system::Protocol>,
+            filesystem: FileSystemSession,
             reply: namespace_admin::mount::Reply<MockReply>,
         ) {
-            self.mounted.push(filesystem.into_handle().raw().get());
+            self.mounted.push(filesystem.into_handle().raw());
             reply
                 .send(Ok::<(), FileSystemError>(()))
                 .expect("the caller waits");
@@ -67,6 +65,6 @@ mod tests {
             assert_eq!(client.mount(SESSION).expect("call"), Ok(()));
             server.join().expect("server joins");
         });
-        assert_eq!(sink.mounted, [SESSION.into_handle().raw().get()]);
+        assert_eq!(sink.mounted, [SESSION.into_handle().raw()]);
     }
 }

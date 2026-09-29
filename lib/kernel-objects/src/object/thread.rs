@@ -35,15 +35,13 @@ impl OwnedHandle<kind::Thread> {
             entry.arg,
             u64::from(entry.priority),
         )
-        .map(Self::from_handle)
+        .map(Self::from)
         .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным потоком.
     pub fn self_thread() -> Result<Self> {
-        svc::thread_self()
-            .map(Self::from_handle)
-            .map_err(Error::Syscall)
+        svc::thread_self().map(Self::from).map_err(Error::Syscall)
     }
 
     /// Финальный exit-код завершённого потока.

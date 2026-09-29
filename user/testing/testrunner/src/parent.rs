@@ -5,7 +5,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{num::NonZeroU64, ops::ControlFlow};
 
 use component_abi::{
-    AcceptError, LOG_REQUIREMENT, MmioWindow, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
+    AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
     SessionError, SessionRequest, SessionRequirement, SessionScope,
     component_startup as startup_contract,
 };
@@ -13,7 +13,7 @@ use ipc::{
     Listener as _, Protocol as _, RecvError,
     wire::{MESSAGE_INLINE_MAX, Str},
 };
-use kernel_objects::{Delivery, Error, OwnedHandle, Port, ReceivedHandle, Resource, Session, kind};
+use kernel_objects::{Delivery, Error, IssuedHandle, OwnedHandle, Port, Resource, Session, kind};
 use log_abi::log;
 use managed_component::{Children, Departure, GrantError, Status};
 use runtime::{Instant, Mutex, PortTransport, Timeout};
@@ -26,7 +26,7 @@ use crate::{
     log_relay::component_log_session,
 };
 
-type Debt = ReceivedHandle<kind::Reply>;
+type Debt = IssuedHandle<kind::Reply>;
 
 const CHILD_SLACK: u64 = 1024 * 1024;
 
@@ -411,24 +411,6 @@ impl startup_contract::Service<Delivery> for State {
                 let _ = reply.send(Err::<Port, _>(SessionError::Refused));
             }
         }
-    }
-
-    fn irq(
-        &mut self,
-        frame: &Delivery,
-        _requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
-        reply: startup_contract::irq::Reply<Debt>,
-    ) {
-        let _ = reply.send(self.refuse_resource::<OwnedHandle<kind::IrqLine>>(frame.badge));
-    }
-
-    fn mmio(
-        &mut self,
-        frame: &Delivery,
-        _requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
-        reply: startup_contract::mmio::Reply<Debt>,
-    ) {
-        let _ = reply.send(self.refuse_resource::<MmioWindow>(frame.badge));
     }
 
     fn region(

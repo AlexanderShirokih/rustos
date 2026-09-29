@@ -152,6 +152,8 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
     let device_tree: &'static fdt::devicetree::DeviceTree =
         unsafe { core::mem::transmute(&device_tree) };
 
+    crate::power::install(device_tree);
+
     // До этой точки логический идентификатор CPU задан только значением по умолчанию,
     // поэтому подсистемы с per-CPU состоянием инициализируются ниже.
     init_cpu_topology(device_tree);
@@ -219,9 +221,6 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
         device_regions,
         boot_dtb,
     )));
-
-    #[cfg(feature = "power-semihosting")]
-    kernelspace::power::install(crate::power::machine_off_exit_code);
 
     kmain::<Aarch64Context, _>(
         driver_scanner,

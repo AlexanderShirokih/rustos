@@ -42,6 +42,8 @@ pub mod physical_address;
 pub mod range_allocator;
 pub mod region;
 pub mod relocatable_ptr;
+#[doc(hidden)]
+pub mod testing;
 pub mod user_vm_allocator;
 pub mod user_vm_context;
 pub mod virtual_address;

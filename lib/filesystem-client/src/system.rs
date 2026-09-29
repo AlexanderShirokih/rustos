@@ -2,7 +2,7 @@
 //! capability региона - отображением данных сессии.
 
 use filesystem_abi::{FileSystemError, file_system, namespace};
-use kernel_objects::{Mapping, MemoryRegion, ReceivedHandle, SessionTransport};
+use kernel_objects::{IssuedHandle, Mapping, MemoryRegion, SessionTransport};
 use syscall::{UserMemFlags, kind};
 
 use crate::{
@@ -50,13 +50,13 @@ impl SharedRegion for SessionRegion {
 }
 
 impl Environment for FileSystemEnvironment {
-    type Handle<K: syscall::ObjectKind> = ReceivedHandle<K>;
+    type Handle<K: syscall::ObjectKind> = IssuedHandle<K>;
     type Transport = SessionTransport;
     type Region = SessionRegion;
 
     fn connect(
         &self,
-        session: ipc::wire::Session<file_system::Protocol, ReceivedHandle<kind::Port>>,
+        session: ipc::wire::Session<file_system::Protocol, IssuedHandle<kind::Port>>,
     ) -> Result<SessionTransport, FileSystemError> {
         Ok(kernel_objects::Session::from_session(session)
             .client()
@@ -65,7 +65,7 @@ impl Environment for FileSystemEnvironment {
 
     fn map(
         &self,
-        region: ReceivedHandle<kind::MemoryRegion>,
+        region: IssuedHandle<kind::MemoryRegion>,
     ) -> Result<SessionRegion, FileSystemError> {
         // Маппинг жив, пока открыта капа региона.
         let region = MemoryRegion::from(region);

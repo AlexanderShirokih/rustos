@@ -16,15 +16,13 @@ impl OwnedHandle<kind::Process> {
     /// Создаёт пустой процесс с именем `name`.
     pub fn create(name: &str) -> Result<Self> {
         svc::process_create(name.as_bytes())
-            .map(Self::from_handle)
+            .map(Self::from)
             .map_err(Error::Syscall)
     }
 
     /// Возвращает обёртку над собственным процессом.
     pub fn self_process() -> Result<Self> {
-        svc::process_self()
-            .map(Self::from_handle)
-            .map_err(Error::Syscall)
+        svc::process_self().map(Self::from).map_err(Error::Syscall)
     }
 
     /// Загружает образ в процесс из сериализованного дескриптора `desc`.
@@ -35,29 +33,23 @@ impl OwnedHandle<kind::Process> {
     /// Запускает первый поток процесса с параметрами `entry`, передавая потомку
     /// стартовый хэндл-канал `handle`. `resource` задаёт метеринг-ресурс
     /// потомка, `None` отдаёт ему ресурс вызывающего. На `Ok` ядро забрало
-    /// `handle` (ушёл потомку), на `Err` он закрывается своим `Drop`.
+    /// `handle` (ушёл потомку), на `Err` он закрывается.
     pub fn start<K: syscall::ObjectKind>(
         &self,
         entry: ThreadEntry,
         handle: OwnedHandle<K>,
         resource: Option<&Resource>,
     ) -> Result<Thread> {
-        let result = svc::process_start(
+        svc::process_start(
             self.as_raw(),
             entry.entry_pc,
             entry.user_sp,
-            handle.as_raw(),
+            handle.into_issued(),
             u64::from(entry.priority),
             resource.map(Resource::as_raw),
-        );
-
-        match result {
-            Ok(thread) => {
-                let _ = handle.into_raw();
-                Ok(Thread::from_handle(thread))
-            }
-            Err(e) => Err(Error::Syscall(e)),
-        }
+        )
+        .map(Thread::from)
+        .map_err(Error::Syscall)
     }
 
     /// Блокирует до терминации процесса либо тайм-аута.

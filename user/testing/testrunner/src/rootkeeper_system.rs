@@ -1,8 +1,9 @@
-//! Требования, журнал, отказы, перезапуски, бюджет, устройства и файловые системы записей
-//! композиции rootkeeper.
+//! Требования, журнал, отказы, перезапуски, бюджет, выдача устройств `platform` и файловые
+//! системы записей композиции rootkeeper.
 
 use alloc::{string::String, vec::Vec};
 
+use bootstrap_abi::hardware;
 use component_abi::{
     AcceptError, LOG_REQUIREMENT, ResourceError, SessionError,
     component_startup as startup_contract,
@@ -19,6 +20,7 @@ use kernel_objects::{Error, IrqLine, MemoryRegion, Port, Session, SessionTranspo
 use kernel_tests::kernel_test;
 use log_abi::log;
 use log_relay::SourceNames as _;
+use platform_abi::{PlatformError, platform};
 use rootkeeper::{
     BootFailure, ImporterRequirement, Stopped,
     relay::{ComponentNames, log_badge},
@@ -27,8 +29,8 @@ use rtc_abi::rtc;
 use runtime::{JoinHandle, PortTransport, Priority, Timeout, spawn_owned};
 use syscall::SyscallError;
 use userland_image::{
-    ComponentSpec, DeviceSpec, PlanDecodeError, RequirementSource, RequirementSourceSpec,
-    RequirementSpec, USERLAND_PROGRAM_MAGIC,
+    ComponentSpec, PlanDecodeError, RequirementSource, RequirementSourceSpec, RequirementSpec,
+    USERLAND_PROGRAM_MAGIC,
 };
 
 use crate::{
@@ -36,7 +38,6 @@ use crate::{
         BOOT_PLAN_ENTRY, Composition, Importer, Mounted, ROUTER_NAME, admin, encoded, image, pause,
         request, view,
     },
-    device_forwarding_protocol::device_forwarding,
     filesystem::{connect, open, path},
     log_relay::{
         await_component_lines, await_component_sources, component_scenario_session,
@@ -55,10 +56,8 @@ const RAMFS: &str = "ramfs";
 const ROOT_VIEW: &str = "root";
 const NAMESPACE: &str = "namespace";
 const RTC_REQUIREMENT: &str = "rtc";
-const LINE: &str = "line";
-const WINDOW: &str = "window";
-const FIRST_WINDOW: &str = "first";
-const SECOND_WINDOW: &str = "second";
+const HARDWARE: &str = "hardware";
+const PLATFORM_REQUIREMENT: &str = "platform";
 const IMAGE: &str = "image";
 const AREA: &str = "area";
 const SPARE_VIEW: &str = "spare";
@@ -73,10 +72,12 @@ const NESTED_SPARE_MOUNT: &str = "/boot/spare";
 const NESTED_SPARE_PATH: &str = "/boot/spare/x";
 const AREA_SCOPE: &str = "/scope-consumer-fixture";
 
-const PROBE_PROVIDER: u16 = 0;
-const ROUTER_RECORD: u16 = 0;
-const RAM_FS_RECORD: u16 = 1;
-const IMAGE_FS_RECORD: u16 = 2;
+const BOOT_RECORD: u16 = 0;
+const PLATFORM_RECORD: u16 = 1;
+const PROBE_PROVIDER: u16 = 1;
+const ROUTER_RECORD: u16 = 1;
+const RAM_FS_RECORD: u16 = 2;
+const IMAGE_FS_RECORD: u16 = 3;
 
 const CALL_WAIT: Timeout = Timeout::from_secs(2);
 const REFUSAL_WAIT: Timeout = Timeout::from_secs(1);
@@ -108,38 +109,30 @@ const STARVED_MEMORY: u64 = 4096;
 const PROBE_EXPORTS: &[&str] = &[probe::Protocol::ID];
 const FILE_SYSTEM_EXPORTS: &[&str] = &[file_system::Protocol::ID];
 const ROUTER_EXPORTS: &[&str] = &[namespace::Protocol::ID, namespace_admin::Protocol::ID];
-const FORWARDING_EXPORTS: &[&str] = &[device_forwarding::Protocol::ID];
 
-const PL031: &[&str] = &["arm,pl031"];
-const ABSENT_CLOCK: &[&str] = &["acme,absent-clock"];
-const GPIO: &[&str] = &["arm,pl061"];
-const VIRTIO: &[&str] = &["virtio,mmio"];
+const PL031: &str = "arm,pl031";
+const VIRTIO: &str = "virtio,mmio";
+const ABSENT: &str = "vendor,absent";
 
-const RTC_DEVICES: &[RequirementSpec<'static>] =
-    &device_requirements(device(PL031, 0), device(PL031, 0));
-const ABSENT_DEVICES: &[RequirementSpec<'static>] =
-    &device_requirements(device(ABSENT_CLOCK, 0), device(ABSENT_CLOCK, 0));
-const SECOND_INSTANCE_DEVICES: &[RequirementSpec<'static>] =
-    &device_requirements(device(PL031, 1), device(PL031, 0));
-const GPIO_LINE_DEVICES: &[RequirementSpec<'static>] =
-    &device_requirements(device(GPIO, 0), device(PL031, 0));
-const FIRST_VIRTIO_DEVICES: &[RequirementSpec<'static>] =
-    &device_requirements(device(VIRTIO, 0), device(VIRTIO, 0));
-const SECOND_VIRTIO_DEVICES: &[RequirementSpec<'static>] =
-    &device_requirements(device(VIRTIO, 1), device(VIRTIO, 1));
-const VIRTIO_PAIR: &[RequirementSpec<'static>] = &[
-    RequirementSpec {
-        name: FIRST_WINDOW,
-        source: RequirementSourceSpec::Mmio(device(VIRTIO, 0)),
+const VIRTIO_REGION: u64 = 0xa00_0000;
+const VIRTIO_STRIDE: u64 = 0x200;
+
+const PLATFORM_REQUIREMENTS: &[RequirementSpec<'static>] = &[RequirementSpec {
+    name: HARDWARE,
+    source: RequirementSourceSpec::Export {
+        provider: BOOT_RECORD,
+        protocol: hardware::Protocol::ID,
+        scope: "",
     },
-    RequirementSpec {
-        name: SECOND_WINDOW,
-        source: RequirementSourceSpec::Mmio(device(VIRTIO, 1)),
+}];
+
+const PL031_PLATFORM: &[RequirementSpec<'static>] = &[RequirementSpec {
+    name: PLATFORM_REQUIREMENT,
+    source: RequirementSourceSpec::Export {
+        provider: PLATFORM_RECORD,
+        protocol: platform::Protocol::ID,
+        scope: PL031,
     },
-];
-const RTC_LINE: &[RequirementSpec<'static>] = &[RequirementSpec {
-    name: LINE,
-    source: RequirementSourceSpec::Irq(device(PL031, 0)),
 }];
 
 const RAM_FS_REQUIREMENTS: &[RequirementSpec<'static>] = &[namespace_requirement("/tmp")];
@@ -182,6 +175,15 @@ const PROBE_REQUIREMENTS: &[RequirementSpec<'static>] = &[RequirementSpec {
         scope: "",
     },
 }];
+
+const PARENT: ComponentSpec<'static> = ComponentSpec {
+    executable: "/testrunner",
+    name: "testrunner",
+    requirements: &[],
+    exports: &[hardware::Protocol::ID],
+    memory_limit: 0,
+    restarts: 0,
+};
 
 const EXPORT: ComponentSpec<'static> = fixture("/export-fixture", "export-fixture");
 const EXPORT_ENTRY: &str = "/export-fixture/program";
@@ -227,32 +229,29 @@ const HOLDER: ComponentSpec<'static> = ComponentSpec {
     ..fixture("/budget-holder-fixture", "budget-holder-fixture")
 };
 
+const PLATFORM: ComponentSpec<'static> = ComponentSpec {
+    executable: "/platform",
+    name: "platform",
+    requirements: PLATFORM_REQUIREMENTS,
+    exports: &[platform::Protocol::ID],
+    memory_limit: MIB,
+    restarts: 1,
+};
+
 const RTC: ComponentSpec<'static> = ComponentSpec {
     executable: "/driver-pl031",
     name: "driver-pl031",
-    requirements: RTC_DEVICES,
+    requirements: PL031_PLATFORM,
     exports: &[rtc::Protocol::ID],
     memory_limit: MIB,
     restarts: 0,
 };
 
-const FORWARDING: ComponentSpec<'static> = ComponentSpec {
-    requirements: RTC_DEVICES,
-    exports: FORWARDING_EXPORTS,
-    ..fixture("/device-forwarding-fixture", "device-forwarding-fixture")
-};
-
 const IRQ: ComponentSpec<'static> = ComponentSpec {
-    requirements: RTC_LINE,
+    requirements: PL031_PLATFORM,
     exports: &[],
     restarts: 1,
     ..fixture("/irq-fixture", "irq-fixture")
-};
-
-const MMIO_PAIR: ComponentSpec<'static> = ComponentSpec {
-    requirements: VIRTIO_PAIR,
-    exports: &[],
-    ..fixture("/mmio-pair-fixture", "mmio-pair-fixture")
 };
 
 const ROUTER: ComponentSpec<'static> = ComponentSpec {
@@ -317,30 +316,6 @@ const fn fixture(executable: &'static str, name: &'static str) -> ComponentSpec<
     }
 }
 
-const fn device(compatible: &'static [&'static str], instance: u16) -> DeviceSpec<'static> {
-    DeviceSpec {
-        compatible,
-        instance,
-        resource: 0,
-    }
-}
-
-const fn device_requirements(
-    line: DeviceSpec<'static>,
-    window: DeviceSpec<'static>,
-) -> [RequirementSpec<'static>; 2] {
-    [
-        RequirementSpec {
-            name: LINE,
-            source: RequirementSourceSpec::Irq(line),
-        },
-        RequirementSpec {
-            name: WINDOW,
-            source: RequirementSourceSpec::Mmio(window),
-        },
-    ]
-}
-
 const fn namespace_requirement(scope: &'static str) -> RequirementSpec<'static> {
     RequirementSpec {
         name: NAMESPACE,
@@ -374,7 +349,11 @@ const fn file_system_of(
 }
 
 fn scenario(components: &[ComponentSpec<'_>]) -> Composition {
-    let plan = encoded(components);
+    started(&[&[PARENT], components].concat())
+}
+
+fn started(records: &[ComponentSpec<'_>]) -> Composition {
+    let plan = encoded(records);
     start_component_relay(ComponentNames::of(&plan));
     Composition::start(plan, component_scenario_session)
 }
@@ -392,15 +371,6 @@ fn ping(importer: &Importer, requirement: &str) -> Result<u64, IpcError> {
         .ping(PING)
 }
 
-const fn forwarding_of(name: &'static str) -> ImporterRequirement<'static> {
-    ImporterRequirement {
-        name,
-        provider: name,
-        protocol: device_forwarding::Protocol::ID,
-        scope: "",
-    }
-}
-
 fn requested<P: Protocol>(
     importer: &Importer,
     requirement: &str,
@@ -409,16 +379,43 @@ fn requested<P: Protocol>(
     request::<P>(importer.handle(), requirement, wait).map(|answer| answer.map(drop))
 }
 
-fn forwarding(
-    importer: &Importer,
-    requirement: &str,
-) -> Result<Result<(), SessionError>, IpcError> {
-    requested::<device_forwarding::Protocol>(importer, requirement, CALL_WAIT)
+const fn platform_of(name: &'static str, scope: &'static str) -> ImporterRequirement<'static> {
+    ImporterRequirement {
+        name,
+        provider: PLATFORM.name,
+        protocol: platform::Protocol::ID,
+        scope,
+    }
 }
 
-fn await_revoked(window: &MemoryRegion) -> bool {
+fn platform_session(importer: &Importer, requirement: &str) -> platform::Client<SessionTransport> {
+    importer
+        .session::<platform::Protocol>(requirement)
+        .client()
+        .with_wait(CALL_WAIT)
+}
+
+fn line(session: &platform::Client<SessionTransport>) -> Result<IrqLine, PlatformError> {
+    session.irq(0, 0).expect("irq call").map(IrqLine::from)
+}
+
+fn window(
+    session: &platform::Client<SessionTransport>,
+    instance: u16,
+) -> Result<(MemoryRegion, u64), PlatformError> {
+    session
+        .mmio(instance, 0)
+        .expect("mmio call")
+        .map(|window| (MemoryRegion::from(window.region), window.offset))
+}
+
+fn region_base(region: &MemoryRegion) -> u64 {
+    region.inspect().expect("region inspects").base
+}
+
+fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
     (0..REVOKE_POLLS).any(|_| {
-        let revoked = window.inspect().err() == Some(Error::Syscall(SyscallError::Revoked));
+        let revoked = inspect().err() == Some(Error::Syscall(SyscallError::Revoked));
         if !revoked {
             pause(REVOKE_POLL);
         }
@@ -502,23 +499,23 @@ fn written(client: &file_system::Client<SessionTransport>) -> Result<NodeKind, F
 
 fn refusals() -> Vec<String> {
     let composition = scenario(&[EXPORT, REFUSAL_PROBE]);
-    let lines = await_component_lines(REFUSAL_PROBE.name, 6);
+    let lines = await_component_lines(REFUSAL_PROBE.name, 5);
     finish(composition);
     lines
 }
 
 #[kernel_test]
 fn a_log_badge_names_its_record() {
-    let plan = encoded(&[EXPORT, IDLE_EXPORT]);
+    let plan = encoded(&[PARENT, EXPORT, IDLE_EXPORT]);
     let names = ComponentNames::of(&plan);
 
-    for (record, component) in (0..).zip([EXPORT, IDLE_EXPORT]) {
+    for (record, component) in (1..).zip([EXPORT, IDLE_EXPORT]) {
         let name = names
             .name(log_badge(record).get())
             .expect("record badge is named");
         kernel_tests::kassert_eq!(name.as_str(), component.name);
     }
-    kernel_tests::kassert!(names.name(log_badge(2).get()).is_none());
+    kernel_tests::kassert!(names.name(log_badge(3).get()).is_none());
 }
 
 #[kernel_test]
@@ -577,15 +574,6 @@ fn a_requirement_outside_the_record_of_the_caller_is_refused_at_once() {
 }
 
 #[kernel_test]
-fn a_requirement_asked_by_an_operation_of_another_kind_is_refused_at_once() {
-    kernel_tests::kassert!(
-        refusals()
-            .iter()
-            .any(|line| line == "kind Ok(Err(Refused))")
-    );
-}
-
-#[kernel_test]
 fn a_session_requirement_of_another_protocol_is_refused_at_once() {
     kernel_tests::kassert!(
         refusals()
@@ -617,6 +605,20 @@ fn a_region_asked_on_a_session_requirement_is_refused_at_once() {
             .iter()
             .any(|line| line == "region Ok(Err(Refused))")
     );
+}
+
+#[kernel_test]
+fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
+    let composition = started(&[ComponentSpec {
+        exports: PROBE_EXPORTS,
+        ..PARENT
+    }]);
+    let importer = composition.importer(&[probe_of(PROBE, PARENT.name)]);
+
+    let answer = requested::<probe::Protocol>(&importer, PROBE, CALL_WAIT);
+
+    kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Refused)));
+    finish(composition);
 }
 
 #[kernel_test]
@@ -864,8 +866,8 @@ fn a_launch_short_of_memory_removes_the_child_without_stopping_the_root() {
 }
 
 #[kernel_test]
-fn a_device_component_serves_time_over_a_minted_session() {
-    let composition = scenario(&[RTC]);
+fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
+    let composition = scenario(&[PLATFORM, RTC]);
     let importer = composition.importer(&[ImporterRequirement {
         name: RTC_REQUIREMENT,
         provider: RTC.name,
@@ -886,193 +888,113 @@ fn a_device_component_serves_time_over_a_minted_session() {
 }
 
 #[kernel_test]
-fn a_restarted_child_takes_its_irq_line_again() {
-    let composition = scenario(&[IRQ]);
+fn a_restarted_child_takes_the_same_line_and_region_again() {
+    let composition = scenario(&[PLATFORM, IRQ]);
+
+    let lines = await_component_lines(IRQ.name, 2);
+
+    kernel_tests::kassert_eq!(lines.len(), 2);
+    kernel_tests::kassert!(lines[0].starts_with("line and region "));
+    kernel_tests::kassert_eq!(lines[0], lines[1]);
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_compatible_outside_the_platform_description_is_not_described() {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, ABSENT)]);
+
+    let session = platform_session(&importer, PLATFORM_REQUIREMENT);
+
+    kernel_tests::kassert_eq!(line(&session).map(drop), Err(PlatformError::NotDescribed));
+    drop(session);
+    finish(composition);
+}
+
+#[kernel_test]
+fn an_instance_outside_the_platform_description_is_not_described() {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, PL031)]);
+
+    let session = platform_session(&importer, PLATFORM_REQUIREMENT);
 
     kernel_tests::kassert_eq!(
-        await_component_lines(IRQ.name, 2),
-        ["line taken", "line taken"]
+        window(&session, 1).map(drop),
+        Err(PlatformError::NotDescribed)
     );
+    drop(session);
     finish(composition);
 }
 
 #[kernel_test]
-fn a_restarted_child_takes_its_mmio_window_again() {
-    let composition = scenario(&[ComponentSpec {
-        restarts: 1,
-        ..FORWARDING
-    }]);
-    let importer = composition.importer(&[forwarding_of(FORWARDING.name)]);
+fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes() {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, PL031)]);
+    let first = platform_session(&importer, PLATFORM_REQUIREMENT);
+    let second = platform_session(&importer, PLATFORM_REQUIREMENT);
+    let held_line = line(&first).expect("first session takes the line");
+    let (held_region, _) = window(&first, 0).expect("first session takes the region");
 
-    let first = importer
-        .session::<device_forwarding::Protocol>(FORWARDING.name)
-        .client()
-        .with_wait(CALL_WAIT)
-        .forward()
-        .expect("forward call");
-    // Фикстура завершается после выдачи, и отзыв её окна означает уход первой incarnation.
-    kernel_tests::kassert!(await_revoked(&MemoryRegion::from(first.window)));
+    kernel_tests::kassert_eq!(line(&second).map(drop), Err(PlatformError::Taken));
+    kernel_tests::kassert_eq!(window(&second, 0).map(drop), Err(PlatformError::Taken));
 
-    // Сессию выдаёт только перезапущенная incarnation, и она стартует лишь с окном MMIO.
-    kernel_tests::kassert_eq!(forwarding(&importer, FORWARDING.name), Ok(Ok(())));
+    drop(first);
+
+    kernel_tests::kassert!(await_revoked(|| held_region.inspect()));
+    kernel_tests::kassert!(await_revoked(|| held_line.ack()));
+    kernel_tests::kassert!(line(&second).is_ok());
+    kernel_tests::kassert!(window(&second, 0).is_ok());
+    drop(second);
     finish(composition);
 }
 
 #[kernel_test]
-fn a_device_outside_the_platform_description_is_refused_to_its_record() {
-    let composition = scenario(&[
-        ComponentSpec {
-            requirements: ABSENT_DEVICES,
-            ..FORWARDING
-        },
-        NEIGHBOUR,
-    ]);
-    let importer = composition.importer(&[
-        forwarding_of(FORWARDING.name),
-        probe_of(PROBE, NEIGHBOUR.name),
-    ]);
+fn a_window_in_the_region_of_another_session_is_taken() {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, VIRTIO)]);
+    let first = platform_session(&importer, PLATFORM_REQUIREMENT);
+    let second = platform_session(&importer, PLATFORM_REQUIREMENT);
 
-    kernel_tests::kassert_eq!(
-        forwarding(&importer, FORWARDING.name),
-        Ok(Err(SessionError::Unavailable))
-    );
-    kernel_tests::kassert_eq!(ping(&importer, PROBE), Ok(PING));
+    let taken = window(&first, 0);
+
+    kernel_tests::kassert!(taken.is_ok());
+    kernel_tests::kassert_eq!(window(&second, 1).map(drop), Err(PlatformError::Taken));
+    drop((first, second, taken));
     finish(composition);
 }
 
 #[kernel_test]
-fn a_device_instance_outside_the_platform_is_refused_to_its_record() {
-    let composition = scenario(&[
-        ComponentSpec {
-            requirements: SECOND_INSTANCE_DEVICES,
-            ..FORWARDING
-        },
-        NEIGHBOUR,
-    ]);
-    let importer = composition.importer(&[
-        forwarding_of(FORWARDING.name),
-        probe_of(PROBE, NEIGHBOUR.name),
-    ]);
+fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets() {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, VIRTIO)]);
+    let session = platform_session(&importer, PLATFORM_REQUIREMENT);
 
-    kernel_tests::kassert_eq!(
-        forwarding(&importer, FORWARDING.name),
-        Ok(Err(SessionError::Unavailable))
-    );
-    kernel_tests::kassert_eq!(ping(&importer, PROBE), Ok(PING));
+    let (first, first_offset) = window(&session, 0).expect("first window");
+    let (second, second_offset) = window(&session, 1).expect("second window");
+
+    kernel_tests::kassert_eq!(region_base(&first), VIRTIO_REGION);
+    kernel_tests::kassert_eq!(region_base(&second), VIRTIO_REGION);
+    kernel_tests::kassert_eq!((first_offset, second_offset), (0, VIRTIO_STRIDE));
+    drop(session);
     finish(composition);
 }
 
 #[kernel_test]
-fn a_second_record_naming_a_taken_line_is_refused() {
-    let first = ComponentSpec {
-        name: "first-forwarding",
-        ..FORWARDING
-    };
-    let second = ComponentSpec {
-        name: "second-forwarding",
-        ..FORWARDING
-    };
-    let composition = scenario(&[first, second]);
-    let importer = composition.importer(&[forwarding_of(first.name), forwarding_of(second.name)]);
+fn the_grants_of_a_platform_incarnation_are_revoked_when_it_ends() {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT, PL031)]);
+    let session = platform_session(&importer, PLATFORM_REQUIREMENT);
+    let held_line = line(&session).expect("session takes the line");
+    let (held_region, _) = window(&session, 0).expect("session takes the region");
 
-    let answers = [
-        forwarding(&importer, first.name),
-        forwarding(&importer, second.name),
-    ];
+    composition.terminate(PLATFORM.name, TERMINATE_EXIT_CODE);
 
-    kernel_tests::kassert!(answers.contains(&Ok(Ok(()))));
-    kernel_tests::kassert!(answers.contains(&Ok(Err(SessionError::Unavailable))));
-    finish(composition);
-}
-
-#[kernel_test]
-fn a_second_record_naming_a_taken_window_is_refused() {
-    let gpio_line = ComponentSpec {
-        name: "gpio-line-forwarding",
-        requirements: GPIO_LINE_DEVICES,
-        ..FORWARDING
-    };
-    let alone = scenario(&[gpio_line]);
-    let importer = alone.importer(&[forwarding_of(gpio_line.name)]);
-    kernel_tests::kassert_eq!(forwarding(&importer, gpio_line.name), Ok(Ok(())));
-    finish(alone);
-
-    let composition = scenario(&[FORWARDING, gpio_line]);
-    let importer = composition.importer(&[
-        forwarding_of(FORWARDING.name),
-        forwarding_of(gpio_line.name),
-    ]);
-    let answers = [
-        forwarding(&importer, FORWARDING.name),
-        forwarding(&importer, gpio_line.name),
-    ];
-
-    kernel_tests::kassert!(answers.contains(&Ok(Ok(()))));
-    kernel_tests::kassert!(answers.contains(&Ok(Err(SessionError::Unavailable))));
-    finish(composition);
-}
-
-#[kernel_test]
-fn a_second_record_naming_a_window_in_a_taken_page_is_refused() {
-    let first = ComponentSpec {
-        name: "first-virtio-forwarding",
-        requirements: FIRST_VIRTIO_DEVICES,
-        ..FORWARDING
-    };
-    let second = ComponentSpec {
-        name: "second-virtio-forwarding",
-        requirements: SECOND_VIRTIO_DEVICES,
-        ..FORWARDING
-    };
-    for alone in [first, second] {
-        let composition = scenario(&[alone]);
-        let importer = composition.importer(&[forwarding_of(alone.name)]);
-        kernel_tests::kassert_eq!(forwarding(&importer, alone.name), Ok(Ok(())));
-        finish(composition);
-    }
-
-    let composition = scenario(&[first, second]);
-    let importer = composition.importer(&[forwarding_of(first.name), forwarding_of(second.name)]);
-    let answers = [
-        forwarding(&importer, first.name),
-        forwarding(&importer, second.name),
-    ];
-
-    kernel_tests::kassert!(answers.contains(&Ok(Ok(()))));
-    kernel_tests::kassert!(answers.contains(&Ok(Err(SessionError::Unavailable))));
-    finish(composition);
-}
-
-#[kernel_test]
-fn windows_of_one_record_in_one_page_share_the_region_at_their_offsets() {
-    let composition = scenario(&[MMIO_PAIR]);
-
-    kernel_tests::kassert_eq!(
-        await_component_lines(MMIO_PAIR.name, 1),
-        ["regions 0xa000000 0xa000000 offsets 0x0 0x200"]
-    );
-    finish(composition);
-}
-
-#[kernel_test]
-fn a_forwarded_device_grant_is_revoked_when_its_incarnation_ends() {
-    let composition = scenario(&[FORWARDING]);
-    let importer = composition.importer(&[forwarding_of(FORWARDING.name)]);
-
-    let forwarded = importer
-        .session::<device_forwarding::Protocol>(FORWARDING.name)
-        .client()
-        .with_wait(CALL_WAIT)
-        .forward()
-        .expect("forward call");
-    let window = MemoryRegion::from(forwarded.window);
-    let line = IrqLine::from(forwarded.line);
-
-    kernel_tests::kassert!(await_revoked(&window));
-    kernel_tests::kassert_eq!(
-        line.ack().err(),
-        Some(Error::Syscall(SyscallError::Revoked))
-    );
+    kernel_tests::kassert!(await_revoked(|| held_region.inspect()));
+    kernel_tests::kassert!(await_revoked(|| held_line.ack()));
+    let renewed = platform_session(&importer, PLATFORM_REQUIREMENT);
+    kernel_tests::kassert!(line(&renewed).is_ok());
+    kernel_tests::kassert!(window(&renewed, 0).is_ok());
+    drop((session, renewed));
     finish(composition);
 }
 

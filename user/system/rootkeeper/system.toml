@@ -16,8 +16,13 @@ memory_limit = "4M"
 scope = { namespace = "/tmp" }
 
 [[components]]
+executable = "platform"
+memory_limit = "1M"
+
+[[components]]
 executable = "driver-pl031"
 memory_limit = "1M"
+scope = { platform = "arm,pl031" }
 
 [[components]]
 executable = "clock-std"

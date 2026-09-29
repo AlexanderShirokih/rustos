@@ -1,4 +1,7 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 use collections::{LockCell, MutexCell, StaticString};
 use syscall::{IrqTrigger, MAX_PROCESS_NAME_LEN, Rights, WakeCount};
@@ -9,6 +12,7 @@ use super::{
     handle_table::{HandleTable, RejectedInsert},
     irq_control::IrqControl,
     irq_line::IrqLine,
+    rev_node::RevocationHook,
     runtime::{installed_runtime, runtime},
     signal::Signal,
     wait::{
@@ -396,7 +400,7 @@ pub fn signal_create() -> Result<HandleId, IpcError> {
 /// [`default_rights_for`](super::rights::default_rights_for).
 ///
 /// Разделяемых линий в проекте не существует, и минт уже привязанной линии отвергается с
-/// [`IpcError::AlreadyBound`]. Отвязка идёт по разрушению последней капы на `IrqLine`.
+/// [`IpcError::AlreadyBound`]. Отзыв выданной капы отвязывает линию.
 pub fn irq_mint(
     control_handle: HandleId,
     irq: u16,
@@ -410,7 +414,10 @@ pub fn irq_mint(
     }
 
     let line = IrqLine::bind(control.interrupts().clone(), irq, trigger)?;
+    let hook: Weak<dyn RevocationHook> = Arc::<IrqLine>::downgrade(&line);
     let handle = Capability::new_with_default_rights(line);
+    // Хук регистрируется до вставки корня в таблицу, пока корень недоступен другим потокам.
+    handle.node().register_hook(hook);
     table
         .with_lock(|tbl| tbl.insert(handle))
         .map_err(RejectedInsert::release)

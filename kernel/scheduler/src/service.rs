@@ -149,6 +149,13 @@ where
         self.inner.with_lock(|inner| inner.current_process_object())
     }
 
+    /// Принадлежит ли поток процессу текущего потока. `None`, если поток или текущий поток
+    /// уже убран из таблицы потоков.
+    pub fn thread_in_current_process(&self, thread: &Arc<ThreadObject>) -> Option<bool> {
+        self.inner
+            .with_lock(|inner| inner.thread_in_current_process(thread))
+    }
+
     pub fn create_empty_process(
         &self,
         name: &str,

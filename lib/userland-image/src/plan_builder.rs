@@ -4,34 +4,19 @@ use component_abi::SESSION_SCOPE_MAX;
 
 use crate::plan::{
     BOOT_PLAN_MAGIC, BOOT_PLAN_VERSION, PLAN_HEADER_SIZE, REQUIREMENT_KIND_EXPORT,
-    REQUIREMENT_KIND_IRQ, REQUIREMENT_KIND_MMIO, REQUIREMENT_KIND_REGION,
+    REQUIREMENT_KIND_REGION,
 };
-
-/// Устройство требования `irq` или `mmio`, укладываемое в план.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeviceSpec<'a> {
-    /// Драйверу подходит любая из перечисленных строк совместимости.
-    pub compatible: &'a [&'a str],
-    /// Номер экземпляра среди устройств той же совместимости.
-    pub instance: u16,
-    /// Номер ресурса устройства: линии либо окна.
-    pub resource: u16,
-}
 
 /// Источник capability требования, укладываемый в план.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequirementSourceSpec<'a> {
-    /// Сессия экспорта `protocol` в области `scope`. `provider` - номер провайдера в плане.
-    /// Пустая область называет весь экспорт.
+    /// Сессия экспорта `protocol` в области `scope`. `provider` - номер провайдера в плане,
+    /// провайдер 0 - загрузочная программа. Пустая область называет весь экспорт.
     Export {
         provider: u16,
         protocol: &'a str,
         scope: &'a str,
     },
-    /// Линия прерывания устройства.
-    Irq(DeviceSpec<'a>),
-    /// MMIO-окно устройства.
-    Mmio(DeviceSpec<'a>),
     /// Read-only регион userland-образа.
     Region,
 }
@@ -59,28 +44,38 @@ pub struct ComponentSpec<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanEncodeError {
-    /// В плане нет ни одного компонента.
-    EmptyComposition,
-    /// Строка поля пуста, либо у устройства нет ни одной строки совместимости.
+    /// В плане нет записи 0 либо у неё ненулевые требования, предел памяти или перезапуски.
+    BootRecord,
+    /// Строка поля пуста.
     EmptyString,
     /// Область длиннее `SESSION_SCOPE_MAX`.
     ScopeTooLong,
     /// Строка длиннее `u16::MAX` байт.
     StringTooLong,
-    /// Число компонентов, требований, экспортов или строк совместимости превышает `u16::MAX`.
+    /// Число компонентов, требований или экспортов превышает `u16::MAX`.
     TooManyEntries,
     /// Предел памяти компонента равен нулю.
     ZeroMemory,
 }
 
 /// Кодирует план загрузочной композиции без сверки требований с экспортами, которую делает
-/// [`decode_plan`].
+/// [`decode_plan`]. Первым элементом `components` идёт запись 0 - загрузочная программа без
+/// требований, предела памяти и перезапусков.
 ///
 /// [`decode_plan`]: crate::decode_plan
 pub fn encode_plan(components: &[ComponentSpec<'_>]) -> Result<Vec<u8>, PlanEncodeError> {
     let count = u16::try_from(components.len()).map_err(|_| PlanEncodeError::TooManyEntries)?;
-    if count == 0 {
-        return Err(PlanEncodeError::EmptyComposition);
+    let (boot, composition) = components
+        .split_first()
+        .ok_or(PlanEncodeError::BootRecord)?;
+    if boot.memory_limit != 0 || boot.restarts != 0 || !boot.requirements.is_empty() {
+        return Err(PlanEncodeError::BootRecord);
+    }
+    if composition
+        .iter()
+        .any(|component| component.memory_limit == 0)
+    {
+        return Err(PlanEncodeError::ZeroMemory);
     }
 
     let mut bytes = Vec::with_capacity(PLAN_HEADER_SIZE);
@@ -99,9 +94,6 @@ fn encode_component(
     bytes: &mut Vec<u8>,
     component: &ComponentSpec<'_>,
 ) -> Result<(), PlanEncodeError> {
-    if component.memory_limit == 0 {
-        return Err(PlanEncodeError::ZeroMemory);
-    }
     let executable_len = string_len(component.executable)?;
     let name_len = string_len(component.name)?;
     let requirement_count = entry_count(component.requirements.len())?;
@@ -136,7 +128,6 @@ fn encode_requirement(
     let mut protocol_len = 0;
     let mut scope_len_field = 0;
     let mut session = None;
-    let mut device = None;
     let kind = match requirement.source {
         RequirementSourceSpec::Export {
             provider: index,
@@ -149,26 +140,7 @@ fn encode_requirement(
             session = Some((protocol, scope));
             REQUIREMENT_KIND_EXPORT
         }
-        RequirementSourceSpec::Irq(spec) => {
-            device = Some(spec);
-            REQUIREMENT_KIND_IRQ
-        }
-        RequirementSourceSpec::Mmio(spec) => {
-            device = Some(spec);
-            REQUIREMENT_KIND_MMIO
-        }
         RequirementSourceSpec::Region => REQUIREMENT_KIND_REGION,
-    };
-    let (instance, resource, selector_count) = match device {
-        // Драйвер работает с семейством устройств. Драйверу подходит любая из строк, а
-        // выбор между ними принадлежит описанию платформы.
-        Some(device) if device.compatible.is_empty() => return Err(PlanEncodeError::EmptyString),
-        Some(device) => (
-            device.instance,
-            device.resource,
-            entry_count(device.compatible.len())?,
-        ),
-        None => (0, 0, 0),
     };
 
     // Поля заголовка идут подряд в порядке смещений `REQUIREMENT_*` из `plan.rs`.
@@ -178,18 +150,10 @@ fn encode_requirement(
     bytes.extend_from_slice(&provider.to_le_bytes());
     bytes.extend_from_slice(&protocol_len.to_le_bytes());
     bytes.extend_from_slice(&scope_len_field.to_le_bytes());
-    bytes.extend_from_slice(&instance.to_le_bytes());
-    bytes.extend_from_slice(&resource.to_le_bytes());
-    bytes.extend_from_slice(&selector_count.to_le_bytes());
     bytes.extend_from_slice(requirement.name.as_bytes());
     if let Some((protocol, scope)) = session {
         bytes.extend_from_slice(protocol.as_bytes());
         bytes.extend_from_slice(scope.as_bytes());
-    }
-    if let Some(device) = device {
-        for compatible in device.compatible {
-            encode_name(bytes, compatible)?;
-        }
     }
     Ok(())
 }

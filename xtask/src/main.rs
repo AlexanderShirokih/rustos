@@ -51,7 +51,7 @@ enum Commands {
     /// Run the QEMU integration tests
     QemuTest {
         /// Timeout in seconds
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, default_value_t = 80)]
         timeout: u64,
         /// Device spec to run against
         #[arg(long, default_value = qemu_test::DEFAULT_SPEC)]

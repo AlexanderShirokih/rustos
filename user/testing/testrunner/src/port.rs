@@ -22,8 +22,8 @@ use core::{
 use kernel_objects::{Error, Port, kind};
 use kernel_tests::kernel_test;
 use runtime::{
-    JoinHandle, Priority, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_create,
-    port_recv, port_send, signal_create, signal_set, signal_wait_one, spawn,
+    JoinHandle, Priority, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_recv,
+    port_send, signal_create, signal_set, signal_wait_one, spawn, spawn_owned,
 };
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
@@ -158,8 +158,7 @@ fn send_recv_round_trip_sender_first() {
 extern "C" fn receiver_worker(_arg: usize) -> u32 {
     let va = ipc_va();
     WORKER_READY.store(1, SeqCst);
-    let r = port_recv(ep_handle(), Timeout::INFINITE);
-    if r != 0 {
+    if !matches!(port_recv(ep_handle(), Timeout::INFINITE), Ok(None)) {
         WORKER_RESULT.store(-100, SeqCst);
         return 0;
     }
@@ -193,10 +192,7 @@ fn send_recv_round_trip_receiver_first() {
 // --- (b) call/reply round-trip: worker = server (Port::recv + Reply::reply), -
 //        main = caller (raw call на тот же id).
 
-extern "C" fn server_worker(_arg: usize) -> u32 {
-    // Сервер - единственный владелец Port (усыновляет id, закроет на drop);
-    // main оперирует тем же id сырым call и не закрывает.
-    let ep = Port::from_handle(port_of(EP_RAW.load(SeqCst) as u32).expect("port id"));
+fn serve_one_call(ep: &Port) -> u32 {
     WORKER_READY.store(1, SeqCst);
     let mut buf = [0u8; 8];
     let Ok((len, Some(reply))) = ep.recv_bytes(&mut buf, Timeout::INFINITE) else {
@@ -214,10 +210,13 @@ extern "C" fn server_worker(_arg: usize) -> u32 {
 
 #[kernel_test]
 fn call_reply_round_trip() {
-    let ep = port_create().expect("port_create");
-    EP_RAW.store(u64::from(ep.raw()), SeqCst);
+    let ep = Port::create().expect("port create");
+    let ep_raw = ep.as_raw();
 
-    let worker = spawn_worker(server_worker);
+    WORKER_RESULT.store(i64::MIN, SeqCst);
+    WORKER_READY.store(0, SeqCst);
+    let worker = spawn_owned(move || serve_one_call(&ep), STACK_SIZE, Priority::new(1))
+        .expect("spawn worker");
     while WORKER_READY.load(SeqCst) == 0 {
         core::hint::spin_loop();
     }
@@ -227,7 +226,7 @@ fn call_reply_round_trip() {
     unsafe {
         write_msg(va, b"req", &[]);
     }
-    kernel_tests::kassert_eq!(port_call(ep, Timeout::INFINITE), 0);
+    kernel_tests::kassert_eq!(port_call(ep_raw, Timeout::INFINITE), 0);
 
     let mut buf = [0u8; 8];
     // SAFETY: собственный буфер.
@@ -248,17 +247,20 @@ extern "C" fn cap_sender_worker(_arg: usize) -> u32 {
     // "уехать" вместе с объектом и быть видим получателю - это доказывает
     // идентичность capability target (свежий объект бита бы не имел).
     let notif = signal_create().expect("signal_create");
-    NOTIF_RAW.store(u64::from(notif.raw()), SeqCst);
-    if signal_set(notif, SIGNALED, 0, WakeCount::None) != 0 {
+    NOTIF_RAW.store(u64::from(notif.as_raw().raw()), SeqCst);
+    if signal_set(notif.as_raw(), SIGNALED, 0, WakeCount::None) != 0 {
         WORKER_RESULT.store(-100, SeqCst);
         return 0;
     }
     // SAFETY: собственный буфер; передаём 0-байтовое тело и 1 cap.
     unsafe {
-        write_msg(va, b"", &[notif.raw()]);
+        write_msg(va, b"", &[notif.as_raw().raw()]);
     }
     WORKER_READY.store(1, SeqCst);
     let r = port_send(ep_handle(), Timeout::INFINITE);
+    if r == 0 {
+        let _ = notif.leak();
+    }
     WORKER_RESULT.store(r, SeqCst);
     0
 }
@@ -331,8 +333,8 @@ fn badge_round_trip_two_clients() {
     // заданный badge). Права сужаем до WRITE - клиенту нужен только send.
     let copy_a = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_A).expect("mint badged copy A");
     let copy_b = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_B).expect("mint badged copy B");
-    EP_BADGED[0].store(u64::from(copy_a.raw()), SeqCst);
-    EP_BADGED[1].store(u64::from(copy_b.raw()), SeqCst);
+    EP_BADGED[0].store(u64::from(copy_a.as_raw().raw()), SeqCst);
+    EP_BADGED[1].store(u64::from(copy_b.as_raw().raw()), SeqCst);
     CLIENTS_READY.store(0, SeqCst);
     for result in &CLIENT_RESULTS {
         result.store(i64::MIN, SeqCst);

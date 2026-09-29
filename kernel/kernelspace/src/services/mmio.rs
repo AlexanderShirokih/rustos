@@ -105,100 +105,14 @@ fn access_mask_for_device(permissions: Owners<UncachedPermission>) -> AccessMask
 mod tests {
     extern crate std;
 
-    use std::{any::Any, sync::Mutex, vec::Vec};
-
-    use memory::{
-        memory_mapper::{
-            AddressSpaceHandle, AddressSpaceTag, MemoryMappingError, MemoryRemappingError,
-            MemoryUnmappingError,
-        },
-        physical_address::PhysicalAddress,
-    };
+    use memory::testing::{Call, MapExactCall, PageMapper, UnmapCall};
 
     use super::*;
-
-    #[derive(Clone, Copy)]
-    struct MapCall {
-        va: PageAlignedVirtualAddress,
-        pa: PageAlignedAddress,
-        size: usize,
-        flags: MemFlags,
-    }
-
-    struct SpyMapper {
-        maps: Mutex<Vec<MapCall>>,
-        unmaps: Mutex<Vec<(PageAlignedVirtualAddress, usize)>>,
-    }
-
-    impl SpyMapper {
-        fn new() -> Self {
-            Self {
-                maps: Mutex::new(Vec::new()),
-                unmaps: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl MemoryMapper for SpyMapper {
-        fn map(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _page_count: usize,
-            _init: &[u8],
-            _flags: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            unreachable!("MmioServiceImpl must use MemoryRegion::install over physical regions")
-        }
-
-        fn map_exact(
-            &self,
-            source_address: PageAlignedVirtualAddress,
-            target_address: PageAlignedAddress,
-            size: usize,
-            mem_flags: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            self.maps.lock().unwrap().push(MapCall {
-                va: source_address,
-                pa: target_address,
-                size,
-                flags: mem_flags,
-            });
-            Ok(())
-        }
-
-        fn unmap(
-            &self,
-            address: PageAlignedVirtualAddress,
-            size: usize,
-        ) -> Result<(), MemoryUnmappingError> {
-            self.unmaps.lock().unwrap().push((address, size));
-            Ok(())
-        }
-
-        fn remap(
-            &self,
-            _start_address: PageAlignedVirtualAddress,
-            _size: usize,
-            _new_flags: MemFlags,
-        ) -> Result<(), MemoryRemappingError> {
-            unreachable!()
-        }
-
-        fn activate_handle(&self) -> AddressSpaceHandle {
-            AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-        }
-
-        fn zero_owned_frame(&self, _pa: PageAlignedAddress) {}
-
-        fn as_any(&self) -> &(dyn Any + 'static) {
-            self
-        }
-    }
 
     const ARENA_BASE: usize = 0xffff_fffc_0000_0000;
     const ARENA_SIZE: usize = 0x1_0000_0000;
 
-    fn make_service(mapper: &'static SpyMapper) -> MmioServiceImpl {
+    fn make_service(mapper: &'static PageMapper) -> MmioServiceImpl {
         MmioServiceImpl::new(
             mapper,
             PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
@@ -208,7 +122,7 @@ mod tests {
 
     #[test]
     fn map_mmio_allocates_va_from_arena_independent_of_pa() {
-        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let mapper = Box::leak(Box::new(PageMapper::new()));
         let service = make_service(mapper);
 
         let address = MmioAddress::new(0x0c17_0000, 0x1000).unwrap();
@@ -219,21 +133,22 @@ mod tests {
             )
             .expect("mmio mapping must succeed");
 
-        let maps = mapper.maps.lock().unwrap();
-        assert_eq!(maps.len(), 1);
-        let first = maps[0];
+        let calls = mapper.calls();
+        assert_eq!(calls.len(), 1);
+        let Call::MapExact(MapExactCall {
+            va,
+            pa,
+            size,
+            flags,
+        }) = calls[0].clone()
+        else {
+            panic!("mmio mapping must use map_exact");
+        };
 
-        assert_eq!(
-            first.va,
-            PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
-            "first MMIO VA must equal arena base"
-        );
-        assert_eq!(
-            first.pa,
-            PageAlignedAddress::from_usize(0x0c17_0000).unwrap()
-        );
-        assert_eq!(first.size, 0x1000);
-        match first.flags {
+        assert_eq!(va, ARENA_BASE, "first MMIO VA must equal arena base");
+        assert_eq!(pa, 0x0c17_0000);
+        assert_eq!(size, 0x1000);
+        match flags {
             MemFlags::Device(owners) => match owners.kernel.access {
                 AccessMode::Writable => {}
                 _ => panic!("kernel MMIO mapping must remain writable"),
@@ -242,22 +157,20 @@ mod tests {
                 panic!("mmio mapping must use device flags")
             }
         }
-        drop(maps);
-
         drop(bound);
 
         assert_eq!(
-            *mapper.unmaps.lock().unwrap(),
-            Vec::from([(
-                PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
-                0x1000
-            )])
+            mapper.unmaps(),
+            [UnmapCall {
+                va: ARENA_BASE,
+                size: 0x1000
+            }]
         );
     }
 
     #[test]
     fn map_mmio_rounds_sub_page_size_up_to_page() {
-        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let mapper = Box::leak(Box::new(PageMapper::new()));
         let service = make_service(mapper);
 
         let address = MmioAddress::new(0x0c16_f000, 0x200).unwrap();
@@ -268,26 +181,24 @@ mod tests {
             )
             .expect("mmio mapping must succeed");
 
-        let maps = mapper.maps.lock().unwrap();
+        let maps = mapper.map_exacts();
         assert_eq!(maps.len(), 1);
         assert_eq!(
             maps[0].size,
             PAGE_SIZE.get(),
             "sub-page MMIO must round up to 4K"
         );
-        drop(maps);
 
         drop(bound);
 
-        // unmap должен быть симметричен размеру install.
-        let unmaps = mapper.unmaps.lock().unwrap();
+        let unmaps = mapper.unmaps();
         assert_eq!(unmaps.len(), 1);
-        assert_eq!(unmaps[0].1, PAGE_SIZE.get());
+        assert_eq!(unmaps[0].size, PAGE_SIZE.get());
     }
 
     #[test]
     fn map_mmio_returns_va_to_arena_after_unbind() {
-        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let mapper = Box::leak(Box::new(PageMapper::new()));
         let service = make_service(mapper);
 
         let address = MmioAddress::new(0x0c17_0000, 0x1000).unwrap();
@@ -297,7 +208,6 @@ mod tests {
                 Owners::<UncachedPermission>::kernel(UncachedPermission::writable()),
             )
             .expect("first mmio mapping must succeed");
-        let first_va = PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap();
         drop(first);
 
         let second = service
@@ -307,59 +217,13 @@ mod tests {
             )
             .expect("second mmio mapping must reuse freed VA");
 
-        let maps = mapper.maps.lock().unwrap();
+        let maps = mapper.map_exacts();
         assert_eq!(maps.len(), 2);
         assert_eq!(
-            maps[1].va, first_va,
+            maps[1].va, ARENA_BASE,
             "freed VA must be reused for the next allocation"
         );
-        drop(maps);
         drop(second);
-    }
-
-    struct FailingMapper;
-
-    impl MemoryMapper for FailingMapper {
-        fn map(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _pc: usize,
-            _init: &[u8],
-            _f: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            unreachable!()
-        }
-        fn map_exact(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _pa: PageAlignedAddress,
-            _s: usize,
-            _f: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            Err(MemoryMappingError::OutOfMemory)
-        }
-        fn unmap(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _s: usize,
-        ) -> Result<(), MemoryUnmappingError> {
-            Ok(())
-        }
-        fn remap(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _s: usize,
-            _f: MemFlags,
-        ) -> Result<(), MemoryRemappingError> {
-            Ok(())
-        }
-        fn activate_handle(&self) -> AddressSpaceHandle {
-            AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-        }
-        fn zero_owned_frame(&self, _pa: PageAlignedAddress) {}
-        fn as_any(&self) -> &(dyn Any + 'static) {
-            self
-        }
     }
 
     fn user_owners(access: AccessMode) -> Owners<UncachedPermission> {
@@ -371,7 +235,8 @@ mod tests {
 
     #[test]
     fn map_mmio_rolls_back_va_when_install_fails() {
-        let mapper = Box::leak(Box::new(FailingMapper));
+        let mapper = Box::leak(Box::new(PageMapper::new()));
+        mapper.fail_map_exact_after(0);
         let service = MmioServiceImpl::new(
             mapper,
             PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
@@ -408,7 +273,7 @@ mod tests {
 
     #[test]
     fn map_mmio_rejects_unaligned_address() {
-        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let mapper = Box::leak(Box::new(PageMapper::new()));
         let service = make_service(mapper);
         // 0x0c17_0001 не выровнен на 4К.
         let address = MmioAddress::new(0x0c17_0001, 0x1000).unwrap();
@@ -419,12 +284,12 @@ mod tests {
             panic!("unaligned MMIO base must be rejected");
         };
         assert!(format!("{err}").contains("not aligned"));
-        assert!(mapper.maps.lock().unwrap().is_empty());
+        assert!(mapper.calls().is_empty());
     }
 
     #[test]
     fn map_mmio_rejects_zero_size() {
-        let mapper = Box::leak(Box::new(SpyMapper::new()));
+        let mapper = Box::leak(Box::new(PageMapper::new()));
         let service = make_service(mapper);
         let address = MmioAddress::new(0x0c17_0000, 0).unwrap();
         let Err(err) = service.map_mmio(
@@ -434,7 +299,7 @@ mod tests {
             panic!("zero-size MMIO must be rejected");
         };
         assert!(format!("{err}").contains("non-zero"));
-        assert!(mapper.maps.lock().unwrap().is_empty());
+        assert!(mapper.calls().is_empty());
     }
 
     #[test]

@@ -41,7 +41,7 @@ diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
 diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 --- a/std/src/os/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/os/molecular/mod.rs	2026-08-10 18:37:47.249314886 +0000
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,82 @@
 +//! RustOS-specific definitions.
 +//!
 +//! Процесс получает ресурсы системы стартовым набором capability, который композиция выдаёт
@@ -59,42 +59,45 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +
 +#![unstable(feature = "molecular_ext", issue = "none")]
 +
-+use crate::mem::ManuallyDrop;
 +use crate::num::NonZeroU32;
++
++use syscall_user::IssuedHandle;
++use syscall_user::syscall::kind;
 +
 +/// Идентификатор capability в таблице handle процесса.
 +pub type RawHandle = NonZeroU32;
 +
-+/// Владеет capability процесса и закрывает её в `Drop`.
++/// Владеет capability процесса. Разрушение владельца закрывает её.
 +#[derive(Debug)]
 +pub struct OwnedHandle {
-+    handle: RawHandle,
++    handle: IssuedHandle<kind::Any>,
 +}
 +
 +impl OwnedHandle {
 +    /// Идентификатор владеемой capability.
 +    pub fn as_raw(&self) -> RawHandle {
-+        self.handle
++        self.handle.as_raw().as_nonzero()
 +    }
 +
-+    /// Отдаёт идентификатор владеемой capability и подавляет её закрытие.
-+    pub fn into_raw(self) -> RawHandle {
-+        ManuallyDrop::new(self).handle
++    /// Оставляет capability процессу до его завершения и отдаёт её идентификатор. Запись
++    /// закрывает ядро при завершении процесса.
++    pub fn leak(self) -> RawHandle {
++        self.handle.leak().as_nonzero()
 +    }
 +
-+    /// Усыновляет уже существующую запись таблицы handle процесса.
++    /// Владелец записи таблицы handle процесса по её идентификатору.
 +    ///
 +    /// # Safety
 +    ///
-+    /// `raw` называет открытую запись, владельца у которой больше нет.
++    /// `raw` называет открытую запись без другого владельца: её идентификатор отдал
++    /// [`OwnedHandle::leak`] либо владелец вне библиотеки, который от записи отказался.
 +    pub unsafe fn from_raw(raw: RawHandle) -> Self {
-+        Self { handle: raw }
++        // SAFETY: условие вызова `from_raw` совпадает с условием `adopt`.
++        Self { handle: unsafe { IssuedHandle::adopt(raw) } }
 +    }
-+}
 +
-+impl Drop for OwnedHandle {
-+    fn drop(&mut self) {
-+        runtime::handle_close(runtime::Handle::<runtime::kind::Any>::from_abi(self.handle));
++    pub(crate) fn into_issued(self) -> IssuedHandle<kind::Any> {
++        self.handle
 +    }
 +}
 +
@@ -103,7 +106,7 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +/// Владение уходит вызывающему, и выдача одна: дальше `None`. `None` на первом вызове -
 +/// процесс запущен без стартового handle.
 +pub fn take_start_handle() -> Option<OwnedHandle> {
-+    Some(OwnedHandle { handle: runtime::take_bootstrap()?.as_nonzero() })
++    Some(OwnedHandle { handle: runtime::take_bootstrap()? })
 +}
 +
 +/// Делает сессию маршрутизатора имён файловым корнем процесса. Пути `std::fs` отсчитываются
@@ -119,7 +122,7 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +/// источника остаётся за значком сессии. Повторная установка сохраняет первую сессию и
 +/// закрывает переданную.
 +pub fn install_log(session: OwnedHandle) {
-+    runtime::install_log(runtime::Handle::from_abi(session.into_raw()), "");
++    runtime::install_log(session.into_issued().assume_kind(), "");
 +}
 diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
 --- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
@@ -195,7 +198,7 @@ diff -ruN a/std/src/sys/fs/mod.rs b/std/src/sys/fs/mod.rs
 diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 --- a/std/src/sys/fs/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/fs/molecular.rs	2026-09-27 19:23:48.863214000 +0000
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,594 @@
 +//! Файловая поверхность RustOS поверх `filesystem-client`.
 +//!
 +//! Корень процесса - сессия маршрутизатора имён, которую программа один раз передаёт
@@ -209,7 +212,6 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +use filesystem_client::{Failure, FileSystem, FileSystemEnvironment, Listing, OpenNode};
 +use kernel_objects::{Port, Session};
 +use syscall_user::ipc::wire::IpcError;
-+use syscall_user::syscall::Handle;
 +
 +use crate::ffi::OsString;
 +use crate::fmt;
@@ -295,7 +297,7 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +        if let Self::Installed(_) = self
 +            && let Self::Installed(session) = mem::replace(self, Self::Empty)
 +        {
-+            let port = Port::from_handle(Handle::from_abi(session.into_raw()));
++            let port = Port::from(session.into_issued().assume_kind());
 +            *self = Self::Ready(FileSystem::routed(Session::from_handle(port)));
 +        }
 +
@@ -901,7 +903,7 @@ diff -ruN a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
 diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 --- a/std/src/sys/pal/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/pal/molecular/mod.rs	2026-08-10 18:37:47.249510846 +0000
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,61 @@
 +//! Платформенный слой RustOS.
 +//!
 +//! Работу выполняет крейт `runtime`: он же обслуживает userspace-программы вне `std`.
@@ -921,7 +923,8 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +        runtime::start_component(runtime::Handle::from_abi(parent), "");
 +    }
 +
-+    runtime::start(bootstrap);
++    // SAFETY: `bootstrap` - значение `x0` точки входа, и точка входа исполняется один раз.
++    unsafe { runtime::start(bootstrap) };
 +
 +    unsafe extern "C" {
 +        fn main(argc: isize, argv: *const *const u8, sigpipe: u8) -> i32;
@@ -1245,7 +1248,8 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +use crate::cmp;
 +
 +use runtime::thread::{create, release_stack};
-+use syscall_user::syscall::{Handle, Priority, SIGNALED, Timeout, kind};
++use syscall_user::IssuedHandle;
++use syscall_user::syscall::{Priority, SIGNALED, Timeout, kind};
 +
 +/// Приоритет потока: тот же, с каким userspace поднимает свои рабочие потоки.
 +const PRIORITY: Priority = Priority::new(1);
@@ -1257,7 +1261,7 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +/// `join` освобождает стек. Поток, брошенный без `join`, остаётся отвязанным, и стек с ним:
 +/// на нём поток ещё может исполняться.
 +pub struct Thread {
-+    handle: Handle<kind::Thread>,
++    handle: IssuedHandle<kind::Thread>,
 +    stack: NonNull<u8>,
 +    stack_bytes: usize,
 +}
@@ -1280,9 +1284,9 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +
 +        match started {
 +            Ok(spawned) => Ok(Thread {
-+                handle: spawned.thread(),
 +                stack: spawned.stack(),
 +                stack_bytes: spawned.stack_bytes(),
++                handle: spawned.into_thread(),
 +            }),
 +            Err(error) => {
 +                // Поток не стартовал: точку входа его аргумент не прочитает.
@@ -1294,12 +1298,11 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +    }
 +
 +    pub fn join(self) {
-+        let outcome = syscall_user::signal_wait_one(self.handle, SIGNALED, Timeout::INFINITE);
++        let outcome = syscall_user::signal_wait_one(self.handle.as_raw(), SIGNALED, Timeout::INFINITE);
 +        assert!(outcome >= 0, "failed to join thread");
 +        // SAFETY: поток терминирован, и его стек больше никем не адресуется. Указатель и
 +        // размер - те же, с какими стек выдан запуском.
 +        unsafe { release_stack(self.stack, self.stack_bytes) };
-+        syscall_user::handle_close(self.handle);
 +    }
 +}
 +

@@ -1214,6 +1214,20 @@ where
         self.processes.get(pid).map(|p| p.process_object().clone())
     }
 
+    pub(super) fn thread_in_current_process(
+        &self,
+        thread_object: &Arc<ThreadObject>,
+    ) -> Option<bool> {
+        let current = self.current_cpu()?.current();
+        let current_pid = self.threads.get(current)?.process();
+        let pid = self
+            .threads
+            .iter()
+            .find(|t| Arc::ptr_eq(t.thread_object(), thread_object))?
+            .process();
+        Some(pid == current_pid)
+    }
+
     pub(super) fn current_process_name(&self) -> Option<StaticString<MAX_PROCESS_NAME_LEN>> {
         let current_id = self.current_cpu()?.current();
         let pid = self.threads.get(current_id)?.process();

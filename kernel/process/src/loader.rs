@@ -36,14 +36,11 @@ pub fn load_user_image(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Mutex, vec};
+    use std::vec;
 
     use memory::{
-        memory_mapper::{
-            AddressSpaceTag, MemoryMapper, MemoryMappingError, MemoryRemappingError,
-            MemoryUnmappingError,
-        },
-        physical_address::{PageAlignedAddress, PhysicalAddress},
+        memory_mapper::MemoryMappingError,
+        testing::PageMapper,
         virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
     };
 
@@ -83,102 +80,18 @@ mod tests {
         }
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone)]
-    struct MapCall {
-        va: usize,
-        page_count: usize,
-        init: std::vec::Vec<u8>,
-    }
-
-    struct MockMapper {
-        calls: Mutex<std::vec::Vec<MapCall>>,
-        fail_on_call: Option<usize>,
-    }
-
-    impl MockMapper {
-        fn new() -> Self {
-            Self {
-                calls: Mutex::new(std::vec::Vec::new()),
-                fail_on_call: None,
-            }
-        }
-        fn failing_on(call_index: usize) -> Self {
-            Self {
-                calls: Mutex::new(std::vec::Vec::new()),
-                fail_on_call: Some(call_index),
-            }
-        }
-        fn calls(&self) -> std::vec::Vec<MapCall> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl MemoryMapper for MockMapper {
-        fn map(
-            &self,
-            va: PageAlignedVirtualAddress,
-            page_count: usize,
-            init: &[u8],
-            _: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            let mut calls = self.calls.lock().unwrap();
-            if self.fail_on_call == Some(calls.len()) {
-                return Err(MemoryMappingError::OutOfMemory);
-            }
-            calls.push(MapCall {
-                va: va.as_usize(),
-                page_count,
-                init: init.to_vec(),
-            });
-            Ok(())
-        }
-        fn map_exact(
-            &self,
-            _: PageAlignedVirtualAddress,
-            _: PageAlignedAddress,
-            _: usize,
-            _: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            unreachable!()
-        }
-        fn unmap(
-            &self,
-            _: PageAlignedVirtualAddress,
-            _: usize,
-        ) -> Result<(), MemoryUnmappingError> {
-            unreachable!()
-        }
-        fn remap(
-            &self,
-            _: PageAlignedVirtualAddress,
-            _: usize,
-            _: MemFlags,
-        ) -> Result<(), MemoryRemappingError> {
-            unreachable!()
-        }
-        fn activate_handle(&self) -> memory::memory_mapper::AddressSpaceHandle {
-            memory::memory_mapper::AddressSpaceHandle::new(
-                PhysicalAddress::new(0xDEAD_BEEF),
-                AddressSpaceTag::NONE,
-            )
-        }
-        fn zero_owned_frame(&self, _pa: memory::physical_address::PageAlignedAddress) {}
-        fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-            self
-        }
-    }
-
     #[test]
     fn load_user_image_maps_segments_and_stack_in_order() {
         let init = vec![0xCDu8; 100];
         let segs = [rx_segment(0x4000_0000, PAGE, &init)];
         let image = make_image(&segs, 0x4000_0000);
 
-        let mapper = MockMapper::new();
+        let mapper = PageMapper::new();
 
         load_user_image(&mapper, &image).expect("load ok");
 
-        let calls = mapper.calls();
+        assert_eq!(mapper.calls().len(), 2);
+        let calls = mapper.maps();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].va, 0x4000_0000);
         assert_eq!(calls[0].page_count, 1);
@@ -196,10 +109,10 @@ mod tests {
         let segs = [rx_segment(0x4000_0000, PAGE, &init)];
         let image = make_image(&segs, 0x4000_0000);
 
-        let mapper = MockMapper::new();
+        let mapper = PageMapper::new();
         load_user_image(&mapper, &image).unwrap();
 
-        let calls = mapper.calls();
+        let calls = mapper.maps();
         assert_eq!(calls[0].init, init);
     }
 
@@ -210,13 +123,14 @@ mod tests {
             rw_segment(0x4000_0000 + PAGE, PAGE, &[]),
         ];
         let image = make_image(&segs, 0x4000_0000);
-        let mapper = MockMapper::failing_on(1);
+        let mapper = PageMapper::new();
+        mapper.fail_map_after(1);
 
         assert_eq!(
             load_user_image(&mapper, &image),
             Err(UserImageError::Mapping(MemoryMappingError::OutOfMemory))
         );
-        let calls = mapper.calls();
+        let calls = mapper.maps();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].va, 0x4000_0000);
     }
@@ -225,11 +139,11 @@ mod tests {
     fn load_user_image_rejects_invalid_image() {
         let segs = [rw_segment(0x4000_0000, PAGE, &[])];
         let image = make_image(&segs, 0x4000_0000);
-        let mapper = MockMapper::new();
+        let mapper = PageMapper::new();
         assert_eq!(
             load_user_image(&mapper, &image),
             Err(UserImageError::EntryNotInExecSegment)
         );
-        assert!(mapper.calls().is_empty());
+        assert!(mapper.maps().is_empty());
     }
 }

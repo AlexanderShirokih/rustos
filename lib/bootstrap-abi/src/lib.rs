@@ -1,12 +1,12 @@
-//! Контракты первого процесса с ядром: [`bootstrap`] и [`devices`].
+//! Контракты первого процесса с ядром: [`bootstrap`] и [`hardware`].
 //!
 //! Ядро выдаёт первому процессу handle порта [`bootstrap`] при запуске, аргументом точки входа.
 //! По нему процесс пишет строки в журнал ядра, получает регион userland-образа и сессию
-//! [`devices`]. Сессия [`devices`] выдаёт полномочия на устройства машины: копию контроллера
+//! [`hardware`]. Сессия [`hardware`] выдаёт полномочия на устройства машины: копию контроллера
 //! прерываний, регион boot FDT и окна набора устройств. Держатель сессии не получает других
 //! полномочий первого процесса.
 //!
-//! [`devices::Client::acquire_device_memory_containing`] ищет окно набора, которое содержит
+//! [`hardware::Client::acquire_device_memory_containing`] ищет окно набора, которое содержит
 //! окно устройства. [`bootstrap::Client::log_str`] режет строку длиннее кадра по границе
 //! символа.
 
@@ -54,16 +54,16 @@ ipc::protocol! {
         /// Выдаёт вызывателю read-only capability на регион поверх байт userland-образа.
         call fn acquire_userland_image() -> own Result<ipc::wire::Cap<kind::MemoryRegion>, u32>;
 
-        /// Выдаёт вызывателю сессию [`devices`]. Капа сессии разрешает отправку, перенос и
+        /// Выдаёт вызывателю сессию [`hardware`]. Капа сессии разрешает отправку, перенос и
         /// дублирование и не разрешает приём. `Err` - ненулевой код ошибки выдачи.
-        call fn acquire_devices() -> own Result<ipc::wire::Session<devices::Protocol>, u32>;
+        call fn acquire_hardware() -> own Result<ipc::wire::Session<hardware::Protocol>, u32>;
     }
 }
 
 ipc::protocol! {
     /// Канал держателя устройств машины к ядру.
-    pub mod devices {
-        name = "Devices";
+    pub mod hardware {
+        name = "Hardware";
 
         /// Выдаёт копию корневого `IrqControl` в таблицу вызывателя (оригинал
         /// остаётся у ядра). `Err` - ненулевой код ошибки выдачи.
@@ -81,19 +81,19 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU32;
     use std::{format, string::String, thread};
 
     use ipc::{
         IntoWireValue,
         wire::{Cap, Session, Str},
     };
-    use syscall::{Handle, ObjectKind, kind};
+    use ipc_test::{MockHandle, MockResources};
+    use syscall::{ObjectKind, kind};
 
-    use super::{BootFdt, LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap, devices};
+    use super::{BootFdt, LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap, hardware};
 
-    fn cap<K: ObjectKind>(raw: u32) -> Cap<K> {
-        Cap::from_handle(Handle::from_abi(NonZeroU32::new(raw).expect("non-zero")))
+    fn cap<K: ObjectKind>(raw: u32) -> MockHandle<K> {
+        MockHandle::new(raw)
     }
 
     #[derive(Default)]
@@ -101,10 +101,10 @@ mod tests {
         last_log: Option<String>,
     }
 
-    impl<F: ipc::ReceivedResources> bootstrap::Service<F> for Sink {
+    impl bootstrap::Service<MockResources> for Sink {
         fn log(
             &mut self,
-            _frame: &F,
+            _frame: &MockResources,
             tag: Str<'_, { LOG_TAG_MAX }>,
             message: Str<'_, { LOG_MESSAGE_MAX }>,
         ) {
@@ -113,46 +113,53 @@ mod tests {
 
         fn acquire_userland_image(
             &mut self,
-            _frame: &F,
-        ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, u32>> {
-            Ok::<_, u32>(cap(0x88))
+            _frame: &MockResources,
+        ) -> impl IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, u32>>
+        {
+            Ok::<_, u32>(cap::<kind::MemoryRegion>(0x88))
         }
 
-        fn acquire_devices(
+        fn acquire_hardware(
             &mut self,
-            _frame: &F,
-        ) -> impl IntoWireValue<Read = Result<Session<devices::Protocol>, u32>> {
-            Ok::<_, u32>(Session::<devices::Protocol>::from_handle(cap(0x55)))
+            _frame: &MockResources,
+        ) -> impl IntoWireValue<MockResources, Read = Result<Session<hardware::Protocol>, u32>>
+        {
+            Ok::<_, u32>(Session::<hardware::Protocol, _>::from_handle(cap::<
+                kind::Port,
+            >(
+                0x55
+            )))
         }
     }
 
-    impl<F: ipc::ReceivedResources> devices::Service<F> for Sink {
+    impl hardware::Service<MockResources> for Sink {
         fn acquire_irq_control(
             &mut self,
-            _frame: &F,
-        ) -> impl IntoWireValue<Read = Result<Cap<kind::IrqControl>, u32>> {
-            Ok::<_, u32>(cap(0x77))
+            _frame: &MockResources,
+        ) -> impl IntoWireValue<MockResources, Read = Result<Cap<kind::IrqControl>, u32>> {
+            Ok::<_, u32>(cap::<kind::IrqControl>(0x77))
         }
 
         fn acquire_boot_fdt(
             &mut self,
-            _frame: &F,
-        ) -> impl IntoWireValue<Read = Result<BootFdt, u32>> {
+            _frame: &MockResources,
+        ) -> impl IntoWireValue<MockResources, Read = Result<BootFdt, u32>> {
             Ok::<_, u32>(BootFdt {
-                region: cap(0x99),
+                region: cap::<kind::MemoryRegion>(0x99),
                 offset: 0x600,
             })
         }
 
         fn acquire_device_memory(
             &mut self,
-            _frame: &F,
+            _frame: &MockResources,
             index: u32,
-        ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, u32>> {
+        ) -> impl IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, u32>>
+        {
             if index >= 2 {
                 return Err(7);
             }
-            Ok(cap(0x90 + index))
+            Ok(cap::<kind::MemoryRegion>(0x90 + index))
         }
     }
 
@@ -189,7 +196,7 @@ mod tests {
             assert_eq!(client.acquire_userland_image(), Ok(Ok(cap(0x88))));
             assert_eq!(
                 client
-                    .acquire_devices()
+                    .acquire_hardware()
                     .map(|session| session.map(Session::into_handle)),
                 Ok(Ok(cap(0x55)))
             );
@@ -199,13 +206,13 @@ mod tests {
     #[test]
     fn device_acquisitions_answer_with_their_capability_or_refusal() {
         let (client_end, server_end) = ipc_test::pair();
-        let client = devices::Client::new(client_end);
+        let client = hardware::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
                 for _ in 0..4 {
                     server_end
-                        .serve(|frame| devices::dispatch(&mut sink, frame))
+                        .serve(|frame| hardware::dispatch(&mut sink, frame))
                         .expect("dispatch ok");
                 }
             });

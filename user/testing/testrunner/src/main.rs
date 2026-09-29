@@ -25,7 +25,8 @@ extern crate alloc;
 
 use core::{fmt::Write as _, panic::PanicInfo};
 
-use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, devices};
+use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, hardware};
+use component_startup::component_manifest;
 use io::writer::Writer;
 use kernel_objects::Session;
 use kernel_tests::kernel_test;
@@ -38,7 +39,6 @@ mod answer_exhaustion_protocol;
 mod child_steps_protocol;
 mod clock;
 mod composition;
-mod device_forwarding_protocol;
 mod filesystem;
 mod filesystem_bench;
 mod filesystem_scope;
@@ -89,6 +89,10 @@ mod thread_stack_protocol;
 mod thread_yield;
 mod vm;
 mod watched_capability;
+
+component_manifest! {
+    exports: [hardware::Protocol],
+}
 
 static BOOTSTRAP_HANDLE: Once<Handle<kind::Port>> = Once::new();
 
@@ -155,12 +159,12 @@ pub(crate) fn bootstrap_handle() -> Handle<kind::Port> {
         .expect("bootstrap handle set in _start")
 }
 
-pub(crate) fn devices_session() -> Session<devices::Protocol> {
+pub(crate) fn hardware_session() -> Session<hardware::Protocol> {
     bootstrap::Client::new(PortTransport::new(bootstrap_handle()))
-        .acquire_devices()
-        .expect("acquire_devices call")
+        .acquire_hardware()
+        .expect("acquire_hardware call")
         .map(Session::from_session)
-        .expect("devices session granted")
+        .expect("hardware session granted")
 }
 
 fn runner_exit(code: u32) -> ! {

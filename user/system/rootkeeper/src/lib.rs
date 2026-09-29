@@ -6,7 +6,6 @@
 
 extern crate alloc;
 
-mod devices;
 pub mod relay;
 mod system;
 

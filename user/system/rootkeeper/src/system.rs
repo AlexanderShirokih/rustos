@@ -7,7 +7,7 @@ use core::{
     ops::ControlFlow,
 };
 
-use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap};
+use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, hardware};
 use component_abi::{
     AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX, ResourceError,
     SessionError, SessionRequest, SessionRequirement, SessionScope, component_startup,
@@ -17,8 +17,7 @@ use ipc::{
     wire::{MESSAGE_INLINE_MAX, Str},
 };
 use kernel_objects::{
-    Delivery, Error, MemoryRegion, ObjectKind, OwnedHandle, Port, ReadOnlyMapping, ReceivedHandle,
-    Resource, Session, kind,
+    Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, kind,
 };
 use log_abi::{LogBuffer, log};
 use log_relay::{KernelLogSink, LogRelayThread};
@@ -30,17 +29,16 @@ use userland_image::{
     PlanDecodeError, RequirementSource, decode, decode_plan,
 };
 
-use crate::{
-    devices::{DeviceGrants, DeviceKind, DeviceRefusal},
-    relay::{ComponentNames, log_badge},
-};
+use crate::relay::{ComponentNames, log_badge};
 
 const LOG_TAG: &str = "rootkeeper";
+
+const BOOT_RECORD: u16 = 0;
 
 /// Срок возврата бюджета перед перезапуском записи.
 pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-type Debt = ReceivedHandle<kind::Reply>;
+type Debt = IssuedHandle<kind::Reply>;
 
 /// Код, с которым завершается процесс rootkeeper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +77,8 @@ pub enum BudgetFailure {
     Reserve,
     /// Порт `ComponentStartup` не создан.
     StartupPort,
-    /// Ядро не выдало сессию `Devices`.
-    Devices,
+    /// Ядро не выдало сессию `Hardware`.
+    Hardware,
 }
 
 /// Требование `name` импортёра. Импортёр получает по нему сессию экспорта `protocol` записи
@@ -131,7 +129,7 @@ pub struct RootSystem<'a> {
     children: Children<'a, Holder, DecodedProgram<'a>>,
     plan: BootPlan<'a>,
     logs: Vec<Session<log::Protocol>>,
-    devices: DeviceGrants,
+    hardware: Session<hardware::Protocol>,
     image: &'a SystemImage,
     kernel: Handle<kind::Port>,
     restarts_used: Vec<u32>,
@@ -167,7 +165,7 @@ impl BootFailure {
             Self::Budget(BudgetFailure::Root) => "root resource unavailable",
             Self::Budget(BudgetFailure::Reserve) => "component reserve not granted",
             Self::Budget(BudgetFailure::StartupPort) => "startup port not created",
-            Self::Budget(BudgetFailure::Devices) => "devices session not granted",
+            Self::Budget(BudgetFailure::Hardware) => "hardware session not granted",
         }
     }
 }
@@ -203,8 +201,9 @@ impl SystemImage {
 }
 
 impl<'a> RootSystem<'a> {
-    /// Заводит записи плана `plan`, которые запускает первый [`turn`]. `log_sessions` создаёт
-    /// источник журнала записи по значку [`log_badge`](crate::relay::log_badge) её номера.
+    /// Заводит записи плана `plan` с номера 1, которые запускает первый [`turn`]. Запись 0 -
+    /// программа самого rootkeeper, и её он не запускает. `log_sessions` создаёт источник
+    /// журнала записи по значку [`log_badge`](crate::relay::log_badge) её номера.
     pub fn bring_up(
         image: &'a SystemImage,
         plan: BootPlan<'a>,
@@ -216,19 +215,21 @@ impl<'a> RootSystem<'a> {
             Resource::self_resource().map_err(|_| BootFailure::Budget(BudgetFailure::Root))?;
         let mut children =
             Children::new().map_err(|_| BootFailure::Budget(BudgetFailure::StartupPort))?;
-        let logs = (0..plan.len())
+        let logs = (BOOT_RECORD + 1..plan.len())
             .map(|record| log_sessions(log_badge(record)))
             .collect::<Option<Vec<_>>>()
             .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
-        let session = bootstrap::Client::new(PortTransport::new(kernel))
-            .acquire_devices()
+        let hardware = bootstrap::Client::new(PortTransport::new(kernel))
+            .acquire_hardware()
             .ok()
             .and_then(Result::ok)
             .map(Session::from_session)
-            .ok_or(BootFailure::Budget(BudgetFailure::Devices))?;
-        let devices = DeviceGrants::new(session, &plan);
+            .ok_or(BootFailure::Budget(BudgetFailure::Hardware))?;
 
-        for (record, component) in (0..plan.len()).zip(plan.components()) {
+        for (record, component) in (0..plan.len())
+            .zip(plan.components())
+            .skip(usize::from(BOOT_RECORD) + 1)
+        {
             let path = format!("{}/{COMPONENT_PROGRAM_NAME}", component.executable());
             let program = entries
                 .entry(&path)
@@ -250,7 +251,7 @@ impl<'a> RootSystem<'a> {
             children,
             plan,
             logs,
-            devices,
+            hardware,
             image,
             kernel,
             restarts_used: vec![0; usize::from(plan.len())],
@@ -378,9 +379,7 @@ impl<'a> RootSystem<'a> {
                 protocol,
                 scope: SessionScope::new(scope)?,
             }),
-            RequirementSource::Irq(_) | RequirementSource::Mmio(_) | RequirementSource::Region => {
-                None
-            }
+            RequirementSource::Region => None,
         }
     }
 
@@ -401,15 +400,34 @@ impl<'a> RootSystem<'a> {
         if protocol != log::Protocol::ID {
             return Err(SessionError::Refused);
         }
-        let source = self
-            .logs
-            .get(usize::from(record))
+        let source = record
+            .checked_sub(BOOT_RECORD + 1)
+            .and_then(|index| self.logs.get(usize::from(index)))
             .ok_or(SessionError::Refused)?;
         self.children
             .grant(
                 badge,
                 LOG_REQUIREMENT,
                 source.handle().borrow(),
+                Rights::WRITE | Rights::TRANSFER,
+            )
+            .map_err(SessionError::from)
+    }
+
+    fn boot_export(
+        &mut self,
+        badge: u64,
+        requirement: &str,
+        protocol: &str,
+    ) -> Result<Port, SessionError> {
+        if protocol != hardware::Protocol::ID {
+            return Err(SessionError::Refused);
+        }
+        self.children
+            .grant(
+                badge,
+                requirement,
+                self.hardware.handle().borrow(),
                 Rights::WRITE | Rights::TRANSFER,
             )
             .map_err(SessionError::from)
@@ -427,39 +445,6 @@ impl<'a> RootSystem<'a> {
             record,
             self.plan.component(record)?.requirement(requirement)?,
         ))
-    }
-
-    fn device<K: DeviceKind>(
-        &mut self,
-        badge: u64,
-        requirement: &str,
-    ) -> Result<K::Grant, ResourceError> {
-        let (record, device) = self
-            .record_requirement(badge, requirement)
-            .and_then(|(record, source)| Some((record, K::device(source)?)))
-            .ok_or(ResourceError::Refused)?;
-        let children = &mut self.children;
-        K::root(&mut self.devices, record, requirement, device, |root| {
-            grant(children, badge, requirement, root)
-        })
-        .unwrap_or_else(|refusal| Err(self.refuse_device(record, requirement, refusal)))
-    }
-
-    fn refuse_device(
-        &self,
-        record: u16,
-        requirement: &str,
-        refusal: DeviceRefusal,
-    ) -> ResourceError {
-        let name = self
-            .plan
-            .component(record)
-            .map_or("", |component| component.name());
-        self.log(format_args!(
-            "{name} requirement {requirement} refused: {}",
-            refusal.reason()
-        ));
-        ResourceError::Refused
     }
 
     fn log(&self, line: Arguments<'_>) {
@@ -491,6 +476,11 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             let _ = reply.send(Err::<Port, _>(SessionError::Refused));
             return;
         };
+        if export.provider == BOOT_RECORD {
+            let answer = self.boot_export(badge, name, export.protocol);
+            let _ = reply.send(answer);
+            return;
+        }
 
         let provider = Holder::Record(export.provider);
         if matches!(self.children.status(provider), None | Some(Status::Removed)) {
@@ -499,24 +489,6 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         }
         self.children
             .request(provider, export.protocol, badge, name, export.scope, reply);
-    }
-
-    fn irq(
-        &mut self,
-        frame: &Delivery,
-        requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
-        reply: component_startup::irq::Reply<Debt>,
-    ) {
-        let _ = reply.send(self.device::<kind::IrqLine>(frame.badge, requirement.as_str()));
-    }
-
-    fn mmio(
-        &mut self,
-        frame: &Delivery,
-        requirement: Str<'_, { REQUIREMENT_NAME_MAX }>,
-        reply: component_startup::mmio::Reply<Debt>,
-    ) {
-        let _ = reply.send(self.device::<kind::MemoryRegion>(frame.badge, requirement.as_str()));
     }
 
     fn region(
@@ -569,9 +541,9 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
     }
 }
 
-/// Один оборот обслуживания композиции `system`: запуск ждущих записей, приём кадра не дольше
-/// `timeout` и его обслуживание. На время приёма замок `system` отпущен. `Break` означает, что
-/// порт закрыт.
+/// Один оборот обслуживания композиции `system`: запуск ждущих записей с номера 1, приём кадра
+/// не дольше `timeout` и его обслуживание. Запрос к экспорту записи 0 обслуживает сам оборот.
+/// На время приёма замок `system` отпущен. `Break` означает, что порт закрыт.
 pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()> {
     let (port, wait) = {
         let mut guard = system.lock();
@@ -628,22 +600,6 @@ pub fn run(kernel: Handle<kind::Port>) -> Stopped {
     while turn(&system, Timeout::INFINITE).is_continue() {}
     log_line(kernel, format_args!("startup port closed"));
     Stopped::Subsystem
-}
-
-fn grant<'a, K: ObjectKind + 'static>(
-    children: &mut Children<'a, Holder, DecodedProgram<'a>>,
-    badge: u64,
-    requirement: &str,
-    root: kernel_objects::BorrowedHandle<'_, K>,
-) -> Result<OwnedHandle<K>, ResourceError> {
-    children
-        .grant(
-            badge,
-            requirement,
-            root,
-            Rights::READ | Rights::WRITE | Rights::DUPLICATE | Rights::TRANSFER,
-        )
-        .map_err(ResourceError::from)
 }
 
 fn refuse_boot(kernel: Handle<kind::Port>, failure: BootFailure) -> Stopped {

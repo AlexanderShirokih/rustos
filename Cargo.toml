@@ -11,6 +11,7 @@ members = [
     "lib/ipc",
     "lib/kernel-objects",
     "lib/log-abi",
+    "lib/platform-abi",
     "lib/rtc-abi",
     "lib/syscall",
     "kernel/kernelspace",
@@ -82,6 +83,7 @@ ipc = { path = "lib/ipc" }
 ipc-test = { path = "lib/ipc-test" }
 bootstrap-abi = { path = "lib/bootstrap-abi" }
 log-abi = { path = "lib/log-abi" }
+platform-abi = { path = "lib/platform-abi" }
 collections = { path = "lib/collections" }
 component-abi = { path = "lib/component-abi" }
 device-resolver = { path = "lib/device-resolver" }

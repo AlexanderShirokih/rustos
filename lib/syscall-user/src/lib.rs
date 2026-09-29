@@ -12,12 +12,14 @@
 
 mod delivery;
 mod ipc_buffer;
+mod issued;
 mod port_transport;
 mod svc;
 
-pub use delivery::{Delivery, ReceivedHandle};
+pub use delivery::Delivery;
 pub use ipc;
 pub use ipc_buffer::ipc_buffer_ptr;
+pub use issued::IssuedHandle;
 pub use port_transport::PortTransport;
 pub use svc::{
     handle_close, handle_duplicate, ipc_buffer_addr, irq_ack, irq_mint, memory_allocate,

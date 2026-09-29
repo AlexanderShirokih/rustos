@@ -1,6 +1,5 @@
-//! Драйвер PL031 RTC: компонент композиции, получающий линию прерывания и
-//! MMIO-окно устройства требованиями своего манифеста. Описание платформы
-//! драйверу не выдаётся.
+//! Драйвер PL031 RTC: компонент композиции, получающий линию прерывания и окно
+//! регистров устройства по сессии `Platform`.
 
 #![no_std]
 #![no_main]
@@ -16,7 +15,8 @@ use core::{convert::Infallible, panic::PanicInfo};
 use component_startup::{component_manifest, serve_export, whole_export};
 use io::mmio::{Mmio, Reg};
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{IrqLine, Port};
+use kernel_objects::{IrqLine, MemoryRegion, MmioWindow, Port, SessionTransport};
+use platform_abi::platform;
 use rtc_abi::rtc;
 use runtime::{
     PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned, start_component,
@@ -42,10 +42,7 @@ const EXPORT_STACK_SIZE: u64 = 0x4000;
 
 component_manifest! {
     struct RtcStartup {
-        requirements: {
-            line: irq(compatible = ["arm,pl031"]),
-            window: mmio(compatible = ["arm,pl031"]),
-        },
+        requirements: { platform: session(platform::Protocol) },
         exports: [rtc::Protocol],
     }
 }
@@ -53,6 +50,7 @@ component_manifest! {
 struct Pl031 {
     device: Mmio,
     line: IrqLine,
+    _platform: platform::Client<SessionTransport>,
 }
 
 impl Pl031 {
@@ -111,10 +109,18 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     )
     .map_err(|_| Error::Runtime)?;
 
-    let mapping = requirements.window.map()?;
+    let platform = requirements.platform.client();
+    let line = IrqLine::from(platform.irq(0, 0)??);
+    let window = platform.mmio(0, 0)??;
+    let window = MmioWindow {
+        region: MemoryRegion::from(window.region),
+        offset: window.offset,
+    };
+    let mapping = window.map()?;
     let mut driver = Pl031 {
         device: mapping.mmio(),
-        line: requirements.line,
+        line,
+        _platform: platform,
     };
 
     log_line("started");

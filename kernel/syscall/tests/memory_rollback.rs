@@ -11,36 +11,31 @@
     clippy::unwrap_in_result
 )]
 
+mod common;
+
 use core::{
     num::NonZeroUsize,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
-use capability::{
-    Capability, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError, ProcessObject,
-    Resource, SpawnError, StartProcessError, ThreadObject, UserImageInstall, UserStartSpec,
-    UserThreadEntry, WaitToken, install_runtime,
-};
+use capability::{Capability, HandleId, HandleTable, Resource};
 use collections::{LockCell, MutexCell};
 use memory::{
-    AccessMask, MemFlags, MemoryRegion, UserVmContext,
+    AccessMask, MemoryRegion,
     frame::Frame,
     frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
-    memory_mapper::{
-        AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
-        MemoryRemappingError, MemoryUnmappingError,
-    },
-    physical_address::{PageAlignedAddress, PhysicalAddress},
+    physical_address::PageAlignedAddress,
     range_allocator::RangeError,
+    testing::PageMapper,
     user_vm_allocator::UserVmAllocator,
-    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+    virtual_address::PageAlignedVirtualAddress,
 };
-use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp};
+use syscall_kernel::{SyscallError, SyscallOp};
+
+use crate::common::{USER_VM_ARENA_BASE, dispatch, runtimes, test_lock, user_vm_allocator};
 
 const PAGE: usize = memory::PAGE_SIZE.get();
-const ARENA_BASE: usize = 0x1000_0000;
-const ARENA_END: usize = 0x1100_0000;
 
 struct SpyFrameAllocator {
     next: AtomicUsize,
@@ -91,169 +86,26 @@ impl FrameAllocator for SpyFrameAllocator {
     }
 }
 
-struct FailingMapper;
-
-impl MemoryMapper for FailingMapper {
-    fn map(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _pc: usize,
-        _init: &[u8],
-        _f: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        Err(MemoryMappingError::OutOfMemory)
-    }
-    fn map_exact(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _pa: PageAlignedAddress,
-        _s: usize,
-        _f: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        Err(MemoryMappingError::OutOfMemory)
-    }
-    fn unmap(&self, _va: PageAlignedVirtualAddress, _s: usize) -> Result<(), MemoryUnmappingError> {
-        Ok(())
-    }
-    fn remap(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _s: usize,
-        _f: MemFlags,
-    ) -> Result<(), MemoryRemappingError> {
-        Ok(())
-    }
-    fn activate_handle(&self) -> AddressSpaceHandle {
-        AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-    }
-    fn zero_owned_frame(&self, _pa: PageAlignedAddress) {}
-    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-        self
-    }
-}
-
-struct TableRuntime {
-    handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
-}
-
-impl KernelRuntime for TableRuntime {
-    fn current_wait_token(&self) -> WaitToken {
-        WaitToken::new(core::num::NonZeroU64::new(1).unwrap())
-    }
-    fn now_ns(&self) -> u64 {
-        0
-    }
-    fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
-        self.handle_table.lock().unwrap().clone()
-    }
-    fn exit_current_thread(&self, _c: i32) -> ! {
-        panic!("exit_current_thread must not be called in this test")
-    }
-    fn exit_current_process(&self, _c: i32) -> ! {
-        panic!("exit_current_process must not be called in this test")
-    }
-    fn yield_current(&self) {}
-    fn block_current_until(&self, _r: &AtomicU32, _t: Option<u64>) {}
-    fn unblock(&self, _t: WaitToken) {}
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
-    fn clear_blocked_cancel(&self) {}
-    fn release_process_holder(&self, _process: &Arc<capability::ProcessObject>) {}
-}
-
-struct StubSyscallRuntime {
-    allocator: Arc<MutexCell<UserVmAllocator>>,
-    fa: &'static SpyFrameAllocator,
-}
-
-impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
-    fn current_user_vm(&self) -> Option<UserVmContext> {
-        Some(UserVmContext::new(
-            Arc::new(FailingMapper),
-            self.allocator.clone(),
-        ))
-    }
-    fn current_ipc_buffer_va(&self) -> Option<u64> {
-        None
-    }
-    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
-        Some(self.fa)
-    }
-    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-        None
-    }
-    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-        None
-    }
-    fn create_empty_process(&self, _n: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-        Ok(ProcessObject::new())
-    }
-    fn create_user_thread(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _e: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, SpawnError> {
-        Ok(ThreadObject::new())
-    }
-    fn terminate_thread(&self, _t: &Arc<ThreadObject>, _c: i32) -> Result<(), IpcError> {
-        Ok(())
-    }
-    fn terminate_process(&self, _p: &Arc<ProcessObject>, _c: i32) -> Result<(), IpcError> {
-        Ok(())
-    }
-    fn load_user_image_into(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _i: &UserImageInstall,
-    ) -> Result<(), LoadImageError> {
-        Ok(())
-    }
-    fn start_user_process(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _s: UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, StartProcessError> {
-        Ok(ThreadObject::new())
-    }
-}
-
-type SetupHandles = (
-    &'static Arc<TableRuntime>,
-    &'static SpyFrameAllocator,
-    Arc<MutexCell<UserVmAllocator>>,
-);
-
 type TestEnv = (
-    &'static Arc<TableRuntime>,
     Arc<MutexCell<HandleTable>>,
     Arc<MutexCell<UserVmAllocator>>,
     &'static SpyFrameAllocator,
 );
 
 fn setup() -> TestEnv {
-    static R: OnceLock<SetupHandles> = OnceLock::new();
-    let (rt, fa, allocator) = R.get_or_init(|| {
-        let rt: &'static Arc<TableRuntime> = Box::leak(Box::new(Arc::new(TableRuntime {
-            handle_table: Mutex::new(None),
-        })));
-        let concrete: Arc<TableRuntime> = (*rt).clone();
-        let dyn_rt: Arc<dyn KernelRuntime> = concrete;
-        install_runtime(dyn_rt);
-
+    static STATE: OnceLock<(&'static SpyFrameAllocator, Arc<MutexCell<UserVmAllocator>>)> =
+        OnceLock::new();
+    let (fa, allocator) = STATE.get_or_init(|| {
         let fa: &'static SpyFrameAllocator = Box::leak(Box::new(SpyFrameAllocator::new()));
-        let allocator = Arc::new(MutexCell::new(UserVmAllocator::new(
-            PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap(),
-            VirtualAddress::new(ARENA_END),
-        )));
-        let stub: Arc<StubSyscallRuntime> = Arc::new(StubSyscallRuntime {
-            allocator: allocator.clone(),
-            fa,
-        });
-        syscall_kernel::install_runtime(stub);
-        (rt, fa, allocator)
+        let (_, stub) = runtimes();
+        let allocator = user_vm_allocator();
+        stub.set_frame_allocator(fa);
+        stub.set_user_vm(failing_mapper(), allocator.clone());
+        (fa, allocator)
     });
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
-    *rt.handle_table.lock().unwrap() = Some(table.clone());
-    (rt, table, allocator.clone(), fa)
+    runtimes().0.set_handle_table(table.clone());
+    (table, allocator.clone(), fa)
 }
 
 fn insert_metering_resource(table: &Arc<MutexCell<HandleTable>>) -> (u64, Arc<Resource>) {
@@ -269,51 +121,10 @@ fn insert_metering_resource(table: &Arc<MutexCell<HandleTable>>) -> (u64, Arc<Re
     (u64::from(id.raw().get()), resource)
 }
 
-fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-struct TestFrame {
-    op: u16,
-    args: [u64; 6],
-    ret: i64,
-}
-impl SyscallFrame for TestFrame {
-    fn op_raw(&self) -> u16 {
-        self.op
-    }
-    fn arg(&self, i: usize) -> u64 {
-        self.args[i]
-    }
-    fn set_return(&mut self, v: i64) {
-        self.ret = v;
-    }
-    fn set_secondary_return(&mut self, _v: u64) {}
-    fn origin(&self) -> Origin {
-        Origin::User
-    }
-}
-
-fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, i64> {
-    let mut frame = TestFrame {
-        op: op as u16,
-        args,
-        ret: 0,
-    };
-    syscall_kernel::dispatch(&mut frame);
-    if frame.ret >= 0 {
-        Ok(u64::try_from(frame.ret).unwrap())
-    } else {
-        Err(frame.ret)
-    }
-}
-
 #[test]
 fn memory_allocate_rolls_back_va_and_frees_frames_on_install_failure() {
     let _g = test_lock();
-    let (_rt, table, allocator, fa) = setup();
+    let (table, allocator, fa) = setup();
     let (resource_h, resource) = insert_metering_resource(&table);
     let before = fa.outstanding();
     let budget_before = resource.remaining_budget();
@@ -336,7 +147,7 @@ fn memory_allocate_rolls_back_va_and_frees_frames_on_install_failure() {
         "rollback must refund the metered budget"
     );
 
-    let base = PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap();
+    let base = PageAlignedVirtualAddress::from_usize(USER_VM_ARENA_BASE).unwrap();
     let size = NonZeroUsize::new(PAGE).unwrap();
     let err = allocator.with_lock(|alloc| alloc.lookup(base, size).map(|_| ()));
     assert_eq!(
@@ -351,7 +162,7 @@ fn memory_allocate_rolls_back_va_and_frees_frames_on_install_failure() {
 #[test]
 fn metered_alloc_does_not_leak_budget_on_frame_oom() {
     let _g = test_lock();
-    let (_rt, table, _allocator, fa) = setup();
+    let (table, _allocator, fa) = setup();
     let (resource_h, resource) = insert_metering_resource(&table);
     let budget_before = resource.remaining_budget();
 
@@ -385,7 +196,7 @@ fn metered_alloc_does_not_leak_budget_on_frame_oom() {
 #[test]
 fn memory_map_rolls_back_va_and_keeps_region_frames_on_install_failure() {
     let _g = test_lock();
-    let (_rt, table, allocator, fa) = setup();
+    let (table, allocator, fa) = setup();
 
     let region = Arc::new(
         MemoryRegion::create_virtual(
@@ -413,7 +224,7 @@ fn memory_map_rolls_back_va_and_keeps_region_frames_on_install_failure() {
         frames_after_create,
         "map rollback must not free the externally-owned region's frames"
     );
-    let base = PageAlignedVirtualAddress::from_usize(ARENA_BASE).unwrap();
+    let base = PageAlignedVirtualAddress::from_usize(USER_VM_ARENA_BASE).unwrap();
     let size = NonZeroUsize::new(PAGE).unwrap();
     let err = allocator.with_lock(|alloc| alloc.lookup(base, size).map(|_| ()));
     assert_eq!(
@@ -427,4 +238,11 @@ fn fa_static(
     fa: &'static SpyFrameAllocator,
 ) -> &'static &'static (dyn FrameAllocator + Send + Sync) {
     Box::leak(Box::new(fa as &'static (dyn FrameAllocator + Send + Sync)))
+}
+
+fn failing_mapper() -> Arc<PageMapper> {
+    let mapper = PageMapper::new();
+    mapper.fail_map_after(0);
+    mapper.fail_map_exact_after(0);
+    Arc::new(mapper)
 }

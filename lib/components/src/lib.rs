@@ -23,9 +23,9 @@ pub use handle::into_std_handle;
 pub fn requirements<T>(
     request: impl FnOnce(Handle<kind::Port>) -> Result<T, StartupError>,
 ) -> Result<T, StartupError> {
-    // Стартовая сессия нужна до конца процесса, и её handle не закрывается.
+    // Стартовая сессия нужна до конца процесса, и её запись остаётся процессу.
     let parent = molecular::take_start_handle()
-        .map(molecular::OwnedHandle::into_raw)
+        .map(molecular::OwnedHandle::leak)
         .ok_or(StartupError {
             requirement: "",
             failure: StartupFailure::NoStartHandle,

@@ -12,18 +12,20 @@ mod common;
 use std::sync::Arc;
 
 use capability::UserThreadEntry;
-use memory::virtual_address::{PageAlignedVirtualAddress, VirtualAddress};
+use memory::{
+    testing::PageMapperFactory,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+};
 use scheduler::{Scheduler, SchedulerConfig, SchedulerHandle, Uninit};
 
 use crate::common::{
-    CountingFrameAllocator, MockAddressSpaceFactory, MockContext, MockTimer, MockTimerSource,
-    reset_switches,
+    CountingFrameAllocator, MockContext, MockTimer, MockTimerSource, reset_switches,
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
 
-fn factory_static(factory: MockAddressSpaceFactory) -> &'static MockAddressSpaceFactory {
+fn factory_static(factory: PageMapperFactory) -> &'static PageMapperFactory {
     Box::leak(Box::new(factory))
 }
 
@@ -58,7 +60,7 @@ fn user_entry() -> UserThreadEntry {
 #[test]
 fn without_frame_allocator_user_thread_has_no_ipc_buffer_region() {
     reset_switches();
-    let factory = factory_static(MockAddressSpaceFactory::new());
+    let factory = factory_static(PageMapperFactory::new());
     let timer = MockTimer::new();
     let scheduler = TestScheduler::with_address_space_factory(
         MockTimerSource(timer),
@@ -84,7 +86,7 @@ fn without_frame_allocator_user_thread_has_no_ipc_buffer_region() {
 #[test]
 fn with_frame_allocator_user_thread_attaches_one_ipc_buffer_region() {
     reset_switches();
-    let factory = factory_static(MockAddressSpaceFactory::new());
+    let factory = factory_static(PageMapperFactory::new());
     let timer = MockTimer::new();
     let scheduler = TestScheduler::with_address_space_factory(
         MockTimerSource(timer),
@@ -112,7 +114,7 @@ fn with_frame_allocator_user_thread_attaches_one_ipc_buffer_region() {
 #[test]
 fn terminate_thread_releases_its_ipc_buffer_region() {
     reset_switches();
-    let factory = factory_static(MockAddressSpaceFactory::new());
+    let factory = factory_static(PageMapperFactory::new());
     let timer = MockTimer::new();
     let scheduler = TestScheduler::with_address_space_factory(
         MockTimerSource(timer),
@@ -145,7 +147,7 @@ fn terminate_thread_releases_its_ipc_buffer_region() {
 #[test]
 fn ipc_buffer_install_failure_rolls_back_allocation_and_thread() {
     reset_switches();
-    let factory = factory_static(MockAddressSpaceFactory::with_failing_map_exact());
+    let factory = factory_static(PageMapperFactory::failing_map_exact());
     let timer = MockTimer::new();
     let scheduler = TestScheduler::with_address_space_factory(
         MockTimerSource(timer),

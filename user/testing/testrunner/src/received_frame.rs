@@ -7,16 +7,16 @@
 
 use core::{
     num::NonZeroU64,
-    sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
+    sync::atomic::{AtomicI64, Ordering::SeqCst},
 };
 
 use ipc::{
     Channel as _, Incoming, Listener, ReceivedResources as _, RecvError, ReplyChannel as _,
     wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf},
 };
-use kernel_objects::{Delivery, Port, ReceivedHandle, Resource, SessionTransport, Signal, kind};
+use kernel_objects::{Delivery, IssuedHandle, Port, Resource, SessionTransport, Signal, kind};
 use kernel_tests::kernel_test;
-use runtime::{PortTransport, Priority, Timeout, spawn};
+use runtime::{Mutex, PortTransport, Priority, Timeout, spawn, spawn_owned};
 use syscall::{Handle, kind as object_kind};
 use userland_loader::load_entry;
 
@@ -61,25 +61,19 @@ ipc::protocol! {
     }
 }
 
-type EchoReply = frame_probe::echo::Reply<ReceivedHandle<object_kind::Reply>>;
+type EchoReply = frame_probe::echo::Reply<IssuedHandle<object_kind::Reply>>;
 
-type RequestReply = frame_probe::request::Reply<ReceivedHandle<object_kind::Reply>>;
-
-fn port_of(raw: u32) -> Option<Port> {
-    core::num::NonZeroU32::new(raw)
-        .map(Handle::from_abi)
-        .map(Port::from_handle)
-}
+type RequestReply = frame_probe::request::Reply<IssuedHandle<object_kind::Reply>>;
 
 struct Exchange {
     port: Handle<kind::Port>,
-    capability: AtomicU32,
+    capability: Mutex<Option<Port>>,
     outcome: AtomicI64,
 }
 
 struct TamperedReply {
     port: Handle<kind::Port>,
-    capability: u32,
+    capability: Port,
     scalar: bool,
 }
 
@@ -96,7 +90,7 @@ struct Probe {
 }
 
 impl frame_probe::Service<Delivery> for Probe {
-    fn hand(&mut self, _frame: &Delivery, capability: ReceivedHandle<kind::Port>) {
+    fn hand(&mut self, _frame: &Delivery, capability: IssuedHandle<kind::Port>) {
         if let Some(nested) = self.nested {
             let client =
                 frame_probe::Client::new(PortTransport::new(nested)).with_wait(CALL_TIMEOUT);
@@ -122,7 +116,7 @@ impl frame_probe::Service<Delivery> for Probe {
         }
     }
 
-    fn forward(&mut self, _frame: &Delivery, caller: ipc::Reply<u32, ReceivedHandle<kind::Reply>>) {
+    fn forward(&mut self, _frame: &Delivery, caller: ipc::Reply<u32, IssuedHandle<kind::Reply>>) {
         self.forwarded = Some(caller.send(PROBE_VALUE).is_ok());
     }
 }
@@ -131,16 +125,14 @@ impl Exchange {
     fn new(port: Handle<kind::Port>) -> Self {
         Self {
             port,
-            capability: AtomicU32::new(0),
+            capability: Mutex::new(None),
             outcome: AtomicI64::new(i64::MIN),
         }
     }
 
     fn with_capability(port: Handle<kind::Port>, capability: Port) -> Self {
         let exchange = Self::new(port);
-        exchange
-            .capability
-            .store(capability.into_raw().raw(), SeqCst);
+        *exchange.capability.lock() = Some(capability);
         exchange
     }
 
@@ -149,7 +141,10 @@ impl Exchange {
     }
 
     fn capability(&self) -> Port {
-        port_of(self.capability.load(SeqCst)).expect("capability of the frame")
+        self.capability
+            .lock()
+            .take()
+            .expect("capability of the frame")
     }
 
     fn store(&self, answered: Result<u32, IpcError>) {
@@ -195,7 +190,7 @@ extern "C" fn echo_worker(arg: usize) -> u32 {
 extern "C" fn session_echo_worker(arg: usize) -> u32 {
     // SAFETY: см. `exchange_of`.
     let exchange = unsafe { exchange_of(arg) };
-    let session = SessionTransport::new(Port::from_handle(exchange.port));
+    let session = SessionTransport::new(exchange.capability());
     exchange.store(
         frame_probe::Client::new(session)
             .with_wait(CALL_TIMEOUT)
@@ -269,10 +264,7 @@ extern "C" fn undelivered_vendor(arg: usize) -> u32 {
     0
 }
 
-extern "C" fn tampered_reply_worker(arg: usize) -> u32 {
-    // SAFETY: главный поток сохраняет аргумент до завершения рабочего потока через join.
-    let exchange = unsafe { &*(arg as *const TamperedReply) };
-    let capability = port_of(exchange.capability).expect("reply capability");
+fn tampered_reply_worker(exchange: TamperedReply) -> u32 {
     let transport = PortTransport::new(exchange.port);
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
     let Incoming {
@@ -286,18 +278,18 @@ extern "C" fn tampered_reply_worker(arg: usize) -> u32 {
         .take_reply()
         .expect("reply channel of the request");
     let header = Header::split(request).expect("request header").header;
-    let mut reply = MessageBuf::new();
+    let mut reply = MessageBuf::<Delivery>::new();
     reply.write_header(&header).expect("reply header");
     if exchange.scalar {
         reply
             .write_field(1, &PROBE_VALUE.to_le_bytes())
             .expect("scalar reply");
     }
+    reply
+        .write_handle(2, exchange.capability.into_issued())
+        .expect("reply capability");
     reply.finish().expect("reply body");
-    channel
-        .send(reply.as_bytes(), &[capability.as_raw().raw()])
-        .expect("reply delivered");
-    let _ = capability.into_raw();
+    channel.send(reply.outgoing()).expect("reply delivered");
     0
 }
 
@@ -444,22 +436,17 @@ fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
     )
     .expect("table fixture loads");
 
-    let mut frame = MessageBuf::new();
+    let mut frame = MessageBuf::<Delivery>::new();
     frame
         .write_header(&Header::new(frame_probe::hand::ORDINAL))
         .expect("frame header");
+    frame
+        .write_handle(1, watched.deliver().into_issued())
+        .expect("frame capability");
     frame.finish().expect("frame finished");
-    let carried = watched.deliver();
-    let mut reply = [0u8; MESSAGE_INLINE_MAX];
     // Таблица фикстуры принимает capability кадра последним свободным слотом, и reply-объекту
     // вызова места уже не остаётся.
-    let _ = PortTransport::new(service.client.as_raw()).call(
-        frame.as_bytes(),
-        &[carried.as_raw().raw()],
-        &mut reply,
-        CALL_TIMEOUT,
-    );
-    let _ = carried.into_raw();
+    let _ = PortTransport::new(service.client.as_raw()).call(frame.outgoing(), CALL_TIMEOUT);
 
     watched.assert_closed();
 }
@@ -471,12 +458,11 @@ fn a_client_decode_failure_closes_its_reply_capabilities() {
     let watched = Watched::create(FIRST_BADGE);
     let exchange = TamperedReply {
         port: service.server.as_raw(),
-        capability: watched.deliver().into_raw().raw(),
+        capability: watched.deliver(),
         scalar: false,
     };
-    let worker = spawn(
-        tampered_reply_worker,
-        core::ptr::from_ref(&exchange) as usize,
+    let worker = spawn_owned(
+        move || tampered_reply_worker(exchange),
         STACK_SIZE,
         Priority::new(1),
     )
@@ -496,12 +482,11 @@ fn a_scalar_reply_closes_extra_capabilities() {
     let watched = Watched::create(FIRST_BADGE);
     let exchange = TamperedReply {
         port: service.server.as_raw(),
-        capability: watched.deliver().into_raw().raw(),
+        capability: watched.deliver(),
         scalar: true,
     };
-    let worker = spawn(
-        tampered_reply_worker,
-        core::ptr::from_ref(&exchange) as usize,
+    let worker = spawn_owned(
+        move || tampered_reply_worker(exchange),
         STACK_SIZE,
         Priority::new(1),
     )
@@ -674,7 +659,8 @@ fn an_unsent_forward_keeps_the_debt_with_its_holder() {
         .expect_err("nobody receives the forward");
     kernel_tests::kassert_eq!(refused.error, IpcError::Timeout);
     refused
-        .value
+        .into_value()
+        .expect("the debt returns to its holder")
         .send(PROBE_VALUE)
         .expect("the holder answers its debt");
     first_worker.join(JOIN_TIMEOUT).expect("first worker joins");
@@ -703,7 +689,8 @@ fn an_unsent_forward_keeps_the_debt_with_its_holder() {
 #[kernel_test]
 fn an_owning_transport_carries_both_sides_of_a_session() {
     let service = Port::create_service(None).expect("port create");
-    let exchange = Exchange::new(service.client.into_raw());
+    let client = service.client;
+    let exchange = Exchange::with_capability(client.as_raw(), client);
     let worker = spawn(
         session_echo_worker,
         core::ptr::from_ref(&exchange) as usize,
@@ -727,7 +714,8 @@ fn an_owning_transport_carries_both_sides_of_a_session() {
 #[kernel_test]
 fn a_dropped_owning_transport_refuses_its_caller() {
     let service = Port::create_service(None).expect("port create");
-    let exchange = Exchange::new(service.client.into_raw());
+    let client = service.client;
+    let exchange = Exchange::with_capability(client.as_raw(), client);
     let worker = spawn(
         session_echo_worker,
         core::ptr::from_ref(&exchange) as usize,

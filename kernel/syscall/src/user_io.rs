@@ -40,135 +40,57 @@ mod tests {
 
     use collections::MutexCell;
     use memory::{
-        MemFlags,
-        memory_mapper::{
-            AddressSpaceHandle, AddressSpaceTag, MemoryMappingError, MemoryRemappingError,
-            MemoryUnmappingError,
-        },
-        physical_address::{PageAlignedAddress, PhysicalAddress},
-        user_vm_allocator::UserVmAllocator,
-        virtual_address::PageAlignedVirtualAddress,
+        MemFlags, PAGE_SIZE, memory_mapper::MemoryMapper, testing::PageMapper,
+        user_vm_allocator::UserVmAllocator, virtual_address::PageAlignedVirtualAddress,
     };
 
     use super::*;
 
-    struct CannedMapper {
-        base_va: usize,
-        writable: bool,
-        bytes: std::sync::Mutex<std::vec::Vec<u8>>,
-    }
+    const PAGE_END: usize = 0x4000;
 
-    impl CannedMapper {
-        fn range(&self, va: VirtualAddress, len: usize) -> Result<(usize, usize), UserCopyError> {
-            let offset = va.as_usize().wrapping_sub(self.base_va);
-            let end = offset.checked_add(len).ok_or(UserCopyError::NotMapped)?;
-            if va.as_usize() < self.base_va || end > self.bytes.lock().unwrap().len() {
-                return Err(UserCopyError::NotMapped);
-            }
-            Ok((offset, end))
-        }
-    }
+    fn make_ctx(bytes: &[u8]) -> (UserVmContext, u64) {
+        let page = PAGE_END - PAGE_SIZE.get();
+        let mut init = std::vec![0u8; PAGE_SIZE.get() - bytes.len()];
+        init.extend_from_slice(bytes);
 
-    impl memory::memory_mapper::MemoryMapper for CannedMapper {
-        fn map(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _page_count: usize,
-            _init: &[u8],
-            _flags: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            unimplemented!("test mapper supports only copy_user_*")
-        }
-
-        fn map_exact(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _pa: PageAlignedAddress,
-            _size: usize,
-            _flags: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            unimplemented!("test mapper supports only copy_user_*")
-        }
-
-        fn unmap(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _size: usize,
-        ) -> Result<(), MemoryUnmappingError> {
-            unimplemented!("test mapper supports only copy_user_*")
-        }
-
-        fn remap(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _size: usize,
-            _flags: MemFlags,
-        ) -> Result<(), MemoryRemappingError> {
-            unimplemented!("test mapper supports only copy_user_*")
-        }
-
-        fn activate_handle(&self) -> AddressSpaceHandle {
-            AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-        }
-
-        fn zero_owned_frame(&self, _pa: PageAlignedAddress) {
-            unimplemented!("test mapper supports only copy_user_*")
-        }
-
-        fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
-            let (offset, end) = self.range(va, dst.len())?;
-            dst.copy_from_slice(&self.bytes.lock().unwrap()[offset..end]);
-            Ok(())
-        }
-
-        fn copy_user_out(&self, va: VirtualAddress, src: &[u8]) -> Result<(), UserCopyError> {
-            if !self.writable {
-                return Err(UserCopyError::AccessDenied);
-            }
-            let (offset, end) = self.range(va, src.len())?;
-            self.bytes.lock().unwrap()[offset..end].copy_from_slice(src);
-            Ok(())
-        }
-
-        fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-            self
-        }
-    }
-
-    fn make_ctx(base_va: usize, bytes: std::vec::Vec<u8>, writable: bool) -> UserVmContext {
-        let mapper = Arc::new(CannedMapper {
-            base_va,
-            writable,
-            bytes: std::sync::Mutex::new(bytes),
-        });
+        let mapper = Arc::new(PageMapper::new());
+        mapper
+            .map(
+                PageAlignedVirtualAddress::from_usize(page).unwrap(),
+                1,
+                &init,
+                MemFlags::user_rw(),
+            )
+            .unwrap();
         let allocator = Arc::new(MutexCell::new(UserVmAllocator::new(
             PageAlignedVirtualAddress::from_usize(0x1000_0000).unwrap(),
             VirtualAddress::new(0x1100_0000),
         )));
-        UserVmContext::new(mapper, allocator)
+        let va = (PAGE_END - bytes.len()) as u64;
+        (UserVmContext::new(mapper, allocator), va)
     }
 
     #[test]
     fn copy_in_reads_user_bytes() {
-        let ctx = make_ctx(0x4000, std::vec![1, 2, 3, 4], true);
+        let (ctx, va) = make_ctx(&[1, 2, 3, 4]);
         let mut dst = [0u8; 4];
-        copy_in(&ctx, 0x4000, &mut dst).expect("copy in ok");
+        copy_in(&ctx, va, &mut dst).expect("copy in ok");
         assert_eq!(dst, [1, 2, 3, 4]);
     }
 
     #[test]
     fn copy_in_out_of_bounds_is_invalid_argument() {
-        let ctx = make_ctx(0x4000, std::vec![1, 2, 3, 4], true);
+        let (ctx, va) = make_ctx(&[1, 2, 3, 4]);
         let mut dst = [0u8; 8];
         assert_eq!(
-            copy_in(&ctx, 0x4000, &mut dst),
+            copy_in(&ctx, va, &mut dst),
             Err(SyscallError::InvalidArgument)
         );
     }
 
     #[test]
     fn copy_in_unmapped_va_is_invalid_argument() {
-        let ctx = make_ctx(0x4000, std::vec![1, 2, 3, 4], true);
+        let (ctx, _) = make_ctx(&[1, 2, 3, 4]);
         let mut dst = [0u8; 4];
         assert_eq!(
             copy_in(&ctx, u64::MAX, &mut dst),

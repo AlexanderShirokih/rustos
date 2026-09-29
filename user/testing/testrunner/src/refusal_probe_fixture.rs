@@ -47,8 +47,6 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let outside =
         session::<probe::Protocol>(&client, OUTSIDE_REQUIREMENT).map(|answer| answer.map(drop));
     log_fmt(format_args!("outside {outside:?}"));
-    let kind = client.irq(probe_requirement).map(|answer| answer.map(drop));
-    log_fmt(format_args!("kind {kind:?}"));
     let protocol =
         session::<rtc::Protocol>(&client, PROBE_REQUIREMENT).map(|answer| answer.map(drop));
     log_fmt(format_args!("protocol {protocol:?}"));

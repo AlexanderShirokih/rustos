@@ -25,21 +25,19 @@ pub trait WireValue<'a, R: ReceivedResources>: Sized {
     fn from_field(data: &'a [u8], frame: &mut R) -> Result<Self::Owned, IpcError>;
 }
 
-/// Значение исходящего кадра, которое пишет одну запись поля.
+/// Значение исходящего кадра с ресурсами `R`, которое пишет одну запись поля.
 ///
-/// Значение, владеющее capability, держит их до итога передачи. Успех отдаёт capability
-/// получателю, отказ оставляет их отправителю, и освобождение значения их закрывает. После
-/// `Timeout` вызова значение освобождается и тогда, когда его capability уже у сервера.
-pub trait IntoWireValue: Sized {
+/// Запись забирает значение, и владельцы его capability переходят в ресурсы кадра. Успех
+/// отправки отдаёт capability получателю. Отказ отправки кадра возвращает значение в том виде, в
+/// каком его читает получатель, а разрушение кадра закрывает capability. Значение без capability
+/// пишется в кадр с любыми ресурсами.
+pub trait IntoWireValue<R: ReceivedResources>: Sized {
     /// Тип, которым получатель читает эту запись.
     type Read;
 
-    /// Пишет запись поля `field_id`. Capability значения занимают слоты кадра `buf`.
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError>;
-
-    /// Отдаёт владение после успешной передачи: capability забрало ядро, и закрытие
-    /// подавлено. Значение без capability ничего не отдаёт.
-    fn relinquish(self);
+    /// Пишет запись поля `field_id` в кадр `frame`. Владельцы capability значения занимают
+    /// слоты ресурсов кадра.
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError>;
 }
 
 /// Структурный wire-дескриптор типа записи. Его читают const-проверки объявления, которые
@@ -60,14 +58,12 @@ macro_rules! int_wire_value {
             }
         }
 
-        impl IntoWireValue for $ty {
+        impl<R: ReceivedResources> IntoWireValue<R> for $ty {
             type Read = Self;
 
-            fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-                buf.write_field(field_id, &value::$encode(*self))
+            fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+                frame.write_field(field_id, &value::$encode(self))
             }
-
-            fn relinquish(self) {}
         }
 
         impl WireTyped for $ty {
@@ -94,14 +90,12 @@ impl<'a, R: ReceivedResources, const N: usize> WireValue<'a, R> for Str<'a, N> {
     }
 }
 
-impl<const N: usize> IntoWireValue for Str<'_, N> {
+impl<R: ReceivedResources, const N: usize> IntoWireValue<R> for Str<'_, N> {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, self.as_str().as_bytes())
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, self.as_str().as_bytes())
     }
-
-    fn relinquish(self) {}
 }
 
 impl<const N: usize> WireTyped for Str<'_, N> {
@@ -116,14 +110,12 @@ impl<'a, R: ReceivedResources, const N: usize> WireValue<'a, R> for Bytes<'a, N>
     }
 }
 
-impl<const N: usize> IntoWireValue for Bytes<'_, N> {
+impl<R: ReceivedResources, const N: usize> IntoWireValue<R> for Bytes<'_, N> {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, self.as_bytes())
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, self.as_bytes())
     }
-
-    fn relinquish(self) {}
 }
 
 impl<const N: usize> WireTyped for Bytes<'_, N> {
@@ -142,14 +134,12 @@ impl<'a, R: ReceivedResources> WireValue<'a, R> for () {
     }
 }
 
-impl IntoWireValue for () {
+impl<R: ReceivedResources> IntoWireValue<R> for () {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, &[])
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, &[])
     }
-
-    fn relinquish(self) {}
 }
 
 impl WireTyped for () {
@@ -165,18 +155,6 @@ impl<'a, R: ReceivedResources, K: ObjectKind> WireValue<'a, R> for Cap<K> {
         frame
             .take_handle(value::decode_port_index(data)?)
             .ok_or(IpcError::InvalidValue)
-    }
-}
-
-impl<K: ObjectKind> IntoWireValue for Cap<K> {
-    type Read = Self;
-
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_handle(field_id, self.raw().get())
-    }
-
-    fn relinquish(self) {
-        // Запись не владеет хэндлом, отдавать нечего.
     }
 }
 
@@ -197,20 +175,14 @@ impl<'a, R: ReceivedResources, T: WireValue<'a, R> + WireTyped> WireValue<'a, R>
     }
 }
 
-impl<T: IntoWireValue<Read: WireTyped>> IntoWireValue for Option<T> {
+impl<R: ReceivedResources, T: IntoWireValue<R, Read: WireTyped>> IntoWireValue<R> for Option<T> {
     type Read = Option<T::Read>;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
         const { _ = <Self::Read as WireTyped>::WIRE_TYPE };
         match self {
-            Some(value) => value.write_as_field(buf, field_id),
-            None => buf.write_field(field_id, &[]),
-        }
-    }
-
-    fn relinquish(self) {
-        if let Some(value) = self {
-            value.relinquish();
+            Some(value) => value.write_into(frame, field_id),
+            None => frame.write_field(field_id, &[]),
         }
     }
 }
@@ -255,21 +227,19 @@ where
 
 /// Успешный исход - значение `T`, в том числе владеющее capability. Доменная ошибка `E` читается
 /// тем же типом, которым записана.
-impl<T: IntoWireValue, E: IntoWireValue<Read = E>> IntoWireValue for Result<T, E> {
+impl<R, T, E> IntoWireValue<R> for Result<T, E>
+where
+    R: ReceivedResources,
+    T: IntoWireValue<R>,
+    E: IntoWireValue<R, Read = E>,
+{
     type Read = Result<T::Read, E>;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_nested(field_id, |outcome| match self {
-            Ok(value) => value.write_as_field(outcome, RESULT_OK_FIELD),
-            Err(error) => error.write_as_field(outcome, RESULT_ERR_FIELD),
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_nested(field_id, |outcome| match self {
+            Ok(value) => value.write_into(outcome, RESULT_OK_FIELD),
+            Err(error) => error.write_into(outcome, RESULT_ERR_FIELD),
         })
-    }
-
-    fn relinquish(self) {
-        match self {
-            Ok(value) => value.relinquish(),
-            Err(error) => error.relinquish(),
-        }
     }
 }
 
@@ -282,50 +252,51 @@ impl<T: WireTyped, E: WireTyped> WireTyped for Result<T, E> {
 
 #[cfg(test)]
 mod tests {
-    use syscall::{Handle, kind};
+    use std::vec::Vec;
+
+    use syscall::kind;
 
     use super::{IntoWireValue, WireValue};
     use crate::{
-        resources::testing::TestFrame,
+        resources::testing::{TestCap, TestFrame, cap},
         wire::{Bytes, Cap, FieldCursor, IpcError, MessageBuf, Str},
     };
 
     const FIELD_ID: u8 = 1;
 
-    fn port(raw: u32) -> Cap<kind::Port> {
-        Cap::from_handle(Handle::from_abi(
-            core::num::NonZeroU32::new(raw).expect("non-zero"),
-        ))
+    fn port(raw: u32) -> TestCap<kind::Port> {
+        cap(raw)
     }
 
-    fn encode<'b, V: IntoWireValue>(v: &V, buf: &'b mut MessageBuf) -> (&'b [u8], TestFrame) {
-        v.write_as_field(buf, FIELD_ID).expect("write ok");
+    fn encode<W: IntoWireValue<TestFrame>>(value: W) -> (Vec<u8>, TestFrame) {
+        let mut buf = MessageBuf::new();
+        value.write_into(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
-        let buf: &'b MessageBuf = buf;
-        let mut cursor = FieldCursor::new(buf.as_bytes());
+        (buf.as_bytes().to_vec(), buf.into_resources())
+    }
+
+    fn only_field(bytes: &[u8]) -> &[u8] {
+        let mut cursor = FieldCursor::new(bytes);
         let field = cursor.next_field().expect("decode ok").expect("present");
         assert_eq!(field.id, FIELD_ID);
-        (field.data, TestFrame::of(buf.handles()))
+        field.data
     }
 
-    fn round_trip<'b, V>(v: &V, buf: &'b mut MessageBuf) -> V
+    fn round_trip<W, O>(value: W) -> O
     where
-        V: IntoWireValue + WireValue<'b, TestFrame, Owned = V>,
+        W: IntoWireValue<TestFrame>,
+        W::Read: for<'b> WireValue<'b, TestFrame, Owned = O>,
     {
-        let (data, mut frame) = encode(v, buf);
-        V::from_field(data, &mut frame).expect("from_field ok")
+        let (bytes, mut frame) = encode(value);
+        <W::Read as WireValue<'_, TestFrame>>::from_field(only_field(&bytes), &mut frame)
+            .expect("from_field ok")
     }
 
-    fn field_with(data: &[u8]) -> MessageBuf {
-        let mut buf = MessageBuf::new();
+    fn field_with(data: &[u8]) -> Vec<u8> {
+        let mut buf: MessageBuf = MessageBuf::new();
         buf.write_field(FIELD_ID, data).expect("write ok");
         buf.finish().expect("finish ok");
-        buf
-    }
-
-    fn only_field(buf: &MessageBuf) -> &[u8] {
-        let mut cursor = FieldCursor::new(buf.as_bytes());
-        cursor.next_field().expect("ok").expect("present").data
+        buf.as_bytes().to_vec()
     }
 
     #[test]
@@ -333,7 +304,7 @@ mod tests {
         macro_rules! check {
             ($($ty:ty = $val:expr),*) => {$({
                 let value: $ty = $val;
-                assert_eq!(round_trip(&value, &mut MessageBuf::new()), value);
+                assert_eq!(round_trip(value), value);
             })*};
         }
         check!(
@@ -352,12 +323,13 @@ mod tests {
 
     #[test]
     fn bounded_values_round_trip_and_refuse_data_over_their_bound() {
-        let mut buf = MessageBuf::new();
-        let text: Str<8> = round_trip(&Str::new("hello").expect("within bound"), &mut buf);
-        assert_eq!(text.as_str(), "hello");
-        let mut buf = MessageBuf::new();
-        let bytes: Bytes<8> = round_trip(&Bytes::new(&[1, 2, 3]).expect("within bound"), &mut buf);
-        assert_eq!(bytes.as_bytes(), &[1, 2, 3]);
+        let (encoded, mut frame) = encode(Str::<8>::new("hello").expect("within bound"));
+        let text = <Str<8> as WireValue<TestFrame>>::from_field(only_field(&encoded), &mut frame);
+        assert_eq!(text.expect("from_field ok").as_str(), "hello");
+        let (encoded, mut frame) = encode(Bytes::<8>::new(&[1, 2, 3]).expect("within bound"));
+        let bytes =
+            <Bytes<8> as WireValue<TestFrame>>::from_field(only_field(&encoded), &mut frame);
+        assert_eq!(bytes.expect("from_field ok").as_bytes(), &[1, 2, 3]);
 
         // Отправитель записал больше, чем объявленная граница получателя.
         let long = field_with(b"abcd");
@@ -373,15 +345,14 @@ mod tests {
 
     #[test]
     fn a_cap_travels_in_a_slot_and_its_slot_is_taken_once() {
-        let cap = port(0x2A);
-        let mut buf = MessageBuf::new();
-        let (data, mut frame) = encode(&cap, &mut buf);
+        let (encoded, mut frame) = encode(port(0x2A));
+        let data = only_field(&encoded);
 
         // Хэндл передаётся слотом кадра, в теле лежит только его индекс.
         assert_eq!(data, [0]);
         assert_eq!(
             <Cap<kind::Port> as WireValue<TestFrame>>::from_field(data, &mut frame),
-            Ok(cap)
+            Ok(port(0x2A))
         );
         // Второе поле с тем же индексом - это второй владелец того же хэндла.
         assert_eq!(
@@ -393,19 +364,16 @@ mod tests {
     #[test]
     fn a_cap_index_without_a_slot_is_refused() {
         let buf = field_with(&[3]);
+        let (_, mut frame) = encode(port(0x2A));
         assert_eq!(
-            <Cap<kind::Port> as WireValue<TestFrame>>::from_field(
-                only_field(&buf),
-                &mut TestFrame::of(&[0x2A])
-            ),
+            <Cap<kind::Port> as WireValue<TestFrame>>::from_field(only_field(&buf), &mut frame),
             Err(IpcError::InvalidValue)
         );
     }
 
     #[test]
     fn an_empty_value_is_a_field_without_data() {
-        let mut buf = MessageBuf::new();
-        round_trip(&(), &mut buf);
+        round_trip(());
 
         let with_data = field_with(&[0]);
         assert_eq!(
@@ -416,21 +384,14 @@ mod tests {
 
     #[test]
     fn an_optional_cap_round_trips_in_both_states() {
-        for expected in [None, Some(port(0x2A))] {
-            let mut buf = MessageBuf::new();
-            let (data, mut frame) = encode(&expected, &mut buf);
-            assert_eq!(
-                <Option<Cap<kind::Port>> as WireValue<TestFrame>>::from_field(data, &mut frame),
-                Ok(expected)
-            );
-        }
+        assert_eq!(round_trip(None::<TestCap<kind::Port>>), None);
+        assert_eq!(round_trip(Some(port(0x2A))), Some(port(0x2A)));
     }
 
     #[test]
     fn an_optional_integer_round_trips_in_both_states() {
         for expected in [None, Some(0u32), Some(7)] {
-            let mut buf = MessageBuf::new();
-            assert_eq!(round_trip(&expected, &mut buf), expected);
+            assert_eq!(round_trip(expected), expected);
         }
     }
 
@@ -449,8 +410,7 @@ mod tests {
             Some(Span { start: 0, len: 0 }),
             Some(Span { start: 7, len: 3 }),
         ] {
-            let mut buf = MessageBuf::new();
-            assert_eq!(round_trip(&expected, &mut buf), expected);
+            assert_eq!(round_trip(expected), expected);
         }
     }
 
@@ -459,11 +419,11 @@ mod tests {
         let mut buf = MessageBuf::new();
         for id in 0..crate::wire::MESSAGE_MAX_HANDLES {
             port(id as u32 + 1)
-                .write_as_field(&mut buf, FIELD_ID + id as u8)
+                .write_into(&mut buf, FIELD_ID + id as u8)
                 .expect("within the frame budget");
         }
         assert_eq!(
-            port(99).write_as_field(&mut buf, 99),
+            port(99).write_into(&mut buf, 99),
             Err(IpcError::TooManyHandles)
         );
     }
@@ -471,16 +431,14 @@ mod tests {
     #[test]
     fn both_outcomes_of_a_result_round_trip() {
         for expected in [Ok(7u32), Err(-3i16)] {
-            let mut buf = MessageBuf::new();
-            assert_eq!(round_trip(&expected, &mut buf), expected);
+            assert_eq!(round_trip(expected), expected);
         }
     }
 
     #[test]
     fn a_result_carries_the_capability_of_its_outcome() {
-        let expected: Result<Cap<kind::Port>, u8> = Ok(port(0x2A));
-        let mut buf = MessageBuf::new();
-        assert_eq!(round_trip(&expected, &mut buf), expected);
+        let sent: Result<TestCap<kind::Port>, u8> = Ok(port(0x2A));
+        assert_eq!(round_trip(sent), Ok(port(0x2A)));
     }
 
     #[test]
@@ -494,7 +452,7 @@ mod tests {
 
     #[test]
     fn a_result_with_both_outcomes_is_refused() {
-        let mut inner = MessageBuf::new();
+        let mut inner: MessageBuf = MessageBuf::new();
         inner
             .write_field(1, &crate::wire::value::encode_u32(7))
             .expect("ok");

@@ -20,10 +20,10 @@ use memory::{
     kernel_vm_allocator::{AllocationError, HeapAllocator, HeapArena},
     memory_mapper::{
         AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
-        MemoryRemappingError, MemoryUnmappingError,
+        MemoryRemappingError, MemoryUnmappingError, UserCopyError,
     },
     physical_address::{PageAlignedAddress, PhysicalAddress},
-    virtual_address::PageAlignedVirtualAddress,
+    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 
 const PAGE_SIZE: usize = memory::PAGE_SIZE.get();
@@ -136,6 +136,14 @@ impl MemoryMapper for MockKernelMapper {
     }
 
     fn zero_owned_frame(&self, _pa: memory::physical_address::PageAlignedAddress) {}
+
+    fn copy_user_in(&self, _va: VirtualAddress, _dst: &mut [u8]) -> Result<(), UserCopyError> {
+        unimplemented!("not used by HeapAllocator unit tests")
+    }
+
+    fn copy_user_out(&self, _va: VirtualAddress, _src: &[u8]) -> Result<(), UserCopyError> {
+        unimplemented!("not used by HeapAllocator unit tests")
+    }
 
     fn as_any(&self) -> &(dyn core::any::Any + 'static) {
         self

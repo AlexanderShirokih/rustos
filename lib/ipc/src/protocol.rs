@@ -36,12 +36,12 @@ pub trait Protocol {
 /// Слово `own` перед именем параметра либо перед типом ответа передаёт получателю владение
 /// значением. Помеченный параметр принимает любое значение [`IntoWireValue`](crate::IntoWireValue)
 /// с записью `Read` - типом из объявления, и тем же значением сервер отдаёт помеченный ответ. Вид
-/// capability приходит из типа записи. Судьбу владеющего значения решает итог отправки. Успех
-/// отдаёт capability получателю, отказ оставляет их отправителю, и освобождение значения их
-/// закрывает. Клиентский метод `cast` с владеющими параметрами возвращает их при отказе в
-/// [`Undelivered`](crate::Undelivered): один параметр - сам, несколько - кортежем в порядке
-/// объявления. Отказ `call` владеющие параметры разрушает. `Timeout` вызова приходит и после того,
-/// как сервер принял кадр, и тогда разрушаются параметры, чьи capability уже у сервера.
+/// capability приходит из типа записи. Запись переносит владельцев capability в кадр. Успех
+/// отправки отдаёт capability получателю, отказ возвращает кадр отправителю. Клиентский метод
+/// `cast` с владеющими параметрами возвращает при отказе [`Undelivered`](crate::Undelivered),
+/// которое читает параметры в принятом виде: один параметр - сам, несколько - кортежем в порядке
+/// объявления. Отказ записи кадра и отказ `call` закрывают владеющие параметры. `Timeout` вызова
+/// приходит и после того, как сервер принял кадр, и тогда capability уже у сервера.
 ///
 /// Получатель читает параметр `own` и любой ответ значением [`Received`](crate::Received),
 /// которое владеет capability записи. Параметр без `own` приходит значением объявленного типа
@@ -106,14 +106,12 @@ pub trait Protocol {
 /// `now` отвечает возвращённым значением, а `open` - долгом:
 ///
 /// ```no_run
-/// use syscall::{Handle, kind};
-///
 /// ipc::protocol! {
 ///     mod store {
 ///         name = "Store";
 ///
 ///         call fn now() -> u64;
-///         call(defer) fn open() -> own ipc::wire::Cap<kind::Port>;
+///         call(defer) fn open() -> u32;
 ///     }
 /// }
 ///
@@ -125,8 +123,7 @@ pub trait Protocol {
 ///     }
 ///
 ///     fn open(&mut self, _frame: &F, reply: store::open::Reply<F::Reply>) {
-///         let port = ipc::wire::Cap::from_handle(Handle::from_abi(core::num::NonZeroU32::MIN));
-///         let _ = reply.send(port);
+///         let _ = reply.send(7u32);
 ///     }
 /// }
 ///
@@ -216,7 +213,7 @@ macro_rules! protocol {
 
     // Тип клиентской сигнатуры и тип записи закрепляются за параметром. Владеющий параметр
     // получает обобщённый тип клиента из `names` и добавляется в список `owned`. По этому
-    // списку клиент отпускает либо возвращает значения после отправки.
+    // списку клиент читает значения из неотправленного кадра.
 
     (@params ctx = $ctx:tt done = [$($done:tt)*] rest = [$($rest:tt)*]
         head = [$($head:tt)*] acc = [$($acc:tt)*] owned = [$($owned:tt)*] names = $names:tt
@@ -233,7 +230,7 @@ macro_rules! protocol {
         $crate::protocol!(@params
             ctx = $ctx done = $done rest = $rest head = $head
             acc = [$($acc)* { $id , $param , $generic , $param_ty , [own] }]
-            owned = [$($owned)* { $generic , $param , $param_ty }]
+            owned = [$($owned)* { $id , $generic , $param , $param_ty }]
             names = [$($names)*]
             id = $id + 1u8;
             $($($more)*)?
@@ -532,50 +529,9 @@ macro_rules! __protocol_decode_params {
 #[macro_export]
 macro_rules! __protocol_write_params {
     ([$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]) => {
-        |frame: &mut $crate::wire::MessageBuf| {
-            $( $crate::IntoWireValue::write_as_field(&$param, frame, $field_id)?; )*
+        move |frame: &mut $crate::wire::MessageBuf<_>| {
+            $( $crate::IntoWireValue::write_into($param, frame, $field_id)?; )*
             ::core::result::Result::Ok(())
-        }
-    };
-}
-
-/// Тип и значение владеющих параметров, которые односторонняя отправка возвращает при отказе.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __protocol_owned {
-    (@ty [{ $generic:ident , $param:ident , $ty:ty }]) => {
-        $generic
-    };
-    (@ty [$( { $generic:ident , $param:ident , $ty:ty } )+]) => {
-        ($($generic,)+)
-    };
-    (@value [{ $generic:ident , $param:ident , $ty:ty }]) => {
-        $param
-    };
-    (@value [$( { $generic:ident , $param:ident , $ty:ty } )+]) => {
-        ($($param,)+)
-    };
-}
-
-/// Переводит итог односторонней отправки в итог метода. Успех отпускает владеющие параметры,
-/// отказ возвращает их в `Undelivered`.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __protocol_settle_owned {
-    ($sent:expr, [$( { $generic:ident , $owned:ident , $owned_ty:ty } )+]) => {
-        match $sent {
-            ::core::result::Result::Ok(()) => {
-                $( $crate::IntoWireValue::relinquish($owned); )+
-                ::core::result::Result::Ok(())
-            }
-            ::core::result::Result::Err(error) => {
-                ::core::result::Result::Err($crate::Undelivered {
-                    error,
-                    value: $crate::__protocol_owned!(
-                        @value [$( { $generic , $owned , $owned_ty } )+]
-                    ),
-                })
-            }
         }
     };
 }
@@ -597,58 +553,73 @@ macro_rules! __protocol_client_method {
                 $crate::__protocol_write_params!(
                     [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
                 ),
+                |_, _| ::core::result::Result::Ok(()),
             )
+            .map_err(|undelivered| undelivered.error)
         }
     };
 
-    (cast $op:ident [$(#[$doc:meta])*] $ret:tt
+    // Отказ отдаёт единственный владеющий параметр сам, а несколько - кортежем в порядке
+    // объявления.
+    (cast $op:ident $docs:tt $ret:tt $params:tt
+     [{ $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty }]) => {
+        $crate::__protocol_client_method! {
+            @owned_cast $op $docs $params [{ $owned_id , $generic , $owned , $owned_ty }]
+            [$crate::Received<$owned_ty, C::Resources>] [$owned]
+        }
+    };
+
+    (cast $op:ident $docs:tt $ret:tt $params:tt
+     [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )+]) => {
+        $crate::__protocol_client_method! {
+            @owned_cast $op $docs $params [$( { $owned_id , $generic , $owned , $owned_ty } )+]
+            [($($crate::Received<$owned_ty, C::Resources>,)+)] [($($owned,)+)]
+        }
+    };
+
+    (@owned_cast $op:ident [$(#[$doc:meta])*]
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]
-     [$( { $generic:ident , $owned:ident , $owned_ty:ty } )+]) => {
+     [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )+]
+     [$refused:ty] [$refused_value:expr]) => {
         $(#[$doc])*
-        pub fn $op<$($generic: $crate::IntoWireValue<Read = $owned_ty>),+>(
+        pub fn $op<$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),+>(
             &self $(, $param: $sig_ty)*
-        ) -> ::core::result::Result<
-            (),
-            $crate::Undelivered<
-                $crate::__protocol_owned!(@ty [$( { $generic , $owned , $owned_ty } )+])
-            >,
-        > {
-            let sent = $crate::__protocol_send(
+        ) -> ::core::result::Result<(), $crate::Undelivered<$refused>> {
+            $crate::__protocol_send(
                 &self.channel,
                 $op::ORDINAL,
                 self.wait,
                 $crate::__protocol_write_params!(
                     [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
                 ),
-            );
-            $crate::__protocol_settle_owned!(sent, [$( { $generic , $owned , $owned_ty } )+])
+                |body, frame| {
+                    $crate::__protocol_decode_params!(
+                        body, frame, [$( { $owned_id , $owned , $owned_ty } )+]
+                    );
+                    ::core::result::Result::Ok($refused_value)
+                },
+            )
         }
     };
 
     (call $op:ident [$(#[$doc:meta])*] [$read:ty]
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]
-     [$( { $generic:ident , $owned:ident , $owned_ty:ty } )*]) => {
+     [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )*]) => {
         $(#[$doc])*
-        pub fn $op<$($generic: $crate::IntoWireValue<Read = $owned_ty>),*>(
+        pub fn $op<$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),*>(
             &self $(, $param: $sig_ty)*
         ) -> ::core::result::Result<$crate::Received<$read, C::Resources>, $crate::wire::IpcError>
         {
-            let mut reply = [0u8; $crate::wire::MESSAGE_INLINE_MAX];
-            // `Ok` вызова означает, что сервер принял кадр вместе с его capability. `Timeout`
-            // приходит и до приёма кадра сервером, и после него, поэтому при `Err` параметры
-            // разрушаются в обоих случаях.
+            let mut frame = $crate::wire::MessageBuf::new();
             let answered = $crate::__protocol_call(
                 &self.channel,
                 $op::ORDINAL,
                 self.wait,
-                &mut reply,
+                &mut frame,
                 $crate::__protocol_write_params!(
                     [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
                 ),
             );
-            if answered.is_ok() {
-                $( $crate::IntoWireValue::relinquish($owned); )*
-            }
             $crate::__protocol_answer::<$read, _>($op::ORDINAL, answered?)
         }
     };
@@ -675,7 +646,7 @@ macro_rules! __protocol_service_method {
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]) => {
         $(#[$doc])*
         fn $op(&mut self, frame: &F $(, $param: $crate::__protocol_received!($own F $wire_ty))*)
-            -> impl $crate::IntoWireValue<Read = $ret>;
+            -> impl $crate::IntoWireValue<F, Read = $ret>;
     };
 
     (call $op:ident [$(#[$doc:meta])*] $ret:tt $ret_own:tt [defer]
@@ -690,47 +661,63 @@ macro_rules! __protocol_service_method {
     };
 }
 
-pub(crate) fn send_frame<T>(
+#[inline]
+pub(crate) fn build_frame<R: crate::ReceivedResources>(
+    frame: &mut crate::wire::MessageBuf<R>,
     header: crate::wire::Header,
-    write: impl FnOnce(&mut crate::wire::MessageBuf) -> Result<(), crate::wire::IpcError>,
-    send: impl FnOnce(&[u8], &[u32]) -> Result<T, crate::wire::IpcError>,
-) -> Result<T, crate::wire::IpcError> {
-    let mut frame = crate::wire::MessageBuf::new();
+    write: impl FnOnce(&mut crate::wire::MessageBuf<R>) -> Result<(), crate::wire::IpcError>,
+) -> Result<(), crate::wire::IpcError> {
     frame.write_header(&header)?;
-    write(&mut frame)?;
-    frame.finish()?;
-    send(frame.as_bytes(), frame.handles())
+    write(frame)?;
+    frame.finish()
 }
 
 /// Отправляет каналом односторонний кадр операции `ordinal` с записями параметров `write`.
+/// Отказ отправки разбирает кадр чтением `read` в значение [`Undelivered`](crate::Undelivered),
+/// отказ записи кадра закрывает capability параметров.
 #[doc(hidden)]
-pub fn __protocol_send<C: crate::Channel>(
+pub fn __protocol_send<C: crate::Channel, V>(
     channel: &C,
     ordinal: u64,
     wait: crate::Timeout,
-    write: impl FnOnce(&mut crate::wire::MessageBuf) -> Result<(), crate::wire::IpcError>,
-) -> Result<(), crate::wire::IpcError> {
-    send_frame(
-        crate::wire::Header::new(ordinal),
-        write,
-        |bytes, handles| channel.send(bytes, handles, wait),
-    )
+    write: impl FnOnce(&mut crate::wire::MessageBuf<C::Resources>) -> Result<(), crate::wire::IpcError>,
+    read: impl FnOnce(&[u8], &mut C::Resources) -> Result<V, crate::wire::IpcError>,
+) -> Result<(), crate::Undelivered<V>> {
+    let mut frame = crate::wire::MessageBuf::new();
+    build_frame(&mut frame, crate::wire::Header::new(ordinal), write)
+        .map_err(crate::Undelivered::unwritten)?;
+    channel
+        .send(frame.outgoing(), wait)
+        .map_err(|unsent| crate::Undelivered::__new(unsent, read))
 }
 
-/// Отправляет каналом кадр вызова операции `ordinal` и принимает в `reply` кадр ответа.
+/// Отправляет каналом кадр вызова операции `ordinal`, построенный в `frame` записями параметров
+/// `write`, и принимает кадр ответа в байты `frame`. Отказ разрушает кадр вызова вместе с его
+/// capability.
 #[doc(hidden)]
 pub fn __protocol_call<'b, C: crate::Channel>(
     channel: &C,
     ordinal: u64,
     wait: crate::Timeout,
-    reply: &'b mut crate::FrameBytes,
-    write: impl FnOnce(&mut crate::wire::MessageBuf) -> Result<(), crate::wire::IpcError>,
+    frame: &'b mut crate::wire::MessageBuf<C::Resources>,
+    write: impl FnOnce(&mut crate::wire::MessageBuf<C::Resources>) -> Result<(), crate::wire::IpcError>,
 ) -> Result<crate::Incoming<'b, C::Resources>, crate::wire::IpcError> {
-    send_frame(
-        crate::wire::Header::new(ordinal),
-        write,
-        |bytes, handles| channel.call(bytes, handles, reply, wait),
-    )
+    build_frame(frame, crate::wire::Header::new(ordinal), write)?;
+    channel.call(frame.outgoing(), wait)
+}
+
+pub(crate) fn read_answer<'b, V: crate::WireValue<'b, R>, R: crate::ReceivedResources>(
+    body: &'b [u8],
+    resources: &mut R,
+) -> Result<V::Owned, crate::wire::IpcError> {
+    let mut cursor = crate::wire::FieldCursor::new(body);
+    let mut value = None;
+    while let Some(field) = cursor.next_field()? {
+        if field.id == crate::wire::FIELD_ID_MIN {
+            value = Some(V::from_field(field.data, resources)?);
+        }
+    }
+    value.ok_or(crate::wire::IpcError::MissingField)
 }
 
 /// Разбирает кадр ответа операции `ordinal`: значение ответа занимает поле `FIELD_ID_MIN`.
@@ -749,13 +736,5 @@ pub fn __protocol_answer<'b, V: crate::WireValue<'b, R>, R: crate::ReceivedResou
     if header.ordinal != ordinal {
         return Err(crate::wire::IpcError::InvalidValue);
     }
-
-    let mut cursor = crate::wire::FieldCursor::new(body);
-    let mut value = None;
-    while let Some(field) = cursor.next_field()? {
-        if field.id == crate::wire::FIELD_ID_MIN {
-            value = Some(V::from_field(field.data, &mut resources)?);
-        }
-    }
-    value.ok_or(crate::wire::IpcError::MissingField)
+    read_answer::<V, R>(body, &mut resources)
 }

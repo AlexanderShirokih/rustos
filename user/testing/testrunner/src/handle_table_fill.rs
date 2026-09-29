@@ -1,10 +1,11 @@
 use kernel_objects::Signal;
-use syscall::{Handle, kind};
 
-pub fn fill_handle_table() -> Option<Handle<kind::Signal>> {
+pub fn fill_handle_table() -> Option<Signal> {
     let mut last = None;
     while let Ok(signal) = Signal::create() {
-        last = Some(signal.into_raw());
+        if let Some(previous) = last.replace(signal) {
+            let _ = previous.into_raw();
+        }
     }
     last
 }

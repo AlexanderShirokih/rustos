@@ -238,7 +238,7 @@ fn write_log(session: &Port, tag: &str, message: &str) {
 }
 
 fn send_unknown_ordinal(session: &Port) {
-    let mut frame = MessageBuf::new();
+    let mut frame = MessageBuf::<()>::new();
     frame
         .write_header(&Header::new(log::write::ORDINAL ^ 1))
         .expect("header fits");
@@ -248,7 +248,7 @@ fn send_unknown_ordinal(session: &Port) {
 }
 
 fn send_log_frame_with_cap(session: &Port, cap: Port) -> i64 {
-    let mut frame = MessageBuf::new();
+    let mut frame = MessageBuf::<()>::new();
     frame
         .write_header(&Header::new(log::write::ORDINAL))
         .expect("header fits");
@@ -261,11 +261,10 @@ fn send_log_frame_with_cap(session: &Port, cap: Port) -> i64 {
     frame.finish().expect("frame fits");
     // Ядро вынимает capability из таблицы отправителя при рандеву: владение
     // хэндлом отдаётся кадру.
-    let carried = cap.into_raw();
-    ipc_raw::write_frame(frame.as_bytes(), &[carried.raw()]);
+    ipc_raw::write_frame(frame.as_bytes(), &[cap.as_raw().raw()]);
     let sent = port_send(session.as_raw(), SEND_TIMEOUT);
-    if sent < 0 {
-        drop(Port::from_handle(carried));
+    if sent >= 0 {
+        let _ = cap.into_raw();
     }
     sent
 }

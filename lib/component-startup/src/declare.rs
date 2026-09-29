@@ -2,7 +2,7 @@ use core::fmt;
 
 use component_abi::{REQUIREMENT_NAME_MAX, ResourceError, component_startup};
 use ipc::wire::{IpcError, Str};
-use kernel_objects::{MmioWindow, OwnedHandle, PortTransport, ReceivedHandle, Session, kind};
+use kernel_objects::{PortTransport, Session, kind};
 use syscall::Handle;
 
 use crate::request::session;
@@ -20,7 +20,7 @@ pub struct StartupError {
 pub enum StartupFailure {
     /// Отказ в сессии требования.
     Session(component_abi::SessionError),
-    /// Отказ в линии прерывания, MMIO-окне либо регионе образа.
+    /// Отказ в регионе образа.
     Resource(ResourceError),
     /// Отказ транспорта либо истечение [`STARTUP_REQUEST_TIMEOUT`](crate::STARTUP_REQUEST_TIMEOUT).
     Ipc(IpcError),
@@ -69,7 +69,6 @@ impl core::error::Error for StartupError {}
 ///     struct AlarmStartup {
 ///         requirements: {
 ///             rtc: session(rtc::Protocol),
-///             window: mmio(compatible = ["arm,pl031"]),
 ///         },
 ///         exports: [alarm::Protocol],
 ///     }
@@ -79,6 +78,12 @@ impl core::error::Error for StartupError {}
 /// ```
 #[macro_export]
 macro_rules! component_manifest {
+    (exports: [$($export:path),* $(,)?] $(,)?) => {
+        $crate::component_abi::__component_manifest_record! {
+            exports = [$($export),*]
+            requirements {}
+        }
+    };
     (
         $(#[$attribute:meta])*
         $visibility:vis struct $name:ident {
@@ -119,19 +124,9 @@ macro_rules! component_manifest {
         }
     };
     (@field session($protocol:path)) => { $crate::Session<$protocol> };
-    (@field irq $parameters:tt) => { $crate::IrqLine };
-    (@field mmio $parameters:tt) => { $crate::MmioWindow };
     (@field region) => { $crate::MemoryRegion };
     (@request $requests:ident $requirement:ident session($protocol:path)) => {
         $crate::start_session::<$protocol>(&$requests, stringify!($requirement))
-    };
-    (@request $requests:ident $requirement:ident irq $parameters:tt) => {
-        $crate::start_resource(stringify!($requirement), |name| $requests.irq(name))
-            .map($crate::OwnedHandle::from)
-    };
-    (@request $requests:ident $requirement:ident mmio $parameters:tt) => {
-        $crate::start_resource(stringify!($requirement), |name| $requests.mmio(name))
-            .map($crate::mmio_window)
     };
     (@request $requests:ident $requirement:ident region) => {
         $crate::start_resource(stringify!($requirement), |name| $requests.region(name))
@@ -173,16 +168,6 @@ pub fn start_resource<R>(
         Ok(Ok(resource)) => Ok(resource),
         Ok(Err(error)) => Err(failed(requirement, StartupFailure::Resource(error))),
         Err(error) => Err(failed(requirement, StartupFailure::Ipc(error))),
-    }
-}
-
-#[must_use]
-pub fn mmio_window(
-    window: component_abi::MmioWindow<ReceivedHandle<kind::MemoryRegion>>,
-) -> MmioWindow {
-    MmioWindow {
-        region: OwnedHandle::from(window.region),
-        offset: window.offset,
     }
 }
 

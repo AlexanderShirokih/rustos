@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
 use component_abi::{LOG_REQUIREMENT, RequirementKind, SESSION_SCOPE_MAX};
-use userland_image::{DeviceSpec, RequirementSourceSpec, RequirementSpec};
+use userland_image::{RequirementSourceSpec, RequirementSpec};
 
 use crate::{
     manifest::{ManifestRequirement, ProgramManifest},
@@ -9,14 +9,14 @@ use crate::{
 
 const BIND_KEY: &str = "bind";
 const SCOPE_KEY: &str = "scope";
-const INSTANCE_KEY: &str = "instance";
+
+const BOOT_RECORD: usize = 0;
 
 pub(super) struct Consumer<'a> {
     pub(super) index: usize,
     pub(super) name: &'a str,
     pub(super) entry: &'a ComponentEntry,
     pub(super) declared: &'a ProgramManifest,
-    pub(super) compatible: &'a [Vec<&'a str>],
 }
 
 pub(super) struct Providers<'p> {
@@ -33,16 +33,9 @@ pub(super) fn compile_requirements<'a>(
         .declared
         .requirements
         .iter()
-        .zip(consumer.compatible)
-        .map(|(requirement, compatible)| {
+        .map(|requirement| {
             let source = match requirement.kind {
                 RequirementKind::Region => RequirementSourceSpec::Region,
-                RequirementKind::Irq => {
-                    RequirementSourceSpec::Irq(device(consumer.entry, requirement, compatible))
-                }
-                RequirementKind::Mmio => {
-                    RequirementSourceSpec::Mmio(device(consumer.entry, requirement, compatible))
-                }
                 RequirementKind::Session => session(consumer, requirement, providers)?,
             };
             Ok(RequirementSpec {
@@ -53,26 +46,13 @@ pub(super) fn compile_requirements<'a>(
         .collect()
 }
 
-fn device<'a>(
-    entry: &ComponentEntry,
-    requirement: &ManifestRequirement,
-    compatible: &'a [&'a str],
-) -> DeviceSpec<'a> {
-    DeviceSpec {
-        compatible,
-        // Требование без ключа `instance` получает первое устройство своей совместимости.
-        instance: entry.instance.get(&requirement.name).copied().unwrap_or(0),
-        resource: requirement.resource,
-    }
-}
-
 fn session<'a>(
     consumer: &Consumer<'a>,
     requirement: &'a ManifestRequirement,
     providers: &Providers<'_>,
 ) -> Result<RequirementSourceSpec<'a>> {
     let name = consumer.name;
-    let protocol = requirement.names.first().with_context(|| {
+    let protocol = requirement.protocol.as_deref().with_context(|| {
         format!(
             "boot plan component '{name}' declares session requirement '{}' without a protocol",
             requirement.name
@@ -84,15 +64,25 @@ fn session<'a>(
         }
         None => only_provider(consumer, &requirement.name, protocol, providers)?,
     };
+    let scope = consumer.entry.scope.get(&requirement.name);
+    // Экспорт записи 0 выдаёт сам rootkeeper без заявки провайдеру, и область читать некому.
+    if provider == BOOT_RECORD && scope.is_some() {
+        bail!(
+            "boot plan component '{name}' sets '{SCOPE_KEY}' on requirement '{}', \
+             which the boot program '{}' provides",
+            requirement.name,
+            providers
+                .names
+                .get(BOOT_RECORD)
+                .copied()
+                .unwrap_or_default()
+        );
+    }
     Ok(RequirementSourceSpec::Export {
         provider: u16::try_from(provider)
             .context("boot plan resolves a provider past the count of a plan record")?,
         protocol,
-        scope: consumer
-            .entry
-            .scope
-            .get(&requirement.name)
-            .map_or("", String::as_str),
+        scope: scope.map_or("", String::as_str),
     })
 }
 
@@ -175,10 +165,10 @@ fn exports(declared: &ProgramManifest, protocol: &str) -> bool {
 fn validate_keys(consumer: &Consumer<'_>) -> Result<()> {
     let entry = consumer.entry;
     for requirement in entry.bind.keys() {
-        validate_key(consumer, BIND_KEY, requirement, RequirementClass::Session)?;
+        validate_key(consumer, BIND_KEY, requirement)?;
     }
     for (requirement, scope) in &entry.scope {
-        validate_key(consumer, SCOPE_KEY, requirement, RequirementClass::Session)?;
+        validate_key(consumer, SCOPE_KEY, requirement)?;
         ensure!(
             !scope.is_empty() && scope.len() <= SESSION_SCOPE_MAX,
             "boot plan component '{}' sets '{SCOPE_KEY}' on requirement '{requirement}' with {} bytes; \
@@ -187,29 +177,10 @@ fn validate_keys(consumer: &Consumer<'_>) -> Result<()> {
             scope.len()
         );
     }
-    for requirement in entry.instance.keys() {
-        validate_key(
-            consumer,
-            INSTANCE_KEY,
-            requirement,
-            RequirementClass::Device,
-        )?;
-    }
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum RequirementClass {
-    Session,
-    Device,
-}
-
-fn validate_key(
-    consumer: &Consumer<'_>,
-    key: &str,
-    requirement: &str,
-    class: RequirementClass,
-) -> Result<()> {
+fn validate_key(consumer: &Consumer<'_>, key: &str, requirement: &str) -> Result<()> {
     let name = consumer.name;
     // Родитель сам выдаёт журнал, и описание композиции его не связывает.
     ensure!(
@@ -228,18 +199,9 @@ fn validate_key(
                  which its manifest does not declare"
             )
         })?;
-    match class {
-        RequirementClass::Session => ensure!(
-            declaration.kind == RequirementKind::Session,
-            "boot plan component '{name}' sets '{key}' on requirement '{requirement}', which takes no session"
-        ),
-        RequirementClass::Device => ensure!(
-            matches!(
-                declaration.kind,
-                RequirementKind::Irq | RequirementKind::Mmio
-            ),
-            "boot plan component '{name}' sets '{key}' on requirement '{requirement}', which names no device"
-        ),
-    }
+    ensure!(
+        declaration.kind == RequirementKind::Session,
+        "boot plan component '{name}' sets '{key}' on requirement '{requirement}', which takes no session"
+    );
     Ok(())
 }

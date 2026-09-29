@@ -499,7 +499,7 @@ fn signal_set_wait(
 
 fn signal_close_wait(payload: u64) -> Result<(), FailureKind> {
     let signal = signal_create().map_err(|_| FailureKind::violated(-1400))?;
-    let state = WorkerState::new(signal, payload);
+    let state = WorkerState::new(signal.as_raw(), payload);
     let worker = spawn_worker(signal_wait_worker, &state, -1401)?;
     wait_until_ready(&state)?;
 

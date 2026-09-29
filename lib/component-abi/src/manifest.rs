@@ -12,7 +12,7 @@ pub const COMPONENT_MANIFEST_SECTION: &str = ".component.manifest";
 const COMPONENT_MANIFEST_MAGIC: [u8; 8] = *b"CMPMFST\0";
 const COMPONENT_MANIFEST_VERSION: u16 = 1;
 const COMPONENT_MANIFEST_HEADER_SIZE: usize = 16;
-const COMPONENT_REQUIREMENT_HEADER_SIZE: usize = 4;
+const COMPONENT_REQUIREMENT_HEADER_SIZE: usize = 1;
 const OFFSET_VERSION: usize = 8;
 const OFFSET_REQUIREMENT_COUNT: usize = 10;
 const OFFSET_EXPORT_COUNT: usize = 12;
@@ -25,12 +25,8 @@ const OFFSET_RESERVED: usize = 13;
 pub enum RequirementKind {
     /// Read-only регион данных образа.
     Region = 0,
-    /// Линия прерывания устройства.
-    Irq = 1,
-    /// MMIO-окно устройства.
-    Mmio = 2,
     /// Сессия экспорта другого компонента.
-    Session = 3,
+    Session = 1,
 }
 
 /// Требование из объявления манифеста, вход [`manifest_len`] и [`encode_manifest`].
@@ -38,9 +34,7 @@ pub enum RequirementKind {
 pub struct RequirementDeclaration {
     name: &'static str,
     kind: RequirementKind,
-    resource: u16,
     protocol: &'static str,
-    compatible: &'static [&'static str],
 }
 
 /// Требование, прочитанное [`decode_manifest`] из байт секции [`COMPONENT_MANIFEST_SECTION`].
@@ -48,9 +42,7 @@ pub struct RequirementDeclaration {
 pub struct ManifestRequirement<'a> {
     name: &'a str,
     kind: RequirementKind,
-    resource: u16,
-    names: &'a [u8],
-    name_count: u8,
+    protocol: Option<&'a str>,
 }
 
 /// Имена записи в порядке объявления: длина `u8` и байты каждого.
@@ -96,9 +88,7 @@ impl RequirementKind {
     const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Region),
-            1 => Some(Self::Irq),
-            2 => Some(Self::Mmio),
-            3 => Some(Self::Session),
+            1 => Some(Self::Session),
             _ => None,
         }
     }
@@ -111,46 +101,7 @@ impl RequirementDeclaration {
         Self {
             name,
             kind: RequirementKind::Region,
-            resource: 0,
             protocol: "",
-            compatible: &[],
-        }
-    }
-
-    /// Линия прерывания устройства, совместимого с одной из `compatible`.
-    /// `resource` называет линию среди линий устройства.
-    #[must_use]
-    pub const fn irq(
-        name: &'static str,
-        compatible: &'static [&'static str],
-        resource: u16,
-    ) -> Self {
-        Self::device(name, RequirementKind::Irq, compatible, resource)
-    }
-
-    /// MMIO-окно устройства, совместимого с одной из `compatible`. `resource`
-    /// называет окно среди окон устройства.
-    #[must_use]
-    pub const fn mmio(
-        name: &'static str,
-        compatible: &'static [&'static str],
-        resource: u16,
-    ) -> Self {
-        Self::device(name, RequirementKind::Mmio, compatible, resource)
-    }
-
-    const fn device(
-        name: &'static str,
-        kind: RequirementKind,
-        compatible: &'static [&'static str],
-        resource: u16,
-    ) -> Self {
-        Self {
-            name,
-            kind,
-            resource,
-            protocol: "",
-            compatible,
         }
     }
 
@@ -160,18 +111,7 @@ impl RequirementDeclaration {
         Self {
             name,
             kind: RequirementKind::Session,
-            resource: 0,
             protocol,
-            compatible: &[],
-        }
-    }
-
-    const fn name_count(&self) -> usize {
-        match self.kind {
-            RequirementKind::Session => 1,
-            RequirementKind::Region | RequirementKind::Irq | RequirementKind::Mmio => {
-                self.compatible.len()
-            }
         }
     }
 }
@@ -188,20 +128,10 @@ impl<'a> ManifestRequirement<'a> {
         self.kind
     }
 
-    /// Номер ресурса устройства: линии либо окна. У прочих требований ноль.
+    /// Идентификатор протокола сессии. У региона образа `None`.
     #[must_use]
-    pub const fn resource(&self) -> u16 {
-        self.resource
-    }
-
-    /// Имена требования: строки совместимости устройства либо идентификатор протокола.
-    #[must_use]
-    pub const fn names(&self) -> ManifestNames<'a> {
-        ManifestNames {
-            bytes: self.names,
-            cursor: 0,
-            remaining: self.name_count,
-        }
+    pub const fn protocol(&self) -> Option<&'a str> {
+        self.protocol
     }
 }
 
@@ -272,11 +202,6 @@ pub const fn manifest_len(requirements: &[RequirementDeclaration], exports: &[&s
         if matches!(requirement.kind, RequirementKind::Session) {
             len += 1 + requirement.protocol.len();
         }
-        let mut names = requirement.compatible;
-        while let [name, others @ ..] = names {
-            len += 1 + name.len();
-            names = others;
-        }
         pending = tail;
     }
     len
@@ -321,14 +246,7 @@ pub const fn encode_manifest<const LEN: usize>(
             declaration.name.len() <= REQUIREMENT_NAME_MAX,
             "requirement name fits REQUIREMENT_NAME_MAX"
         );
-        let resource = declaration.resource.to_le_bytes();
-        let requirement_header = [
-            declaration.kind as u8,
-            resource[0],
-            resource[1],
-            len_byte(declaration.name_count()),
-        ];
-        rest = write_bytes(rest, &requirement_header);
+        rest = write_bytes(rest, &[declaration.kind as u8]);
         rest = write_name(rest, declaration.name);
 
         if matches!(declaration.kind, RequirementKind::Session) {
@@ -337,11 +255,6 @@ pub const fn encode_manifest<const LEN: usize>(
                 "requirement protocol fits PROTOCOL_ID_MAX"
             );
             rest = write_name(rest, declaration.protocol);
-        }
-        let mut names = declaration.compatible;
-        while let [name, others @ ..] = names {
-            rest = write_name(rest, name);
-            names = others;
         }
         requirement_count += 1;
         pending = tail;
@@ -512,52 +425,32 @@ fn parse_requirement(
     bytes: &[u8],
     at: usize,
 ) -> Result<ParsedRequirement<'_>, ManifestDecodeError> {
-    let header = bytes
-        .get(at..at + COMPONENT_REQUIREMENT_HEADER_SIZE)
-        .ok_or(ManifestDecodeError::Truncated {
-            needed: at + COMPONENT_REQUIREMENT_HEADER_SIZE,
-            actual: bytes.len(),
-        })?;
-    let [kind, resource_low, resource_high, name_count] = *header else {
-        return Err(ManifestDecodeError::InvalidLayout("requirement header"));
-    };
+    let kind = *bytes.get(at).ok_or(ManifestDecodeError::Truncated {
+        needed: at + COMPONENT_REQUIREMENT_HEADER_SIZE,
+        actual: bytes.len(),
+    })?;
     let kind = RequirementKind::from_byte(kind)
         .ok_or(ManifestDecodeError::InvalidLayout("requirement kind"))?;
-    let resource = u16::from_le_bytes([resource_low, resource_high]);
-
-    // Устройство названо хотя бы одной совместимостью, сессия - ровно одним идентификатором
-    // протокола, а регион образа не имеет имён.
-    match kind {
-        RequirementKind::Region if name_count != 0 || resource != 0 => {
-            return Err(ManifestDecodeError::InvalidLayout("region requirement"));
-        }
-        RequirementKind::Session if name_count != 1 || resource != 0 => {
-            return Err(ManifestDecodeError::InvalidLayout("session requirement"));
-        }
-        RequirementKind::Irq | RequirementKind::Mmio if name_count == 0 => {
-            return Err(ManifestDecodeError::InvalidLayout("device requirement"));
-        }
-        _ => {}
-    }
-
-    let (name, names_at) = parse_name(
+    let (name, cursor) = parse_name(
         bytes,
         at + COMPONENT_REQUIREMENT_HEADER_SIZE,
         "requirement name",
     )?;
-    let cursor = parse_names(bytes, names_at, name_count, "requirement name")?;
+    let (protocol, end) = match kind {
+        RequirementKind::Region => (None, cursor),
+        RequirementKind::Session => {
+            let (protocol, end) = parse_name(bytes, cursor, "requirement protocol")?;
+            (Some(protocol), end)
+        }
+    };
 
     Ok(ParsedRequirement {
         requirement: ManifestRequirement {
             name,
             kind,
-            resource,
-            names: bytes
-                .get(names_at..cursor)
-                .ok_or(ManifestDecodeError::InvalidLayout("requirement names"))?,
-            name_count,
+            protocol,
         },
-        end: cursor,
+        end,
     })
 }
 
@@ -572,36 +465,31 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use std::{vec, vec::Vec};
+    use std::vec::Vec;
 
     use super::*;
 
-    const RTC: &[&str] = &["arm,pl031", "arm,primecell"];
-
     const NO_EXPORTS: &[&str] = &[];
     const TWO_EXPORTS: &[&str] = &["Namespace", "NamespaceAdmin"];
-
-    const DEVICE_REQUIREMENTS: &[RequirementDeclaration] = &[
-        RequirementDeclaration::irq("line", RTC, 0),
-        RequirementDeclaration::mmio("window", RTC, 1),
-    ];
-    const DEVICE_LEN: usize = manifest_len(DEVICE_REQUIREMENTS, NO_EXPORTS);
 
     const SESSION_REQUIREMENTS: &[RequirementDeclaration] =
         &[RequirementDeclaration::session("files", "FileSystem")];
     const SESSION_LEN: usize = manifest_len(SESSION_REQUIREMENTS, NO_EXPORTS);
 
-    fn device_record() -> [u8; DEVICE_LEN] {
-        encode_manifest(DEVICE_REQUIREMENTS, NO_EXPORTS)
+    const REGION_REQUIREMENTS: &[RequirementDeclaration] =
+        &[RequirementDeclaration::region("image")];
+    const REGION_LEN: usize = manifest_len(REGION_REQUIREMENTS, NO_EXPORTS);
+
+    fn session_record() -> [u8; SESSION_LEN] {
+        encode_manifest(SESSION_REQUIREMENTS, NO_EXPORTS)
     }
 
     #[test]
     fn a_record_carries_every_requirement_and_export_in_the_order_of_the_declaration() {
         const REQUIREMENTS: &[RequirementDeclaration] = &[
-            RequirementDeclaration::irq("line", RTC, 0),
-            RequirementDeclaration::mmio("window", RTC, 1),
             RequirementDeclaration::region("image"),
             RequirementDeclaration::session("files", "FileSystem"),
+            RequirementDeclaration::region("fonts"),
         ];
         const LEN: usize = manifest_len(REQUIREMENTS, TWO_EXPORTS);
         let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, TWO_EXPORTS);
@@ -611,22 +499,37 @@ mod tests {
         let requirements: Vec<_> = manifest
             .requirements()
             .map(|requirement| {
-                let names: Vec<&str> = requirement.names().collect();
                 (
                     requirement.name(),
                     requirement.kind(),
-                    requirement.resource(),
-                    names,
+                    requirement.protocol(),
                 )
             })
             .collect();
         assert_eq!(
             requirements,
             [
-                ("line", RequirementKind::Irq, 0, RTC.to_vec()),
-                ("window", RequirementKind::Mmio, 1, RTC.to_vec()),
-                ("image", RequirementKind::Region, 0, vec![]),
-                ("files", RequirementKind::Session, 0, vec!["FileSystem"]),
+                ("image", RequirementKind::Region, None),
+                ("files", RequirementKind::Session, Some("FileSystem")),
+                ("fonts", RequirementKind::Region, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_region_requirement_ends_with_its_name() {
+        let bytes: [u8; REGION_LEN] = encode_manifest(REGION_REQUIREMENTS, NO_EXPORTS);
+
+        assert_eq!(
+            &bytes[COMPONENT_MANIFEST_HEADER_SIZE..],
+            [
+                RequirementKind::Region as u8,
+                5,
+                b'i',
+                b'm',
+                b'a',
+                b'g',
+                b'e'
             ]
         );
     }
@@ -705,7 +608,7 @@ mod tests {
 
     #[test]
     fn an_empty_requirement_name_is_refused() {
-        let mut bytes = device_record();
+        let mut bytes = session_record();
         bytes[COMPONENT_MANIFEST_HEADER_SIZE + COMPONENT_REQUIREMENT_HEADER_SIZE] = 0;
 
         assert_eq!(
@@ -715,15 +618,15 @@ mod tests {
     }
 
     #[test]
-    fn a_session_requirement_with_other_than_one_name_is_refused() {
-        let mut bytes: [u8; SESSION_LEN] = encode_manifest(SESSION_REQUIREMENTS, NO_EXPORTS);
-        for count in [0, 2] {
-            bytes[COMPONENT_MANIFEST_HEADER_SIZE + 3] = count;
-            assert_eq!(
-                decode_manifest(&bytes),
-                Err(ManifestDecodeError::InvalidLayout("session requirement"))
-            );
-        }
+    fn an_empty_session_protocol_is_refused() {
+        let mut bytes = session_record();
+        let protocol_at = COMPONENT_MANIFEST_HEADER_SIZE + COMPONENT_REQUIREMENT_HEADER_SIZE + 6;
+        bytes[protocol_at] = 0;
+
+        assert_eq!(
+            decode_manifest(&bytes),
+            Err(ManifestDecodeError::InvalidLayout("requirement protocol"))
+        );
     }
 
     #[test]
@@ -737,7 +640,7 @@ mod tests {
 
     #[test]
     fn a_foreign_magic_is_refused() {
-        let mut bytes = device_record();
+        let mut bytes = session_record();
         bytes[0] = b'X';
 
         assert_eq!(
@@ -750,7 +653,7 @@ mod tests {
 
     #[test]
     fn another_version_is_refused() {
-        let mut bytes = device_record();
+        let mut bytes = session_record();
         for version in [2, 9] {
             bytes[OFFSET_VERSION] = version;
             assert_eq!(
@@ -762,7 +665,7 @@ mod tests {
 
     #[test]
     fn bytes_past_the_record_are_refused() {
-        let mut bytes = device_record().to_vec();
+        let mut bytes = session_record().to_vec();
         bytes.push(0);
 
         assert!(matches!(
@@ -773,8 +676,8 @@ mod tests {
 
     #[test]
     fn an_unknown_requirement_kind_is_refused() {
-        let mut bytes = device_record();
-        for kind in [4, 5, 9] {
+        let mut bytes = session_record();
+        for kind in [2, 3, 9] {
             bytes[COMPONENT_MANIFEST_HEADER_SIZE] = kind;
             assert_eq!(
                 decode_manifest(&bytes),
@@ -784,32 +687,8 @@ mod tests {
     }
 
     #[test]
-    fn a_device_requirement_without_names_is_refused() {
-        let mut bytes = device_record();
-        bytes[COMPONENT_MANIFEST_HEADER_SIZE + 3] = 0;
-
-        assert_eq!(
-            decode_manifest(&bytes),
-            Err(ManifestDecodeError::InvalidLayout("device requirement"))
-        );
-    }
-
-    #[test]
-    fn a_region_requirement_with_a_resource_is_refused() {
-        const REQUIREMENTS: &[RequirementDeclaration] = &[RequirementDeclaration::region("image")];
-        const LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
-        let mut bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS);
-        bytes[COMPONENT_MANIFEST_HEADER_SIZE + 1] = 1;
-
-        assert_eq!(
-            decode_manifest(&bytes),
-            Err(ManifestDecodeError::InvalidLayout("region requirement"))
-        );
-    }
-
-    #[test]
     fn a_non_zero_reserved_field_is_refused() {
-        let mut bytes = device_record();
+        let mut bytes = session_record();
         bytes[OFFSET_RESERVED] = 1;
 
         assert_eq!(
@@ -820,7 +699,7 @@ mod tests {
 
     #[test]
     fn a_truncated_record_is_refused() {
-        let bytes = device_record();
+        let bytes = session_record();
         for length in [0, COMPONENT_MANIFEST_HEADER_SIZE, bytes.len() - 1] {
             assert!(
                 matches!(

@@ -4,8 +4,9 @@
 
 use filesystem_abi::{AccessMode, OpenFlags, file_system};
 use ipc::wire::Str;
-use runtime::PortTransport;
-use syscall::{Handle, Timeout, kind};
+use kernel_objects::Port;
+use runtime::{IssuedHandle, PortTransport};
+use syscall::{Timeout, kind};
 
 mod fixture_start;
 
@@ -19,8 +20,9 @@ const PATH: &str = "/fixture";
 
 fixture_start!(populate_session);
 
-fn populate_session(service: Handle<kind::Port>) -> Result<(), Failed> {
-    let client = file_system::Client::new(PortTransport::new(service)).with_wait(CALL_TIMEOUT);
+fn populate_session(service: IssuedHandle<kind::Port>) -> Result<(), Failed> {
+    let service = Port::from(service);
+    let client = file_system::Client::new(PortTransport::new(&service)).with_wait(CALL_TIMEOUT);
 
     let _buffer = client
         .acquire_buffer(BUFFER_SIZE)

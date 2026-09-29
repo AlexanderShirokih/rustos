@@ -12,10 +12,10 @@ use ipc::{
     Channel as _, IntoWireValue as _, Listener as _,
     wire::{Header, MESSAGE_INLINE_MAX, MessageBuf},
 };
-use kernel_objects::{Delivery, OwnedHandle, Port, ReceivedHandle, Signal, kind};
+use kernel_objects::{Delivery, IssuedHandle, OwnedHandle, Port, Signal, kind};
 use kernel_tests::kernel_test;
-use runtime::{PortTransport, Priority, Timeout, handle_close, port_send, spawn};
-use syscall::{Handle, Rights, SyscallError};
+use runtime::{PortTransport, Priority, Timeout, port_send, signal_set, spawn_owned};
+use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
 const STACK_SIZE: u64 = 0x4000;
 
@@ -45,7 +45,7 @@ struct Probe {
 }
 
 impl kind_probe::Service<Delivery> for Probe {
-    fn hand(&mut self, _frame: &Delivery, capability: ReceivedHandle<kind::Port>) {
+    fn hand(&mut self, _frame: &Delivery, capability: IssuedHandle<kind::Port>) {
         self.handed = Some(OwnedHandle::from(capability));
     }
 
@@ -56,7 +56,6 @@ impl kind_probe::Service<Delivery> for Probe {
 
 struct Exchange {
     client: AtomicU32,
-    signal: AtomicU32,
     sent: AtomicI64,
     answered: AtomicI64,
 }
@@ -67,31 +66,22 @@ fn port_of(raw: u32) -> Handle<kind::Port> {
         .expect("port handle present")
 }
 
-extern "C" fn sending_worker(arg: usize) -> u32 {
+fn sending_worker(arg: usize, signal: Signal) -> u32 {
     // SAFETY: главный поток держит `Exchange` в своём кадре до `join`.
     let exchange = unsafe { &*(arg as *const Exchange) };
-    let signal = Signal::from_handle(
-        core::num::NonZeroU32::new(exchange.signal.load(SeqCst))
-            .map(Handle::from_abi)
-            .expect("signal capability present"),
-    );
     let transport = PortTransport::new(port_of(exchange.client.load(SeqCst)));
 
     // Кадр собран вручную, потому что сгенерированный клиент не пропускает чужой вид в это поле.
     let mut frame = MessageBuf::new();
     let built = frame
         .write_header(&Header::new(kind_probe::hand::ORDINAL))
-        .and_then(|()| signal.write_as_field(&mut frame, ipc::wire::FIELD_ID_MIN))
+        .and_then(|()| signal.write_into(&mut frame, ipc::wire::FIELD_ID_MIN))
         .and_then(|()| frame.finish());
     if built.is_err() {
         exchange.sent.store(-1, SeqCst);
         return 0;
     }
-    let sent = transport.send(frame.as_bytes(), frame.handles(), SEND_TIMEOUT);
-    if sent.is_ok() {
-        // Ядро забрало запись у отправителя вместе с кадром.
-        signal.relinquish();
-    }
+    let sent = transport.send(frame.outgoing(), SEND_TIMEOUT);
     exchange.sent.store(i64::from(sent.is_ok()), SeqCst);
 
     let answered = kind_probe::Client::new(transport)
@@ -114,13 +104,12 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
 
     let exchange = Exchange {
         client: AtomicU32::new(service.client.as_raw().raw()),
-        signal: AtomicU32::new(carried.into_raw().raw()),
         sent: AtomicI64::new(i64::MIN),
         answered: AtomicI64::new(i64::MIN),
     };
-    let worker = spawn(
-        sending_worker,
-        core::ptr::from_ref(&exchange) as usize,
+    let exchange_addr = core::ptr::from_ref(&exchange) as usize;
+    let worker = spawn_owned(
+        move || sending_worker(exchange_addr, carried),
         STACK_SIZE,
         Priority::new(1),
     )
@@ -142,11 +131,10 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
         SyscallError::WrongType.as_return_value()
     );
 
-    // Уход владельца освобождает запись получателя, и повторное закрытие даёт `BadHandle`.
-    let stale = owned.as_raw();
+    let stale = Handle::<kind::Signal>::from_abi(owned.as_raw().as_nonzero());
     drop(owned);
     kernel_tests::kassert_eq!(
-        handle_close(stale),
+        signal_set(stale, SIGNALED, 0, WakeCount::None),
         SyscallError::BadHandle.as_return_value()
     );
 

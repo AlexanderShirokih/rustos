@@ -1,10 +1,10 @@
 //! `Process::start` из EL0. На ошибочном пути процесс без загруженного образа отвергает
-//! `start`, и переданный по значению хэндл закрывается обёрткой (его `Drop`) ровно один раз,
+//! `start`, и переданный по значению хэндл закрывает его владелец ровно один раз,
 //! не утекая. Запущенный процесс получает стартовый хэндл без права передачи.
 
 use kernel_objects::{Error, Port, Process, Signal, ThreadEntry, kind};
 use kernel_tests::kernel_test;
-use runtime::{Priority, Timeout, handle_close, signal_set};
+use runtime::{Priority, Timeout, signal_set};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
 use crate::fixture::spawn_entry;
@@ -36,10 +36,6 @@ fn start_error_closes_passed_handles() {
     kernel_tests::kassert!(error.is_some());
 
     kernel_tests::kassert!(is_closed(stale));
-    kernel_tests::kassert_eq!(
-        handle_close(stale),
-        SyscallError::BadHandle.as_return_value()
-    );
 }
 
 #[kernel_test]

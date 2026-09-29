@@ -9,6 +9,10 @@ path = "/rootkeeper"
 boot = true
 
 [[programs]]
+package = "platform"
+path = "/platform"
+
+[[programs]]
 package = "driver-pl031"
 path = "/driver-pl031"
 

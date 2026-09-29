@@ -11,6 +11,7 @@ use std::{
 
 use memory::{
     AccessMask, MemFlags, MemoryRegion,
+    testing::PageMapperFactory,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use scheduler::{
@@ -19,9 +20,9 @@ use scheduler::{
 };
 
 use crate::common::{
-    CountingFrameAllocator, MockAddressSpaceFactory, MockContext, MockTimer, MockTimerSource,
-    preemption_enabled, reset_switches, set_current_cpu, switch_count, take_address_space_switches,
-    take_reschedules, with_simulated_irq,
+    CountingFrameAllocator, MockContext, MockTimer, MockTimerSource, preemption_enabled,
+    reset_switches, set_current_cpu, switch_count, take_address_space_switches, take_reschedules,
+    with_simulated_irq,
 };
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
@@ -466,8 +467,8 @@ fn spawn_via_service_handle_works() {
     assert_eq!(running.current(), Some(id));
 }
 
-fn new_factory_static() -> &'static MockAddressSpaceFactory {
-    Box::leak(Box::new(MockAddressSpaceFactory::new()))
+fn new_factory_static() -> &'static PageMapperFactory {
+    Box::leak(Box::new(PageMapperFactory::new()))
 }
 
 fn mark_process_loaded(
@@ -487,7 +488,7 @@ fn mark_process_loaded(
 
 fn make_scheduler_with_factory(
     timer: Arc<MockTimer>,
-    factory: &'static MockAddressSpaceFactory,
+    factory: &'static PageMapperFactory,
 ) -> Scheduler<MockContext, MockTimerSource, scheduler::Bootstrapped> {
     Scheduler::<MockContext, MockTimerSource, Uninit>::with_address_space_factory(
         MockTimerSource(timer),
@@ -638,7 +639,6 @@ fn user_address_space_is_live_while_process_is_live() {
 fn terminating_last_user_thread_releases_address_space() {
     // Последний thread_exit ставит процесс в pending-removal; следующий
     // `switch_to_next` удаляет его из ProcessTable, дропая `Arc<AddressSpace>`.
-    // Это последняя ссылка -> `MockUserMapper::Drop` инкрементирует `released`.
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -1042,6 +1042,46 @@ fn thread_terminate_via_handle_signals_terminated() {
 }
 
 #[test]
+fn thread_in_current_process_compares_thread_process_with_current() {
+    use capability::UserThreadEntry;
+
+    reset_switches();
+    let factory = new_factory_static();
+    let timer = MockTimer::new();
+    let scheduler = make_scheduler_with_factory(timer, factory);
+    let id = scheduler
+        .spawn(SpawnConfig::new("t"), || {})
+        .expect("spawn t");
+    let kernel = scheduler.thread_object_for(id).expect("thread_object");
+    let handle = scheduler.handle();
+
+    let process = handle
+        .create_empty_process("p")
+        .expect("create_empty_process");
+    mark_process_loaded(&handle, &process);
+    let user = handle
+        .create_user_thread(
+            &process,
+            UserThreadEntry {
+                entry_pc: 0x4000_0000,
+                user_sp: 0x4001_0000,
+                arg: 0,
+                priority: 1,
+            },
+        )
+        .expect("create_user_thread");
+
+    let running = scheduler.run();
+    assert_ne!(running.current(), Some(id));
+
+    let handle = running.handle();
+    let current = handle.current_thread_object().expect("current thread");
+    assert!(Arc::ptr_eq(&current, &user));
+    assert_eq!(handle.thread_in_current_process(&user), Some(true));
+    assert_eq!(handle.thread_in_current_process(&kernel), Some(false));
+}
+
+#[test]
 fn process_terminate_via_handle_terminates_all_threads() {
     use capability::UserThreadEntry;
 
@@ -1384,7 +1424,7 @@ struct CleanupQuarantineProbe {
     handle: SchedulerHandle<MockContext, MockTimerSource>,
     victim_cpu: CpuId,
     return_cpu: CpuId,
-    factory: &'static MockAddressSpaceFactory,
+    factory: &'static PageMapperFactory,
     calls: std::sync::atomic::AtomicUsize,
     released_during_cancel: std::sync::atomic::AtomicUsize,
 }
@@ -1394,7 +1434,7 @@ impl CleanupQuarantineProbe {
         handle: &SchedulerHandle<MockContext, MockTimerSource>,
         victim_cpu: CpuId,
         return_cpu: CpuId,
-        factory: &'static MockAddressSpaceFactory,
+        factory: &'static PageMapperFactory,
     ) -> Arc<Self> {
         Arc::new(Self {
             handle: handle.clone(),

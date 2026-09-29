@@ -22,11 +22,9 @@ pub use component_abi::{
 };
 pub use declare::{StartupError, StartupFailure};
 #[doc(hidden)]
-pub use declare::{mmio_window, start_parent, start_resource, start_session};
+pub use declare::{start_parent, start_resource, start_session};
 pub use export::{ExportError, MintedSession, mint_session, serve_export, whole_export};
 pub use ipc::wire::IpcError;
-pub use kernel_objects::{
-    IrqLine, MemoryRegion, MmioWindow, OwnedHandle, Port, PortTransport, Session, kind,
-};
+pub use kernel_objects::{MemoryRegion, OwnedHandle, Port, PortTransport, Session, kind};
 pub use request::{SessionRequest, accept, session};
 pub use syscall::{Handle, ObjectKind};

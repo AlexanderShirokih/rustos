@@ -5,7 +5,6 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     fmt::Write as _,
-    num::NonZeroU32,
     sync::atomic::{
         AtomicI64, AtomicU64,
         Ordering::{Acquire, Relaxed, Release},
@@ -19,7 +18,7 @@ use runtime::{
     port_recv, port_reply, port_send, signal_wait_one, spawn_owned, thread_exit_code,
     thread_terminate, thread_yield,
 };
-use syscall::{Handle, Rights, SIGNALED, SYSCALL_RETURN_TIMEOUT};
+use syscall::{Handle, Rights, SIGNALED, SYSCALL_RETURN_TIMEOUT, SyscallError};
 
 use crate::stress::{SplitMix64, StressPlan, log_pass, log_seed, read_payload, write_payload};
 
@@ -170,22 +169,20 @@ fn caller(arena: &Arena, index: usize, steps: u64, seed: u64) -> u32 {
 
 fn responder(arena: &Arena) -> u32 {
     loop {
-        let result = port_recv(arena.server, RECV_TIMEOUT);
-        if result == SYSCALL_RETURN_TIMEOUT {
-            if !arena.callers_running() {
+        let reply = match port_recv(arena.server, RECV_TIMEOUT) {
+            Ok(reply) => reply,
+            Err(SyscallError::Timeout) => {
+                if !arena.callers_running() {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => {
+                arena.failed(-i64::from(error as u32));
                 break;
             }
-            continue;
-        }
-        if result < 0 {
-            arena.failed(result);
-            break;
-        }
+        };
         let request = read_payload();
-        let reply = u32::try_from(result)
-            .ok()
-            .and_then(NonZeroU32::new)
-            .map(Handle::<kind::Reply>::from_abi);
         match (request, reply) {
             (Some(request), Some(reply)) => {
                 if caller_of(request) >= CALLERS {
@@ -259,6 +256,7 @@ fn handle_churn(arena: &Arena) -> u32 {
                     break;
                 }
             };
+        let stale = derived.as_raw();
         let closed = handle_close(derived);
         if closed != 0 {
             arena.failed(closed);
@@ -266,7 +264,7 @@ fn handle_churn(arena: &Arena) -> u32 {
         }
         // Закрытый хэндл больше не адресует объект. Слот мог достаться соседу,
         // и поколение отсекает обращение по устаревшему идентификатору.
-        if port_send(derived, Timeout::POLL) == 0 {
+        if port_send(stale, Timeout::POLL) == 0 {
             arena.mismatched.fetch_add(1, Relaxed);
         }
         arena.duplicates.fetch_add(1, Relaxed);
@@ -421,7 +419,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
                     let result = port_recv(server, VICTIM_TIMEOUT);
                     // Возврата быть не должно. У порта нет отправителей, и приём
                     // обязан прерваться снятием.
-                    u32::from(result != 0)
+                    u32::from(!matches!(result, Ok(None)))
                 },
                 STACK_SIZE,
                 Priority::new(1),

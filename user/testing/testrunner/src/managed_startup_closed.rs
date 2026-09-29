@@ -8,8 +8,8 @@ use core::panic::PanicInfo;
 
 use component_startup::component_manifest;
 use kernel_objects::Port;
-use runtime::{Timeout, handle_close, log_line, process_exit, start_component};
-use syscall::{Handle, kind};
+use runtime::{Timeout, handle_close, log_line, process_exit, start_component, take_bootstrap};
+use syscall::kind;
 
 const LOG_TAG: &str = "closed";
 
@@ -20,9 +20,15 @@ component_manifest! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    if ClosedStartup::request(parent).is_err() {
+pub extern "C" fn _start(parent: u32) -> ! {
+    // SAFETY: `parent` - значение `x0` точки входа, и точка входа исполняется один раз.
+    unsafe { runtime::start(parent) };
+    let Some(parent) = take_bootstrap() else {
+        process_exit(FAILED_EXIT_CODE)
+    };
+    let parent = parent.assume_kind::<kind::Port>();
+    start_component(parent.as_raw(), LOG_TAG);
+    if ClosedStartup::request(parent.as_raw()).is_err() {
         process_exit(FAILED_EXIT_CODE)
     }
     log_line("started");

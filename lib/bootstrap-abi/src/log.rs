@@ -21,6 +21,7 @@ mod tests {
     use std::{format, string::String};
 
     use ipc::wire::Str;
+    use ipc_test::{MockHandle, MockResources};
 
     use crate::{LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
 
@@ -29,10 +30,10 @@ mod tests {
         last_log: Option<String>,
     }
 
-    impl<F: ipc::ReceivedResources> crate::bootstrap::Service<F> for Sink {
+    impl crate::bootstrap::Service<MockResources> for Sink {
         fn log(
             &mut self,
-            _frame: &F,
+            _frame: &MockResources,
             tag: ipc::wire::Str<'_, { LOG_TAG_MAX }>,
             message: ipc::wire::Str<'_, { LOG_MESSAGE_MAX }>,
         ) {
@@ -41,18 +42,24 @@ mod tests {
 
         fn acquire_userland_image(
             &mut self,
-            _frame: &F,
-        ) -> impl ipc::IntoWireValue<Read = Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32>>
-        {
-            Err::<ipc::wire::Cap<crate::kind::MemoryRegion>, u32>(1)
+            _frame: &MockResources,
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32>,
+        > {
+            Err::<MockHandle<crate::kind::MemoryRegion>, u32>(1)
         }
 
-        fn acquire_devices(
+        fn acquire_hardware(
             &mut self,
-            _frame: &F,
-        ) -> impl ipc::IntoWireValue<Read = Result<ipc::wire::Session<crate::devices::Protocol>, u32>>
-        {
-            Err::<ipc::wire::Session<crate::devices::Protocol>, u32>(1)
+            _frame: &MockResources,
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<ipc::wire::Session<crate::hardware::Protocol>, u32>,
+        > {
+            Err::<ipc::wire::Session<crate::hardware::Protocol, MockHandle<crate::kind::Port>>, u32>(
+                1,
+            )
         }
     }
 

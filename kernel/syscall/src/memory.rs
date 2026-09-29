@@ -758,7 +758,7 @@ mod tests {
     }
 
     mod revoke {
-        use alloc::{sync::Weak, vec::Vec};
+        use alloc::sync::Weak;
 
         use capability::{
             Capability, CapabilityTarget, DrainedHandles, HandleTable, RevocationHook,
@@ -766,11 +766,8 @@ mod tests {
         use collections::MutexCell;
         use memory::{
             MemFlags, MemoryRegion,
-            memory_mapper::{
-                AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
-                MemoryRemappingError, MemoryUnmappingError,
-            },
-            physical_address::{PageAlignedAddress, PhysicalAddress},
+            physical_address::PageAlignedAddress,
+            testing::{PageMapper, UnmapCall},
             user_vm_allocator::UserVmAllocator,
             virtual_address::VirtualAddress,
         };
@@ -778,62 +775,6 @@ mod tests {
         use super::*;
 
         const ARENA: usize = 0x4000_0000;
-
-        struct TrackingMapper {
-            unmapped: MutexCell<Vec<usize>>,
-        }
-
-        impl TrackingMapper {
-            fn new() -> Self {
-                Self {
-                    unmapped: MutexCell::new(Vec::new()),
-                }
-            }
-        }
-
-        impl MemoryMapper for TrackingMapper {
-            fn map(
-                &self,
-                _v: PageAlignedVirtualAddress,
-                _pc: usize,
-                _i: &[u8],
-                _f: MemFlags,
-            ) -> Result<(), MemoryMappingError> {
-                Ok(())
-            }
-            fn map_exact(
-                &self,
-                _v: PageAlignedVirtualAddress,
-                _p: PageAlignedAddress,
-                _s: usize,
-                _f: MemFlags,
-            ) -> Result<(), MemoryMappingError> {
-                Ok(())
-            }
-            fn unmap(
-                &self,
-                v: PageAlignedVirtualAddress,
-                _s: usize,
-            ) -> Result<(), MemoryUnmappingError> {
-                self.unmapped.with_lock(|u| u.push(v.as_usize()));
-                Ok(())
-            }
-            fn remap(
-                &self,
-                _v: PageAlignedVirtualAddress,
-                _s: usize,
-                _f: MemFlags,
-            ) -> Result<(), MemoryRemappingError> {
-                Ok(())
-            }
-            fn activate_handle(&self) -> AddressSpaceHandle {
-                AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-            }
-            fn zero_owned_frame(&self, _p: PageAlignedAddress) {}
-            fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-                self
-            }
-        }
 
         fn region() -> Arc<MemoryRegion> {
             Arc::new(MemoryRegion::create_physical_device(
@@ -843,12 +784,9 @@ mod tests {
             ))
         }
 
-        fn recipient_with_mapping() -> (
-            UserVmContext,
-            Arc<TrackingMapper>,
-            PageAlignedVirtualAddress,
-        ) {
-            let mapper = Arc::new(TrackingMapper::new());
+        fn recipient_with_mapping() -> (UserVmContext, Arc<PageMapper>, PageAlignedVirtualAddress) {
+            let mapper = Arc::new(PageMapper::new());
+            let region = region();
             let mut alloc = UserVmAllocator::new(
                 PageAlignedVirtualAddress::from_usize(ARENA).unwrap(),
                 VirtualAddress::new(ARENA + 16 * PAGE_SIZE.get()),
@@ -858,13 +796,16 @@ mod tests {
                     PAGE_SIZE,
                     MappingTag {
                         flags: MemFlags::user_rw(),
-                        region: region(),
+                        region: region.clone(),
                         grant: AccessMask::RW,
                         revocation: None,
                     },
                 )
                 .unwrap();
             let base = allocated.base();
+            region
+                .install(mapper.as_ref(), base, MemFlags::user_rw())
+                .unwrap();
             let ctx = UserVmContext::new(mapper.clone(), Arc::new(MutexCell::new(alloc)));
             (ctx, mapper, base)
         }
@@ -900,11 +841,17 @@ mod tests {
                 .register_revocation_hook(recv_id, weak)
                 .unwrap();
 
-            assert!(mapper.unmapped.with_lock(|u| u.is_empty()));
+            assert!(mapper.unmaps().is_empty());
 
             grantor.remove(root).unwrap().release();
 
-            assert_eq!(mapper.unmapped.with_lock(|u| u.clone()), [base.as_usize()]);
+            assert_eq!(
+                mapper.unmaps(),
+                [UnmapCall {
+                    va: base.as_usize(),
+                    size: PAGE_SIZE.get()
+                }]
+            );
         }
 
         #[test]
@@ -929,7 +876,7 @@ mod tests {
             drop(mapping);
 
             table.remove(id).unwrap().release();
-            assert!(mapper.unmapped.with_lock(|u| u.is_empty()));
+            assert!(mapper.unmaps().is_empty());
         }
 
         #[test]

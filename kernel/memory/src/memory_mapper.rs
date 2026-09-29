@@ -233,17 +233,11 @@ pub trait MemoryMapper {
     /// произволен, диапазон может пересекать страницы. Каждая leaf-page
     /// проверяется на user-readable. AS не обязан быть активным root:
     /// доступ идёт через линейную карту физических фреймов.
-    fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
-        let _ = (va, dst);
-        Err(UserCopyError::NotMapped)
-    }
+    fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError>;
 
     /// Симметрично [`Self::copy_user_in`] для записи `src` в user-AS.
     /// Требует user-writable на каждой leaf-page.
-    fn copy_user_out(&self, va: VirtualAddress, src: &[u8]) -> Result<(), UserCopyError> {
-        let _ = (va, src);
-        Err(UserCopyError::NotMapped)
-    }
+    fn copy_user_out(&self, va: VirtualAddress, src: &[u8]) -> Result<(), UserCopyError>;
 
     /// Доступ к конкретной реализации через `Any`-downcast.
     ///

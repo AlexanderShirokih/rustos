@@ -7,151 +7,32 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
-    clippy::unimplemented,
     clippy::unwrap_in_result
 )]
 
-use core::{
-    num::NonZeroU64,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
-};
+mod common;
+
+use core::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use capability::{
-    Capability, CapabilityTarget, DrainedHandles, HandleTable, IpcError, KernelRuntime,
-    LoadImageError, ProcessObject, Rights, Signal, SpawnError, StartProcessError, ThreadObject,
-    UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
+    Capability, CapabilityTarget, DrainedHandles, HandleTable, IpcError, LoadImageError,
+    ProcessObject, Rights, Signal, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
+    UserStartSpec, UserThreadEntry,
 };
 use collections::{LockCell, MutexCell};
-use memory::{
-    MemFlags, UserVmContext,
-    frame_allocator::FrameAllocator,
-    memory_mapper::{
-        AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
-        MemoryRemappingError, MemoryUnmappingError, UserCopyError,
-    },
-    physical_address::{PageAlignedAddress, PhysicalAddress},
-    user_vm_allocator::UserVmAllocator,
-    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
-};
-use syscall_kernel::{Origin, SyscallError, SyscallFrame, SyscallOp};
+use memory::{MemFlags, UserVmContext, frame_allocator::FrameAllocator, testing::PageMapper};
+use syscall_kernel::{SyscallError, SyscallOp};
 
-struct CountingRuntime {
-    handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
-}
-
-impl CountingRuntime {
-    fn new() -> Self {
-        Self {
-            handle_table: Mutex::new(None),
-        }
-    }
-
-    fn set_handle_table(&self, table: Arc<MutexCell<HandleTable>>) {
-        *self.handle_table.lock().unwrap() = Some(table);
-    }
-}
-
-impl KernelRuntime for CountingRuntime {
-    fn current_wait_token(&self) -> WaitToken {
-        WaitToken::new(NonZeroU64::new(1).unwrap())
-    }
-    fn now_ns(&self) -> u64 {
-        0
-    }
-
-    fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
-        self.handle_table.lock().unwrap().clone()
-    }
-
-    fn exit_current_thread(&self, _exit_code: i32) -> ! {
-        panic!("exit_current_thread must not be called in this test");
-    }
-
-    fn exit_current_process(&self, _exit_code: i32) -> ! {
-        panic!("exit_current_process must not be called in this test");
-    }
-
-    fn yield_current(&self) {}
-
-    fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
-
-    fn unblock(&self, _token: WaitToken) {}
-
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
-
-    fn clear_blocked_cancel(&self) {}
-    fn release_process_holder(&self, _process: &Arc<capability::ProcessObject>) {}
-}
+use crate::common::{TableRuntime, install, test_lock, user_vm_allocator};
 
 const NAME_VA: usize = 0x2000_0000;
-
-struct NameMapper {
-    bytes: Mutex<Vec<u8>>,
-}
-
-impl MemoryMapper for NameMapper {
-    fn map(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _pages: usize,
-        _init: &[u8],
-        _flags: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        unimplemented!()
-    }
-    fn map_exact(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _pa: PageAlignedAddress,
-        _size: usize,
-        _flags: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        unimplemented!()
-    }
-    fn unmap(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _size: usize,
-    ) -> Result<(), MemoryUnmappingError> {
-        unimplemented!()
-    }
-    fn remap(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _size: usize,
-        _flags: MemFlags,
-    ) -> Result<(), MemoryRemappingError> {
-        unimplemented!()
-    }
-    fn activate_handle(&self) -> AddressSpaceHandle {
-        AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-    }
-    fn zero_owned_frame(&self, _pa: PageAlignedAddress) {
-        unimplemented!()
-    }
-    fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
-        let bytes = self.bytes.lock().unwrap();
-        let offset = va.as_usize().wrapping_sub(NAME_VA);
-        let end = offset
-            .checked_add(dst.len())
-            .ok_or(UserCopyError::NotMapped)?;
-        if va.as_usize() < NAME_VA || end > bytes.len() {
-            return Err(UserCopyError::NotMapped);
-        }
-        dst.copy_from_slice(&bytes[offset..end]);
-        Ok(())
-    }
-    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-        self
-    }
-}
 
 struct StubSyscallRuntime {
     create_empty_process_calls: AtomicUsize,
     create_user_thread_calls: AtomicUsize,
     start_user_process_calls: AtomicUsize,
-    user_vm: Mutex<Option<Arc<NameMapper>>>,
+    user_vm: Mutex<Option<Arc<PageMapper>>>,
 }
 
 impl StubSyscallRuntime {
@@ -165,9 +46,8 @@ impl StubSyscallRuntime {
     }
 
     fn set_user_vm_name(&self, name: &[u8]) {
-        *self.user_vm.lock().unwrap() = Some(Arc::new(NameMapper {
-            bytes: Mutex::new(name.to_vec()),
-        }));
+        *self.user_vm.lock().unwrap() =
+            Some(PageMapper::with_mapping(NAME_VA, 1, name, MemFlags::user_ro()).unwrap());
     }
 
     fn clear_user_vm(&self) {
@@ -184,11 +64,7 @@ impl StubSyscallRuntime {
 impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
     fn current_user_vm(&self) -> Option<UserVmContext> {
         let mapper = self.user_vm.lock().unwrap().clone()?;
-        let allocator = Arc::new(MutexCell::new(UserVmAllocator::new(
-            PageAlignedVirtualAddress::from_usize(0x1000_0000).unwrap(),
-            VirtualAddress::new(0x1100_0000),
-        )));
-        Some(UserVmContext::new(mapper, allocator))
+        Some(UserVmContext::new(mapper, user_vm_allocator()))
     }
 
     fn current_ipc_buffer_va(&self) -> Option<u64> {
@@ -204,6 +80,10 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
     }
 
     fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
+        None
+    }
+
+    fn thread_in_current_process(&self, _t: &Arc<ThreadObject>) -> Option<bool> {
         None
     }
 
@@ -267,22 +147,12 @@ impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
     }
 }
 
-fn shared_runtime() -> &'static (Arc<CountingRuntime>, Arc<StubSyscallRuntime>) {
-    static RUNTIME: OnceLock<(Arc<CountingRuntime>, Arc<StubSyscallRuntime>)> = OnceLock::new();
+fn shared_runtime() -> &'static (Arc<TableRuntime>, Arc<StubSyscallRuntime>) {
+    static RUNTIME: OnceLock<(Arc<TableRuntime>, Arc<StubSyscallRuntime>)> = OnceLock::new();
     RUNTIME.get_or_init(|| {
-        let rt = Arc::new(CountingRuntime::new());
-        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
-        install_runtime(dyn_rt);
         let stub = Arc::new(StubSyscallRuntime::new());
-        syscall_kernel::install_runtime(stub.clone());
-        (rt, stub)
+        (install(stub.clone()), stub)
     })
-}
-
-fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn full_table_with_capacity_one() -> Arc<MutexCell<HandleTable>> {
@@ -302,55 +172,9 @@ fn install_process_handle(table: &Arc<MutexCell<HandleTable>>) -> capability::Ha
         .expect("insert process handle")
 }
 
-struct TestFrame {
-    op: u16,
-    args: [u64; 6],
-    ret: i64,
-    secondary: u64,
-}
-
-impl TestFrame {
-    fn new(op: SyscallOp, args: [u64; 6]) -> Self {
-        Self {
-            op: op as u16,
-            args,
-            ret: 0,
-            secondary: 0,
-        }
-    }
-}
-
-impl SyscallFrame for TestFrame {
-    fn op_raw(&self) -> u16 {
-        self.op
-    }
-
-    fn arg(&self, idx: usize) -> u64 {
-        self.args[idx]
-    }
-
-    fn set_return(&mut self, value: i64) {
-        self.ret = value;
-    }
-
-    fn set_secondary_return(&mut self, value: u64) {
-        self.secondary = value;
-    }
-
-    fn origin(&self) -> Origin {
-        Origin::User
-    }
-}
-
 fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, SyscallError> {
-    let mut frame = TestFrame::new(op, args);
-    syscall_kernel::dispatch(&mut frame);
-    if frame.ret >= 0 {
-        Ok(u64::try_from(frame.ret).expect("non-negative return fits in u64"))
-    } else {
-        let neg = u32::try_from(-frame.ret).expect("error code fits in u32");
-        Err(decode_error(neg))
-    }
+    common::dispatch(op, args)
+        .map_err(|ret| decode_error(u32::try_from(-ret).expect("error code fits in u32")))
 }
 
 const ALL_ERRORS: &[SyscallError] = &[

@@ -1,16 +1,20 @@
+use std::iter;
+
 use anyhow::{Result, ensure};
 use syscall::MAX_PROCESS_NAME_LEN;
 
 use super::source::ComponentEntry;
 
-pub(super) fn resolve_names<'a>(entries: &[&'a ComponentEntry]) -> Result<Vec<&'a str>> {
-    let names: Vec<&str> = entries
-        .iter()
-        .map(|component| match &component.name {
+pub(super) fn resolve_names<'a>(
+    boot: &'a str,
+    entries: &[&'a ComponentEntry],
+) -> Result<Vec<&'a str>> {
+    let names: Vec<&str> = iter::once(boot)
+        .chain(entries.iter().map(|component| match &component.name {
             Some(name) => name.as_str(),
             // Умолчание имени экземпляра - идентичность программы.
             None => component.executable.as_str(),
-        })
+        }))
         .collect();
     for (index, name) in names.iter().enumerate() {
         validate_name(name)?;

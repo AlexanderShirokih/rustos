@@ -8,11 +8,6 @@ build = "build.rs"
 [package.metadata.userland]
 stack_size = 65536
 
-# Крейт поднимает систему `rootkeeper`, зависимую от архитектуры через биндинги
-# контроллеров прерываний, и проверяет её вместе с ней.
-[package.metadata.molecular]
-arch = "aarch64"
-
 [[bin]]
 name = "testrunner"
 path = "src/main.rs"
@@ -92,20 +87,8 @@ test = false
 bench = false
 
 [[bin]]
-name = "device-forwarding-fixture"
-path = "src/device_forwarding_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "irq-fixture"
 path = "src/irq_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "mmio-pair-fixture"
-path = "src/mmio_pair_fixture.rs"
 test = false
 bench = false
 
@@ -194,6 +177,7 @@ io = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
+platform-abi = { workspace = true }
 runtime = { workspace = true }
 spin = { workspace = true }
 test-harness-qemu = { workspace = true }

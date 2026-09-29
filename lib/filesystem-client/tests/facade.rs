@@ -27,11 +27,11 @@ use filesystem_abi::{
 };
 use filesystem_client::{Environment, Failure, FileSystem, SharedRegion};
 use ipc::{
-    Channel, FrameBytes, Incoming, Listener, Timeout,
+    Channel, Incoming, Listener, Outgoing, Timeout, Unsent,
     wire::{Cap, HEADER_SIZE, IpcError, MESSAGE_INLINE_MAX, Str},
 };
-use ipc_test::{MockChannel, MockListener, MockResources};
-use syscall::{Handle, ObjectKind, kind};
+use ipc_test::{MockChannel, MockHandle, MockListener, MockReply, MockResources};
+use syscall::{ObjectKind, kind};
 
 const BUFFER_SIZE: u32 = 4096;
 
@@ -40,6 +40,8 @@ const ROOT: &str = "/";
 const TRUNCATED_BODY: usize = 4;
 
 type Shared = Arc<Mutex<Vec<u8>>>;
+
+type TestSession = ipc::wire::Session<file_system::Protocol, MockHandle<kind::Port>>;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Node {
@@ -169,11 +171,8 @@ impl World {
         *self.pair_root_len.lock().expect("mutex not poisoned") = Some(len);
     }
 
-    fn cap<K: ObjectKind>(&self) -> Cap<K> {
-        let raw = self.next_cap.fetch_add(1, Ordering::SeqCst);
-        Cap::from_handle(Handle::from_abi(
-            core::num::NonZeroU32::new(raw).expect("capability id is non-zero"),
-        ))
+    fn cap<K: ObjectKind>(&self) -> MockHandle<K> {
+        MockHandle::new(self.next_cap.fetch_add(1, Ordering::SeqCst))
     }
 
     fn minted(&self) -> u32 {
@@ -214,17 +213,13 @@ impl World {
         client
     }
 
-    fn session(
-        self: &Arc<Self>,
-        filesystem: Arc<Filesystem>,
-        root: String,
-    ) -> ipc::wire::Session<file_system::Protocol> {
+    fn session(self: &Arc<Self>, filesystem: Arc<Filesystem>, root: String) -> TestSession {
         let cap = self.cap();
         let end = self.session_end_in(filesystem, root);
         self.sessions
             .lock()
             .expect("mutex not poisoned")
-            .insert(cap.raw().get(), end);
+            .insert(cap.raw(), end);
         ipc::wire::Session::from_handle(cap)
     }
 }
@@ -253,18 +248,20 @@ impl Drop for TrackedEnd {
 impl Channel for TrackedEnd {
     type Resources = MockResources;
 
-    fn send(&self, bytes: &[u8], handles: &[u32], wait: Timeout) -> Result<(), IpcError> {
-        self.end.send(bytes, handles, wait)
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, MockResources>,
+        wait: Timeout,
+    ) -> Result<(), Unsent<'b, MockResources>> {
+        self.end.send(frame, wait)
     }
 
     fn call<'b>(
         &self,
-        bytes: &[u8],
-        handles: &[u32],
-        reply: &'b mut FrameBytes,
+        frame: Outgoing<'b, MockResources>,
         wait: Timeout,
     ) -> Result<Incoming<'b, MockResources>, IpcError> {
-        let mut answer = self.end.call(bytes, handles, reply, wait)?;
+        let mut answer = self.end.call(frame, wait)?;
         if self.world.claims_fail.load(Ordering::SeqCst) {
             // Ответ назвал capability, которой кадр не доставил.
             answer.resources = MockResources::default();
@@ -291,7 +288,7 @@ impl SessionServer {
     fn root_session(
         &mut self,
         path: Str<'_, { PATH_MAX }>,
-    ) -> Result<ipc::wire::Session<file_system::Protocol>, FileSystemError> {
+    ) -> Result<TestSession, FileSystemError> {
         if self.world.scoping_fails.load(Ordering::SeqCst) {
             return Err(FileSystemError::NotFound);
         }
@@ -304,14 +301,14 @@ impl SessionServer {
         Ok(self.world.session(Arc::clone(&self.filesystem), full))
     }
 
-    fn buffer_capability(&mut self, size: u32) -> Cap<kind::MemoryRegion> {
+    fn buffer_capability(&mut self, size: u32) -> MockHandle<kind::MemoryRegion> {
         let shared: Shared = Arc::new(Mutex::new(std::vec![0; size as usize]));
         let cap = self.world.cap();
         self.world
             .buffers
             .lock()
             .expect("mutex not poisoned")
-            .insert(cap.raw().get(), Arc::clone(&shared));
+            .insert(cap.raw(), Arc::clone(&shared));
         self.buffer = Some(shared);
         cap
     }
@@ -358,18 +355,19 @@ impl SessionServer {
     }
 }
 
-impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
+impl file_system::Service<MockResources> for SessionServer {
     fn acquire_buffer(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         size: u32,
-    ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>>
+    {
         Ok::<_, FileSystemError>(self.buffer_capability(size))
     }
 
     fn open(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         path: Str<'_, { PATH_MAX }>,
         _mode: AccessMode,
         flags: OpenFlags,
@@ -417,7 +415,11 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
         })
     }
 
-    fn close(&mut self, _frame: &F, fd: NodeDescriptor) -> Result<u32, FileSystemError> {
+    fn close(
+        &mut self,
+        _frame: &MockResources,
+        fd: NodeDescriptor,
+    ) -> Result<u32, FileSystemError> {
         self.open
             .remove(&fd.raw())
             .ok_or(FileSystemError::BadDescriptor)?;
@@ -427,7 +429,7 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn read(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         fd: NodeDescriptor,
         offset: u64,
         len: u32,
@@ -455,7 +457,7 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn write(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         fd: NodeDescriptor,
         offset: u64,
         len: u32,
@@ -489,7 +491,7 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn set_size(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         fd: NodeDescriptor,
         size: u64,
     ) -> Result<u32, FileSystemError> {
@@ -505,7 +507,11 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
         Ok(0)
     }
 
-    fn stat(&mut self, _frame: &F, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
+    fn stat(
+        &mut self,
+        _frame: &MockResources,
+        fd: NodeDescriptor,
+    ) -> Result<NodeInfo, FileSystemError> {
         let path = self.path_of(fd)?;
         let tree = self.filesystem.tree();
         let node = tree.get(&path).ok_or(FileSystemError::NotFound)?.clone();
@@ -517,7 +523,7 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn list(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         fd: NodeDescriptor,
         from: DirCursor,
     ) -> Result<Listed, FileSystemError> {
@@ -564,7 +570,7 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn rename(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         from: Str<'_, { PATH_MAX }>,
         to: Str<'_, { PATH_MAX }>,
     ) -> Result<u32, FileSystemError> {
@@ -578,7 +584,7 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn unlink(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         path: Str<'_, { PATH_MAX }>,
         expected: NodeKind,
     ) -> Result<u32, FileSystemError> {
@@ -613,9 +619,9 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn create_backed(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         _path: Str<'_, { PATH_MAX }>,
-        _region: F::Handle<kind::MemoryRegion>,
+        _region: MockHandle<kind::MemoryRegion>,
         _size: u64,
     ) -> Result<u32, FileSystemError> {
         Err(FileSystemError::NotSupported)
@@ -623,18 +629,21 @@ impl<F: ipc::ReceivedResources> file_system::Service<F> for SessionServer {
 
     fn backing_memory(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         _fd: NodeDescriptor,
-    ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
-        Err::<Cap<kind::MemoryRegion>, _>(FileSystemError::NotSupported)
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>>
+    {
+        Err::<MockHandle<kind::MemoryRegion>, _>(FileSystemError::NotSupported)
     }
 
     fn open_root(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         path: Str<'_, { PATH_MAX }>,
-    ) -> impl ipc::IntoWireValue<Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>>
-    {
+    ) -> impl ipc::IntoWireValue<
+        MockResources,
+        Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
+    > {
         self.root_session(path)
     }
 }
@@ -648,7 +657,7 @@ impl Router {
         &mut self,
         from: Str<'_, { PATH_MAX }>,
         to: Str<'_, { PATH_MAX }>,
-    ) -> Result<ResolvedPair, FileSystemError> {
+    ) -> Result<ResolvedPair<TestSession>, FileSystemError> {
         let mut resolved = self.world.resolved.lock().expect("mutex not poisoned");
         resolved.push(String::from(from.as_str()));
         resolved.push(String::from(to.as_str()));
@@ -701,7 +710,7 @@ impl Router {
     fn resolved_session(
         &mut self,
         path: Str<'_, { PATH_MAX }>,
-    ) -> Result<ipc::wire::Session<file_system::Protocol>, FileSystemError> {
+    ) -> Result<TestSession, FileSystemError> {
         self.world
             .resolved
             .lock()
@@ -722,22 +731,22 @@ impl Router {
     }
 }
 
-impl<F: ipc::ReceivedResources> namespace::Service<F> for Router {
+impl namespace::Service<MockResources> for Router {
     fn resolve(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         path: Str<'_, { PATH_MAX }>,
-        reply: namespace::resolve::Reply<F::Reply>,
+        reply: namespace::resolve::Reply<MockReply>,
     ) {
         let _ = reply.send(self.resolved_session(path));
     }
 
     fn resolve_pair(
         &mut self,
-        _frame: &F,
+        _frame: &MockResources,
         from: Str<'_, { PATH_MAX }>,
         to: Str<'_, { PATH_MAX }>,
-        reply: namespace::resolve_pair::Reply<F::Reply>,
+        reply: namespace::resolve_pair::Reply<MockReply>,
     ) {
         let _ = reply.send(self.resolved_pair(from, to));
     }
@@ -748,25 +757,22 @@ struct TestEnvironment {
 }
 
 impl Environment for TestEnvironment {
-    type Handle<K: ObjectKind> = Cap<K>;
+    type Handle<K: ObjectKind> = MockHandle<K>;
     type Transport = TrackedEnd;
     type Region = TestBuffer;
 
-    fn connect(
-        &self,
-        session: ipc::wire::Session<file_system::Protocol>,
-    ) -> Result<TrackedEnd, FileSystemError> {
+    fn connect(&self, session: TestSession) -> Result<TrackedEnd, FileSystemError> {
         let end = self
             .world
             .sessions
             .lock()
             .expect("mutex not poisoned")
-            .remove(&session.into_handle().raw().get())
+            .remove(&session.into_handle().raw())
             .ok_or(FileSystemError::NoSession)?;
         Ok(TrackedEnd::new(&self.world, end))
     }
 
-    fn map(&self, region: Cap<kind::MemoryRegion>) -> Result<TestBuffer, FileSystemError> {
+    fn map(&self, region: MockHandle<kind::MemoryRegion>) -> Result<TestBuffer, FileSystemError> {
         if self.world.mappings_allowed.load(Ordering::SeqCst) == 0 {
             return Err(FileSystemError::NoSpace);
         }
@@ -776,7 +782,7 @@ impl Environment for TestEnvironment {
             .buffers
             .lock()
             .expect("mutex not poisoned")
-            .get(&region.raw().get())
+            .get(&region.raw())
             .cloned()
             .ok_or(FileSystemError::NoBuffer)?;
         Ok(TestBuffer { bytes })

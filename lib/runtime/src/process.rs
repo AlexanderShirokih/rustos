@@ -1,8 +1,12 @@
 //! Завершение процесса и его метеринг-ресурс.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    num::NonZeroU32,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use syscall::{Handle, kind};
+use syscall_user::IssuedHandle;
 
 use crate::{restore, svc};
 
@@ -12,17 +16,21 @@ static BOOTSTRAP: AtomicU32 = AtomicU32::new(0);
 
 /// Принимает стартовый handle, который ядро кладёт в `x0` точки входа.
 ///
-/// Вызывается точкой входа программы один раз до `main`.
-pub fn start(bootstrap: u32) {
+/// # Safety
+///
+/// `bootstrap` получен из `x0` точки входа процесса, и вызов в процессе один.
+pub unsafe fn start(bootstrap: u32) {
     BOOTSTRAP.store(bootstrap, Ordering::Release);
 }
 
-/// Отдаёт стартовый handle процесса первому вызову. Дальше `None`.
+/// Отдаёт владельца стартового handle процесса первому вызову. Дальше `None`.
 ///
 /// По этому handle компонент композиции принимает стартовый набор capability, а корень
-/// композиции обращается к ядру. Владение уходит вызывающему, и выдача одна.
-pub fn take_bootstrap() -> Option<Handle<kind::Any>> {
-    restore(BOOTSTRAP.swap(0, Ordering::AcqRel))
+/// композиции обращается к ядру.
+pub fn take_bootstrap() -> Option<IssuedHandle<kind::Any>> {
+    let raw = NonZeroU32::new(BOOTSTRAP.swap(0, Ordering::AcqRel))?;
+    // SAFETY: номер записал `start` из `x0` точки входа, и обмен на ноль отдаёт его один раз.
+    Some(unsafe { IssuedHandle::adopt(raw) })
 }
 
 /// Завершает процесс со всеми его потоками. Не возвращается.
@@ -36,14 +44,11 @@ pub fn metering_handle() -> Option<Handle<kind::Resource>> {
         return Some(cached);
     }
 
-    // `ProcessResourceSelf` ставит свежий handle на каждый вызов. Кэш держит первый,
-    // проигравшая гонку сторона закрывает свой дубль.
+    // `ProcessResourceSelf` ставит свежий handle на каждый вызов. Кэш держит номер первого до
+    // завершения процесса, а дубль проигравшей гонку стороны закрывает его владелец.
     let fresh = svc::process_resource_self().ok()?;
-    match METERING.compare_exchange(0, fresh.raw(), Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => Some(fresh),
-        Err(existing) => {
-            svc::handle_close(fresh);
-            restore(existing)
-        }
+    match METERING.compare_exchange(0, fresh.as_raw().raw(), Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Some(fresh.leak()),
+        Err(existing) => restore(existing),
     }
 }

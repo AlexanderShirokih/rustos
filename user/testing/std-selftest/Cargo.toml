@@ -19,6 +19,7 @@ components = { workspace = true }
 filesystem-abi = { workspace = true }
 kernel-objects = { workspace = true }
 syscall = { workspace = true }
+syscall-user = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

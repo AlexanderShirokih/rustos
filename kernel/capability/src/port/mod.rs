@@ -711,14 +711,13 @@ mod tests {
     };
 
     use collections::MutexCell;
-    use memory::virtual_address::VirtualAddress;
+    use memory::{MemFlags, testing::PageMapper, virtual_address::VirtualAddress};
     use syscall::encode_tag;
 
     use super::{
         super::{
             CancelTarget, DrainedHandles, HandleTable,
             handle::Capability,
-            ipc_buffer_xfer::test_mapper::PageMapper,
             rev_node::revoke_subtree,
             runtime::{KernelRuntime, WaitToken},
             target::CapabilityTarget,
@@ -828,7 +827,7 @@ mod tests {
     fn transport(base: usize) -> ThreadTransport {
         use memory::memory_mapper::MemoryMapper;
 
-        let mapper = PageMapper::new(base);
+        let mapper = PageMapper::with_mapping(base, 1, &[], MemFlags::user_rw()).unwrap();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
 
         mapper
@@ -1935,7 +1934,7 @@ mod tests {
         let root = root_capability(&ep);
         drop(badged_capability(&root, BADGE_A));
 
-        let mapper = PageMapper::new(BASE_B);
+        let mapper = PageMapper::with_mapping(BASE_B, 1, &[], MemFlags::user_rw()).unwrap();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let receiver = ThreadTransport::new(mapper.clone(), VirtualAddress::new(BASE_B), table);
 
@@ -1958,7 +1957,7 @@ mod tests {
     ) -> (ThreadTransport, Arc<MutexCell<HandleTable>>) {
         use memory::memory_mapper::MemoryMapper;
 
-        let mapper = PageMapper::new(base);
+        let mapper = PageMapper::with_mapping(base, 1, &[], MemFlags::user_rw()).unwrap();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
 
         let id = table
@@ -2077,7 +2076,7 @@ mod tests {
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
         let caller = ThreadTransport::new(
-            PageMapper::new(BASE_A),
+            PageMapper::with_mapping(BASE_A, 1, &[], MemFlags::user_rw()).unwrap(),
             VirtualAddress::new(BASE_A),
             Arc::new(MutexCell::new(HandleTable::with_capacity(0))),
         );

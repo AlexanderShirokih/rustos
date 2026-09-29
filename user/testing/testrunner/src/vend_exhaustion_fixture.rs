@@ -3,9 +3,9 @@
 #![allow(unsafe_code)]
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::{MemoryRegion, kind};
-use runtime::{PortTransport, handle_close};
-use syscall::{HANDLE_TABLE_CAPACITY, Handle};
+use kernel_objects::{IssuedHandle, MemoryRegion, Port, kind};
+use runtime::PortTransport;
+use syscall::HANDLE_TABLE_CAPACITY;
 
 mod fixture_start;
 mod handle_table_fill;
@@ -15,8 +15,9 @@ use handle_table_fill::fill_handle_table;
 
 fixture_start!(run);
 
-fn run(kernel: Handle<kind::Port>) -> Result<(), Failed> {
-    let client = bootstrap::Client::new(PortTransport::new(kernel));
+fn run(kernel: IssuedHandle<kind::Port>) -> Result<(), Failed> {
+    let kernel = Port::from(kernel);
+    let client = bootstrap::Client::new(PortTransport::new(&kernel));
     let spare = fill_handle_table().ok_or(Failed)?;
 
     for _ in 0..=HANDLE_TABLE_CAPACITY {
@@ -25,7 +26,7 @@ fn run(kernel: Handle<kind::Port>) -> Result<(), Failed> {
         }
     }
 
-    let _ = handle_close(spare);
+    drop(spare);
     let image = client
         .acquire_userland_image()
         .map_err(|_| Failed)?

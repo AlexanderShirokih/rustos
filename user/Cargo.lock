@@ -88,6 +88,7 @@ dependencies = [
  "io",
  "ipc",
  "kernel-objects",
+ "platform-abi",
  "rtc-abi",
  "runtime",
  "syscall",
@@ -247,7 +248,6 @@ version = "0.1.0"
 dependencies = [
  "component-abi",
  "component-startup",
- "ipc",
  "kernel-objects",
  "runtime",
  "syscall",
@@ -266,6 +266,31 @@ dependencies = [
  "runtime",
  "syscall",
  "userland-build",
+]
+
+[[package]]
+name = "platform"
+version = "0.1.0"
+dependencies = [
+ "bootstrap-abi",
+ "component-startup",
+ "device-resolver",
+ "device-resolver-aarch64",
+ "fdt",
+ "ipc",
+ "kernel-objects",
+ "platform-abi",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
+name = "platform-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -292,9 +317,7 @@ version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
  "component-abi",
- "device-resolver",
- "device-resolver-aarch64",
- "fdt",
+ "component-startup",
  "ipc",
  "kernel-objects",
  "log-abi",
@@ -347,6 +370,7 @@ dependencies = [
  "filesystem-abi",
  "kernel-objects",
  "syscall",
+ "syscall-user",
  "userland-build",
 ]
 
@@ -408,6 +432,7 @@ dependencies = [
  "log-abi",
  "log-relay",
  "managed-component",
+ "platform-abi",
  "rootkeeper",
  "rtc-abi",
  "runtime",

@@ -26,8 +26,6 @@ pub(super) struct ComponentEntry {
     pub(super) bind: BTreeMap<String, String>,
     #[serde(default)]
     pub(super) scope: BTreeMap<String, String>,
-    #[serde(default)]
-    pub(super) instance: BTreeMap<String, u16>,
 }
 
 fn default_plan_version() -> u16 {

@@ -18,7 +18,7 @@ use syscall::{
 use crate::{
     process::metering_handle,
     svc::{
-        handle_close, memory_allocate, memory_free, process_self, signal_wait_one, thread_create,
+        IssuedHandle, memory_allocate, memory_free, process_self, signal_wait_one, thread_create,
         thread_exit, thread_exit_code,
     },
     tls::run_destructors,
@@ -26,7 +26,7 @@ use crate::{
 
 /// Поднятый поток: его handle и стек.
 pub struct Spawned {
-    thread: Handle<kind::Thread>,
+    thread: IssuedHandle<kind::Thread>,
     stack: NonNull<u8>,
     stack_bytes: usize,
 }
@@ -35,6 +35,12 @@ impl Spawned {
     /// Handle поднятого потока.
     #[must_use]
     pub const fn thread(&self) -> Handle<kind::Thread> {
+        self.thread.as_raw()
+    }
+
+    /// Владелец handle поднятого потока. Стек остаётся выданным.
+    #[must_use]
+    pub fn into_thread(self) -> IssuedHandle<kind::Thread> {
         self.thread
     }
 
@@ -76,15 +82,16 @@ pub fn create(
             return Err(error);
         }
     };
+    // `ProcessSelf` ставит свежую запись таблицы handle на каждый вызов, и её закрывает
+    // владелец `process`.
     let created = thread_create(
-        process,
+        process.as_raw(),
         entry as *const () as u64,
         stack.addr().get() as u64 + bytes as u64,
         arg as u64,
         u64::from(priority),
     );
-    // `ProcessSelf` ставит свежую запись таблицы handle на каждый вызов.
-    handle_close(process);
+    drop(process);
 
     match created {
         Ok(thread) => Ok(Spawned {
@@ -183,10 +190,14 @@ pub fn spawn(
     let payload = Box::into_raw(Box::new(SpawnPayload { entry, arg })) as usize;
     let bytes = usize::try_from(stack_bytes).unwrap_or(usize::MAX);
     match create(trampoline, payload, bytes, priority) {
-        Ok(spawned) => Ok(JoinHandle {
-            thread: spawned.thread(),
-            stack: spawned.stack(),
-            stack_bytes: spawned.stack_bytes(),
+        Ok(Spawned {
+            thread,
+            stack,
+            stack_bytes,
+        }) => Ok(JoinHandle {
+            thread,
+            stack,
+            stack_bytes,
         }),
         Err(error) => {
             // Поток не стартовал - трамплин payload не прочитает, освобождаем его;
@@ -200,10 +211,10 @@ pub fn spawn(
 
 /// Дескриптор запущенного потока владеет его хэндлом и стеком.
 ///
-/// `join` ждёт терминации и освобождает стек. `Drop` закрывает хэндл, а уход без `join`
-/// оставляет стек выданным: поток мог ещё выполняться на нём.
+/// `join` ждёт терминации и освобождает стек. Разрушение без `join` закрывает хэндл и оставляет
+/// стек выданным.
 pub struct JoinHandle {
-    thread: Handle<kind::Thread>,
+    thread: IssuedHandle<kind::Thread>,
     stack: NonNull<u8>,
     stack_bytes: usize,
 }
@@ -217,12 +228,12 @@ unsafe impl Sync for JoinHandle {}
 
 impl JoinHandle {
     pub const fn handle(&self) -> Handle<kind::Thread> {
-        self.thread
+        self.thread.as_raw()
     }
 
     /// Ждёт терминации потока до `timeout`.
     pub fn wait(&self, timeout: Timeout) -> Result<(), SyscallError> {
-        let observed = signal_wait_one(self.thread, SIGNALED, timeout);
+        let observed = signal_wait_one(self.thread.as_raw(), SIGNALED, timeout);
         if observed < 0 {
             return Err(SyscallError::from_return(observed).unwrap_or(SyscallError::Canceled));
         }
@@ -231,8 +242,7 @@ impl JoinHandle {
 
     /// Ждёт терминации потока до `timeout` и освобождает его стек.
     ///
-    /// Отказ ожидания потребляет `self`: `Drop` закрывает хэндл, а стек остаётся
-    /// выданным.
+    /// Отказ ожидания потребляет `self`: хэндл закрывается, а стек остаётся выданным.
     pub fn join(self, timeout: Timeout) -> Result<(), SyscallError> {
         self.wait(timeout)?;
         // SAFETY: поток терминирован, и стек больше никем не адресуется; указатель и размер
@@ -243,17 +253,11 @@ impl JoinHandle {
 
     /// Финальный exit-код завершённого потока.
     pub fn exit_code(&self) -> Result<u32, SyscallError> {
-        let code = thread_exit_code(self.thread);
+        let code = thread_exit_code(self.thread.as_raw());
         if code < 0 {
             return Err(SyscallError::from_return(code).unwrap_or(SyscallError::BadHandle));
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Ok((code as u64 & 0xFFFF_FFFF) as u32)
-    }
-}
-
-impl Drop for JoinHandle {
-    fn drop(&mut self) {
-        handle_close(self.thread);
     }
 }

@@ -4,12 +4,11 @@
 
 use kernel_objects::{Signal, kind};
 use kernel_tests::kernel_test;
-use runtime::{handle_close, signal_create, signal_set};
+use runtime::signal_set;
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
 fn mint() -> Signal {
-    let handle = signal_create().expect("signal_create must succeed");
-    Signal::from_handle(handle)
+    Signal::create().expect("signal create must succeed")
 }
 
 fn is_closed(handle: Handle<kind::Signal>) -> bool {
@@ -33,11 +32,7 @@ fn into_raw_suppresses_drop() {
     let owned = mint();
     let raw = owned.into_raw();
 
-    // into_raw подавил Drop: хэндл ещё жив, нужен ручной close.
     kernel_tests::kassert_eq!(signal_set(raw, SIGNALED, 0, WakeCount::None), 0);
-    kernel_tests::kassert_eq!(handle_close(raw), 0);
-    // Повторный close уже закрытого id - BadHandle.
-    kernel_tests::kassert_eq!(handle_close(raw), SyscallError::BadHandle.as_return_value());
 }
 
 #[kernel_test]
@@ -49,10 +44,6 @@ fn close_does_not_double_close() {
 
     // close закрыл хэндл: операция на сыром id - BadHandle.
     kernel_tests::kassert!(is_closed(stale));
-    kernel_tests::kassert_eq!(
-        handle_close(stale),
-        SyscallError::BadHandle.as_return_value()
-    );
 }
 
 #[kernel_test]

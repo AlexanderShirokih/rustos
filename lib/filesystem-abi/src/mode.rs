@@ -61,14 +61,12 @@ impl<'a, R: ReceivedResources> WireValue<'a, R> for AccessMode {
     }
 }
 
-impl IntoWireValue for AccessMode {
+impl<R: ReceivedResources> IntoWireValue<R> for AccessMode {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, &value::encode_u8(self.as_wire()))
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, &value::encode_u8(self.as_wire()))
     }
-
-    fn relinquish(self) {}
 }
 
 impl WireTyped for AccessMode {
@@ -90,8 +88,8 @@ mod tests {
     const MODES: [AccessMode; 3] = [AccessMode::Read, AccessMode::Write, AccessMode::ReadWrite];
 
     fn round_trip(mode: AccessMode) -> Result<AccessMode, IpcError> {
-        let mut buf = MessageBuf::new();
-        mode.write_as_field(&mut buf, FIELD_ID).expect("write ok");
+        let mut buf = MessageBuf::<()>::new();
+        mode.write_into(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");

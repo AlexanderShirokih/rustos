@@ -4,6 +4,28 @@ use super::{PlanProgram, source::ComponentEntry};
 
 const IDENTITY_SEPARATOR: &str = "::";
 
+pub(super) fn boot_program<'a>(programs: &[PlanProgram<'a>]) -> Result<PlanProgram<'a>> {
+    let boot: Vec<PlanProgram<'a>> = programs
+        .iter()
+        .copied()
+        .filter(|program| program.boot)
+        .collect();
+    let [boot] = boot[..] else {
+        bail!(
+            "boot plan requires one boot program in the image; found {}",
+            boot.len()
+        );
+    };
+    if let Some(requirement) = boot.manifest.requirements.first() {
+        bail!(
+            "boot program '{}' declares requirement '{}'; a program without a parent takes none",
+            boot.bin,
+            requirement.name
+        );
+    }
+    Ok(boot)
+}
+
 pub(super) fn resolve_executables<'a>(
     entries: &[&ComponentEntry],
     programs: &[PlanProgram<'a>],

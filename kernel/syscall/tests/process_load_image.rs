@@ -8,220 +8,33 @@
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
-    clippy::unimplemented,
     clippy::unwrap_in_result
 )]
 
-use core::{num::NonZeroUsize, sync::atomic::AtomicU32};
-use std::sync::{Arc, Mutex, OnceLock};
+mod common;
+
+use core::num::NonZeroUsize;
+use std::sync::Arc;
 
 use capability::{
-    Capability, CapabilityTarget, HandleId, HandleTable, IpcError, KernelRuntime, LoadImageError,
-    ProcessObject, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
-    UserStartSpec, UserThreadEntry, WaitToken, default_rights_for, install_runtime,
+    Capability, CapabilityTarget, HandleId, HandleTable, ProcessObject, Rights, default_rights_for,
 };
 use collections::{LockCell, MutexCell};
 use memory::{
-    AccessMask, MemFlags, MemoryRegion, UserVmContext,
-    frame_allocator::FrameAllocator,
-    memory_mapper::{
-        AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
-        MemoryRemappingError, MemoryUnmappingError, UserCopyError,
-    },
-    physical_address::{PageAlignedAddress, PhysicalAddress},
-    user_vm_allocator::UserVmAllocator,
-    virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
+    AccessMask, MemFlags, MemoryRegion, physical_address::PageAlignedAddress, testing::PageMapper,
 };
-use syscall_kernel::{
-    Origin, SyscallError, SyscallFrame, SyscallOp, USER_IMAGE_DESC_SIZE, USER_SEGMENT_SIZE,
-};
+use syscall_kernel::{SyscallError, SyscallOp, USER_IMAGE_DESC_SIZE, USER_SEGMENT_SIZE};
+
+use crate::common::{dispatch, runtimes, test_lock};
 
 const BASE_VA: usize = 0x2000_0000;
 const SEG_VA_BASE: usize = 0x4000_0000;
 const REGION_SIZE: usize = 0x1000;
 
-struct TableRuntime {
-    handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
-}
-
-impl TableRuntime {
-    fn new() -> Self {
-        Self {
-            handle_table: Mutex::new(None),
-        }
-    }
-    fn set_handle_table(&self, table: Arc<MutexCell<HandleTable>>) {
-        *self.handle_table.lock().unwrap() = Some(table);
-    }
-}
-
-impl KernelRuntime for TableRuntime {
-    fn current_wait_token(&self) -> WaitToken {
-        WaitToken::new(core::num::NonZeroU64::new(1).unwrap())
-    }
-    fn now_ns(&self) -> u64 {
-        0
-    }
-    fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
-        self.handle_table.lock().unwrap().clone()
-    }
-    fn exit_current_thread(&self, _exit_code: i32) -> ! {
-        panic!("must not exit");
-    }
-    fn exit_current_process(&self, _exit_code: i32) -> ! {
-        panic!("must not exit process");
-    }
-    fn yield_current(&self) {}
-    fn block_current_until(&self, _ready_flag: &AtomicU32, _timeout_ns: Option<u64>) {}
-    fn unblock(&self, _token: WaitToken) {}
-    fn set_blocked_cancel(&self, _cancel: Arc<dyn capability::CancelTarget>) {}
-    fn clear_blocked_cancel(&self) {}
-    fn release_process_holder(&self, _process: &Arc<capability::ProcessObject>) {}
-}
-
-struct CannedMapper {
-    bytes: Mutex<std::vec::Vec<u8>>,
-}
-
-impl MemoryMapper for CannedMapper {
-    fn map(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _pc: usize,
-        _init: &[u8],
-        _f: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        unimplemented!()
-    }
-    fn map_exact(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _pa: PageAlignedAddress,
-        _s: usize,
-        _f: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        unimplemented!()
-    }
-    fn unmap(&self, _va: PageAlignedVirtualAddress, _s: usize) -> Result<(), MemoryUnmappingError> {
-        unimplemented!()
-    }
-    fn remap(
-        &self,
-        _va: PageAlignedVirtualAddress,
-        _s: usize,
-        _f: MemFlags,
-    ) -> Result<(), MemoryRemappingError> {
-        unimplemented!()
-    }
-    fn activate_handle(&self) -> AddressSpaceHandle {
-        AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-    }
-    fn zero_owned_frame(&self, _pa: PageAlignedAddress) {
-        unimplemented!()
-    }
-    fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
-        let bytes = self.bytes.lock().unwrap();
-        let offset = va.as_usize().wrapping_sub(BASE_VA);
-        let end = offset
-            .checked_add(dst.len())
-            .ok_or(UserCopyError::NotMapped)?;
-        if va.as_usize() < BASE_VA || end > bytes.len() {
-            return Err(UserCopyError::NotMapped);
-        }
-        dst.copy_from_slice(&bytes[offset..end]);
-        Ok(())
-    }
-    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-        self
-    }
-}
-
-struct StubSyscallRuntime {
-    user_vm: Mutex<Option<Arc<CannedMapper>>>,
-}
-
-impl StubSyscallRuntime {
-    fn new() -> Self {
-        Self {
-            user_vm: Mutex::new(None),
-        }
-    }
-    fn set_bytes(&self, bytes: std::vec::Vec<u8>) {
-        *self.user_vm.lock().unwrap() = Some(Arc::new(CannedMapper {
-            bytes: Mutex::new(bytes),
-        }));
-    }
-}
-
-impl syscall_kernel::SyscallRuntime for StubSyscallRuntime {
-    fn current_user_vm(&self) -> Option<UserVmContext> {
-        let mapper = self.user_vm.lock().unwrap().clone()?;
-        let allocator = Arc::new(MutexCell::new(UserVmAllocator::new(
-            PageAlignedVirtualAddress::from_usize(0x1000_0000).unwrap(),
-            VirtualAddress::new(0x1100_0000),
-        )));
-        Some(UserVmContext::new(mapper, allocator))
-    }
-    fn current_ipc_buffer_va(&self) -> Option<u64> {
-        None
-    }
-    fn frame_allocator(&self) -> Option<&'static (dyn FrameAllocator + Send + Sync)> {
-        None
-    }
-    fn current_thread_object(&self) -> Option<Arc<ThreadObject>> {
-        None
-    }
-    fn current_process_object(&self) -> Option<Arc<ProcessObject>> {
-        None
-    }
-    fn create_empty_process(&self, _name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
-        Ok(ProcessObject::new())
-    }
-    fn create_user_thread(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _e: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, SpawnError> {
-        Ok(ThreadObject::new())
-    }
-    fn terminate_thread(&self, _t: &Arc<ThreadObject>, _c: i32) -> Result<(), IpcError> {
-        Ok(())
-    }
-    fn terminate_process(&self, _p: &Arc<ProcessObject>, _c: i32) -> Result<(), IpcError> {
-        Ok(())
-    }
-    fn load_user_image_into(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _i: &UserImageInstall,
-    ) -> Result<(), LoadImageError> {
-        Ok(())
-    }
-    fn start_user_process(
-        &self,
-        _p: &Arc<ProcessObject>,
-        _s: UserStartSpec,
-    ) -> Result<Arc<ThreadObject>, StartProcessError> {
-        Ok(ThreadObject::new())
-    }
-}
-
-fn runtimes() -> &'static (Arc<TableRuntime>, Arc<StubSyscallRuntime>) {
-    static R: OnceLock<(Arc<TableRuntime>, Arc<StubSyscallRuntime>)> = OnceLock::new();
-    R.get_or_init(|| {
-        let rt = Arc::new(TableRuntime::new());
-        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
-        install_runtime(dyn_rt);
-        let stub = Arc::new(StubSyscallRuntime::new());
-        syscall_kernel::install_runtime(stub.clone());
-        (rt, stub)
-    })
-}
-
-fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn set_bytes(bytes: &[u8]) {
+    runtimes()
+        .1
+        .set_mapper(PageMapper::with_mapping(BASE_VA, 1, bytes, MemFlags::user_ro()).unwrap());
 }
 
 fn encode_desc(version: u32, segment_count: u32, segments_va: u64) -> [u8; USER_IMAGE_DESC_SIZE] {
@@ -294,31 +107,10 @@ fn insert_region_with_rights(
         .expect("insert region")
 }
 
-struct TestFrame {
-    op: u16,
-    args: [u64; 6],
-    ret: i64,
-}
-impl SyscallFrame for TestFrame {
-    fn op_raw(&self) -> u16 {
-        self.op
-    }
-    fn arg(&self, i: usize) -> u64 {
-        self.args[i]
-    }
-    fn set_return(&mut self, v: i64) {
-        self.ret = v;
-    }
-    fn set_secondary_return(&mut self, _v: u64) {}
-    fn origin(&self) -> Origin {
-        Origin::User
-    }
-}
-
 fn load_image(process_id: HandleId) -> Result<u64, i64> {
-    let mut frame = TestFrame {
-        op: SyscallOp::ProcessLoadImage as u16,
-        args: [
+    dispatch(
+        SyscallOp::ProcessLoadImage,
+        [
             u64::from(process_id.raw().get()),
             BASE_VA as u64,
             USER_IMAGE_DESC_SIZE as u64,
@@ -326,14 +118,7 @@ fn load_image(process_id: HandleId) -> Result<u64, i64> {
             0,
             0,
         ],
-        ret: 0,
-    };
-    syscall_kernel::dispatch(&mut frame);
-    if frame.ret >= 0 {
-        Ok(u64::try_from(frame.ret).unwrap())
-    } else {
-        Err(frame.ret)
-    }
+    )
 }
 
 fn expect(e: SyscallError) -> Result<u64, i64> {
@@ -343,11 +128,11 @@ fn expect(e: SyscallError) -> Result<u64, i64> {
 #[test]
 fn rejects_wrong_abi_version() {
     let _g = test_lock();
-    let (rt, stub) = runtimes();
+    let (rt, _) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
     rt.set_handle_table(table);
-    stub.set_bytes(canned_buffer(
+    set_bytes(&canned_buffer(
         encode_desc(2, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         None,
     ));
@@ -357,11 +142,11 @@ fn rejects_wrong_abi_version() {
 #[test]
 fn rejects_zero_segment_count() {
     let _g = test_lock();
-    let (rt, stub) = runtimes();
+    let (rt, _) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
     rt.set_handle_table(table);
-    stub.set_bytes(canned_buffer(
+    set_bytes(&canned_buffer(
         encode_desc(1, 0, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         None,
     ));
@@ -371,12 +156,12 @@ fn rejects_zero_segment_count() {
 #[test]
 fn rejects_segment_count_above_max() {
     let _g = test_lock();
-    let (rt, stub) = runtimes();
+    let (rt, _) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
     rt.set_handle_table(table);
     let too_many = (syscall_kernel::MAX_SEGMENTS_PER_IMG as u32) + 1;
-    stub.set_bytes(canned_buffer(
+    set_bytes(&canned_buffer(
         encode_desc(1, too_many, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         None,
     ));
@@ -386,13 +171,13 @@ fn rejects_segment_count_above_max() {
 #[test]
 fn rejects_nonzero_reserved_field() {
     let _g = test_lock();
-    let (rt, stub) = runtimes();
+    let (rt, _) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
     let region = insert_region(&table, REGION_SIZE, AccessMask::RW);
     rt.set_handle_table(table);
     let seg = encode_segment(region.raw().get(), 0, REGION_SIZE as u64, 1);
-    stub.set_bytes(canned_buffer(
+    set_bytes(&canned_buffer(
         encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         Some(seg),
     ));
@@ -402,13 +187,13 @@ fn rejects_nonzero_reserved_field() {
 #[test]
 fn rejects_mapped_size_mismatch() {
     let _g = test_lock();
-    let (rt, stub) = runtimes();
+    let (rt, _) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
     let region = insert_region(&table, REGION_SIZE, AccessMask::RW);
     rt.set_handle_table(table);
     let seg = encode_segment(region.raw().get(), 0, (REGION_SIZE * 2) as u64, 0);
-    stub.set_bytes(canned_buffer(
+    set_bytes(&canned_buffer(
         encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         Some(seg),
     ));
@@ -418,7 +203,7 @@ fn rejects_mapped_size_mismatch() {
 #[test]
 fn rejects_access_denied_when_region_mask_too_weak() {
     let _g = test_lock();
-    let (rt, stub) = runtimes();
+    let (rt, _) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
     // Хендл содержит READ|WRITE|EXECUTE (проходит проверку прав на строке :178),
@@ -432,7 +217,7 @@ fn rejects_access_denied_when_region_mask_too_weak() {
     );
     rt.set_handle_table(table);
     let seg = encode_segment(region.raw().get(), 2, REGION_SIZE as u64, 0);
-    stub.set_bytes(canned_buffer(
+    set_bytes(&canned_buffer(
         encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         Some(seg),
     ));

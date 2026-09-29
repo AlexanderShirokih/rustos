@@ -60,7 +60,7 @@ fn memory_with_profile_refuses_a_cached_region() {
 
 #[kernel_test]
 fn memory_with_profile_retypes_a_device_window() {
-    let client = crate::devices_session().client();
+    let client = crate::hardware_session().client();
     let cap = client
         .acquire_device_memory(0)
         .expect("acquire_device_memory call")

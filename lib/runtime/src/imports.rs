@@ -7,7 +7,7 @@ use ipc::wire::Str;
 use log_abi::log;
 use syscall::{Handle, kind};
 
-use crate::svc::PortTransport;
+use crate::svc::{IssuedHandle, PortTransport};
 
 /// Запрашивает у родителя по стартовой сессии `parent` неявные импорты компонента и ставит их в
 /// состояние процесса. Журнал получает вывод процесса с тегом `tag`. Отказ родителя оставляет
@@ -18,12 +18,15 @@ pub fn start_component(parent: Handle<kind::Port>, tag: &'static str) {
     }
 }
 
-fn import<P: ipc::Protocol>(parent: Handle<kind::Port>, name: &str) -> Option<Handle<kind::Port>> {
+fn import<P: ipc::Protocol>(
+    parent: Handle<kind::Port>,
+    name: &str,
+) -> Option<IssuedHandle<kind::Port>> {
     let requirement = SessionRequirement {
         name: Str::new(name)?,
         protocol: Str::new(P::ID)?,
     };
     let requests = component_startup::Client::new(PortTransport::new(parent))
         .with_wait(STARTUP_REQUEST_TIMEOUT);
-    Some(requests.session(requirement).ok()?.ok()?.into_raw())
+    requests.session(requirement).ok()?.ok()
 }

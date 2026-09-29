@@ -26,7 +26,7 @@ use syscall::{Handle, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount, kind};
 
 use crate::{
     clock::Instant,
-    svc::{handle_close, signal_create, signal_set, signal_wait_one, thread_yield},
+    svc::{signal_create, signal_set, signal_wait_one, thread_yield},
 };
 
 /// Слово, по адресу которого ждут и будят.
@@ -98,14 +98,12 @@ impl Bucket {
         let created = signal_create().ok()?;
         match self
             .signal
-            .compare_exchange(0, created.raw(), AcqRel, Acquire)
+            .compare_exchange(0, created.as_raw().raw(), AcqRel, Acquire)
         {
-            Ok(_) => Some(created),
-            Err(existing) => {
-                // Гонку выиграл другой поток: свежий хэндл лишний.
-                let _ = handle_close(created);
-                crate::restore(existing)
-            }
+            // Сигнал бакета нужен до завершения процесса.
+            Ok(_) => Some(created.leak()),
+            // Гонку выиграл другой поток, и владелец закрывает лишний хэндл.
+            Err(existing) => crate::restore(existing),
         }
     }
 

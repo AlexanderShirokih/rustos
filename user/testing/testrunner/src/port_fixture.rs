@@ -10,7 +10,6 @@
 runtime::process_heap!();
 
 use core::{
-    num::NonZeroU32,
     panic::PanicInfo,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -22,12 +21,10 @@ use fixture_protocol::{
     REPLY_HOLD_FAILED, REPLY_MAP_FAILED, REPLY_OK, REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED,
     REQUEST_LEN, decode_request,
 };
-use kernel_objects::{
-    Error, MemoryRegion, OwnedHandle, Port, Process, Reply, Resource, Signal, kind,
-};
+use kernel_objects::{Error, MemoryRegion, Port, Process, Reply, Resource, Signal, kind};
 use runtime::{
-    MemoryAccess, Priority, Timeout, UserMemFlags, process_exit, signal_set, spawn_owned,
-    thread_exit,
+    IssuedHandle, MemoryAccess, Priority, Timeout, UserMemFlags, process_exit, signal_set,
+    spawn_owned, take_bootstrap, thread_exit,
 };
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 use userland::USERLAND_PAGE_SIZE;
@@ -43,8 +40,13 @@ static SLOT: AtomicU64 = AtomicU64::new(0);
 const FAILED_EXIT_CODE: u64 = 101;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
-    let port = Port::from_handle(root);
+pub extern "C" fn _start(root: u32) -> ! {
+    // SAFETY: `root` - значение `x0` точки входа, и точка входа исполняется один раз.
+    unsafe { runtime::start(root) };
+    let Some(root) = take_bootstrap() else {
+        thread_exit(FAILED_EXIT_CODE)
+    };
+    let port = Port::from(root.assume_kind());
 
     loop {
         let reply = match port.recv(Timeout::INFINITE) {
@@ -74,17 +76,28 @@ pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
                 answer(reply, &out);
             }
             OP_MAP_CHECK => {
-                let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
+                let cap = if ncaps == 1 {
+                    ipc_raw::take_cap(0)
+                } else {
+                    None
+                };
                 answer(reply, &[map_check(cap, arg)]);
             }
             OP_HOLD_CAP => {
-                let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
+                let cap = if ncaps == 1 {
+                    ipc_raw::take_cap(0)
+                } else {
+                    None
+                };
                 answer(reply, &[hold_cap(cap)]);
             }
             OP_HOLD_SELF => answer(reply, &[hold_self()]),
             OP_CLOSE_CAP => {
-                let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
-                let Some(handle) = owned_of::<kind::Any>(cap) else {
+                let Some(handle) = (if ncaps == 1 {
+                    ipc_raw::take_cap(0)
+                } else {
+                    None
+                }) else {
                     thread_exit(FAILED_EXIT_CODE)
                 };
                 drop(handle);
@@ -134,12 +147,6 @@ fn park_forever(ready: Handle<kind::Signal>) -> u32 {
     0
 }
 
-fn owned_of<K: kernel_objects::ObjectKind>(raw: u32) -> Option<OwnedHandle<K>> {
-    NonZeroU32::new(raw)
-        .map(Handle::from_abi)
-        .map(OwnedHandle::from_handle)
-}
-
 fn answer(reply: Reply, body: &[u8]) {
     ipc_raw::write_frame(body, &[]);
     if reply.reply().is_err() {
@@ -147,11 +154,11 @@ fn answer(reply: Reply, body: &[u8]) {
     }
 }
 
-fn hold_cap(cap: u32) -> u8 {
-    let Some(handle) = owned_of::<kind::Any>(cap) else {
+fn hold_cap(cap: Option<IssuedHandle<kind::Any>>) -> u8 {
+    let Some(handle) = cap else {
         return REPLY_HOLD_FAILED;
     };
-    let _ = handle.into_raw();
+    let _ = handle.leak();
     REPLY_OK
 }
 
@@ -187,11 +194,11 @@ fn duplicate_transfer_cap() -> u8 {
     }
 }
 
-fn map_check(cap: u32, expected: u64) -> u8 {
-    let Some(region) = owned_of::<kind::MemoryRegion>(cap) else {
+fn map_check(cap: Option<IssuedHandle<kind::Any>>, expected: u64) -> u8 {
+    let Some(region) = cap else {
         return REPLY_MAP_FAILED;
     };
-    let region = MemoryRegion::from_handle(region.into_raw());
+    let region = MemoryRegion::from(region.assume_kind());
     let Ok(mapping) = region.map_full(UserMemFlags::ReadWrite) else {
         return REPLY_MAP_FAILED;
     };

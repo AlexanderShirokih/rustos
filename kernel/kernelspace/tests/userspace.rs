@@ -11,6 +11,7 @@ use capability::{Capability, CapabilityTarget, Port, Rights, Signal};
 use kernelspace::{SchedulerUserProcessLauncher, SpawnUserError, UserProcessLauncher};
 use memory::{
     MemFlags,
+    testing::PageMapperFactory,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 use process::{UserImage, UserImageError, UserSegment};
@@ -20,8 +21,7 @@ use scheduler::{
 };
 
 use crate::common::{
-    MockAddressSpaceFactory, MockContext, MockTimer, MockTimerSource, reset_switches,
-    take_address_space_switches,
+    MockContext, MockTimer, MockTimerSource, reset_switches, take_address_space_switches,
 };
 
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(8, 16);
@@ -46,7 +46,7 @@ fn bootstrap_launch() -> UserProcessLaunch {
 
 fn make_scheduler(
     timer: std::sync::Arc<MockTimer>,
-    factory: &'static MockAddressSpaceFactory,
+    factory: &'static PageMapperFactory,
 ) -> BootstrappedScheduler {
     TestScheduler::with_address_space_factory(MockTimerSource(timer), TEST_CONFIG, Some(factory))
         .bootstrap()
@@ -54,8 +54,8 @@ fn make_scheduler(
         .expect("bootstrap must succeed in tests")
 }
 
-fn fresh_factory() -> &'static MockAddressSpaceFactory {
-    Box::leak(Box::new(MockAddressSpaceFactory::new()))
+fn fresh_factory() -> &'static PageMapperFactory {
+    Box::leak(Box::new(PageMapperFactory::new()))
 }
 
 fn launcher(
@@ -150,8 +150,7 @@ fn spawn_user_process_creates_address_space_and_thread() {
     assert_eq!(factory.created(), 1);
     // process_count: idle + user = 2.
     assert_eq!(scheduler.process_count(), 2);
-    // 1 map() для сегмента + 1 map() для user-stack = 2 вызова.
-    let calls = factory.map_calls();
+    let calls = factory.maps();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].page_count, 1);
     assert_eq!(calls[1].page_count, USER_STACK_SIZE / PAGE);
@@ -315,16 +314,15 @@ fn spawn_user_process_loads_segments_and_stack_in_order() {
         .spawn_user_process_with_launch("user-b", &image, Priority::new(2), 4, bootstrap_launch())
         .expect("spawn ok");
 
-    let calls = factory.map_calls();
+    let calls = factory.maps();
     assert_eq!(calls.len(), 3, "2 segments + stack");
     assert_eq!(calls[0].va, USER_SEGMENT_VA);
     assert_eq!(calls[1].va, USER_SEGMENT_VA + PAGE);
     let stack_base = USER_STACK_TOP_VA - PAGE;
     assert_eq!(calls[2].va, stack_base);
 
-    assert_eq!(calls[0].init_hash, common::fnv1a_hash(&init0));
-    assert_eq!(calls[0].init_len, init0.len());
-    assert_eq!(calls[1].init_hash, common::fnv1a_hash(&init1));
+    assert_eq!(calls[0].init, init0);
+    assert_eq!(calls[1].init, init1);
 }
 
 #[test]
@@ -397,7 +395,7 @@ fn spawn_user_process_validation_rejects_misaligned() {
     // Только idle процесс - user не вставился.
     assert_eq!(scheduler.process_count(), 1);
     // validate отрабатывает раньше первого `mapper.map()` - лог пуст.
-    assert!(factory.map_calls().is_empty());
+    assert!(factory.maps().is_empty());
 }
 
 #[test]
@@ -428,7 +426,7 @@ fn context_switch_kernel_to_user_records_user_root() {
     let _running = scheduler.run();
     let switches = take_address_space_switches();
     // Root первой выданной фабрикой пары.
-    let expected_root = MockAddressSpaceFactory::BASE_ROOT_PA;
+    let expected_root = PageMapperFactory::BASE_ROOT_PA;
     assert!(
         switches
             .iter()
@@ -482,7 +480,7 @@ fn context_switch_between_two_user_processes_writes_distinct_roots() {
 
     running.yield_now();
     let after_yield = take_address_space_switches();
-    let root_b = MockAddressSpaceFactory::BASE_ROOT_PA + PAGE;
+    let root_b = PageMapperFactory::BASE_ROOT_PA + PAGE;
 
     assert!(
         after_yield.iter().any(|sw| matches!(
@@ -638,8 +636,7 @@ fn spawning_two_user_processes_creates_two_distinct_address_spaces() {
     assert_eq!(factory.created(), 2);
     // process_count: idle + 2 user = 3.
     assert_eq!(scheduler.process_count(), 3);
-    // Каждый процесс - segment + stack = 2 вызова map(); итого 4.
-    assert_eq!(factory.map_calls().len(), 4);
+    assert_eq!(factory.maps().len(), 4);
 }
 
 #[test]

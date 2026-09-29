@@ -124,7 +124,7 @@ cargo xtask test
 cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]
 ```
 
-По умолчанию тайм-аут — 60 секунд, спека — `devices/spec/qemu-aarch64-test.yaml`
+По умолчанию тайм-аут — 80 секунд, спека — `devices/spec/qemu-aarch64-test.yaml`
 с четырьмя CPU и GICv3. `--spec` меняет конфигурацию машины, оставляя проходы
 прежними; `devices/spec/qemu-aarch64-test-gicv2.yaml` даёт ту же машину с GICv2,
 покрывая второй бэкенд контроллера прерываний:

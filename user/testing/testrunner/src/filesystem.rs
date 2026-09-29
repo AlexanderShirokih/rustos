@@ -8,8 +8,10 @@ use filesystem_abi::{
     NodeKind, OpenFlags, Opened, Path, file_system, namespace, namespace_admin,
 };
 use ipc::{
-    Channel, FrameBytes, Incoming, Protocol,
-    wire::{HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, Str, TERMINATOR},
+    Channel, Incoming, Outgoing, Protocol, Unsent,
+    wire::{
+        FieldCursor, HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str, TERMINATOR,
+    },
 };
 use kernel_objects::{
     Delivery, MemoryRegion, OwnedHandle, Port, Resource, Session, SessionTransport, Signal,
@@ -226,44 +228,68 @@ impl Tamper {
         empty_body: false,
     };
 
-    fn apply(self, bytes: &[u8], out: &mut [u8]) -> Result<usize, IpcError> {
-        let mut header = Header::split(bytes)?.header;
+    fn apply(self, frame: &Outgoing<'_, Delivery>) -> Result<MessageBuf<Delivery>, IpcError> {
+        if frame.resources().has_capabilities() {
+            return Err(IpcError::TooManyHandles);
+        }
+        let parts = Header::split(frame.as_bytes())?;
+        let mut header = parts.header;
         if self.unknown_ordinal {
             header.ordinal ^= 1;
         }
-        out[..bytes.len()].copy_from_slice(bytes);
-        header.encode(out)?;
-        if self.empty_body {
-            out[HEADER_SIZE] = TERMINATOR;
-            return Ok(HEADER_SIZE + 1);
+        let mut out = MessageBuf::new();
+        out.write_header(&header)?;
+        if !self.empty_body {
+            let mut fields = FieldCursor::new(parts.body);
+            while let Some(field) = fields.next_field()? {
+                out.write_field(field.id, field.data)?;
+            }
         }
-        Ok(bytes.len())
+        out.finish()?;
+        Ok(out)
     }
 }
 
 impl Channel for Tampered {
     type Resources = Delivery;
 
-    fn send(&self, bytes: &[u8], handles: &[u32], wait: Timeout) -> Result<(), IpcError> {
-        let mut frame = [0u8; MESSAGE_INLINE_MAX];
-        let len = self.tamper.apply(bytes, &mut frame)?;
-        self.port.send(&frame[..len], handles, wait)
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, Delivery>,
+        wait: Timeout,
+    ) -> Result<(), Unsent<'b, Delivery>> {
+        let mut tampered = match self.tamper.apply(&frame) {
+            Ok(tampered) => tampered,
+            Err(error) => return Err((error, frame)),
+        };
+        self.port
+            .send(tampered.outgoing(), wait)
+            .map_err(|(error, _)| (error, frame))
     }
 
     fn call<'b>(
         &self,
-        bytes: &[u8],
-        handles: &[u32],
-        reply: &'b mut FrameBytes,
+        frame: Outgoing<'b, Delivery>,
         wait: Timeout,
     ) -> Result<Incoming<'b, Delivery>, IpcError> {
-        let mut frame = [0u8; MESSAGE_INLINE_MAX];
-        let len = self.tamper.apply(bytes, &mut frame)?;
+        let mut tampered = self.tamper.apply(&frame)?;
         if self.tamper.one_way {
-            self.port.send(&frame[..len], handles, wait)?;
+            self.port
+                .send(tampered.outgoing(), wait)
+                .map_err(|(error, _)| error)?;
             return Err(IpcError::PeerClosed);
         }
-        self.port.call(&frame[..len], handles, reply, wait)
+        let Incoming { bytes, resources } = self.port.call(tampered.outgoing(), wait)?;
+        let answer = frame
+            .into_parts()
+            .buffer
+            .get_mut(..bytes.len())
+            .ok_or(IpcError::FrameOverflow)?;
+        answer.copy_from_slice(bytes);
+        Ok(Incoming {
+            bytes: answer,
+            resources,
+        })
     }
 }
 

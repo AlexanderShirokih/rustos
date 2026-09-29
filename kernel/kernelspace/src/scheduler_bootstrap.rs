@@ -110,6 +110,10 @@ where
         self.handle.current_process_object()
     }
 
+    fn thread_in_current_process(&self, thread: &Arc<ThreadObject>) -> Option<bool> {
+        self.handle.thread_in_current_process(thread)
+    }
+
     fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
         self.handle.create_empty_process(name)
     }

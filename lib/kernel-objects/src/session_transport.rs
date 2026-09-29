@@ -1,7 +1,7 @@
 //! Канал ipc-контрактов поверх порта, capability которого он держит.
 
 use ipc::{
-    Channel, FrameBytes, Incoming, Listener, RecvError,
+    Channel, FrameBytes, Incoming, Listener, Outgoing, RecvError, Unsent,
     wire::{IpcError, SessionHandle},
 };
 use syscall::{Timeout, kind};
@@ -32,18 +32,20 @@ impl SessionTransport {
 impl Channel for SessionTransport {
     type Resources = Delivery;
 
-    fn send(&self, bytes: &[u8], handles: &[u32], wait: Timeout) -> Result<(), IpcError> {
-        self.transport.send(bytes, handles, wait)
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, Delivery>,
+        wait: Timeout,
+    ) -> Result<(), Unsent<'b, Delivery>> {
+        self.transport.send(frame, wait)
     }
 
     fn call<'b>(
         &self,
-        bytes: &[u8],
-        handles: &[u32],
-        reply: &'b mut FrameBytes,
+        frame: Outgoing<'b, Delivery>,
         wait: Timeout,
     ) -> Result<Incoming<'b, Delivery>, IpcError> {
-        self.transport.call(bytes, handles, reply, wait)
+        self.transport.call(frame, wait)
     }
 }
 

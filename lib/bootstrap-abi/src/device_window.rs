@@ -7,7 +7,7 @@ use core::ops::Range;
 use ipc::{Channel, ReceivedResources, wire::IpcError};
 use syscall::kind;
 
-use crate::devices;
+use crate::hardware;
 
 /// Окно device-памяти, построенное из доставленной capability `H`.
 pub trait DeviceWindow<H>: Sized + From<H> {
@@ -24,7 +24,7 @@ pub struct ContainingWindow<W> {
     pub offset: u64,
 }
 
-impl<C: Channel> devices::Client<C> {
+impl<C: Channel> hardware::Client<C> {
     /// Находит перебором `acquire_device_memory` device-окно, которое целиком содержит
     /// `size` байт от физического адреса `base`, и смещение `base` от начала этого окна.
     /// `Ok(None)` - окно пустое, его конец выходит за разрядность `u64` либо набор исчерпан
@@ -59,75 +59,77 @@ impl<C: Channel> devices::Client<C> {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU32;
     use std::thread;
 
     use ipc::wire::Cap;
-    use syscall::{Handle, ObjectKind, kind};
+    use ipc_test::{MockHandle, MockResources};
+    use syscall::{ObjectKind, kind};
 
     use super::DeviceWindow;
 
-    fn cap<K: ObjectKind>(raw: u32) -> Cap<K> {
-        Cap::from_handle(Handle::from_abi(NonZeroU32::new(raw).expect("non-zero")))
+    fn cap<K: ObjectKind>(raw: u32) -> MockHandle<K> {
+        MockHandle::new(raw)
     }
-    use crate::devices;
+    use crate::hardware;
 
     struct Vendor;
 
-    impl<F: ipc::ReceivedResources> devices::Service<F> for Vendor {
+    impl hardware::Service<MockResources> for Vendor {
         fn acquire_irq_control(
             &mut self,
-            _frame: &F,
-        ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::IrqControl>, u32>> {
-            Err::<Cap<kind::IrqControl>, u32>(1)
+            _frame: &MockResources,
+        ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::IrqControl>, u32>>
+        {
+            Err::<MockHandle<kind::IrqControl>, u32>(1)
         }
 
         fn acquire_boot_fdt(
             &mut self,
-            _frame: &F,
-        ) -> impl ipc::IntoWireValue<Read = Result<crate::BootFdt, u32>> {
-            Err::<crate::BootFdt, u32>(1)
+            _frame: &MockResources,
+        ) -> impl ipc::IntoWireValue<MockResources, Read = Result<crate::BootFdt, u32>> {
+            Err::<crate::BootFdt<MockHandle<kind::MemoryRegion>>, u32>(1)
         }
 
         fn acquire_device_memory(
             &mut self,
-            _frame: &F,
+            _frame: &MockResources,
             index: u32,
-        ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, u32>> {
+        ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, u32>>
+        {
             if index >= 2 {
                 return Err(7);
             }
-            Ok(cap(0x90 + index))
+            Ok(cap::<kind::MemoryRegion>(0x90 + index))
         }
     }
 
     struct FakeWindow {
-        cap: Cap<kind::MemoryRegion>,
+        cap: MockHandle<kind::MemoryRegion>,
     }
 
-    impl From<Cap<kind::MemoryRegion>> for FakeWindow {
-        fn from(cap: Cap<kind::MemoryRegion>) -> Self {
+    impl From<MockHandle<kind::MemoryRegion>> for FakeWindow {
+        fn from(cap: MockHandle<kind::MemoryRegion>) -> Self {
             Self { cap }
         }
     }
 
-    impl DeviceWindow<Cap<kind::MemoryRegion>> for FakeWindow {
+    impl DeviceWindow<MockHandle<kind::MemoryRegion>> for FakeWindow {
         fn physical_range(&self) -> Option<core::ops::Range<u64>> {
-            if self.cap.raw().get() == 0x90 {
+            if self.cap.raw() == 0x90 {
                 return None;
             }
-            let base = u64::from(self.cap.raw().get() - 0x90) * 0x1000;
+            let base = u64::from(self.cap.raw() - 0x90) * 0x1000;
             Some(base..base + 0x1000)
         }
     }
 
-    fn with_vendor<R>(body: impl FnOnce(&devices::Client<ipc_test::MockChannel>) -> R) -> R {
+    fn with_vendor<R>(body: impl FnOnce(&hardware::Client<ipc_test::MockChannel>) -> R) -> R {
         let (client_end, server_end) = ipc_test::pair();
-        let client = devices::Client::new(client_end);
+        let client = hardware::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut vendor = Vendor;
-                let _ = server_end.serve_all(|frame| devices::dispatch(&mut vendor, frame));
+                let _ = server_end.serve_all(|frame| hardware::dispatch(&mut vendor, frame));
             });
             let result = body(&client);
             drop(client);
@@ -141,7 +143,7 @@ mod tests {
                 .acquire_device_memory_containing::<FakeWindow>(base, size)
                 .expect("call ok")
         })
-        .map(|found| (found.window.cap.raw().get(), found.offset))
+        .map(|found| (found.window.cap.raw(), found.offset))
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
         process_exit(RESTART_EXIT_CODE)
     };
     let duplicate = log.handle().duplicate(Rights::WRITE, None).map(drop);
-    install_log(log.into_handle().into_raw(), LOG_TAG);
+    install_log(log.into_handle().into_issued(), LOG_TAG);
     log_fmt(format_args!("{duplicate:?}"));
     process_exit(RESTART_EXIT_CODE)
 }

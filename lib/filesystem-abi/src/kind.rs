@@ -47,14 +47,12 @@ impl<'a, R: ReceivedResources> WireValue<'a, R> for NodeKind {
     }
 }
 
-impl IntoWireValue for NodeKind {
+impl<R: ReceivedResources> IntoWireValue<R> for NodeKind {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, &value::encode_u8(self.as_wire()))
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, &value::encode_u8(self.as_wire()))
     }
-
-    fn relinquish(self) {}
 }
 
 impl WireTyped for NodeKind {
@@ -76,8 +74,8 @@ mod tests {
     const KINDS: [NodeKind; 2] = [NodeKind::File, NodeKind::Directory];
 
     fn round_trip(kind: NodeKind) -> Result<NodeKind, IpcError> {
-        let mut buf = MessageBuf::new();
-        kind.write_as_field(&mut buf, FIELD_ID).expect("write ok");
+        let mut buf = MessageBuf::<()>::new();
+        kind.write_into(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");

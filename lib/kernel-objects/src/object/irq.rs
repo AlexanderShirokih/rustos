@@ -11,8 +11,8 @@ use crate::{
 /// Владеет хэндлом полномочия `IrqControl` и закрывает его на drop.
 pub type IrqControl = OwnedHandle<kind::IrqControl>;
 
-/// Владеет хэндлом линии прерывания и закрывает его на drop. Закрытие снимает
-/// биндинг линии в ядре.
+/// Владеет хэндлом линии прерывания и закрывает его на drop. Закрытие хэндла из
+/// [`mint`](OwnedHandle::mint) снимает привязку линии в ядре.
 pub type IrqLine = OwnedHandle<kind::IrqLine>;
 
 impl OwnedHandle<kind::IrqControl> {
@@ -21,7 +21,7 @@ impl OwnedHandle<kind::IrqControl> {
     /// линия - `AlreadyBound`.
     pub fn mint(&self, irq: u16, trigger: IrqTrigger) -> Result<IrqLine> {
         svc::irq_mint(self.as_raw(), irq, trigger)
-            .map(IrqLine::from_handle)
+            .map(IrqLine::from)
             .map_err(Error::Syscall)
     }
 }

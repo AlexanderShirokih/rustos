@@ -1,6 +1,7 @@
 use core::{mem, ptr::NonNull};
 
-use memory::memory_mapper::AddressSpaceHandle;
+use collections::{CriticalSection as _, DaifCriticalSection};
+use memory::{memory_mapper::AddressSpaceHandle, physical_address::PhysicalAddress};
 use scheduler::{ArchContext, UserEntry};
 
 use super::{
@@ -8,7 +9,20 @@ use super::{
     stack::Aarch64Stack,
     switch::{context_start, context_switch},
 };
-use crate::{exception::gpreg::GpReg, memory::asid::unpack_asid};
+use crate::{
+    exception::gpreg::GpReg,
+    memory::{
+        asid::unpack_asid,
+        regs::{
+            common::EL1,
+            tcr::TranslationControlRegister,
+            ttbr::{LowerHalf, TranslationTableBaseRegister},
+        },
+    },
+};
+
+type Tcr = TranslationControlRegister<EL1>;
+type Ttbr0 = TranslationTableBaseRegister<EL1, LowerHalf>;
 
 /// Callee-saved состояние потока согласно AAPCS64:
 /// - x19..x28 (10 GPR)
@@ -97,23 +111,29 @@ impl ArchContext for Aarch64Context {
     }
 
     fn switch_address_space(next: Option<AddressSpaceHandle>) {
-        let raw_ttbr: u64 = match next {
-            None => 0,
+        let _irq_mask = DaifCriticalSection::enter();
+
+        match next {
+            None => {
+                // SAFETY: IRQ замаскированы до конца функции. `disable_walks` запрещает обход по
+                // TTBR0 до записи нулевого корня. Нулевой TTBR0 содержит зарезервированный ASID 0,
+                // и TLB-записи user-AS, все non-global, при нём не используются.
+                unsafe {
+                    Tcr::disable_walks::<LowerHalf>();
+                    Ttbr0::set_with_asid(PhysicalAddress::new(0), 0);
+                }
+            }
             Some(handle) => {
                 let asid = unpack_asid(handle.tag.raw());
-                (u64::from(asid) << 48) | (handle.root.as_usize() as u64)
+                // SAFETY: `handle` - корень живого AS с его ASID, и IRQ замаскированы до конца
+                // функции. `set_with_asid` применяет корень до разрешения обхода, так что обход
+                // по прежнему корню не начинается. ASID-теги изолируют записи прошлого AS,
+                // full-flush не требуется.
+                unsafe {
+                    Ttbr0::set_with_asid(handle.root, asid);
+                    Tcr::enable_walks::<LowerHalf>();
+                }
             }
-        };
-        // SAFETY: TTBR0_EL1 пишется на EL1; `raw_ttbr` - 0 либо PA живого
-        // L0-root, объединённый с ASID валидного AS. Запись + isb достаточна:
-        // ASID-теги изолируют записи прошлого AS, full-flush не требуется.
-        unsafe {
-            core::arch::asm!(
-                "msr ttbr0_el1, {root}",
-                "isb",
-                root = in(reg) raw_ttbr,
-                options(nostack, preserves_flags),
-            );
         }
     }
 

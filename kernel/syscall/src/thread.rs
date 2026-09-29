@@ -101,6 +101,12 @@ pub fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallE
         return Err(SyscallError::AccessDenied);
     }
 
+    // Снятый поток не отпускает замки своего процесса, а безопасную точку снятия
+    // определяет только сам процесс.
+    if syscall_runtime().thread_in_current_process(&thread) == Some(false) {
+        return Err(SyscallError::AccessDenied);
+    }
+
     syscall_runtime()
         .terminate_thread(&thread, code)
         .map_err(map_ipc_error)?;

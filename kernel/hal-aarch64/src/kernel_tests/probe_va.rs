@@ -37,6 +37,8 @@ pub(super) const PAGE_FLAGS: VaWindow = VaWindow::new(0x5200_0000, MIB);
 
 pub(super) const ASID: VaWindow = VaWindow::new(0x5400_0000, MIB);
 
+pub(super) const LOWER_HALF_WALK: VaWindow = VaWindow::new(0x5600_0000, MIB);
+
 pub(super) const UNMAP: VaWindow = VaWindow::new(0x6000_0000, 8 * MIB);
 
 pub(super) const UNMAP_L2_BLOCK: VaWindow = VaWindow::new(0x7000_0000, L2_BLOCK_SIZE);
@@ -45,9 +47,10 @@ pub(super) const UNMAP_L1_BLOCK: VaWindow = VaWindow::new(0x8000_0000, L1_BLOCK_
 
 pub(super) const UNMAP_PARTIAL_BLOCK: VaWindow = VaWindow::new(0xC000_0000, L2_BLOCK_SIZE);
 
-const WINDOWS: [&VaWindow; 6] = [
+const WINDOWS: [&VaWindow; 7] = [
     &PAGE_FLAGS,
     &ASID,
+    &LOWER_HALF_WALK,
     &UNMAP,
     &UNMAP_L2_BLOCK,
     &UNMAP_L1_BLOCK,

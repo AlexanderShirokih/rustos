@@ -17,8 +17,8 @@
 //! [`ReplyChannel`], который транспорт доставляет вместе с кадром вызова.
 //!
 //! Тип записи поля читается [`WireValue`], пишется [`IntoWireValue`] и описывается в схеме
-//! [`WireTyped`]. Значение, владеющее capability, пишется тем же [`IntoWireValue`], и итог
-//! его отправки решает судьбу этих capability.
+//! [`WireTyped`]. Значение, владеющее capability, пишется тем же [`IntoWireValue`]: запись
+//! переносит владельцев capability в кадр, и кадр уходит в канал вместе с ними.
 //!
 //! Крейт обходится без зависимостей с crates.io и без proc-макросов. Он попадает в граф
 //! зависимостей стандартной библиотеки, где не собирается ни то ни другое.
@@ -50,5 +50,6 @@ pub use resources::{Received, ReceivedResources};
 pub use syscall as __syscall;
 pub use syscall::Timeout;
 pub use transport::{
-    Channel, FrameBytes, Incoming, Listener, RecvError, ReplyChannel, Undelivered,
+    Channel, FrameBytes, Incoming, Listener, Outgoing, OutgoingParts, RecvError, ReplyChannel,
+    Undelivered, Unsent,
 };

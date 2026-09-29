@@ -349,115 +349,14 @@ fn transfer_caps(
 }
 
 #[cfg(test)]
-pub(crate) mod test_mapper {
-    use alloc::{sync::Arc, vec, vec::Vec};
-
-    use collections::MutexCell;
-    use memory::{
-        MemFlags,
-        memory_mapper::{
-            AddressSpaceHandle, AddressSpaceTag, MemoryMapper, MemoryMappingError,
-            MemoryRemappingError, MemoryUnmappingError, UserCopyError,
-        },
-        physical_address::{PageAlignedAddress, PhysicalAddress},
-        virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
-    };
-
-    pub(crate) struct PageMapper {
-        base: usize,
-        bytes: MutexCell<Vec<u8>>,
-    }
-
-    impl PageMapper {
-        pub(crate) fn new(base: usize) -> Arc<Self> {
-            Self::with_size(base, 4096)
-        }
-
-        pub(crate) fn with_size(base: usize, size: usize) -> Arc<Self> {
-            Arc::new(Self {
-                base,
-                bytes: MutexCell::new(vec![0u8; size]),
-            })
-        }
-    }
-
-    impl MemoryMapper for PageMapper {
-        fn map(
-            &self,
-            _va: PageAlignedVirtualAddress,
-            _pc: usize,
-            _init: &[u8],
-            _f: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            unimplemented!()
-        }
-        fn map_exact(
-            &self,
-            _v: PageAlignedVirtualAddress,
-            _p: PageAlignedAddress,
-            _s: usize,
-            _f: MemFlags,
-        ) -> Result<(), MemoryMappingError> {
-            unimplemented!()
-        }
-        fn unmap(
-            &self,
-            _v: PageAlignedVirtualAddress,
-            _s: usize,
-        ) -> Result<(), MemoryUnmappingError> {
-            unimplemented!()
-        }
-        fn remap(
-            &self,
-            _v: PageAlignedVirtualAddress,
-            _s: usize,
-            _f: MemFlags,
-        ) -> Result<(), MemoryRemappingError> {
-            unimplemented!()
-        }
-        fn activate_handle(&self) -> AddressSpaceHandle {
-            AddressSpaceHandle::new(PhysicalAddress::new(0), AddressSpaceTag::NONE)
-        }
-        fn zero_owned_frame(&self, _p: PageAlignedAddress) {}
-
-        fn copy_user_in(&self, va: VirtualAddress, dst: &mut [u8]) -> Result<(), UserCopyError> {
-            use collections::LockCell;
-            let off = va.as_usize().wrapping_sub(self.base);
-            let end = off.checked_add(dst.len()).ok_or(UserCopyError::NotMapped)?;
-            self.bytes.with_lock(|b| {
-                if end > b.len() {
-                    return Err(UserCopyError::NotMapped);
-                }
-                dst.copy_from_slice(&b[off..end]);
-                Ok(())
-            })
-        }
-
-        fn copy_user_out(&self, va: VirtualAddress, src: &[u8]) -> Result<(), UserCopyError> {
-            use collections::LockCell;
-            let off = va.as_usize().wrapping_sub(self.base);
-            let end = off.checked_add(src.len()).ok_or(UserCopyError::NotMapped)?;
-            self.bytes.with_lock(|b| {
-                if end > b.len() {
-                    return Err(UserCopyError::NotMapped);
-                }
-                b[off..end].copy_from_slice(src);
-                Ok(())
-            })
-        }
-
-        fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-            self
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
 
     use collections::{LockCell, MutexCell};
-    use memory::{memory_mapper::MemoryMapper, virtual_address::VirtualAddress};
+    use memory::{
+        MemFlags, PAGE_SIZE, memory_mapper::MemoryMapper, testing::PageMapper,
+        virtual_address::VirtualAddress,
+    };
     use syscall::encode_tag;
 
     use super::{
@@ -465,7 +364,6 @@ mod tests {
             handle::Capability, handle_table::HandleTable, port::ThreadTransport, signal::Signal,
             target::CapabilityTarget,
         },
-        test_mapper::PageMapper,
         *,
     };
 
@@ -479,7 +377,7 @@ mod tests {
         Arc<PageMapper>,
         Arc<MutexCell<HandleTable>>,
     ) {
-        let mapper = PageMapper::new(base);
+        let mapper = PageMapper::with_mapping(base, 1, &[], MemFlags::user_rw()).unwrap();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let t = ThreadTransport::new(mapper.clone(), VirtualAddress::new(base), table.clone());
         (t, mapper, table)
@@ -625,7 +523,6 @@ mod tests {
     }
 
     fn transport_custom(
-        base: usize,
         size: usize,
         cap: u32,
     ) -> (
@@ -633,9 +530,15 @@ mod tests {
         Arc<PageMapper>,
         Arc<MutexCell<HandleTable>>,
     ) {
-        let mapper = PageMapper::with_size(base, size);
+        let mapper =
+            PageMapper::with_mapping(BASE_B - PAGE_SIZE.get(), 1, &[], MemFlags::user_rw())
+                .unwrap();
         let table = Arc::new(MutexCell::new(HandleTable::with_capacity(cap)));
-        let t = ThreadTransport::new(mapper.clone(), VirtualAddress::new(base), table.clone());
+        let t = ThreadTransport::new(
+            mapper.clone(),
+            VirtualAddress::new(BASE_B - size),
+            table.clone(),
+        );
         (t, mapper, table)
     }
 
@@ -742,7 +645,7 @@ mod tests {
     #[test]
     fn install_fail_rolls_caps_back_to_sender() {
         let (sender, sm, st) = transport(BASE_A);
-        let (receiver, _rm, rt) = transport_custom(BASE_B, 4096, 1);
+        let (receiver, _rm, rt) = transport_custom(4096, 1);
         let id_a = signal_with_transfer(&st);
         let id_b = signal_with_transfer(&st);
         write_buf(
@@ -764,7 +667,7 @@ mod tests {
     #[test]
     fn write_caps_fail_rolls_caps_back_to_sender() {
         let (sender, sm, st) = transport(BASE_A);
-        let (receiver, _rm, rt) = transport_custom(BASE_B, CAPS_OFFSET, 16);
+        let (receiver, _rm, rt) = transport_custom(CAPS_OFFSET, 16);
         let id = signal_with_transfer(&st);
         write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
 
@@ -779,20 +682,20 @@ mod tests {
     fn write_badge_fail_leaves_receiver_tag_unset() {
         let (mut sender, sm, _st) = transport(BASE_A);
         sender.badge = 0x1234_5678;
-        let (receiver, rm, _rt) = transport_custom(BASE_B, BADGE_OFFSET, 16);
+        let (receiver, rm, _rt) = transport_custom(BADGE_OFFSET, 16);
         write_buf(&sm, BASE_A, encode_tag(4, 0), &[], b"DATA");
 
         let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
         assert_eq!(err, IpcError::BufferTooSmall);
-        assert_eq!(read_tag(&rm, BASE_B), 0);
-        assert_eq!(read_data(&rm, BASE_B, 4), b"DATA");
+        assert_eq!(read_tag(&rm, BASE_B - BADGE_OFFSET), 0);
+        assert_eq!(read_data(&rm, BASE_B - BADGE_OFFSET, 4), b"DATA");
     }
 
     #[test]
     fn write_badge_fail_rolls_transferred_caps_back_to_sender() {
         let (mut sender, sm, st) = transport(BASE_A);
         sender.badge = 0xABCD;
-        let (receiver, rm, rt) = transport_custom(BASE_B, BADGE_OFFSET, 16);
+        let (receiver, rm, rt) = transport_custom(BADGE_OFFSET, 16);
         let id = signal_with_transfer(&st);
         write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
 
@@ -801,7 +704,7 @@ mod tests {
         assert!(st.with_lock(|t| t.get(id, Rights::READ).is_ok()));
         assert_eq!(st.with_lock(|t| t.live_count()), 1);
         assert_eq!(rt.with_lock(|t| t.live_count()), 0);
-        assert_eq!(read_tag(&rm, BASE_B), 0);
+        assert_eq!(read_tag(&rm, BASE_B - BADGE_OFFSET), 0);
     }
 
     type KernelBuf = Arc<MutexCell<syscall::IpcBuffer>>;

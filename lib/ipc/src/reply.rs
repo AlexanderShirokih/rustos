@@ -43,34 +43,34 @@ impl<V, C> Reply<V, C> {
 
 impl<V, C: ReplyChannel> Reply<V, C> {
     /// Отвечает вызывателю значением `value`. Долг расходуется на любом исходе. Успех отдаёт
-    /// capability значения вызывателю, отказ возвращает значение отправителю вместе с причиной.
-    pub fn send<W: IntoWireValue<Read = V>>(self, value: W) -> Result<(), Undelivered<W>> {
+    /// capability значения вызывателю, отказ возвращает значение в том виде, в каком его читает
+    /// вызыватель, вместе с причиной. Отказ записи кадра закрывает capability значения.
+    pub fn send<W, O>(self, value: W) -> Result<(), Undelivered<O>>
+    where
+        W: IntoWireValue<C::Resources, Read = V>,
+        V: for<'a> WireValue<'a, C::Resources, Owned = O>,
+    {
         let Record { channel, ordinal } = self.record;
-        let header = Header::new(ordinal);
-        let sent = crate::protocol::send_frame(
-            header,
-            |frame| value.write_as_field(frame, FIELD_ID_MIN),
-            |bytes, handles| channel.send(bytes, handles),
-        );
-        match sent {
-            Ok(()) => {
-                value.relinquish();
-                Ok(())
-            }
-            Err(error) => Err(Undelivered { error, value }),
-        }
+        let mut frame = MessageBuf::new();
+        crate::protocol::build_frame(&mut frame, Header::new(ordinal), |frame| {
+            value.write_into(frame, FIELD_ID_MIN)
+        })
+        .map_err(Undelivered::unwritten)?;
+        channel.send(frame.outgoing()).map_err(|unsent| {
+            Undelivered::__new(unsent, |body, resources| {
+                crate::protocol::read_answer::<V, _>(body, resources)
+            })
+        })
     }
 }
 
-impl<V, C: IntoWireValue<Read = Cap<kind::Reply>>> IntoWireValue for Reply<V, C> {
+impl<V, R: ReceivedResources, C: IntoWireValue<R, Read = Cap<kind::Reply>>> IntoWireValue<R>
+    for Reply<V, C>
+{
     type Read = Reply<V>;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        self.record.write_as_field(buf, field_id)
-    }
-
-    fn relinquish(self) {
-        self.record.relinquish();
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        self.record.write_into(frame, field_id)
     }
 }
 
@@ -97,52 +97,57 @@ impl<V, C: fmt::Debug> fmt::Debug for Reply<V, C> {
 
 #[cfg(test)]
 mod tests {
-    use syscall::{Handle, kind};
+    use syscall::kind;
 
     use super::Reply;
     use crate::{
         IntoWireValue, WireValue,
-        resources::testing::{TestFrame, TestReply},
-        wire::{Cap, FieldCursor, IpcError, MessageBuf},
+        resources::testing::{TestFrame, TestReply, cap},
+        wire::{FieldCursor, IpcError, MessageBuf},
     };
 
     #[test]
     fn a_debt_arrives_owning_the_channel_of_its_field() {
-        let channel = Cap::<kind::Reply>::from_handle(Handle::from_abi(
-            core::num::NonZeroU32::new(0x2B).expect("non-zero"),
-        ));
-        let mut buf = MessageBuf::new();
-        Reply::<u32>::__new(channel, 0x0102_0304_0506_0708)
-            .write_as_field(&mut buf, 1)
+        let mut buf = MessageBuf::<TestFrame>::new();
+        Reply::<u32, _>::__new(TestReply(0x2B), 0x0102_0304_0506_0708)
+            .write_into(&mut buf, 1)
             .expect("write ok");
         buf.finish().expect("finish ok");
 
-        let field = FieldCursor::new(buf.as_bytes())
+        let bytes = buf.as_bytes().to_vec();
+        let field = FieldCursor::new(&bytes)
             .next_field()
             .expect("ok")
             .expect("present");
-        let debt = <Reply<u32> as WireValue<TestFrame>>::from_field(
-            field.data,
-            &mut TestFrame::of(buf.handles()),
-        )
-        .expect("the debt is read");
+        let debt =
+            <Reply<u32> as WireValue<TestFrame>>::from_field(field.data, &mut buf.into_resources())
+                .expect("the debt is read");
         assert_eq!(debt.record.channel, TestReply(0x2B));
         assert_eq!(debt.record.ordinal, 0x0102_0304_0506_0708);
     }
 
     #[test]
     fn a_debt_record_without_its_ordinal_is_refused() {
-        let mut record = MessageBuf::new();
-        record.write_field(1, &[0]).expect("channel ok");
+        let mut record = MessageBuf::<TestFrame>::new();
+        record
+            .write_handle(1, cap::<kind::Reply>(0x2B))
+            .expect("channel ok");
         record.finish().expect("finish ok");
 
+        let bytes = record.as_bytes().to_vec();
         assert_eq!(
-            <Reply<u32> as WireValue<TestFrame>>::from_field(
-                record.as_bytes(),
-                &mut TestFrame::of(&[0x2B])
-            )
-            .map(drop),
+            <Reply<u32> as WireValue<TestFrame>>::from_field(&bytes, &mut record.into_resources())
+                .map(drop),
             Err(IpcError::MissingField)
         );
+    }
+
+    #[test]
+    fn a_refused_answer_comes_back_as_its_caller_reads_it() {
+        let refused = Reply::<crate::wire::Cap<kind::Port>, _>::__new(TestReply(0x2B), 7)
+            .send(cap::<kind::Port>(0x2A))
+            .expect_err("the caller is gone");
+        assert_eq!(refused.error, IpcError::PeerClosed);
+        assert_eq!(refused.into_value(), Ok(cap(0x2A)));
     }
 }

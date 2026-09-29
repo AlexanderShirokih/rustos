@@ -82,7 +82,7 @@ macro_rules! wire_value {
     // Запись - умолчание. Псевдонимы параметров внутри блока подставляют умолчание в типы
     // полей, и прочитанное значение заменяет каждый параметр владельца формой, которую
     // получатель читает из его умолчания. `IntoWireValue` реализуется для любого владельца с
-    // `Read` = умолчание.
+    // `Read` = умолчание, который пишется в кадр с ресурсами `__Frame`.
     (@impl name = $name:ident lifetime = [$($lt:lifetime)?] owners = [$($owner:ident = $default:ty),*]
         fields = [$($fields:tt)*]
     ) => {
@@ -92,12 +92,15 @@ macro_rules! wire_value {
                 fields = [$($fields)*]);
         };
 
-        impl<$($lt,)? $($owner: $crate::IntoWireValue<Read = $default>),*> $crate::IntoWireValue
-            for $name<$($lt,)? $($owner),*>
+        impl<
+            $($lt,)?
+            __Frame: $crate::ReceivedResources,
+            $($owner: $crate::IntoWireValue<__Frame, Read = $default>),*
+        > $crate::IntoWireValue<__Frame> for $name<$($lt,)? $($owner),*>
         {
             type Read = $name $(<$lt>)?;
 
-            $crate::wire_value!(@write $($fields)*);
+            $crate::wire_value!(@write name = $name, $($fields)*);
         }
 
         const _: () = ::core::assert!(
@@ -135,20 +138,17 @@ macro_rules! wire_value {
         }
     };
 
-    (@write $( { $id:expr , $field:ident , $ty:ty } )*) => {
-        fn write_as_field(
-            &self,
-            buf: &mut $crate::wire::MessageBuf,
+    (@write name = $name:ident, $( { $id:expr , $field:ident , $ty:ty } )*) => {
+        fn write_into(
+            self,
+            frame: &mut $crate::wire::MessageBuf<__Frame>,
             field_id: u8,
         ) -> ::core::result::Result<(), $crate::wire::IpcError> {
-            buf.write_nested(field_id, |fields| {
-                $( $crate::IntoWireValue::write_as_field(&self.$field, fields, $id)?; )*
+            let $name { $($field),* } = self;
+            frame.write_nested(field_id, |fields| {
+                $( $crate::IntoWireValue::write_into($field, fields, $id)?; )*
                 ::core::result::Result::Ok(())
             })
-        }
-
-        fn relinquish(self) {
-            $( $crate::IntoWireValue::relinquish(self.$field); )*
         }
     };
 

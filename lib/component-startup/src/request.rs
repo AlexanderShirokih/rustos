@@ -2,12 +2,12 @@
 
 use component_abi::{AcceptError, SessionError, SessionRequirement, component_startup};
 use ipc::wire::{IpcError, Str};
-use kernel_objects::{Port, PortTransport, ReceivedHandle, Session, kind};
+use kernel_objects::{IssuedHandle, Port, PortTransport, Session, kind};
 
 /// Заявка импортёра на сессию экспорта. Пустая область называет весь экспорт. Разрушение
 /// заявки без ответа даёт импортёру `IpcError::PeerClosed`.
 pub type SessionRequest =
-    component_abi::SessionRequest<component_startup::session::Reply<ReceivedHandle<kind::Reply>>>;
+    component_abi::SessionRequest<component_startup::session::Reply<IssuedHandle<kind::Reply>>>;
 
 /// Запрашивает у родителя сессию требования `requirement` протокола `P`. Внешний `Err` - отказ
 /// запроса, внутренний - отказ родителя. Имя длиннее

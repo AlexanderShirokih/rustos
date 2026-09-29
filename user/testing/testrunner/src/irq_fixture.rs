@@ -7,7 +7,9 @@ runtime::process_heap!();
 use core::panic::PanicInfo;
 
 use component_startup::component_manifest;
-use runtime::{log_line, process_exit, start_component};
+use kernel_objects::MemoryRegion;
+use platform_abi::platform;
+use runtime::{log_fmt, log_line, process_exit, start_component};
 use syscall::{Handle, kind};
 
 const LOG_TAG: &str = "irq";
@@ -16,7 +18,7 @@ const RESTART_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct IrqStartup {
-        requirements: { line: irq(compatible = ["arm,pl031"]) },
+        requirements: { platform: session(platform::Protocol) },
     }
 }
 
@@ -26,8 +28,15 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Ok(requirements) = IrqStartup::request(parent) else {
         process_exit(RESTART_EXIT_CODE)
     };
-    let _line = requirements.line;
-    log_line("line taken");
+    let platform = requirements.platform.client();
+    let (Ok(Ok(_line)), Ok(Ok(window))) = (platform.irq(0, 0), platform.mmio(0, 0)) else {
+        log_line("resources refused");
+        process_exit(RESTART_EXIT_CODE)
+    };
+    let Ok(region) = MemoryRegion::from(window.region).inspect() else {
+        process_exit(RESTART_EXIT_CODE)
+    };
+    log_fmt(format_args!("line and region {:#x}", region.base));
     process_exit(RESTART_EXIT_CODE)
 }
 

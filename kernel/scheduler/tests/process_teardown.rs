@@ -17,18 +17,17 @@ use memory::{
     AccessMask, MemoryRegion,
     frame::Frame,
     frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
+    testing::PageMapperFactory,
 };
 use scheduler::{AddressSpace, Process, ProcessId, ProcessName};
 
-use crate::common::MockAddressSpaceFactory;
-
 struct WitnessAllocator {
-    factory: &'static MockAddressSpaceFactory,
+    factory: &'static PageMapperFactory,
     released_at_deallocate: Mutex<Vec<usize>>,
 }
 
 impl WitnessAllocator {
-    fn new(factory: &'static MockAddressSpaceFactory) -> Self {
+    fn new(factory: &'static PageMapperFactory) -> Self {
         Self {
             factory,
             released_at_deallocate: Mutex::new(Vec::new()),
@@ -79,8 +78,7 @@ fn pid(raw: u32) -> ProcessId {
 
 #[test]
 fn image_frames_return_after_the_address_space_is_torn_down() {
-    let factory: &'static MockAddressSpaceFactory =
-        Box::leak(Box::new(MockAddressSpaceFactory::new()));
+    let factory: &'static PageMapperFactory = Box::leak(Box::new(PageMapperFactory::new()));
     let fa: &'static WitnessAllocator = Box::leak(Box::new(WitnessAllocator::new(factory)));
 
     let address_space = AddressSpace::new_user(factory).expect("create user AS");

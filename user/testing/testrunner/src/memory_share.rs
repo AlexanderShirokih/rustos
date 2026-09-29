@@ -4,8 +4,8 @@
 
 use kernel_objects::Resource;
 use kernel_tests::kernel_test;
-use runtime::{MemoryAccess, UserMemFlags, handle_close};
-use syscall::{Rights, SyscallError};
+use runtime::{MemoryAccess, UserMemFlags, signal_set};
+use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, kind};
 
 use crate::{
     fixture::Fixture,
@@ -46,9 +46,9 @@ fn memory_region_shared_with_child() {
 
     // Перенос капы по порту - move: ядро забрало хэндл, наш `Drop` его закрывать
     // не должен, а сам слот больше не валиден.
-    let stale = lease.into_raw();
+    let stale = Handle::<kind::Signal>::from_abi(lease.into_raw().as_nonzero());
     kernel_tests::kassert_eq!(
-        handle_close(stale),
+        signal_set(stale, SIGNALED, 0, WakeCount::None),
         SyscallError::BadHandle.as_return_value()
     );
 

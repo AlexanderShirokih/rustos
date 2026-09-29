@@ -37,24 +37,6 @@ macro_rules! __component_manifest_record {
     (@requirement $name:ident region) => {
         $crate::RequirementDeclaration::region(stringify!($name))
     };
-    (@requirement $name:ident irq(compatible = [$($compatible:literal),+ $(,)?])) => {
-        $crate::RequirementDeclaration::irq(stringify!($name), &[$($compatible),+], 0)
-    };
-    (
-        @requirement $name:ident
-        irq(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)
-    ) => {
-        $crate::RequirementDeclaration::irq(stringify!($name), &[$($compatible),+], $resource)
-    };
-    (@requirement $name:ident mmio(compatible = [$($compatible:literal),+ $(,)?])) => {
-        $crate::RequirementDeclaration::mmio(stringify!($name), &[$($compatible),+], 0)
-    };
-    (
-        @requirement $name:ident
-        mmio(compatible = [$($compatible:literal),+ $(,)?], resource = $resource:literal)
-    ) => {
-        $crate::RequirementDeclaration::mmio(stringify!($name), &[$($compatible),+], $resource)
-    };
     (@requirement $name:ident session($protocol:path)) => {
         $crate::RequirementDeclaration::session(stringify!($name), <$protocol as $crate::__Protocol>::ID)
     };
@@ -99,9 +81,9 @@ mod tests {
     const EXPORTS_LEN: usize = manifest_len(&[], TYPED_EXPORTS);
 
     const REQUIREMENTS: &[crate::RequirementDeclaration] = &[
-        crate::__component_manifest_record!(@requirement line irq(compatible = ["arm,pl031", "arm,primecell"])),
-        crate::__component_manifest_record!(@requirement window mmio(compatible = ["arm,pl031"], resource = 1)),
         crate::__component_manifest_record!(@requirement image region),
+        crate::__component_manifest_record!(@requirement files session(file_system::Protocol)),
+        crate::__component_manifest_record!(@requirement fonts region),
     ];
     const REQUIREMENTS_LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
 
@@ -120,8 +102,8 @@ mod tests {
         let requirement = manifest.requirements().next().expect("session requirement");
         assert_eq!(requirement.kind(), RequirementKind::Session);
         assert_eq!(
-            requirement.names().collect::<std::vec::Vec<_>>(),
-            [<file_system::Protocol as ipc::Protocol>::ID]
+            requirement.protocol(),
+            Some(<file_system::Protocol as ipc::Protocol>::ID)
         );
     }
 
@@ -151,9 +133,9 @@ mod tests {
         assert_eq!(
             requirements,
             [
-                ("line", RequirementKind::Irq),
-                ("window", RequirementKind::Mmio),
-                ("image", RequirementKind::Region)
+                ("image", RequirementKind::Region),
+                ("files", RequirementKind::Session),
+                ("fonts", RequirementKind::Region)
             ]
         );
     }

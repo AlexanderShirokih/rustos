@@ -69,14 +69,12 @@ macro_rules! discriminant_error {
             }
         }
 
-        impl IntoWireValue for $name {
+        impl<R: ReceivedResources> IntoWireValue<R> for $name {
             type Read = Self;
 
-            fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-                buf.write_field(field_id, &value::encode_discriminant(self.discriminant()))
+            fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+                frame.write_field(field_id, &value::encode_discriminant(self.discriminant()))
             }
-
-            fn relinquish(self) {}
         }
 
         impl WireTyped for $name {
@@ -108,7 +106,7 @@ discriminant_error! {
 }
 
 discriminant_error! {
-    /// Отказ в линии прерывания, MMIO-окне либо регионе образа.
+    /// Отказ в регионе образа.
     pub enum ResourceError {
         /// Копия capability не создана.
         NoSpace = 1,
@@ -166,14 +164,12 @@ impl<'a, R: ReceivedResources> WireValue<'a, R> for SessionScope {
     }
 }
 
-impl IntoWireValue for SessionScope {
+impl<R: ReceivedResources> IntoWireValue<R> for SessionScope {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, self.as_str().as_bytes())
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, self.as_str().as_bytes())
     }
-
-    fn relinquish(self) {}
 }
 
 impl WireTyped for SessionScope {
@@ -200,17 +196,6 @@ ipc::wire_value! {
     }
 }
 
-ipc::wire_value! {
-    /// Окно регистров устройства: регион и смещение первого регистра от его начала.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct MmioWindow<M = ipc::wire::Cap<kind::MemoryRegion>> {
-        /// Регион, который целиком содержит регистры устройства.
-        pub region: M,
-        /// Смещение первого регистра устройства от начала региона.
-        pub offset: u64,
-    }
-}
-
 const _: () = assert!(
     max_body_len(&[<SessionRequirement<'static> as WireTyped>::WIRE_TYPE]) <= BODY_MAX,
     "session request frame exceeds the body budget"
@@ -233,17 +218,6 @@ ipc::protocol! {
             requirement: SessionRequirement,
         ) -> own Result<ipc::wire::Cap<kind::Port>, SessionError>;
 
-        /// Выдаёт линию прерывания требования `requirement` до конца incarnation вызывающего.
-        call(defer) fn irq(
-            requirement: Str<{ REQUIREMENT_NAME_MAX }>,
-        ) -> own Result<ipc::wire::Cap<kind::IrqLine>, ResourceError>;
-
-        /// Выдаёт окно регистров требования `requirement`: регион на запись до конца incarnation
-        /// вызывающего и смещение регистров устройства в нём.
-        call(defer) fn mmio(
-            requirement: Str<{ REQUIREMENT_NAME_MAX }>,
-        ) -> own Result<MmioWindow, ResourceError>;
-
         /// Выдаёт регион образа требования `requirement` на чтение до конца incarnation
         /// вызывающего.
         call(defer) fn region(
@@ -260,26 +234,21 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU32;
     use std::{string::String, vec::Vec};
 
     use ipc::{
         IntoWireValue,
         wire::{Cap, FieldCursor, IpcError, MessageBuf, Str},
     };
-    use ipc_test::{MockReply, MockResources};
-    use syscall::{Handle, ObjectKind, kind};
+    use ipc_test::{MockHandle, MockReply, MockResources};
+    use syscall::kind;
 
     use super::{
-        AcceptError, MmioWindow, PROTOCOL_ID_MAX, ResourceError, SESSION_SCOPE_MAX, SessionError,
+        AcceptError, PROTOCOL_ID_MAX, ResourceError, SESSION_SCOPE_MAX, SessionError,
         SessionRequest, SessionRequirement, SessionScope, WireValue, component_startup, value,
     };
 
-    const SESSION_CAP: Cap<kind::Port> = cap(0x28);
-    const MMIO_WINDOW: MmioWindow = MmioWindow {
-        region: cap(0x29),
-        offset: 0x200,
-    };
+    const SESSION_CAP: MockHandle<kind::Port> = MockHandle::new(0x28);
     const SCOPE: &str = "/boot/demo";
     const EXPORT: &str = "FileSystem";
     const REQUIREMENT: &str = "files";
@@ -307,23 +276,6 @@ mod tests {
             self.waiting = Some(reply);
         }
 
-        fn irq(
-            &mut self,
-            _frame: &MockResources,
-            _requirement: Str<'_, { super::REQUIREMENT_NAME_MAX }>,
-            _reply: component_startup::irq::Reply<MockReply>,
-        ) {
-        }
-
-        fn mmio(
-            &mut self,
-            _frame: &MockResources,
-            _requirement: Str<'_, { super::REQUIREMENT_NAME_MAX }>,
-            reply: component_startup::mmio::Reply<MockReply>,
-        ) {
-            let _ = reply.send(Ok::<_, ResourceError>(MMIO_WINDOW));
-        }
-
         fn region(
             &mut self,
             _frame: &MockResources,
@@ -340,20 +292,16 @@ mod tests {
         ) {
             self.exports.push(export.as_str().into());
             let Some(debt) = self.waiting.take() else {
-                let _ = reply.send(Err::<SessionRequest, _>(AcceptError::Refused));
+                let _ = reply.send(Err::<
+                    SessionRequest<component_startup::session::Reply<MockReply>>,
+                    _,
+                >(AcceptError::Refused));
                 return;
             };
             let scope = SessionScope::new(SCOPE).expect("scope within the bound");
             reply
                 .send(Ok::<_, AcceptError>(SessionRequest { scope, reply: debt }))
                 .expect("the parent answers accept");
-        }
-    }
-
-    const fn cap<K: ObjectKind>(raw: u32) -> Cap<K> {
-        match NonZeroU32::new(raw) {
-            Some(id) => Cap::from_handle(Handle::from_abi(id)),
-            None => panic!("non-zero"),
         }
     }
 
@@ -373,14 +321,12 @@ mod tests {
         T::from_field(field.data, &mut ())
     }
 
-    fn round_trip<T>(written: &T) -> Result<T, IpcError>
+    fn round_trip<T>(written: T) -> Result<T, IpcError>
     where
-        T: IntoWireValue + for<'a> WireValue<'a, (), Owned = T>,
+        T: IntoWireValue<()> + for<'a> WireValue<'a, (), Owned = T>,
     {
         let mut buf = MessageBuf::new();
-        written
-            .write_as_field(&mut buf, FIELD_ID)
-            .expect("write ok");
+        written.write_into(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         read_field(&buf)
     }
@@ -396,13 +342,13 @@ mod tests {
     #[test]
     fn every_variant_round_trips() {
         for variant in SessionError::VARIANTS {
-            assert_eq!(round_trip(variant), Ok(*variant));
+            assert_eq!(round_trip(*variant), Ok(*variant));
         }
         for variant in AcceptError::VARIANTS {
-            assert_eq!(round_trip(variant), Ok(*variant));
+            assert_eq!(round_trip(*variant), Ok(*variant));
         }
         for variant in ResourceError::VARIANTS {
-            assert_eq!(round_trip(variant), Ok(*variant));
+            assert_eq!(round_trip(*variant), Ok(*variant));
         }
     }
 
@@ -461,30 +407,11 @@ mod tests {
     }
 
     #[test]
-    fn an_mmio_reply_carries_the_region_and_the_offset_of_the_registers() {
-        let (child_end, listener) = ipc_test::pair();
-        let mut parent = Parent::default();
-
-        let answer = std::thread::scope(|scope| {
-            let child = scope.spawn(|| {
-                component_startup::Client::new(child_end)
-                    .mmio(Str::new(REQUIREMENT).expect("name within the bound"))
-            });
-            listener
-                .serve(|frame| component_startup::dispatch(&mut parent, frame))
-                .expect("dispatch ok");
-            child.join().expect("child joins")
-        });
-
-        assert_eq!(answer, Ok(Ok(MMIO_WINDOW)));
-    }
-
-    #[test]
     fn an_empty_scope_names_the_whole_export() {
         let empty = SessionScope::new("").expect("empty scope");
 
         assert_eq!(empty.as_str(), "");
-        assert_eq!(round_trip(&empty), Ok(empty));
+        assert_eq!(round_trip(empty.clone()), Ok(empty));
     }
 
     #[test]
@@ -492,7 +419,7 @@ mod tests {
         let text = "a".repeat(SESSION_SCOPE_MAX);
         let scope = SessionScope::new(&text).expect("scope at the bound");
 
-        let read = round_trip(&scope).expect("scope reads");
+        let read = round_trip(scope).expect("scope reads");
         assert_eq!(read.as_str(), text);
     }
 

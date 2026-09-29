@@ -157,7 +157,7 @@ impl OwnedHandle<kind::Resource> {
     /// Свежий handle на метеринг-`Resource` текущего процесса.
     pub fn self_resource() -> Result<Self> {
         let handle = svc::process_resource_self()?;
-        Ok(Self::from_handle(handle))
+        Ok(Self::from(handle))
     }
 
     /// Отрезает от бюджета ресурса не меньше `budget_bytes` байт в отдельный
@@ -166,14 +166,14 @@ impl OwnedHandle<kind::Resource> {
     /// размер до ухода производного. Нулевой `budget_bytes` даёт `InvalidArgument`.
     pub fn split(&self, budget_bytes: u64) -> Result<Self> {
         svc::resource_split(self.as_raw(), budget_pages(budget_bytes))
-            .map(Self::from_handle)
+            .map(Self::from)
             .map_err(Error::Syscall)
     }
 
     /// Создаёт регион с Virtual backing размера `size_bytes` и маской `access`.
     pub fn create_virtual(&self, size_bytes: u64, access: MemoryAccess) -> Result<MemoryRegion> {
         svc::memory_create_virtual(self.as_raw(), size_bytes, access.raw())
-            .map(MemoryRegion::from_handle)
+            .map(MemoryRegion::from)
             .map_err(Error::Syscall)
     }
 
@@ -219,7 +219,7 @@ impl OwnedHandle<kind::MemoryRegion> {
         access: MemoryAccess,
     ) -> Result<MemoryRegion> {
         svc::memory_slice(self.as_raw(), offset, size_bytes, access.raw())
-            .map(MemoryRegion::from_handle)
+            .map(MemoryRegion::from)
             .map_err(Error::Syscall)
     }
 
@@ -227,7 +227,7 @@ impl OwnedHandle<kind::MemoryRegion> {
     /// меняется в пределах некэшируемых. Требует `DUPLICATE` на хэндле региона.
     pub fn with_profile(&self, profile: MemoryProfile) -> Result<MemoryRegion> {
         svc::memory_with_profile(self.as_raw(), profile.raw())
-            .map(MemoryRegion::from_handle)
+            .map(MemoryRegion::from)
             .map_err(Error::Syscall)
     }
 
@@ -250,7 +250,7 @@ impl OwnedHandle<kind::MemoryRegion> {
     }
 }
 
-impl DeviceWindow<syscall_user::ReceivedHandle<kind::MemoryRegion>> for MemoryRegion {
+impl DeviceWindow<syscall_user::IssuedHandle<kind::MemoryRegion>> for MemoryRegion {
     fn physical_range(&self) -> Option<Range<u64>> {
         let info = self.inspect().ok()?;
         Some(info.base..info.base.checked_add(info.size_bytes)?)

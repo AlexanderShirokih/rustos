@@ -6,8 +6,8 @@
 
 use kernel_objects::{Process, Resource, Signal};
 use kernel_tests::kernel_test;
-use runtime::{Timeout, handle_close};
-use syscall::{SyscallError, SyscallOp};
+use runtime::{Timeout, signal_set};
+use syscall::{SIGNALED, SyscallError, SyscallOp, WakeCount};
 use userland::{Entry, Segment, SegmentPermissions};
 use userland_loader::load_entry;
 
@@ -72,7 +72,7 @@ fn load_entry_passes_bootstrap_handle() {
     let process = load_synthetic_child(&resource, "/child", "child", &code, bootstrap);
 
     kernel_tests::kassert_eq!(
-        handle_close(passed),
+        signal_set(passed, SIGNALED, 0, WakeCount::None),
         SyscallError::BadHandle.as_return_value()
     );
     process.join(CHILD_WAIT_TIMEOUT).expect("child terminates");

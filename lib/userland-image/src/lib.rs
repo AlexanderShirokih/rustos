@@ -29,11 +29,11 @@ pub use image::{
 };
 pub use plan::{
     BOOT_PLAN_MAGIC, BOOT_PLAN_PATH, BOOT_PLAN_VERSION, BootPlan, COMPONENT_PROGRAM_NAME,
-    PlanComponent, PlanComponents, PlanDecodeError, PlanDevice, PlanNames, PlanRequirement,
-    PlanRequirements, RequirementSource, component_name, decode_plan,
+    PlanComponent, PlanComponents, PlanDecodeError, PlanNames, PlanRequirement, PlanRequirements,
+    RequirementSource, component_name, decode_plan,
 };
 #[cfg(any(test, feature = "alloc"))]
 pub use plan_builder::{
-    ComponentSpec, DeviceSpec, PlanEncodeError, RequirementSourceSpec, RequirementSpec, encode_plan,
+    ComponentSpec, PlanEncodeError, RequirementSourceSpec, RequirementSpec, encode_plan,
 };
 pub use program::{DecodedProgram, ProgramDecodeError, USERLAND_PROGRAM_MAGIC};

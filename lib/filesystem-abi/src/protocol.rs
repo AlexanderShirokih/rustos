@@ -164,7 +164,6 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU32;
     use std::{
         string::{String, ToString},
         sync::{Arc, Mutex},
@@ -173,17 +172,20 @@ mod tests {
     };
 
     use ipc::wire::{Cap, Str};
+    use ipc_test::{MockHandle, MockResources};
 
     use super::{
         AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind,
         OpenFlags, Opened, PATH_MAX, Written, file_system,
     };
 
-    const BUFFER_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x11);
-    const BACKING_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x22);
-    const SCOPED_SESSION: ipc::wire::Session<file_system::Protocol> =
-        ipc::wire::Session::from_handle(cap(0x33));
-    const IMPORT_CAP: Cap<syscall::kind::MemoryRegion> = cap(0x44);
+    const BUFFER_CAP: MockHandle<syscall::kind::MemoryRegion> = MockHandle::new(0x11);
+    const BACKING_CAP: MockHandle<syscall::kind::MemoryRegion> = MockHandle::new(0x22);
+    const SCOPED_SESSION: ipc::wire::Session<
+        file_system::Protocol,
+        MockHandle<syscall::kind::Port>,
+    > = ipc::wire::Session::from_handle(MockHandle::new(0x33));
+    const IMPORT_CAP: MockHandle<syscall::kind::MemoryRegion> = MockHandle::new(0x44);
     const READ_COUNT: u32 = 512;
     const DONE: u32 = 0;
     const FD: NodeDescriptor = NodeDescriptor::from_raw(7);
@@ -271,13 +273,15 @@ mod tests {
         }
     }
 
-    impl file_system::Service<ipc_test::MockResources> for Recorder {
+    impl file_system::Service<MockResources> for Recorder {
         fn acquire_buffer(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             size: u32,
-        ) -> impl ipc::IntoWireValue<Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>>
-        {
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>,
+        > {
             self.record(Call::AcquireBuffer { size });
             if size == 0 {
                 return Err(FileSystemError::NoSpace);
@@ -287,7 +291,7 @@ mod tests {
 
         fn open(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             path: Str<'_, { PATH_MAX }>,
             mode: AccessMode,
             flags: OpenFlags,
@@ -302,7 +306,7 @@ mod tests {
 
         fn close(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             fd: NodeDescriptor,
         ) -> Result<u32, FileSystemError> {
             self.record(Call::Close { fd });
@@ -311,7 +315,7 @@ mod tests {
 
         fn read(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             fd: NodeDescriptor,
             offset: u64,
             len: u32,
@@ -322,7 +326,7 @@ mod tests {
 
         fn write(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             fd: NodeDescriptor,
             offset: u64,
             len: u32,
@@ -333,7 +337,7 @@ mod tests {
 
         fn set_size(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             fd: NodeDescriptor,
             size: u64,
         ) -> Result<u32, FileSystemError> {
@@ -343,7 +347,7 @@ mod tests {
 
         fn stat(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             fd: NodeDescriptor,
         ) -> Result<NodeInfo, FileSystemError> {
             self.record(Call::Stat { fd });
@@ -352,7 +356,7 @@ mod tests {
 
         fn list(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             fd: NodeDescriptor,
             from: DirCursor,
         ) -> Result<Listed, FileSystemError> {
@@ -362,7 +366,7 @@ mod tests {
 
         fn rename(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             from: Str<'_, { PATH_MAX }>,
             to: Str<'_, { PATH_MAX }>,
         ) -> Result<u32, FileSystemError> {
@@ -375,7 +379,7 @@ mod tests {
 
         fn unlink(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             path: Str<'_, { PATH_MAX }>,
             expected: NodeKind,
         ) -> Result<u32, FileSystemError> {
@@ -388,14 +392,14 @@ mod tests {
 
         fn create_backed(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             path: Str<'_, { PATH_MAX }>,
-            region: Cap<syscall::kind::MemoryRegion>,
+            region: MockHandle<syscall::kind::MemoryRegion>,
             size: u64,
         ) -> Result<u32, FileSystemError> {
             self.record(Call::CreateBacked {
                 path: path.as_str().to_string(),
-                region: region.raw().get(),
+                region: region.raw(),
                 size,
             });
             Ok(DONE)
@@ -403,32 +407,28 @@ mod tests {
 
         fn backing_memory(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             fd: NodeDescriptor,
-        ) -> impl ipc::IntoWireValue<Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>>
-        {
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>,
+        > {
             self.record(Call::BackingMemory { fd });
             Ok(BACKING_CAP)
         }
 
         fn open_root(
             &mut self,
-            _frame: &ipc_test::MockResources,
+            _frame: &MockResources,
             path: Str<'_, { PATH_MAX }>,
         ) -> impl ipc::IntoWireValue<
+            MockResources,
             Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
         > {
             self.record(Call::OpenRoot {
                 path: path.as_str().to_string(),
             });
             Ok(SCOPED_SESSION)
-        }
-    }
-
-    const fn cap<K: syscall::ObjectKind>(raw: u32) -> Cap<K> {
-        match NonZeroU32::new(raw) {
-            Some(id) => Cap::from_handle(syscall::Handle::from_abi(id)),
-            None => panic!("non-zero"),
         }
     }
 
@@ -549,7 +549,7 @@ mod tests {
                 Call::BackingMemory { fd: FD },
                 Call::CreateBacked {
                     path: "/store/shared".to_string(),
-                    region: IMPORT_CAP.raw().get(),
+                    region: IMPORT_CAP.raw(),
                     size: 123,
                 },
                 Call::OpenRoot {

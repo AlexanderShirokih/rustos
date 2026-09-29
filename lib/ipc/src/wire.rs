@@ -10,7 +10,8 @@ use syscall::{Handle, ObjectKind, kind};
 
 pub use crate::schema::{FIELD_OVERHEAD, HEADER_SIZE};
 use crate::{
-    Channel, IntoWireValue, Protocol, ReceivedResources, WireTyped, WireValue, schema::WireType,
+    Channel, IntoWireValue, Outgoing, Protocol, ReceivedResources, WireTyped, WireValue,
+    schema::WireType,
 };
 
 /// Максимальная длина кадра (заголовок + тело) в байтах. Кадр заполняет тело IPC-буфера.
@@ -128,39 +129,38 @@ pub struct FrameParts<'a> {
     pub body: &'a [u8],
 }
 
-/// Стековый буфер исходящего кадра: байты кадра и слоты его capability.
+/// Стековый буфер исходящего кадра: байты кадра и ресурсы `R` с владельцами его capability.
 ///
-/// Кадр строится как заголовок, затем записи полей, затем терминатор. Кадр, запись которого
-/// отказала, не отправляется.
-#[derive(Debug, Clone)]
-pub struct MessageBuf {
+/// Кадр строится как заголовок, затем записи полей, затем терминатор. Capability попадает в кадр
+/// только вместе со своим владельцем, и разрушение кадра закрывает capability, которые он
+/// держит. Кадр, запись которого отказала, не отправляется.
+#[derive(Debug)]
+pub struct MessageBuf<R: ReceivedResources = ()> {
     bytes: [u8; MESSAGE_INLINE_MAX],
     pos: usize,
     last_field_id: u8,
     open_records: usize,
     terminated: bool,
-    handles: [u32; MESSAGE_MAX_HANDLES],
-    handle_count: usize,
+    resources: R,
 }
 
-impl Default for MessageBuf {
+impl<R: ReceivedResources> Default for MessageBuf<R> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MessageBuf {
-    /// Создаёт пустой буфер с нулевой позицией записи.
+impl<R: ReceivedResources> MessageBuf<R> {
+    /// Создаёт пустой буфер с нулевой позицией записи и пустыми ресурсами.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bytes: [0u8; MESSAGE_INLINE_MAX],
             pos: 0,
             last_field_id: 0,
             open_records: 0,
             terminated: false,
-            handles: [0; MESSAGE_MAX_HANDLES],
-            handle_count: 0,
+            resources: R::default(),
         }
     }
 
@@ -182,10 +182,28 @@ impl MessageBuf {
         self.bytes.get(..self.pos).unwrap_or_default()
     }
 
-    /// Handle-вектор кадра: хэндлы, чьи индексы записаны в теле, в порядке записи.
+    /// Ресурсы кадра: владельцы capability, чьи индексы записаны в теле, в порядке записи.
     #[must_use]
-    pub fn handles(&self) -> &[u32] {
-        self.handles.get(..self.handle_count).unwrap_or_default()
+    pub const fn resources(&self) -> &R {
+        &self.resources
+    }
+
+    /// Ресурсы кадра без его байтов.
+    #[must_use]
+    pub fn into_resources(self) -> R {
+        self.resources
+    }
+
+    /// Отдаёт построенный кадр каналу. Байты остаются в буфере построителя и заимствуются
+    /// кадром, ресурсы переходят в кадр. Построитель становится пустым.
+    #[must_use]
+    pub fn outgoing(&mut self) -> Outgoing<'_, R> {
+        let len = self.pos;
+        self.pos = 0;
+        self.last_field_id = 0;
+        self.open_records = 0;
+        self.terminated = false;
+        Outgoing::new(&mut self.bytes, len, core::mem::take(&mut self.resources))
     }
 
     /// Записывает заголовок в начало буфера. Продвигает позицию на
@@ -219,20 +237,20 @@ impl MessageBuf {
         self.close_record(start, field_id, end)
     }
 
-    /// Записывает поле-capability: хэндл `raw` занимает слот кадра, а тело записи - индекс
-    /// этого слота. Сверх [`MESSAGE_MAX_HANDLES`] хэндлов - `TooManyHandles`.
-    pub fn write_handle(&mut self, field_id: u8, raw: u32) -> Result<(), IpcError> {
-        let index = self.handle_count;
-        let slot_index = u8::try_from(index).map_err(|_| IpcError::TooManyHandles)?;
-        if index >= MESSAGE_MAX_HANDLES {
-            return Err(IpcError::TooManyHandles);
-        }
-        self.write_field(field_id, &[slot_index])?;
-        if let Some(slot) = self.handles.get_mut(index) {
-            *slot = raw;
-        }
-        self.handle_count += 1;
-        Ok(())
+    /// Записывает поле-capability: владелец `handle` занимает слот ресурсов кадра, а тело
+    /// записи - индекс этого слота. Сверх [`MESSAGE_MAX_HANDLES`] capability - `TooManyHandles`.
+    /// Владелец остаётся у кадра и при отказе записи.
+    pub fn write_handle<K: ObjectKind>(
+        &mut self,
+        field_id: u8,
+        handle: R::Handle<K>,
+    ) -> Result<(), IpcError> {
+        let index = self
+            .resources
+            .put_handle(handle)
+            .filter(|&index| usize::from(index) < MESSAGE_MAX_HANDLES)
+            .ok_or(IpcError::TooManyHandles)?;
+        self.write_field(field_id, &[index])
     }
 
     /// Записывает поле `field_id`, тело которого - вложенные записи от `write` с собственным
@@ -395,10 +413,9 @@ impl<'a> FieldCursor<'a> {
 /// Поле-capability кадра, помеченное видом объекта `K`. В теле передаётся индекс в
 /// handle-массиве. Сам id - вне тела.
 ///
-/// Вид задаётся объявлением поля контракта и в кадр не записывается. Значение хэндлом не
-/// владеет. Закрытие принятого хэндла остаётся за
-/// [`ReceivedResources`] кадра, а реализация
-/// [`relinquish`](crate::IntoWireValue::relinquish) для `Cap` пуста.
+/// Вид задаётся объявлением поля контракта и в кадр не записывается. `Cap` - тип чтения поля и
+/// хэндлом не владеет. Получатель читает поле владельцем из [`ReceivedResources`] кадра, а
+/// отправитель пишет его владельцем тех же ресурсов.
 #[repr(transparent)]
 pub struct Cap<K: ObjectKind> {
     handle: Handle<K>,
@@ -527,15 +544,13 @@ impl<'a, P: Protocol, R: ReceivedResources> WireValue<'a, R> for Session<P> {
     }
 }
 
-impl<P: Protocol, H: IntoWireValue<Read = Cap<kind::Port>>> IntoWireValue for Session<P, H> {
+impl<P: Protocol, R: ReceivedResources, H: IntoWireValue<R, Read = Cap<kind::Port>>>
+    IntoWireValue<R> for Session<P, H>
+{
     type Read = Session<P>;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        self.handle.write_as_field(buf, field_id)
-    }
-
-    fn relinquish(self) {
-        self.handle.relinquish();
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        self.handle.write_into(frame, field_id)
     }
 }
 
@@ -708,11 +723,12 @@ pub mod value {
 #[cfg(test)]
 mod tests {
     use super::{value::*, *};
+    use crate::resources::testing::{TestCap, TestFrame, cap};
 
     const ORDINAL: u64 = 0x0102_0304_0506_0708;
 
     fn framed() -> MessageBuf {
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_header(&Header::new(ORDINAL)).expect("header ok");
         buf
     }
@@ -761,7 +777,7 @@ mod tests {
     #[test]
     fn hello_body_golden_bytes() {
         // hello(version: u16 = 1): field_id=1, len=2u16 LE, data=1u16 LE, терминатор.
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_field(1, &encode_u16(1)).expect("field ok");
         buf.finish().expect("finish ok");
         assert_eq!(buf.as_bytes(), &[0x01, 0x02, 0x00, 0x01, 0x00, 0x00]);
@@ -787,7 +803,7 @@ mod tests {
     #[test]
     fn cursor_passes_over_an_unknown_field() {
         // Тело: известное поле id=1, неизвестное id=5, известное id=9.
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_field(1, &encode_u16(0xAAAA)).expect("ok");
         buf.write_field(5, &encode_u32(0xDEAD_BEEF)).expect("ok");
         buf.write_field(9, &encode_u8(0x42)).expect("ok");
@@ -811,7 +827,7 @@ mod tests {
         over.write_field(1, &[0u8; FIELD_DATA_MAX]).expect("fits");
         assert_eq!(over.write_field(2, &[0u8]), Err(IpcError::FrameOverflow));
         assert_eq!(
-            MessageBuf::new().write_field(1, &[0u8; FIELD_DATA_MAX + 1]),
+            MessageBuf::<()>::new().write_field(1, &[0u8; FIELD_DATA_MAX + 1]),
             Err(IpcError::InvalidValue)
         );
     }
@@ -821,7 +837,7 @@ mod tests {
         const LEN: usize = 1500;
         // Длина записи занимает u16, и данные длиннее u8::MAX не усекаются.
         let payload: [u8; LEN] = core::array::from_fn(|i| (i % 251) as u8);
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_field(7, &payload).expect("field fits");
         buf.finish().expect("finish ok");
 
@@ -831,7 +847,7 @@ mod tests {
 
     #[test]
     fn writer_refuses_field_ids_out_of_order_or_range() {
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_field(3, &[1]).expect("ok");
         assert_eq!(buf.write_field(3, &[2]), Err(IpcError::FieldOrder));
         assert_eq!(buf.write_field(2, &[2]), Err(IpcError::FieldOrder));
@@ -842,7 +858,7 @@ mod tests {
 
     #[test]
     fn writer_refuses_a_header_after_a_field_and_a_field_after_finish() {
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_field(1, &[1]).expect("ok");
         assert_eq!(
             buf.write_header(&Header::new(ORDINAL)),
@@ -870,7 +886,7 @@ mod tests {
     #[test]
     fn nested_record_golden_bytes() {
         // Поле 1 с вложенной записью: поле 1 = 0xAA и терминатор вложенного тела.
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_nested(1, |inner| inner.write_field(1, &[0xAA]))
             .expect("nested ok");
         buf.finish().expect("finish ok");
@@ -882,7 +898,7 @@ mod tests {
 
     #[test]
     fn nested_record_numbers_its_fields_anew_and_keeps_the_outer_order() {
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         buf.write_field(1, &[1]).expect("outer 1");
         buf.write_nested(2, |inner| inner.write_field(1, &[2]))
             .expect("nested 2");
@@ -907,7 +923,7 @@ mod tests {
 
     #[test]
     fn finish_inside_a_nested_record_is_rejected() {
-        let mut buf = MessageBuf::new();
+        let mut buf = MessageBuf::<()>::new();
         assert_eq!(
             buf.write_nested(1, MessageBuf::finish),
             Err(IpcError::FieldOrder)
@@ -926,24 +942,27 @@ mod tests {
         }
     }
 
-    fn port(raw: u32) -> Cap<kind::Port> {
-        Cap::from_handle(Handle::from_abi(NonZeroU32::new(raw).expect("non-zero")))
+    fn port(raw: u32) -> TestCap<kind::Port> {
+        cap(raw)
     }
 
     #[test]
     fn a_session_field_encodes_as_a_port_capability() {
-        let mut as_session = MessageBuf::new();
-        crate::IntoWireValue::write_as_field(
-            &Session::<Probe>::from_handle(port(0x2A)),
+        let mut as_session = MessageBuf::<TestFrame>::new();
+        crate::IntoWireValue::write_into(
+            Session::<Probe, _>::from_handle(port(0x2A)),
             &mut as_session,
             1,
         )
         .expect("session written");
-        let mut as_cap = MessageBuf::new();
-        crate::IntoWireValue::write_as_field(&port(0x2A), &mut as_cap, 1).expect("cap written");
+        let mut as_cap = MessageBuf::<TestFrame>::new();
+        crate::IntoWireValue::write_into(port(0x2A), &mut as_cap, 1).expect("cap written");
 
         assert_eq!(as_session.as_bytes(), as_cap.as_bytes());
-        assert_eq!(as_session.handles(), as_cap.handles());
+        assert_eq!(
+            as_session.into_resources().numbers(),
+            as_cap.into_resources().numbers()
+        );
         assert_eq!(
             <Session<Probe> as crate::WireTyped>::WIRE_TYPE,
             <Cap<kind::Port> as crate::WireTyped>::WIRE_TYPE
@@ -952,35 +971,31 @@ mod tests {
 
     #[test]
     fn a_session_arrives_owning_the_port_of_its_field() {
-        let mut buf = MessageBuf::new();
-        crate::IntoWireValue::write_as_field(
-            &Session::<Probe>::from_handle(port(0x2B)),
-            &mut buf,
-            1,
-        )
-        .expect("session written");
+        let mut buf = MessageBuf::<TestFrame>::new();
+        crate::IntoWireValue::write_into(Session::<Probe, _>::from_handle(port(0x2B)), &mut buf, 1)
+            .expect("session written");
         buf.finish().expect("finish ok");
 
-        let field = first_field(buf.as_bytes()).expect("ok").expect("present");
-        let session: Session<Probe, Cap<kind::Port>> =
-            <Session<Probe> as crate::WireValue<crate::resources::testing::TestFrame>>::from_field(
-                field.data,
-                &mut crate::resources::testing::TestFrame::of(buf.handles()),
-            )
-            .expect("the session is read");
+        let bytes = buf.as_bytes().to_vec();
+        let field = first_field(&bytes).expect("ok").expect("present");
+        let session = <Session<Probe> as crate::WireValue<TestFrame>>::from_field(
+            field.data,
+            &mut buf.into_resources(),
+        )
+        .expect("the session is read");
         assert_eq!(session.handle, port(0x2B));
     }
 
     #[test]
     fn handle_field_carries_the_slot_index() {
-        let mut buf = MessageBuf::new();
-        buf.write_handle(1, 0x2A).expect("first handle");
-        buf.write_handle(2, 0x2B).expect("second handle");
+        let mut buf = MessageBuf::<TestFrame>::new();
+        buf.write_handle(1, port(0x2A)).expect("first handle");
+        buf.write_handle(2, port(0x2B)).expect("second handle");
         buf.finish().expect("finish ok");
-        assert_eq!(buf.handles(), [0x2A, 0x2B]);
         assert_eq!(
             buf.as_bytes(),
             &[0x01, 0x01, 0x00, 0x00, 0x02, 0x01, 0x00, 0x01, 0x00]
         );
+        assert_eq!(buf.into_resources().numbers(), [0x2A, 0x2B]);
     }
 }

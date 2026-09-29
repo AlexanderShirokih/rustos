@@ -81,20 +81,15 @@ type Tlb = TranslationLookasideBuffer<EL1>;
 type Sctlr = SystemControlRegister<EL1>;
 
 impl Mmu<EL1> {
-    /// Отключает identity mapping: обнуляет TTBR0_EL1 и сбрасывает TLB.
+    /// Отключает identity mapping: запрещает обход таблиц по TTBR0_EL1 и сбрасывает TLB.
+    /// Обращение к lower half после вызова даёт Translation Fault уровня 0.
     ///
-    /// Вызывать только после перехода в higher half (виртуальный SP и PC).
+    /// Вызывать только после перехода в higher half (виртуальный SP и PC) с замаскированными IRQ.
     pub fn disable_lower_half() {
         Self::full_system_barrier();
-        // SAFETY: Вызывается post-MMU, после переключения SP и PC на виртуальные адреса.
-        // После этого вызова любое обращение к lower half вызовет Translation Fault.
-        unsafe {
-            core::arch::asm!(
-                "msr ttbr0_el1, xzr",
-                "isb",
-                options(nostack, preserves_flags)
-            );
-        }
+        // SAFETY: IRQ замаскированы по контракту функции, и TCR_EL1 между чтением и записью
+        // никто не пишет.
+        unsafe { Tcr::disable_walks::<LowerHalf>() };
         Tlb::invalidate();
         Self::full_system_barrier();
     }

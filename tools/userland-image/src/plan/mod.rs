@@ -7,12 +7,14 @@ mod source;
 #[cfg(test)]
 mod tests;
 
+use std::iter;
+
 use anyhow::{Context, Result, anyhow};
-use userland_image::{ComponentSpec, encode_plan};
+use userland_image::{ComponentSpec, component_name, encode_plan};
 
 use self::{
     binding::{Consumer, Providers, compile_requirements},
-    executable::resolve_executables,
+    executable::{boot_program, resolve_executables},
     limits::validate_composition,
     names::resolve_names,
     source::{ComponentEntry, parse_system_manifest},
@@ -24,6 +26,8 @@ pub(crate) struct PlanProgram<'a> {
     pub package: &'a str,
     pub bin: &'a str,
     pub path: &'a str,
+    /// Загрузочная программа образа. План ставит её записью 0.
+    pub boot: bool,
     pub manifest: &'a ProgramManifest,
 }
 
@@ -31,41 +35,34 @@ pub(crate) fn compile_plan(source: &str, programs: &[PlanProgram<'_>]) -> Result
     let manifest = parse_system_manifest(source)?;
     let entries: Vec<&ComponentEntry> = manifest.components.iter().collect();
 
+    let boot = boot_program(programs)?;
     let executables = resolve_executables(&entries, programs)?;
-    let names = resolve_names(&entries)?;
-    let declarations: Vec<&ProgramManifest> =
-        executables.iter().map(|program| program.manifest).collect();
+    // Запись 0 плана - загрузочная программа, записи композиции идут с номера 1. Имя и
+    // манифест записи 0 участвуют в проверке имён и в поиске провайдеров наравне с остальными.
+    // Ядро называет загрузочный процесс по каталогу его программы, и запись 0 называется так же.
+    let boot_name = component_name(boot.path);
+    let names = resolve_names(boot_name, &entries)?;
+    let declarations: Vec<&ProgramManifest> = iter::once(boot.manifest)
+        .chain(executables.iter().map(|program| program.manifest))
+        .collect();
     validate_composition(&names, &declarations)?;
 
-    // Требования плана ссылаются на эти строки.
-    let compatible: Vec<Vec<Vec<&str>>> = declarations
-        .iter()
-        .map(|declared| {
-            declared
-                .requirements
-                .iter()
-                .map(|requirement| requirement.names.iter().map(String::as_str).collect())
-                .collect()
-        })
-        .collect();
     let providers = Providers {
         names: &names,
         declarations: &declarations,
     };
     let requirements = entries
         .iter()
-        .zip(&declarations)
-        .zip(&compatible)
-        .zip(&names)
+        .zip(declarations.iter().skip(1))
+        .zip(names.iter().skip(1))
         .enumerate()
-        .map(|(index, (((entry, declared), compatible), name))| {
+        .map(|(index, ((entry, declared), name))| {
             compile_requirements(
                 &Consumer {
-                    index,
+                    index: index + 1,
                     name,
                     entry,
                     declared,
-                    compatible,
                 },
                 &providers,
             )
@@ -77,29 +74,42 @@ pub(crate) fn compile_plan(source: &str, programs: &[PlanProgram<'_>]) -> Result
         .collect();
     let memory_limits = entries
         .iter()
-        .zip(&names)
+        .zip(names.iter().skip(1))
         .map(|(entry, name)| {
             parse_memory_limit(&entry.memory_limit)
                 .with_context(|| format!("boot plan component '{name}' sets 'memory_limit'"))
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let components: Vec<ComponentSpec<'_>> = entries
-        .iter()
-        .zip(&executables)
-        .zip(&names)
-        .zip(&requirements)
-        .zip(&exports)
-        .zip(&memory_limits)
-        .map(
-            |(((((entry, program), name), requirements), exports), &memory_limit)| ComponentSpec {
-                executable: program.path,
-                name,
-                requirements,
-                exports,
-                memory_limit,
-                restarts: entry.restarts,
-            },
+    let record_zero = ComponentSpec {
+        executable: boot.path,
+        name: boot_name,
+        requirements: &[],
+        exports: exports.first().map_or(&[], Vec::as_slice),
+        memory_limit: 0,
+        restarts: 0,
+    };
+    let components: Vec<ComponentSpec<'_>> = iter::once(record_zero)
+        .chain(
+            entries
+                .iter()
+                .zip(&executables)
+                .zip(names.iter().skip(1))
+                .zip(&requirements)
+                .zip(exports.iter().skip(1))
+                .zip(&memory_limits)
+                .map(
+                    |(((((entry, program), name), requirements), exports), &memory_limit)| {
+                        ComponentSpec {
+                            executable: program.path,
+                            name,
+                            requirements,
+                            exports,
+                            memory_limit,
+                            restarts: entry.restarts,
+                        }
+                    },
+                ),
         )
         .collect();
     encode_plan(&components).map_err(|err| anyhow!("failed to serialize boot plan: {err:?}"))

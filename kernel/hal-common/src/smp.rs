@@ -104,15 +104,21 @@ pub enum StartMethod {
     SpinTable { release_address: usize },
 }
 
-/// Читает способ старта из узла `/psci`. Общий для всех CPU.
-pub fn psci_method(device_tree: &DeviceTree<'_>) -> Option<StartMethod> {
+/// Читает соглашение о вызове PSCI из свойства `method` узла `/psci`.
+pub fn psci_conduit(device_tree: &DeviceTree<'_>) -> Option<PsciConduit> {
     let psci = device_tree.find("/psci")?;
 
-    let conduit = match psci.prop("method").and_then(|prop| prop.as_cstr())? {
-        "hvc" => PsciConduit::Hvc,
-        "smc" => PsciConduit::Smc,
-        _ => return None,
-    };
+    match psci.prop("method").and_then(|prop| prop.as_cstr())? {
+        "hvc" => Some(PsciConduit::Hvc),
+        "smc" => Some(PsciConduit::Smc),
+        _ => None,
+    }
+}
+
+/// Читает способ старта из узла `/psci`. Общий для всех CPU.
+pub fn psci_method(device_tree: &DeviceTree<'_>) -> Option<StartMethod> {
+    let conduit = psci_conduit(device_tree)?;
+    let psci = device_tree.find("/psci")?;
 
     // Идентификатор функции объявляется узлом; в его отсутствие берётся
     // стандартный для 64-битного соглашения.
@@ -250,6 +256,14 @@ mod tests {
                 cpu_on: 0xC400_00AA,
             })
         );
+    }
+
+    #[test]
+    fn reads_conduit_without_function_ids() {
+        let bytes = build_psci_dtb(Some("smc"), None);
+        let tree = DeviceTree::from_bytes(&bytes).expect("valid dtb");
+
+        assert_eq!(psci_conduit(&tree), Some(PsciConduit::Smc));
     }
 
     #[test]

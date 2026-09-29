@@ -1,0 +1,38 @@
+[package]
+name = "platform"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 65536
+
+# Крейт берёт биндинги контроллеров прерываний из `device-resolver-aarch64`, и со сменой
+# архитектуры этот код переписывается.
+[package.metadata.molecular]
+arch = "aarch64"
+
+[[bin]]
+name = "platform"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+kernel-objects = { workspace = true }
+bootstrap-abi = { workspace = true }
+component-startup = { workspace = true }
+device-resolver = { workspace = true }
+device-resolver-aarch64 = { workspace = true }
+fdt = { workspace = true }
+ipc = { workspace = true }
+platform-abi = { workspace = true }
+runtime = { workspace = true }
+syscall = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

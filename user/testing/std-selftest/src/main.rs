@@ -30,8 +30,8 @@ use std::{
 
 use components::{StartupError, component_manifest, into_std_handle};
 use filesystem_abi::namespace;
-use kernel_objects::Port;
-use syscall::{Handle, Rights};
+use kernel_objects::Signal;
+use syscall::{SIGNALED, SyscallError, WakeCount};
 
 mod filesystem;
 
@@ -104,16 +104,15 @@ fn the_start_handle_is_handed_out_once() {
 }
 
 fn an_owned_handle_closes_its_capability() {
-    let port = Port::create().expect("the port is created");
-    let spare = port
-        .duplicate(Rights::WRITE, None)
-        .expect("the port duplicates");
-    let raw = spare.as_raw().raw();
-    drop(into_std_handle(spare));
+    let signal = Signal::create().expect("the signal is created");
+    let raw = signal.as_raw();
+    drop(into_std_handle(signal));
 
-    let raw = core::num::NonZeroU32::new(raw).expect("the duplicate names a table entry");
-    let closed = Port::from_handle(Handle::from_abi(raw));
-    assert!(closed.close().is_err(), "the dropped handle stays open");
+    assert_eq!(
+        syscall_user::signal_set(raw, SIGNALED, 0, WakeCount::None),
+        SyscallError::BadHandle.as_return_value(),
+        "the dropped handle stays open"
+    );
 }
 
 fn heap_serves_growing_collections() {

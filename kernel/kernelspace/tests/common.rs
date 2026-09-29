@@ -11,23 +11,12 @@
 use std::{
     cell::{Cell, RefCell},
     num::NonZeroU32,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Arc,
     vec,
     vec::Vec,
 };
 
-use memory::{
-    MemFlags,
-    memory_mapper::{
-        AddressSpaceFactory, AddressSpaceHandle, AddressSpaceTag, AsCreateError, MemoryMapper,
-        MemoryMappingError, MemoryRemappingError, MemoryUnmappingError,
-    },
-    physical_address::{PageAlignedAddress, PhysicalAddress},
-    virtual_address::PageAlignedVirtualAddress,
-};
+use memory::memory_mapper::AddressSpaceHandle;
 use scheduler::{
     ArchContext, ArchCpu, CpuId, CpuLocalError, Priority, ProcessId, StackError, Thread, ThreadId,
     ThreadStack, ThreadStackAllocator, TimerSource,
@@ -198,146 +187,4 @@ pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext
     let arch = MockContext;
     let id = ThreadId::new(NonZeroU32::new(1).expect("non-zero"));
     Thread::new(id, process, CpuId::ZERO, priority, arch, stack, name)
-}
-
-#[derive(Clone, Debug)]
-pub struct MapCall {
-    pub va: usize,
-    pub page_count: usize,
-    pub init_hash: u64,
-    pub init_len: usize,
-}
-
-struct MockUserMapper {
-    root_pa: PhysicalAddress,
-    released: Arc<AtomicUsize>,
-    map_calls: Arc<Mutex<Vec<MapCall>>>,
-}
-
-impl MemoryMapper for MockUserMapper {
-    fn map(
-        &self,
-        va: PageAlignedVirtualAddress,
-        page_count: usize,
-        init: &[u8],
-        _flags: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        self.map_calls.lock().unwrap().push(MapCall {
-            va: va.as_usize(),
-            page_count,
-            init_hash: fnv1a_hash(init),
-            init_len: init.len(),
-        });
-        Ok(())
-    }
-
-    fn map_exact(
-        &self,
-        _source_address: PageAlignedVirtualAddress,
-        _target_address: PageAlignedAddress,
-        _size: usize,
-        _mem_flags: MemFlags,
-    ) -> Result<(), MemoryMappingError> {
-        Err(MemoryMappingError::OutOfMemory)
-    }
-
-    fn unmap(
-        &self,
-        _address: PageAlignedVirtualAddress,
-        _size: usize,
-    ) -> Result<(), MemoryUnmappingError> {
-        Err(MemoryUnmappingError::NotMapped)
-    }
-
-    fn remap(
-        &self,
-        _start_address: PageAlignedVirtualAddress,
-        _size: usize,
-        _new_flags: MemFlags,
-    ) -> Result<(), MemoryRemappingError> {
-        Err(MemoryRemappingError::NotMapped)
-    }
-
-    fn activate_handle(&self) -> AddressSpaceHandle {
-        AddressSpaceHandle::new(self.root_pa, AddressSpaceTag::NONE)
-    }
-
-    fn zero_owned_frame(&self, _pa: memory::physical_address::PageAlignedAddress) {}
-
-    fn as_any(&self) -> &(dyn core::any::Any + 'static) {
-        self
-    }
-}
-
-pub fn fnv1a_hash(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
-}
-
-impl Drop for MockUserMapper {
-    fn drop(&mut self) {
-        self.released.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-pub struct MockAddressSpaceFactory {
-    inner: Mutex<MockFactoryInner>,
-    released: Arc<AtomicUsize>,
-    map_calls: Arc<Mutex<Vec<MapCall>>>,
-}
-
-struct MockFactoryInner {
-    next_root_pa: usize,
-    created: usize,
-}
-
-impl MockAddressSpaceFactory {
-    pub const BASE_ROOT_PA: usize = 0x10_0000;
-
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(MockFactoryInner {
-                next_root_pa: Self::BASE_ROOT_PA,
-                created: 0,
-            }),
-            released: Arc::new(AtomicUsize::new(0)),
-            map_calls: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    pub fn created(&self) -> usize {
-        self.inner.lock().unwrap().created
-    }
-
-    pub fn released(&self) -> usize {
-        self.released.load(Ordering::SeqCst)
-    }
-
-    pub fn map_calls(&self) -> Vec<MapCall> {
-        self.map_calls.lock().unwrap().clone()
-    }
-}
-
-impl Default for MockAddressSpaceFactory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AddressSpaceFactory for MockAddressSpaceFactory {
-    fn create_user(&self) -> Result<Arc<dyn MemoryMapper + Send + Sync>, AsCreateError> {
-        let mut inner = self.inner.lock().unwrap();
-        let root_pa = PhysicalAddress::new(inner.next_root_pa);
-        inner.next_root_pa += PAGE_SIZE;
-        inner.created += 1;
-        Ok(Arc::new(MockUserMapper {
-            root_pa,
-            released: self.released.clone(),
-            map_calls: self.map_calls.clone(),
-        }))
-    }
 }

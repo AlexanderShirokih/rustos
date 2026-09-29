@@ -12,9 +12,12 @@ use core::{
 
 use ipc::wire::IpcError;
 use log_abi::{LOG_MESSAGE_MAX, LineAssembler, LogBuffer, log};
-use syscall::{Handle, kind};
+use syscall::kind;
 
-use crate::{svc, svc::PortTransport, sync::Mutex};
+use crate::{
+    svc::{IssuedHandle, PortTransport},
+    sync::Mutex,
+};
 
 static SESSION: AtomicU32 = AtomicU32::new(0);
 
@@ -83,16 +86,21 @@ pub fn installed() -> bool {
 
 /// Запоминает лог-сессию процесса и тег его строк.
 ///
-/// Сессию приносит стартовый кадр, и он один. Повторный вызов закрывает переданный
-/// handle.
-pub fn install(handle: Handle<kind::Port>, tag: &'static str) {
+/// Сессию приносит стартовый кадр, и он один. Сессия остаётся открытой до завершения
+/// процесса. Повторный вызов закрывает переданную сессию.
+pub fn install(session: IssuedHandle<kind::Port>, tag: &'static str) {
     if SESSION
-        .compare_exchange(0, handle.raw(), Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(
+            0,
+            session.as_raw().raw(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
         .is_err()
     {
-        svc::handle_close(handle);
         return;
     }
+    let _ = session.leak();
     TAG_ADDRESS.store(tag.as_ptr() as usize, Ordering::Relaxed);
     // Длина публикуется последней, и по ней тег читают.
     TAG_LENGTH.store(tag.len(), Ordering::Release);

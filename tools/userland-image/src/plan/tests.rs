@@ -19,13 +19,13 @@ const CONSUMER: &str = "namespace-consumer-fixture";
 const AREA: &str = "area-consumer";
 const AREA_REQUIREMENT: &str = "area";
 const HELPER: &str = "helper";
+const PLATFORM: &str = "platform";
 
 const NAMESPACE_PROTOCOL: &str = "Namespace";
 const NAMESPACE_ADMIN_PROTOCOL: &str = "NamespaceAdmin";
 const FILE_SYSTEM_PROTOCOL: &str = "FileSystem";
 const CLOCK_PROTOCOL: &str = "Clock";
-
-const RTC_COMPATIBLE: &[&str] = &["arm,pl031", "arm,primecell"];
+const HARDWARE_PROTOCOL: &str = "Hardware";
 
 const DEFAULT_MEMORY_LIMIT: &str = "256K";
 
@@ -36,7 +36,6 @@ struct Component {
     name: Option<String>,
     bind: Vec<(String, String)>,
     scope: Vec<(String, String)>,
-    instance: Vec<(String, u16)>,
 }
 
 impl Component {
@@ -48,7 +47,6 @@ impl Component {
             name: None,
             bind: Vec::new(),
             scope: Vec::new(),
-            instance: Vec::new(),
         }
     }
 
@@ -84,11 +82,6 @@ impl Component {
         self
     }
 
-    fn instance(mut self, requirement: &str, instance: u16) -> Self {
-        self.instance.push((String::from(requirement), instance));
-        self
-    }
-
     fn render(&self) -> String {
         let restarts = match self.restarts {
             Some(restarts) => format!("restarts = {restarts}\n"),
@@ -110,17 +103,11 @@ impl Component {
                 .iter()
                 .map(|(requirement, area)| (requirement, format!("\"{area}\""))),
         );
-        let instance = table(
-            "instance",
-            self.instance
-                .iter()
-                .map(|(requirement, index)| (requirement, index.to_string())),
-        );
         format!(
             "\n[[components]]\n\
              executable = \"{}\"\n\
              memory_limit = \"{}\"\n\
-             {restarts}{name}{bind}{scope}{instance}",
+             {restarts}{name}{bind}{scope}",
             self.executable, self.memory_limit
         )
     }
@@ -165,26 +152,24 @@ fn consumer() -> Component {
     Component::new(CONSUMER)
 }
 
-fn requirement(
-    name: &str,
-    kind: RequirementKind,
-    resource: u16,
-    names: &[&str],
-) -> ManifestRequirement {
+fn platform() -> Component {
+    Component::new(PLATFORM)
+}
+
+fn requirement(name: &str, kind: RequirementKind, protocol: Option<&str>) -> ManifestRequirement {
     ManifestRequirement {
         name: String::from(name),
         kind,
-        resource,
-        names: names.iter().map(|name| String::from(*name)).collect(),
+        protocol: protocol.map(String::from),
     }
 }
 
 fn session(name: &str, protocol: &str) -> ManifestRequirement {
-    requirement(name, RequirementKind::Session, 0, &[protocol])
+    requirement(name, RequirementKind::Session, Some(protocol))
 }
 
 fn region(name: &str) -> ManifestRequirement {
-    requirement(name, RequirementKind::Region, 0, &[])
+    requirement(name, RequirementKind::Region, None)
 }
 
 fn declaration(requirements: Vec<ManifestRequirement>, exports: &[&str]) -> ProgramManifest {
@@ -198,16 +183,6 @@ fn router_declaration() -> ProgramManifest {
     declaration(
         vec![region("image")],
         &[NAMESPACE_PROTOCOL, NAMESPACE_ADMIN_PROTOCOL],
-    )
-}
-
-fn device_declaration() -> ProgramManifest {
-    declaration(
-        vec![
-            requirement("line", RequirementKind::Irq, 0, RTC_COMPATIBLE),
-            requirement("window", RequirementKind::Mmio, 1, RTC_COMPATIBLE),
-        ],
-        &[],
     )
 }
 
@@ -234,6 +209,7 @@ struct ImageEntry {
     package: String,
     bin: String,
     path: String,
+    boot: bool,
     manifest: ProgramManifest,
 }
 
@@ -248,12 +224,17 @@ fn image_path(bin: &str) -> String {
 impl Image {
     fn new() -> Self {
         let mut image = Self {
-            entries: Vec::new(),
+            entries: vec![ImageEntry {
+                package: String::from(ROOTKEEPER),
+                bin: String::from(ROOTKEEPER),
+                path: image_path(ROOTKEEPER),
+                boot: true,
+                manifest: declaration(Vec::new(), &[HARDWARE_PROTOCOL]),
+            }],
         };
         for (bin, manifest) in [
-            (ROOTKEEPER, ProgramManifest::default()),
             (ROUTER, router_declaration()),
-            (DRIVER, device_declaration()),
+            (DRIVER, declaration(Vec::new(), &[])),
             (CONSUMER, consumer_declaration()),
             (IMAGE_FS, image_filesystem_declaration()),
             (RAM_FS, ram_filesystem_declaration()),
@@ -283,6 +264,7 @@ impl Image {
             package: String::from(package),
             bin: String::from(bin),
             path: String::from(path),
+            boot: false,
             manifest,
         });
         self
@@ -295,6 +277,7 @@ impl Image {
                 package: &entry.package,
                 bin: &entry.bin,
                 path: &entry.path,
+                boot: entry.boot,
                 manifest: &entry.manifest,
             })
             .collect()
@@ -325,6 +308,13 @@ fn image_with_two_helpers() -> Image {
             "/boot/bar-helper",
             ProgramManifest::default(),
         )
+}
+
+fn image_with_platform() -> Image {
+    Image::new().with(
+        PLATFORM,
+        declaration(vec![session("hardware", HARDWARE_PROTOCOL)], &[]),
+    )
 }
 
 fn compiled(source: &str) -> Vec<u8> {
@@ -374,9 +364,9 @@ fn plan_takes_every_requirement_from_the_program_declaration() {
     let bytes = compiled(&plan(&[image_filesystem(), rtc()]));
 
     let plan = decoded(&bytes);
-    assert_eq!(plan.len(), 2);
+    assert_eq!(plan.len(), 3);
 
-    let filesystem = plan.component(0).expect("image filesystem");
+    let filesystem = plan.component(1).expect("image filesystem");
     assert_eq!(filesystem.executable(), image_path(IMAGE_FS));
     assert_eq!(
         filesystem.requirements().collect::<Vec<_>>(),
@@ -385,25 +375,13 @@ fn plan_takes_every_requirement_from_the_program_declaration() {
             source: RequirementSource::Region
         }]
     );
-
-    let rtc = plan.component(1).expect("rtc");
-    let Some(RequirementSource::Irq(line)) = rtc.requirement("line") else {
-        panic!("`line` is an interrupt line")
-    };
-    assert_eq!(line.compatible().collect::<Vec<_>>(), RTC_COMPATIBLE);
-    assert_eq!(line.resource, 0);
-    let Some(RequirementSource::Mmio(window)) = rtc.requirement("window") else {
-        panic!("`window` is an MMIO window")
-    };
-    assert_eq!(window.compatible().collect::<Vec<_>>(), RTC_COMPATIBLE);
-    assert_eq!(window.resource, 1);
 }
 
 #[test]
 fn plan_binds_an_imported_protocol_to_its_exporter_in_either_order() {
     for (components, importer, exporter) in [
-        ([router(), consumer()], 1, 0),
-        ([consumer(), router()], 0, 1),
+        ([router(), consumer()], 2, 1),
+        ([consumer(), router()], 1, 2),
     ] {
         let bytes = compiled(&plan(&components));
 
@@ -424,12 +402,12 @@ fn two_instances_of_one_program_bind_one_requirement_to_two_providers() {
     ]));
 
     assert_eq!(
-        requirements_of(&bytes, 2),
-        [session_of("names", 0, NAMESPACE_PROTOCOL, "")]
-    );
-    assert_eq!(
         requirements_of(&bytes, 3),
         [session_of("names", 1, NAMESPACE_PROTOCOL, "")]
+    );
+    assert_eq!(
+        requirements_of(&bytes, 4),
+        [session_of("names", 2, NAMESPACE_PROTOCOL, "")]
     );
 }
 
@@ -463,7 +441,6 @@ fn plan_rejects_a_key_on_a_name_outside_the_manifest() {
     for (key, component) in [
         ("bind", consumer().bind("files", ROUTER)),
         ("scope", consumer().scope("files", "/")),
-        ("instance", consumer().instance("files", 1)),
     ] {
         assert_eq!(
             rejected(&plan(&[router(), component])),
@@ -565,8 +542,8 @@ fn plan_carries_the_mount_prefix_as_the_scope_of_the_namespace_requirement() {
     ]));
 
     assert_eq!(
-        requirements_of(&bytes, 1),
-        [session_of("namespace", 0, NAMESPACE_ADMIN_PROTOCOL, "/tmp")]
+        requirements_of(&bytes, 2),
+        [session_of("namespace", 1, NAMESPACE_ADMIN_PROTOCOL, "/tmp")]
     );
 }
 
@@ -590,39 +567,12 @@ fn plan_rejects_a_scope_past_its_bound() {
 }
 
 #[test]
-fn an_instance_names_the_device_of_its_requirement() {
-    let bytes = compiled(&plan(&[rtc().instance("line", 1)]));
-
-    let plan = decoded(&bytes);
-    let rtc = plan.component(0).expect("rtc");
-    let Some(RequirementSource::Irq(line)) = rtc.requirement("line") else {
-        panic!("`line` is an interrupt line")
-    };
-    assert_eq!(line.instance, 1);
-    let Some(RequirementSource::Mmio(window)) = rtc.requirement("window") else {
-        panic!("`window` is an MMIO window")
-    };
-    assert_eq!(window.instance, 0);
-}
-
-#[test]
-fn an_instance_on_a_session_requirement_is_refused() {
-    assert_eq!(
-        rejected(&plan(&[router(), consumer().instance("names", 1)])),
-        format!(
-            "boot plan component '{CONSUMER}' sets 'instance' on requirement 'names', \
-             which names no device"
-        )
-    );
-}
-
-#[test]
 fn plan_carries_the_restart_count_of_a_component() {
     let bytes = compiled(&plan(&[router(), rtc()]));
 
     let plan = decoded(&bytes);
-    assert_eq!(plan.component(0).expect("router").restarts(), 2);
-    assert_eq!(plan.component(1).expect("rtc").restarts(), 0);
+    assert_eq!(plan.component(1).expect("router").restarts(), 2);
+    assert_eq!(plan.component(2).expect("rtc").restarts(), 0);
 }
 
 #[test]
@@ -645,10 +595,6 @@ fn the_rootkeeper_handle_estimate_counts_session_requirements_and_exports() {
 
 #[test]
 fn the_rootkeeper_handle_estimate_counts_the_grants_a_component_holds() {
-    assert_eq!(
-        rootkeeper_handles(&[&device_declaration()]),
-        ROOTKEEPER_HANDLES + CHILD_HANDLES + 3 + 2
-    );
     assert_eq!(
         rootkeeper_handles(&[&image_filesystem_declaration()]),
         ROOTKEEPER_HANDLES + CHILD_HANDLES + 1 + 2
@@ -723,7 +669,7 @@ fn a_component_without_a_name_is_called_by_the_program_identity() {
     let bytes = compiled(&plan(&[router()]));
 
     let plan = decoded(&bytes);
-    let router = plan.component(0).expect("router");
+    let router = plan.component(1).expect("router");
     assert_eq!(router.executable(), image_path(ROUTER));
     assert_eq!(router.name(), ROUTER);
 }
@@ -738,7 +684,7 @@ fn a_component_keeps_its_name_when_the_program_moves() {
         .compiled(&plan(&[router().executable(MOVED)]));
 
     let plan = decoded(&bytes);
-    let router = plan.component(0).expect("router");
+    let router = plan.component(1).expect("router");
     // Запись плана хранит размещение, а имя экземпляра идёт от идентичности.
     // Перемещение программы описание композиции не трогает.
     assert_eq!(router.executable(), ELSEWHERE);
@@ -750,7 +696,7 @@ fn a_named_component_keeps_its_name_apart_from_the_program() {
     let bytes = compiled(&plan(&[router().name("names")]));
 
     let plan = decoded(&bytes);
-    let router = plan.component(0).expect("router");
+    let router = plan.component(1).expect("router");
     assert_eq!(router.executable(), image_path(ROUTER));
     assert_eq!(router.name(), "names");
 }
@@ -763,9 +709,9 @@ fn one_program_carries_two_named_instances() {
     ]));
 
     let plan = decoded(&bytes);
-    assert_eq!(plan.len(), 2);
-    let first = plan.component(0).expect("first instance");
-    let second = plan.component(1).expect("second instance");
+    assert_eq!(plan.len(), 3);
+    let first = plan.component(1).expect("first instance");
+    let second = plan.component(2).expect("second instance");
     assert_eq!(first.executable(), second.executable());
     assert_eq!(first.name(), "names-boot");
     assert_eq!(second.name(), "names-spare");
@@ -844,11 +790,11 @@ fn two_packages_with_one_bin_target_are_named_by_the_qualified_form() {
 
     let plan = decoded(&bytes);
     assert_eq!(
-        plan.component(0).expect("foo helper").executable(),
+        plan.component(1).expect("foo helper").executable(),
         "/boot/foo-helper"
     );
     assert_eq!(
-        plan.component(1).expect("bar helper").executable(),
+        plan.component(2).expect("bar helper").executable(),
         "/boot/bar-helper"
     );
 }
@@ -867,7 +813,7 @@ fn a_qualified_form_resolves_when_the_short_form_is_unambiguous() {
     let bytes = compiled(&plan(&[Component::new(&format!("{ROUTER}::{ROUTER}"))]));
 
     assert_eq!(
-        decoded(&bytes).component(0).expect("router").executable(),
+        decoded(&bytes).component(1).expect("router").executable(),
         image_path(ROUTER)
     );
 }
@@ -877,7 +823,7 @@ fn a_component_named_by_the_qualified_form_is_called_by_it() {
     let bytes = image_with_two_helpers().compiled(&plan(&[Component::new("foo::helper")]));
 
     assert_eq!(
-        decoded(&bytes).component(0).expect("helper").name(),
+        decoded(&bytes).component(1).expect("helper").name(),
         "foo::helper"
     );
 }
@@ -926,8 +872,8 @@ fn two_forms_of_one_program_give_two_instance_names() {
     ]));
 
     let plan = decoded(&bytes);
-    assert_eq!(plan.component(0).expect("qualified").name(), "foo::helper");
-    assert_eq!(plan.component(1).expect("short").name(), HELPER);
+    assert_eq!(plan.component(1).expect("qualified").name(), "foo::helper");
+    assert_eq!(plan.component(2).expect("short").name(), HELPER);
 }
 
 #[test]
@@ -940,12 +886,109 @@ fn plan_rejects_two_instances_of_one_identity_without_a_name() {
 
 #[test]
 fn a_program_without_a_manifest_declares_nothing() {
-    let bytes = compiled(&plan(&[Component::new(ROOTKEEPER)]));
+    let bytes = Image::new()
+        .with(HELPER, ProgramManifest::default())
+        .compiled(&plan(&[Component::new(HELPER)]));
 
     let plan = decoded(&bytes);
-    let component = plan.component(0).expect("component");
-    assert_eq!(component.executable(), image_path(ROOTKEEPER));
+    let component = plan.component(1).expect("component");
+    assert_eq!(component.executable(), image_path(HELPER));
     assert_eq!(component.requirements().count(), 0);
+    assert_eq!(component.exports().count(), 0);
+}
+
+#[test]
+fn record_zero_is_the_boot_program_with_the_exports_of_its_manifest() {
+    let bytes = compiled(&plan(&[router()]));
+
+    let boot = decoded(&bytes).component(0).expect("record 0");
+    assert_eq!(boot.executable(), image_path(ROOTKEEPER));
+    assert_eq!(boot.name(), ROOTKEEPER);
+    assert_eq!(boot.exports().collect::<Vec<_>>(), [HARDWARE_PROTOCOL]);
+    assert_eq!(boot.requirements().count(), 0);
+    assert_eq!(boot.memory_limit(), 0);
+    assert_eq!(boot.restarts(), 0);
+}
+
+#[test]
+fn a_requirement_to_the_export_of_the_boot_program_binds_to_record_zero() {
+    for component in [platform(), platform().bind("hardware", ROOTKEEPER)] {
+        let bytes = image_with_platform().compiled(&plan(&[component]));
+
+        assert_eq!(
+            requirements_of(&bytes, 1),
+            [session_of("hardware", 0, HARDWARE_PROTOCOL, "")]
+        );
+    }
+}
+
+#[test]
+fn plan_rejects_a_scope_on_a_requirement_to_record_zero() {
+    assert_eq!(
+        image_with_platform().rejected(&plan(&[platform().scope("hardware", "all")])),
+        format!(
+            "boot plan component '{PLATFORM}' sets 'scope' on requirement 'hardware', \
+             which the boot program '{ROOTKEEPER}' provides"
+        )
+    );
+}
+
+#[test]
+fn plan_rejects_a_requirement_in_the_manifest_of_the_boot_program() {
+    let image = Image {
+        entries: vec![ImageEntry {
+            package: String::from(ROOTKEEPER),
+            bin: String::from(ROOTKEEPER),
+            path: image_path(ROOTKEEPER),
+            boot: true,
+            manifest: consumer_declaration(),
+        }],
+    }
+    .with(ROUTER, router_declaration());
+
+    assert_eq!(
+        image.rejected(&plan(&[router()])),
+        format!(
+            "boot program '{ROOTKEEPER}' declares requirement 'names'; \
+             a program without a parent takes none"
+        )
+    );
+}
+
+#[test]
+fn record_zero_is_named_by_the_image_path_of_the_boot_program() {
+    let image = Image {
+        entries: vec![ImageEntry {
+            package: String::from(ROOTKEEPER),
+            bin: String::from(ROOTKEEPER),
+            path: String::from("/boot/init"),
+            boot: true,
+            manifest: declaration(Vec::new(), &[HARDWARE_PROTOCOL]),
+        }],
+    }
+    .with(
+        PLATFORM,
+        declaration(vec![session("hardware", HARDWARE_PROTOCOL)], &[]),
+    );
+
+    let bytes = image.compiled(&plan(&[platform().bind("hardware", "init")]));
+
+    assert_eq!(
+        decoded(&bytes).component(0).expect("record 0").name(),
+        "init"
+    );
+    assert_eq!(
+        requirements_of(&bytes, 1),
+        [session_of("hardware", 0, HARDWARE_PROTOCOL, "")]
+    );
+}
+
+#[test]
+fn plan_rejects_a_component_named_as_record_zero() {
+    assert_eq!(
+        rejected(&plan(&[router().name(ROOTKEEPER)])),
+        format!("boot plan names component '{ROOTKEEPER}' more than once")
+    );
 }
 
 #[test]

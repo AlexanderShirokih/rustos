@@ -6,6 +6,7 @@ mod cpu_identity;
 mod exception;
 mod kheap;
 mod layout;
+mod lower_half;
 mod page_flags;
 mod probe_va;
 mod smp;

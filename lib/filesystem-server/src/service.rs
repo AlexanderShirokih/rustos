@@ -14,7 +14,7 @@ use ipc::{
     IntoWireValue,
     wire::{Cap, Str},
 };
-use kernel_objects::{Delivery, MemoryRegion, OwnedHandle, Port, ReceivedHandle, Resource, kind};
+use kernel_objects::{Delivery, IssuedHandle, MemoryRegion, OwnedHandle, Port, Resource, kind};
 use runtime::{MemoryAccess, MutexGuard};
 
 use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};
@@ -250,7 +250,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         &mut self,
         delivery: &Delivery,
         size: u32,
-    ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
         client_of(delivery).and_then(|client| self.share_buffer(client, size))
     }
 
@@ -412,7 +412,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         &mut self,
         delivery: &Delivery,
         path: Str<'_, PATH_MAX>,
-        region: ReceivedHandle<kind::MemoryRegion>,
+        region: IssuedHandle<kind::MemoryRegion>,
         size: u64,
     ) -> Result<u32, FileSystemError> {
         // Регион закрывается на любом отказе операции.
@@ -446,7 +446,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         &mut self,
         delivery: &Delivery,
         fd: NodeDescriptor,
-    ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
         client_of(delivery).and_then(|client| self.backing_slice(client, fd))
     }
 
@@ -454,8 +454,10 @@ impl file_system::Service<Delivery> for Serving<'_> {
         &mut self,
         delivery: &Delivery,
         path: Str<'_, PATH_MAX>,
-    ) -> impl IntoWireValue<Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>>
-    {
+    ) -> impl IntoWireValue<
+        Delivery,
+        Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
+    > {
         // Порт сессии создаёт этот сервер, и он же обслуживает на нём `file_system`.
         client_of(delivery)
             .and_then(|client| self.mint_root(client, path))

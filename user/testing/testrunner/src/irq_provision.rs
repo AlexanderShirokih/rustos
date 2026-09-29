@@ -1,10 +1,10 @@
-//! E2E выдачи IRQ-полномочия: `acquire_irq_control` по сессии `Devices`, усыновление
+//! E2E выдачи IRQ-полномочия: `acquire_irq_control` по сессии `Hardware`, усыновление
 //! доставленного capability и минт `IrqLine`.
 //! Сквозной прогон пути выдачи vend -> transfer -> install -> use из userspace.
 
 use kernel_objects::{Error, IrqControl};
 use kernel_tests::kernel_test;
-use syscall::{IrqTrigger, SyscallError};
+use syscall::{IrqTrigger, Rights, SyscallError};
 
 const SPI_BASE: u16 = 32;
 
@@ -20,7 +20,7 @@ const PRIVATE_IRQ_MAX: u16 = SPI_BASE - 1;
 
 #[kernel_test]
 fn acquire_irq_control_and_mint_line() {
-    let client = crate::devices_session().client();
+    let client = crate::hardware_session().client();
 
     let cap = client
         .acquire_irq_control()
@@ -28,19 +28,16 @@ fn acquire_irq_control_and_mint_line() {
         .expect("vend ok");
     let control = IrqControl::from(cap);
 
-    // Успешный минт доказывает, что доставленный capability установлен ядром в таблицу процесса.
     let line = control
         .mint(PL031_IRQ, IrqTrigger::Level)
         .expect("mint IrqLine");
 
-    // Свежая линия: подтверждать нечего, ack -> ошибка. Заодно подтверждает,
-    // что минт вернул живой `IrqLine`. Линия освобождается дропом `line`.
     kernel_tests::kassert!(line.ack().is_err());
 }
 
 #[kernel_test]
 fn minting_a_line_twice_names_the_taken_line() {
-    let client = crate::devices_session().client();
+    let client = crate::hardware_session().client();
     let cap = client
         .acquire_irq_control()
         .expect("acquire_irq_control call")
@@ -52,7 +49,6 @@ fn minting_a_line_twice_names_the_taken_line() {
 
     let taken = control.mint(SPARE_IRQ, IrqTrigger::Level);
 
-    // Занятая линия - отдельный отказ. Исчерпание бюджета памяти к ней отношения не имеет.
     kernel_tests::kassert_eq!(
         taken.err(),
         Some(Error::Syscall(SyscallError::AlreadyBound))
@@ -60,9 +56,58 @@ fn minting_a_line_twice_names_the_taken_line() {
     drop(line);
 }
 
+#[kernel_test]
+fn closing_the_minted_line_frees_it_under_a_live_copy() {
+    let client = crate::hardware_session().client();
+    let cap = client
+        .acquire_irq_control()
+        .expect("acquire_irq_control call")
+        .expect("vend ok");
+    let control = IrqControl::from(cap);
+    let line = control
+        .mint(SPARE_IRQ, IrqTrigger::Level)
+        .expect("mint IrqLine");
+    let copy = line
+        .duplicate(Rights::READ | Rights::WRITE, None)
+        .expect("duplicate IrqLine");
+
+    line.close().expect("close minted line");
+
+    let again = control
+        .mint(SPARE_IRQ, IrqTrigger::Level)
+        .expect("mint freed line");
+    kernel_tests::kassert_eq!(
+        copy.ack().err(),
+        Some(Error::Syscall(SyscallError::Revoked))
+    );
+    drop(again);
+}
+
+#[kernel_test]
+fn closing_a_copy_keeps_the_line_bound() {
+    let client = crate::hardware_session().client();
+    let cap = client
+        .acquire_irq_control()
+        .expect("acquire_irq_control call")
+        .expect("vend ok");
+    let control = IrqControl::from(cap);
+    let line = control
+        .mint(SPARE_IRQ, IrqTrigger::Level)
+        .expect("mint IrqLine");
+    let copy = line
+        .duplicate(Rights::READ | Rights::WRITE, None)
+        .expect("duplicate IrqLine");
+
+    copy.close().expect("close copy");
+
+    kernel_tests::kassert_eq!(
+        control.mint(SPARE_IRQ, IrqTrigger::Level).err(),
+        Some(Error::Syscall(SyscallError::AlreadyBound))
+    );
+    drop(line);
+}
+
 fn first_line_outside(control: &IrqControl) -> u16 {
-    // Полоса - диапазон, поэтому отказы монотонны и край берётся делением
-    // пополам; занятая линия внутри полосы отвечает `AlreadyBound`.
     let mut inside = PL031_IRQ;
     let mut outside = SPI_MAX + 1;
     while outside - inside > 1 {
@@ -80,7 +125,7 @@ fn first_line_outside(control: &IrqControl) -> u16 {
 
 #[kernel_test]
 fn irq_band_ends_at_the_platform_line_count() {
-    let client = crate::devices_session().client();
+    let client = crate::hardware_session().client();
     let cap = client
         .acquire_irq_control()
         .expect("acquire_irq_control call")
@@ -89,8 +134,6 @@ fn irq_band_ends_at_the_platform_line_count() {
 
     let outside = first_line_outside(&control);
 
-    // Край полосы совпадает с числом линий контроллера, и на qemu virt их меньше
-    // архитектурного предела. Край ровно в SPI_MAX + 1 отмечает полосу-литерал.
     kernel_tests::kassert!(outside > PL031_IRQ);
     kernel_tests::kassert!(outside < SPI_MAX + 1);
     kernel_tests::kassert_eq!(
@@ -101,15 +144,13 @@ fn irq_band_ends_at_the_platform_line_count() {
 
 #[kernel_test]
 fn irq_band_starts_above_the_private_lines() {
-    let client = crate::devices_session().client();
+    let client = crate::hardware_session().client();
     let cap = client
         .acquire_irq_control()
         .expect("acquire_irq_control call")
         .expect("vend ok");
     let control = IrqControl::from(cap);
 
-    // Нижний край полосы архитектурно фиксирован SPI_BASE: `PRIVATE_IRQ_MAX` -
-    // последняя приватная линия CPU, вне полосы на любой машине.
     kernel_tests::kassert_eq!(
         control.mint(PRIVATE_IRQ_MAX, IrqTrigger::Level).err(),
         Some(Error::Syscall(SyscallError::AccessDenied))

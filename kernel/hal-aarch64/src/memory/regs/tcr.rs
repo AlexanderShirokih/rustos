@@ -10,7 +10,7 @@ use crate::{
         id_aa64mmfr0::AsidWidth,
         ttbr::{HigherHalf, LowerHalf},
     },
-    write_sysreg,
+    read_sysreg, write_sysreg,
 };
 
 // Поля TCR:
@@ -29,7 +29,7 @@ pub trait TtbrSel {
     /// Сдвиг T0SZ/T1SZ.
     const TNSZ_SHIFT: u64;
     /// Сдвиг EPD (enable/disable).
-    const EDP_SHIFT: u64;
+    const EPD_SHIFT: u64;
     /// Сдвиг IRGN (inner cacheability).
     const IRGN_SHIFT: u64;
     /// Сдвиг ORGN (outer cacheability).
@@ -45,7 +45,7 @@ pub trait TtbrSel {
 // Биты TTBR0 (lower half):
 impl TtbrSel for LowerHalf {
     const TNSZ_SHIFT: u64 = 0;
-    const EDP_SHIFT: u64 = 7;
+    const EPD_SHIFT: u64 = 7;
     const IRGN_SHIFT: u64 = 8;
     const ORGN_SHIFT: u64 = 10;
     const SH_SHIFT: u64 = 12;
@@ -56,7 +56,7 @@ impl TtbrSel for LowerHalf {
 // Биты TTBR1 (higher half):
 impl TtbrSel for HigherHalf {
     const TNSZ_SHIFT: u64 = 16;
-    const EDP_SHIFT: u64 = 23;
+    const EPD_SHIFT: u64 = 23;
     const IRGN_SHIFT: u64 = 24;
     const ORGN_SHIFT: u64 = 26;
     const SH_SHIFT: u64 = 28;
@@ -95,7 +95,7 @@ impl TCRBit {
     }
 
     pub const fn epd<Sel: TtbrSel>(enable: bool) -> Self {
-        let bit = if enable { 0b0 } else { 0b1 << Sel::EDP_SHIFT };
+        let bit = if enable { 0b0 } else { 0b1 << Sel::EPD_SHIFT };
 
         Self(bit)
     }
@@ -131,6 +131,43 @@ impl TranslationControlRegister<EL1> {
         // SAFETY: Запись в TCR_EL1 допустима на EL1 до включения MMU.
         // Значение формируется из типобезопасных конфигураций LowerHalf/HigherHalf.
         unsafe { write_sysreg!(tcr_el1, lower.value | higher.value) };
+    }
+
+    /// Запрещает обход таблиц по TTBR половины `T`. Промах TLB в этой половине даёт Translation
+    /// Fault уровня 0 без обращения к памяти.
+    ///
+    /// # Safety
+    ///
+    /// Другой код на этом CPU не пишет TCR_EL1 между чтением и записью, например IRQ замаскированы.
+    pub unsafe fn disable_walks<T: TtbrSel>() {
+        let epd = TCRBit::epd::<T>(false).encode();
+
+        // SAFETY: чтение и запись TCR_EL1 допустимы на EL1. Запись меняет только бит EPD
+        // половины `T`, а контракт функции исключает запись в TCR_EL1 между `mrs` и `msr`.
+        // `isb` применяет запись до следующей инструкции.
+        unsafe {
+            let value = read_sysreg!(tcr_el1);
+            write_sysreg!(tcr_el1, value | epd);
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+        }
+    }
+
+    /// Разрешает обход таблиц по TTBR половины `T`.
+    ///
+    /// # Safety
+    ///
+    /// TTBR половины `T` содержит корень живых таблиц страниц. Другой код на этом CPU не пишет
+    /// TCR_EL1 между чтением и записью, например IRQ замаскированы.
+    pub unsafe fn enable_walks<T: TtbrSel>() {
+        let epd = TCRBit::epd::<T>(false).encode();
+
+        // SAFETY: см. `disable_walks`; обход пойдёт по корню, который контракт функции требует
+        // от вызывающего.
+        unsafe {
+            let value = read_sysreg!(tcr_el1);
+            write_sysreg!(tcr_el1, value & !epd);
+            core::arch::asm!("isb", options(nostack, preserves_flags));
+        }
     }
 }
 

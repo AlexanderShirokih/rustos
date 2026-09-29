@@ -15,7 +15,7 @@ use component_startup::{ObjectKind, OwnedHandle};
 /// Отдаёт capability стандартной библиотеке владеющим значением.
 #[must_use]
 pub fn into_std_handle<K: ObjectKind>(handle: OwnedHandle<K>) -> molecular::OwnedHandle {
-    // SAFETY: `into_raw` отдаёт запись таблицы процесса и подавляет её закрытие: усыновляющий
-    // владелец у записи единственный.
+    // SAFETY: `into_raw` отдаёт номер записи, от которой владелец программы отказался, и
+    // у записи нет других владельцев.
     unsafe { molecular::OwnedHandle::from_raw(handle.into_raw().as_nonzero()) }
 }

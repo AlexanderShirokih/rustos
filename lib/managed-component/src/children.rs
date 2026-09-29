@@ -8,19 +8,18 @@ use core::{
 use component_abi::{
     AcceptError, ResourceError, SessionError, SessionRequest, SessionScope, component_startup,
 };
-use ipc::{Undelivered, wire::Cap};
 use kernel_objects::{
-    BorrowedHandle, Error, ObjectKind, OwnedHandle, Port, Process, ReceivedHandle, Resource, kind,
+    BorrowedHandle, Error, IssuedHandle, ObjectKind, OwnedHandle, Port, Process, Resource, kind,
 };
 use runtime::{Instant, Timeout};
-use syscall::{Handle, Rights, SyscallError};
+use syscall::{Rights, SyscallError};
 use userland::EntryView;
 use userland_loader::load_entry;
 
 const SESSION_CLOSED_EXIT_CODE: u32 = 0xFFFF_FFFD;
 
-type ImporterDebt = component_startup::session::Reply<ReceivedHandle<kind::Reply>>;
-type AcceptDebt = component_startup::accept::Reply<ReceivedHandle<kind::Reply>>;
+type ImporterDebt = component_startup::session::Reply<IssuedHandle<kind::Reply>>;
+type AcceptDebt = component_startup::accept::Reply<IssuedHandle<kind::Reply>>;
 
 /// Записи дочерних компонентов с ключом `C` и отложенные ответы на их запросы `ComponentStartup`.
 ///
@@ -274,7 +273,7 @@ impl<'a, C: Copy + Eq, V: EntryView<'a>> Children<'a, C, V> {
                 let replaced = core::mem::replace(pending, request);
                 let _ = replaced
                     .reply
-                    .send(Err::<Cap<kind::Port>, _>(SessionError::NoSpace));
+                    .send(Err::<IssuedHandle<kind::Port>, _>(SessionError::NoSpace));
             }
             None => self.requests.push(request),
         }
@@ -372,9 +371,9 @@ impl<'a, C: Copy + Eq, V: EntryView<'a>> Children<'a, C, V> {
         while let Some(pending) = self.requests.get(index) {
             if pending.provider == child {
                 let refused = self.requests.remove(index);
-                let _ = refused
-                    .reply
-                    .send(Err::<Cap<kind::Port>, _>(SessionError::Unavailable));
+                let _ = refused.reply.send(Err::<IssuedHandle<kind::Port>, _>(
+                    SessionError::Unavailable,
+                ));
             } else {
                 index += 1;
             }
@@ -420,9 +419,7 @@ impl<'a, C: Copy + Eq, V: EntryView<'a>> Children<'a, C, V> {
                 return Err(GrantError::Kernel(Error::Syscall(SyscallError::WrongType)));
             }
             let copy = grant.held.duplicate(rights, None)?;
-            return Ok(OwnedHandle::from_handle(Handle::from_abi(
-                copy.into_raw().as_nonzero(),
-            )));
+            return Ok(copy.assume_kind());
         }
 
         let held = source.duplicate(rights | Rights::DUPLICATE, None)?;
@@ -494,10 +491,8 @@ impl<'a, C: Copy + Eq, V: EntryView<'a>> Children<'a, C, V> {
             .send(Ok::<_, AcceptError>(SessionRequest { scope, reply }));
 
         // Недоставленная заявка возвращается на своё место в очереди.
-        if let Err(Undelivered {
-            value: Ok(SessionRequest { scope, reply }),
-            ..
-        }) = sent
+        if let Err(undelivered) = sent
+            && let Ok(Ok(SessionRequest { scope, reply })) = undelivered.into_value()
         {
             self.requests.insert(
                 request,

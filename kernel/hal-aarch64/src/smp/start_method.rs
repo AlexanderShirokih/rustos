@@ -1,16 +1,17 @@
 //! Исполнение команды старта вторичного CPU.
 //!
-//! Разбор device tree лежит в `hal_common::smp`. Здесь - сам вызов PSCI и
+//! Разбор device tree лежит в `hal_common::smp`. Здесь - вызов `CPU_ON` и
 //! освобождение CPU, ждущего на spin-table.
 
 use hal_common::{
     cpu::CpuAffinity,
-    smp::{PsciConduit, PsciFailure, StartMethod},
+    smp::{PsciFailure, StartMethod},
 };
 
 use crate::{
     consts::HIGHER_HALF_BASE,
     memory::regs::{common::EL1, dcache::DataCache, translate::AddressTranslation},
+    psci::{PsciCall, psci_call},
 };
 
 /// Ошибка старта CPU.
@@ -82,15 +83,16 @@ pub unsafe fn start(
 ) -> Result<(), StartError> {
     match method {
         StartMethod::Psci { conduit, cpu_on } => {
-            // SAFETY: контракт функции; `CPU_ON` принимает affinity цели,
-            // физический адрес точки входа и context_id.
+            // SAFETY: контракт функции: `entry_point` - физический адрес точки
+            // входа, а целевой CPU не исполняет код ядра.
             let result = unsafe {
                 psci_call(
                     conduit,
-                    u64::from(cpu_on),
-                    affinity.raw(),
-                    entry_point as u64,
-                    0,
+                    PsciCall::CpuOn {
+                        function: cpu_on,
+                        target: affinity,
+                        entry_point: entry_point as u64,
+                    },
                 )
             };
 
@@ -105,52 +107,6 @@ pub unsafe fn start(
             unsafe { release_spin_table(release_address, entry_point) }
         }
     }
-}
-
-// SAFETY: вызов уходит на уровень выше EL1 и обязан быть корректным вызовом PSCI.
-unsafe fn psci_call(conduit: PsciConduit, function: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-    let result: u64;
-
-    match conduit {
-        PsciConduit::Hvc => {
-            // SAFETY: `hvc #0` - вызов гипервизора по SMCCC: аргументы в x0-x3,
-            // результат в x0. Регистры x4-x17 соглашение объявляет затираемыми.
-            unsafe {
-                core::arch::asm!(
-                    "hvc #0",
-                    inlateout("x0") function => result,
-                    inlateout("x1") arg0 => _,
-                    inlateout("x2") arg1 => _,
-                    inlateout("x3") arg2 => _,
-                    lateout("x4") _, lateout("x5") _, lateout("x6") _, lateout("x7") _,
-                    lateout("x8") _, lateout("x9") _, lateout("x10") _, lateout("x11") _,
-                    lateout("x12") _, lateout("x13") _, lateout("x14") _, lateout("x15") _,
-                    lateout("x16") _, lateout("x17") _,
-                    options(nostack),
-                );
-            }
-        }
-        PsciConduit::Smc => {
-            // SAFETY: см. ветку `hvc`; `smc #0` отличается только уровнем,
-            // на который уходит вызов.
-            unsafe {
-                core::arch::asm!(
-                    "smc #0",
-                    inlateout("x0") function => result,
-                    inlateout("x1") arg0 => _,
-                    inlateout("x2") arg1 => _,
-                    inlateout("x3") arg2 => _,
-                    lateout("x4") _, lateout("x5") _, lateout("x6") _, lateout("x7") _,
-                    lateout("x8") _, lateout("x9") _, lateout("x10") _, lateout("x11") _,
-                    lateout("x12") _, lateout("x13") _, lateout("x14") _, lateout("x15") _,
-                    lateout("x16") _, lateout("x17") _,
-                    options(nostack),
-                );
-            }
-        }
-    }
-
-    result
 }
 
 // SAFETY: `release_address` - физический адрес, объявленный узлом CPU.

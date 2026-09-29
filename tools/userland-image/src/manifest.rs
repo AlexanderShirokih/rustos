@@ -11,8 +11,8 @@ pub(crate) struct ProgramManifest {
 pub(crate) struct ManifestRequirement {
     pub name: String,
     pub kind: RequirementKind,
-    pub resource: u16,
-    pub names: Vec<String>,
+    /// Идентификатор протокола требования сессии.
+    pub protocol: Option<String>,
 }
 
 impl ProgramManifest {
@@ -25,8 +25,7 @@ impl ProgramManifest {
                 .map(|requirement| ManifestRequirement {
                     name: String::from(requirement.name()),
                     kind: requirement.kind(),
-                    resource: requirement.resource(),
-                    names: requirement.names().map(String::from).collect(),
+                    protocol: requirement.protocol().map(String::from),
                 })
                 .collect(),
             exports: record.exports().map(String::from).collect(),
@@ -44,7 +43,6 @@ mod tests {
     fn a_record_becomes_owned_strings() {
         const REQUIREMENTS: &[RequirementDeclaration] = &[
             RequirementDeclaration::region("image"),
-            RequirementDeclaration::irq("line", &["arm,pl031", "arm,primecell"], 2),
             RequirementDeclaration::session("names", "Namespace"),
         ];
         const EXPORTS: &[&str] = &["FileSystem", "FileSystemAdmin"];
@@ -54,22 +52,19 @@ mod tests {
         let manifest = ProgramManifest::from_record(&decode_manifest(&bytes).expect("decodes"));
 
         assert_eq!(manifest.exports, ["FileSystem", "FileSystemAdmin"]);
-        assert_eq!(manifest.requirements.len(), 3);
+        assert_eq!(manifest.requirements.len(), 2);
         let names: Vec<&str> = manifest
             .requirements
             .iter()
             .map(|requirement| requirement.name.as_str())
             .collect();
-        assert_eq!(names, ["image", "line", "names"]);
+        assert_eq!(names, ["image", "names"]);
         assert_eq!(manifest.requirements[0].kind, RequirementKind::Region);
-        assert!(manifest.requirements[0].names.is_empty());
-        assert_eq!(manifest.requirements[1].kind, RequirementKind::Irq);
-        assert_eq!(manifest.requirements[1].resource, 2);
+        assert_eq!(manifest.requirements[0].protocol, None);
+        assert_eq!(manifest.requirements[1].kind, RequirementKind::Session);
         assert_eq!(
-            manifest.requirements[1].names,
-            ["arm,pl031", "arm,primecell"]
+            manifest.requirements[1].protocol.as_deref(),
+            Some("Namespace")
         );
-        assert_eq!(manifest.requirements[2].kind, RequirementKind::Session);
-        assert_eq!(manifest.requirements[2].names, ["Namespace"]);
     }
 }

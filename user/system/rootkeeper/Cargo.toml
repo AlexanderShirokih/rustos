@@ -8,11 +8,6 @@ build = "build.rs"
 [package.metadata.userland]
 stack_size = 65536
 
-# Крейт берёт биндинги контроллеров прерываний из `device-resolver-aarch64`, и со сменой
-# архитектуры этот код переписывается.
-[package.metadata.molecular]
-arch = "aarch64"
-
 [[bin]]
 name = "rootkeeper"
 path = "src/main.rs"
@@ -28,9 +23,7 @@ doctest = false
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
 component-abi = { workspace = true }
-device-resolver = { workspace = true }
-device-resolver-aarch64 = { workspace = true }
-fdt = { workspace = true }
+component-startup = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }

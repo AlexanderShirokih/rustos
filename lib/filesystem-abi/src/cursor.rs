@@ -38,14 +38,12 @@ impl<'a, R: ReceivedResources> WireValue<'a, R> for DirCursor {
     }
 }
 
-impl IntoWireValue for DirCursor {
+impl<R: ReceivedResources> IntoWireValue<R> for DirCursor {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, &value::encode_u32(self.0))
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, &value::encode_u32(self.0))
     }
-
-    fn relinquish(self) {}
 }
 
 impl WireTyped for DirCursor {
@@ -65,10 +63,8 @@ mod tests {
     const FIELD_ID: u8 = 1;
 
     fn round_trip(position: DirCursor) -> Result<DirCursor, IpcError> {
-        let mut buf = MessageBuf::new();
-        position
-            .write_as_field(&mut buf, FIELD_ID)
-            .expect("write ok");
+        let mut buf = MessageBuf::<()>::new();
+        position.write_into(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");

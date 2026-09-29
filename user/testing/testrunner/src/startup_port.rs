@@ -10,7 +10,7 @@ use ipc::{
     Listener as _, Protocol as _, RecvError,
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
-use kernel_objects::{Delivery, Error, Port, ReceivedHandle, Resource, Session, kind};
+use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
 use kernel_tests::kernel_test;
 use managed_component::{Departure, GrantError, Outcome, Status};
 use runtime::{Instant, JoinHandle, PortTransport, Priority, Timeout, port_send, spawn_owned};
@@ -29,7 +29,7 @@ use crate::{
     },
 };
 
-type Debt = ReceivedHandle<kind::Reply>;
+type Debt = IssuedHandle<kind::Reply>;
 
 const STEPS_ENTRY: &str = "/child-steps-fixture/program";
 const IMPORTER_ENTRY: &str = "/probe-importer-fixture/program";

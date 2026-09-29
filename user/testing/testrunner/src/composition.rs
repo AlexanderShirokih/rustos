@@ -247,6 +247,7 @@ fn await_budget(plan: &BootPlan<'_>) {
     loop {
         let probes: Result<Vec<Resource>, Error> = plan
             .components()
+            .skip(1)
             .map(|component| resource.split(component.memory_limit()))
             .collect();
         match probes {

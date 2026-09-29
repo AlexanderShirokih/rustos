@@ -4,10 +4,16 @@
 
 runtime::process_heap!();
 
+component_manifest! {
+    exports: [hardware::Protocol],
+}
+
 extern crate alloc;
 
 use core::panic::PanicInfo;
 
+use bootstrap_abi::hardware;
+use component_startup::component_manifest;
 use rootkeeper::{Stopped, run};
 use runtime::process_exit;
 use syscall::{Handle, kind};

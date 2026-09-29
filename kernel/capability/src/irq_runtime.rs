@@ -13,8 +13,7 @@ use syscall::IrqTrigger;
 use super::errors::IpcError;
 
 /// Приёмник аппаратного прерывания, через который контроллер доводит срабатывание до
-/// [`IrqLine`](super::IrqLine). Реализация держит `Weak<IrqLine>`, и срабатывание в гонке с
-/// закрытием линии становится no-op.
+/// [`IrqLine`](super::IrqLine). Срабатывание отвязанной линии игнорируется.
 pub trait IrqSink: Send + Sync {
     /// Вызывается из IRQ-контекста при срабатывании линии.
     fn fire(&self);
@@ -44,8 +43,7 @@ pub trait InterruptsControl: Send + Sync {
 /// kernelspace это дропает `IrqBound`, чей cleanup отключает линию и удаляет
 /// обработчик.
 ///
-/// Токен хранит сам [`IrqLine`](super::IrqLine), клонированию не подлежит, и все капы на линию
-/// делят один объект с ним. Развязка идёт при разрушении последней такой капы.
+/// Токен хранится в [`IrqLine`](super::IrqLine) и разрушается при отвязке линии.
 pub struct IrqBindToken(#[allow(dead_code)] Box<dyn Send>);
 
 impl IrqBindToken {

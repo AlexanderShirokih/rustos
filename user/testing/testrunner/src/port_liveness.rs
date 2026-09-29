@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
 };
 
-use bootstrap_abi::{bootstrap, devices};
+use bootstrap_abi::{bootstrap, hardware};
 use ipc::{
     Listener as _,
     wire::{IpcError, MESSAGE_INLINE_MAX},
@@ -19,7 +19,7 @@ use kernel_objects::{Error, MemoryRegion, Port, Reply, Result, kind};
 use kernel_tests::kernel_test;
 use runtime::{
     Instant, PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr,
-    port_call, port_send, spawn,
+    port_call, port_send, spawn, spawn_owned,
 };
 use syscall::{Handle, Rights, SyscallError};
 
@@ -148,19 +148,14 @@ fn badge_departs_when_the_client_process_dies() {
     assert_sender_gone(port.recv(SERVE_TIMEOUT), DYING_CLIENT_BADGE.get());
 }
 
-static LIVING_CLIENT_BADGED_CAP: AtomicU32 = AtomicU32::new(0);
-static LIVING_CLIENT_PLAIN_CAP: AtomicU32 = AtomicU32::new(0);
 static LIVING_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
-extern "C" fn living_client(_arg: usize) -> u32 {
-    let badged = client_capability(&LIVING_CLIENT_BADGED_CAP);
-    let plain = client_capability(&LIVING_CLIENT_PLAIN_CAP);
-
-    let framed = port_send(badged, SERVE_TIMEOUT);
-    let closed = handle_close(badged);
+fn living_client(badged: Port, plain: Port) -> u32 {
+    let framed = port_send(badged.as_raw(), SERVE_TIMEOUT);
+    let closed = handle_close(badged.into_issued());
     // Кадр без значка после закрытия. Им клиент подтверждает, что жив.
-    let alive = port_send(plain, SERVE_TIMEOUT);
-    let released = handle_close(plain);
+    let alive = port_send(plain.as_raw(), SERVE_TIMEOUT);
+    let released = handle_close(plain.into_issued());
 
     LIVING_CLIENT_RESULT.store(framed | closed | alive | released, SeqCst);
     0
@@ -176,11 +171,14 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
         .duplicate(Rights::WRITE, None)
         .expect("mint unbadged capability");
     // Обе капы отданы клиенту. Закрывает их он.
-    LIVING_CLIENT_BADGED_CAP.store(badged.into_raw().raw(), SeqCst);
-    LIVING_CLIENT_PLAIN_CAP.store(plain.into_raw().raw(), SeqCst);
     LIVING_CLIENT_RESULT.store(i64::MIN, SeqCst);
 
-    let worker = spawn(living_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
+    let worker = spawn_owned(
+        move || living_client(badged, plain),
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("badged frame");
     kernel_tests::kassert_eq!(received_badge(), LIVING_CLIENT_BADGE.get());
@@ -196,14 +194,12 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
     kernel_tests::kassert_eq!(LIVING_CLIENT_RESULT.load(SeqCst), 0);
 }
 
-static SERVED_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
 static SERVED_CLIENT_CLOSED: AtomicU32 = AtomicU32::new(0);
 static SERVED_CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
-extern "C" fn served_client(_arg: usize) -> u32 {
-    let badged = client_capability(&SERVED_CLIENT_CAP);
-    let framed = port_send(badged, SERVE_TIMEOUT);
-    let closed = handle_close(badged);
+fn served_client(badged: Port) -> u32 {
+    let framed = port_send(badged.as_raw(), SERVE_TIMEOUT);
+    let closed = handle_close(badged.into_issued());
     SERVED_CLIENT_RESULT.store(framed | closed, SeqCst);
     SERVED_CLIENT_CLOSED.store(1, SeqCst);
     0
@@ -215,11 +211,11 @@ fn departed_badge_waits_for_the_busy_server() {
     let badged = port
         .duplicate(Rights::WRITE, Some(SERVED_CLIENT_BADGE))
         .expect("mint badged capability");
-    SERVED_CLIENT_CAP.store(badged.into_raw().raw(), SeqCst);
     SERVED_CLIENT_CLOSED.store(0, SeqCst);
     SERVED_CLIENT_RESULT.store(i64::MIN, SeqCst);
 
-    let worker = spawn(served_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
+    let worker = spawn_owned(move || served_client(badged), STACK_SIZE, Priority::new(1))
+        .expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
     kernel_tests::kassert_eq!(received_badge(), SERVED_CLIENT_BADGE.get());
@@ -257,7 +253,7 @@ fn served_child_exits_when_its_client_capability_goes() {
 /// принимает он же.
 #[kernel_test]
 fn kernel_server_serves_past_a_departed_badge() {
-    let session = Port::from_handle(
+    let session = Port::from(
         handle_duplicate(
             crate::bootstrap_handle(),
             Rights::WRITE.into(),
@@ -294,7 +290,7 @@ fn kernel_server_closes_the_capabilities_of_a_discarded_frame() {
         Some(SyscallError::Revoked)
     );
 
-    crate::devices_session()
+    crate::hardware_session()
         .client()
         .acquire_irq_control()
         .expect("acquire_irq_control call")
@@ -469,7 +465,7 @@ fn kernel_server_serves_past_frames_it_refuses() {
 
 #[kernel_test]
 fn kernel_server_closes_what_it_vended_to_a_full_table() {
-    let kernel = Port::from_handle(
+    let kernel = Port::from(
         handle_duplicate(
             crate::bootstrap_handle(),
             (Rights::WRITE | Rights::TRANSFER).into(),
@@ -484,8 +480,8 @@ fn kernel_server_closes_what_it_vended_to_a_full_table() {
 }
 
 #[kernel_test]
-fn a_devices_session_does_not_receive() {
-    let session = crate::devices_session().into_handle();
+fn a_hardware_session_does_not_receive() {
+    let session = crate::hardware_session().into_handle();
 
     kernel_tests::kassert!(matches!(
         session.recv(Timeout::POLL),
@@ -495,16 +491,16 @@ fn a_devices_session_does_not_receive() {
 
 #[kernel_test]
 fn each_role_refuses_the_operations_of_the_other() {
-    let session = crate::devices_session();
+    let session = crate::hardware_session();
     let as_bootstrap = bootstrap::Client::new(PortTransport::new(session.handle().as_raw()));
-    let as_devices = devices::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    let as_hardware = hardware::Client::new(PortTransport::new(crate::bootstrap_handle()));
 
     kernel_tests::kassert_eq!(
         as_bootstrap.acquire_userland_image().err(),
         Some(IpcError::PeerClosed)
     );
     kernel_tests::kassert_eq!(
-        as_devices.acquire_irq_control().err(),
+        as_hardware.acquire_irq_control().err(),
         Some(IpcError::PeerClosed)
     );
 }

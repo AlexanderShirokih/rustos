@@ -74,6 +74,7 @@ pub fn build_userland(
             package: &entry.program.package,
             bin: &entry.program.bin,
             path: &entry.program.path,
+            boot: entry.program.boot,
             manifest: &entry.manifest,
         })
         .collect();

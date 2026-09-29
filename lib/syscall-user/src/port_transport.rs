@@ -5,19 +5,26 @@
 //! задаёт [`Channel`], серверную - [`Listener`], а роль ограничивают права handle. Отправка
 //! требует `Rights::WRITE`, приём - `Rights::READ`. Ответ встречному вызову уходит каналом
 //! ответа из ресурсов принятого кадра.
+//!
+//! Канал пишет номера capability исходящего кадра в IPC-буфер. Успех отправки снимает закрытие
+//! с их владельцев, отказ `send` и ответа возвращает кадр вызывающему, а отказ `call` кадр
+//! разрушает. Кадр ответа `call` канал читает в буфер исходящего кадра.
 
 use core::num::NonZeroU32;
 
-use ipc::{Channel, FrameBytes, Incoming, Listener, RecvError, ReplyChannel, wire::IpcError};
+use ipc::{
+    Channel, FrameBytes, Incoming, Listener, Outgoing, OutgoingParts, RecvError, ReplyChannel,
+    Unsent, wire::IpcError,
+};
 use syscall::{
     Handle, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, SyscallError, Timeout, decode_tag,
     encode_tag, kind,
 };
 
 use crate::{
-    Delivery, ReceivedHandle,
+    Delivery, IssuedHandle,
     ipc_buffer::ipc_buffer_ptr,
-    svc::{handle_close, port_call, port_recv, port_reply, port_send},
+    svc::{port_call, port_recv, port_reply, port_send},
 };
 
 /// Канал ipc-контракта поверх port-handle.
@@ -41,21 +48,27 @@ impl PortTransport {
 impl Channel for PortTransport {
     type Resources = Delivery;
 
-    fn send(&self, bytes: &[u8], handles: &[u32], wait: Timeout) -> Result<(), IpcError> {
-        store_buffer(bytes, handles)?;
-        map_send_result(port_send(self.handle, wait))
+    #[inline]
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, Delivery>,
+        wait: Timeout,
+    ) -> Result<(), Unsent<'b, Delivery>> {
+        let sent =
+            store_buffer(&frame).and_then(|()| map_send_result(port_send(self.handle, wait)));
+        settle(sent, frame)
     }
 
+    #[inline]
     fn call<'b>(
         &self,
-        bytes: &[u8],
-        handles: &[u32],
-        reply: &'b mut FrameBytes,
+        frame: Outgoing<'b, Delivery>,
         wait: Timeout,
     ) -> Result<Incoming<'b, Delivery>, IpcError> {
-        store_buffer(bytes, handles)?;
-        map_send_result(port_call(self.handle, wait))?;
-        load_buffer(reply, None).ok_or(IpcError::PeerClosed)
+        store_buffer(&frame).and_then(|()| map_send_result(port_call(self.handle, wait)))?;
+        let OutgoingParts { buffer, resources } = frame.into_parts();
+        resources.transferred();
+        load_buffer(buffer, None).ok_or(IpcError::PeerClosed)
     }
 }
 
@@ -67,38 +80,41 @@ impl Listener for PortTransport {
         into: &'b mut FrameBytes,
         wait: Timeout,
     ) -> Result<Incoming<'b, Delivery>, RecvError> {
-        let ret = port_recv(self.handle, wait);
-        if ret < 0 {
-            return Err(map_recv_error(ret));
-        }
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        // Граница ABI: неотрицательный возврат `port_recv` называет reply-handle кадра.
-        let reply = NonZeroU32::new(ret as u32).map(Handle::<kind::Reply>::from_abi);
+        let reply = port_recv(self.handle, wait).map_err(map_recv_error)?;
         load_buffer(into, reply).ok_or(RecvError::Closed)
     }
 }
 
-impl ReplyChannel for ReceivedHandle<kind::Reply> {
-    fn send(self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
-        let reply = self.into_raw();
-        if let Err(error) = store_buffer(bytes, handles) {
-            let _ = handle_close(reply);
-            return Err(error);
+impl ReplyChannel for IssuedHandle<kind::Reply> {
+    type Resources = Delivery;
+
+    #[inline]
+    fn send(self, frame: Outgoing<'_, Delivery>) -> Result<(), Unsent<'_, Delivery>> {
+        // Отказ записи кадра закрывает канал ответа, и вызыватель получает `PeerClosed`.
+        let replied = store_buffer(&frame).and_then(|()| map_send_result(port_reply(self)));
+        settle(replied, frame)
+    }
+}
+
+#[inline]
+fn settle(
+    sent: Result<(), IpcError>,
+    frame: Outgoing<'_, Delivery>,
+) -> Result<(), Unsent<'_, Delivery>> {
+    match sent {
+        Ok(()) => {
+            frame.into_resources().transferred();
+            Ok(())
         }
-        map_send_result(port_reply(reply))
+        Err(error) => Err((error, frame)),
     }
 }
 
 fn load_buffer(
     into: &mut FrameBytes,
-    reply: Option<Handle<kind::Reply>>,
+    reply: Option<IssuedHandle<kind::Reply>>,
 ) -> Option<Incoming<'_, Delivery>> {
-    let Some(ptr) = ipc_buffer_ptr() else {
-        if let Some(reply) = reply {
-            let _ = handle_close(reply);
-        }
-        return None;
-    };
+    let ptr = ipc_buffer_ptr()?;
     // SAFETY: ядро замаппило per-thread IPC-буфер user-RW по одной странице; `ptr` валиден
     // и эксклюзивен для текущего потока. Здесь только чтение полей буфера.
     let buf = unsafe { &*ptr };
@@ -118,8 +134,9 @@ fn load_buffer(
     Some(Incoming { bytes, resources })
 }
 
-fn store_buffer(bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
-    if bytes.len() > IPC_BUFFER_DATA_MAX || handles.len() > IPC_BUFFER_MAX_CAPS {
+fn store_buffer(frame: &Outgoing<'_, Delivery>) -> Result<(), IpcError> {
+    let bytes = frame.as_bytes();
+    if bytes.len() > IPC_BUFFER_DATA_MAX {
         return Err(IpcError::FrameOverflow);
     }
 
@@ -132,24 +149,26 @@ fn store_buffer(bytes: &[u8], handles: &[u32]) -> Result<(), IpcError> {
             return Err(IpcError::Truncated);
         };
         target.copy_from_slice(bytes);
-        for (slot, &raw) in buf.caps.iter_mut().zip(handles) {
+        let mut ncaps = 0;
+        for (slot, raw) in buf.caps.iter_mut().zip(frame.resources().numbers()) {
             *slot = raw;
+            ncaps += 1;
         }
-        buf.tag = encode_tag(bytes.len(), handles.len());
+        buf.tag = encode_tag(bytes.len(), ncaps);
     }
 
     Ok(())
 }
 
-fn map_recv_error(ret: i64) -> RecvError {
-    match SyscallError::from_return(ret) {
-        Some(SyscallError::Timeout) => RecvError::Timeout,
-        Some(SyscallError::SenderGone) => RecvError::SenderGone(ipc_buffer_ptr().map_or(
+fn map_recv_error(error: SyscallError) -> RecvError {
+    match error {
+        SyscallError::Timeout => RecvError::Timeout,
+        SyscallError::SenderGone => RecvError::SenderGone(ipc_buffer_ptr().map_or(
             0,
             // SAFETY: см. `load_buffer`. Здесь только чтение поля буфера.
             |ptr| unsafe { (*ptr).badge },
         )),
-        Some(SyscallError::OutOfHandles | SyscallError::ResourceExhausted) => RecvError::Discarded,
+        SyscallError::OutOfHandles | SyscallError::ResourceExhausted => RecvError::Discarded,
         _ => RecvError::Closed,
     }
 }

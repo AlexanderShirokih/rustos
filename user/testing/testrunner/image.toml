@@ -57,18 +57,8 @@ path = "/budget-holder-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "device-forwarding-fixture"
-path = "/device-forwarding-fixture"
-
-[[programs]]
-package = "testrunner"
 bin = "irq-fixture"
 path = "/irq-fixture"
-
-[[programs]]
-package = "testrunner"
-bin = "mmio-pair-fixture"
-path = "/mmio-pair-fixture"
 
 [[programs]]
 package = "testrunner"
@@ -148,6 +138,10 @@ path = "/crash-filesystem"
 [[programs]]
 package = "driver-pl031"
 path = "/driver-pl031"
+
+[[programs]]
+package = "platform"
+path = "/platform"
 
 [[programs]]
 package = "namespace-router"

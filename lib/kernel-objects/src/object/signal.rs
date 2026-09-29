@@ -14,9 +14,7 @@ pub type Signal = OwnedHandle<kind::Signal>;
 impl OwnedHandle<kind::Signal> {
     /// Создаёт пустой `Signal` в текущем процессе.
     pub fn create() -> Result<Self> {
-        svc::signal_create()
-            .map(Self::from_handle)
-            .map_err(Error::Syscall)
+        svc::signal_create().map(Self::from).map_err(Error::Syscall)
     }
 
     /// Ждёт пересечения с `mask` до `timeout`. Возвращает наблюдаемую маску.

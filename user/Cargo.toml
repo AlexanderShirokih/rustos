@@ -11,6 +11,7 @@ members = [
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
     "system/namespace-router",
+    "system/platform",
     "system/rootkeeper",
     "testing/std-selftest",
     "testing/testrunner",
@@ -58,6 +59,7 @@ io = { path = "../lib/io" }
 ipc = { path = "../lib/ipc" }
 kernel-objects = { path = "../lib/kernel-objects" }
 log-abi = { path = "../lib/log-abi" }
+platform-abi = { path = "../lib/platform-abi" }
 rtc-abi = { path = "../lib/rtc-abi" }
 syscall = { path = "../lib/syscall" }
 syscall-user = { path = "../lib/syscall-user" }

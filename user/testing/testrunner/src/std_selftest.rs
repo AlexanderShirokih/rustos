@@ -15,7 +15,7 @@ use ipc::{
     IntoWireValue, Listener as _, Protocol as _, RecvError,
     wire::{Cap, MESSAGE_INLINE_MAX, Str},
 };
-use kernel_objects::{Delivery, Port, ReceivedHandle, Session, kind};
+use kernel_objects::{Delivery, IssuedHandle, Port, Session, kind};
 use kernel_tests::kernel_test;
 use managed_component::{Departure, Outcome};
 use runtime::{PortTransport, Priority, Timeout, spawn_owned};
@@ -93,8 +93,8 @@ impl file_system::Service<Delivery> for Failing<'_> {
         &mut self,
         frame: &Delivery,
         _size: u32,
-    ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
-        Err::<Cap<kind::MemoryRegion>, _>(error_of(frame))
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+        Err::<IssuedHandle<kind::MemoryRegion>, _>(error_of(frame))
     }
 
     fn open(
@@ -175,7 +175,7 @@ impl file_system::Service<Delivery> for Failing<'_> {
         &mut self,
         frame: &Delivery,
         _path: Str<'_, PATH_MAX>,
-        _region: ReceivedHandle<kind::MemoryRegion>,
+        _region: IssuedHandle<kind::MemoryRegion>,
         _size: u64,
     ) -> Result<u32, FileSystemError> {
         Err(error_of(frame))
@@ -185,16 +185,18 @@ impl file_system::Service<Delivery> for Failing<'_> {
         &mut self,
         frame: &Delivery,
         _fd: NodeDescriptor,
-    ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
-        Err::<Cap<kind::MemoryRegion>, _>(error_of(frame))
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+        Err::<IssuedHandle<kind::MemoryRegion>, _>(error_of(frame))
     }
 
     fn open_root(
         &mut self,
         _frame: &Delivery,
         path: Str<'_, PATH_MAX>,
-    ) -> impl IntoWireValue<Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>>
-    {
+    ) -> impl IntoWireValue<
+        Delivery,
+        Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
+    > {
         self.window(path.as_str()).map(Session::from_handle)
     }
 }

@@ -46,6 +46,10 @@ pub trait SyscallRuntime: Send + Sync {
     /// определён.
     fn current_process_object(&self) -> Option<Arc<ProcessObject>>;
 
+    /// Принадлежит ли поток процессу текущего потока. `None`, если поток или текущий поток
+    /// уже убран из таблицы потоков.
+    fn thread_in_current_process(&self, thread: &Arc<ThreadObject>) -> Option<bool>;
+
     /// Создаёт user-процесс с пустым адресным пространством и handle-таблицей.
     fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError>;
 

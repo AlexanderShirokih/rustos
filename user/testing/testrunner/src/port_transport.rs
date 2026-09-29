@@ -3,8 +3,8 @@
 //! заклеймённую и незаклеймённую копии port-хэндла.
 
 use core::{
-    num::{NonZeroU32, NonZeroU64},
-    sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst},
+    num::NonZeroU64,
+    sync::atomic::{AtomicI64, Ordering::SeqCst},
 };
 
 use ipc::{
@@ -13,7 +13,7 @@ use ipc::{
 };
 use kernel_objects::{Delivery, Port};
 use kernel_tests::kernel_test;
-use runtime::{PortTransport, Priority, Timeout, spawn};
+use runtime::{PortTransport, Priority, Timeout, spawn_owned};
 use syscall::{Rights, kind};
 
 use crate::{
@@ -37,29 +37,15 @@ ipc::protocol! {
     }
 }
 
-static BADGED_RAW: AtomicU64 = AtomicU64::new(0);
-static PLAIN_RAW: AtomicU64 = AtomicU64::new(0);
 static CLIENT_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
 
-extern "C" fn badge_client(_arg: usize) -> u32 {
-    let badged = adopt_port(&BADGED_RAW);
-    let plain = adopt_port(&PLAIN_RAW);
-
+fn badge_client(badged: &Port, plain: &Port) -> u32 {
     // При рандеву порядок приёма сервером совпадает с порядком отправок.
     let first = badged.send_bytes(b"badged", Timeout::INFINITE);
     let second = plain.send_bytes(b"plain", Timeout::INFINITE);
 
     CLIENT_RESULT.store(i64::from(first.is_ok() && second.is_ok()), SeqCst);
     0
-}
-
-fn adopt_port(raw: &AtomicU64) -> Port {
-    let id = u32::try_from(raw.load(SeqCst)).expect("HandleId fits u32");
-    Port::from_handle(
-        NonZeroU32::new(id)
-            .map(syscall::Handle::from_abi)
-            .expect("minted port copy"),
-    )
 }
 
 #[kernel_test]
@@ -73,11 +59,14 @@ fn server_reads_badge_of_receiving_handle() {
     let plain = port
         .duplicate(Rights::WRITE, None)
         .expect("mint unbadged copy");
-    BADGED_RAW.store(u64::from(badged.into_raw().raw()), SeqCst);
-    PLAIN_RAW.store(u64::from(plain.into_raw().raw()), SeqCst);
     CLIENT_RESULT.store(i64::MIN, SeqCst);
 
-    let client = spawn(badge_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
+    let client = spawn_owned(
+        move || badge_client(&badged, &plain),
+        STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("spawn client");
 
     let server = PortTransport::new(port.as_raw());
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
@@ -121,7 +110,10 @@ fn client_cast_reports_peer_close_when_receiver_closes_before_recv() {
 }
 
 impl answer_exhaustion::Service<Delivery> for Option<Port> {
-    fn request(&mut self, _frame: &Delivery) -> impl IntoWireValue<Read = Cap<kind::Port>> {
+    fn request(
+        &mut self,
+        _frame: &Delivery,
+    ) -> impl IntoWireValue<Delivery, Read = Cap<kind::Port>> {
         self.take().expect("capability of the answer")
     }
 }

@@ -17,19 +17,17 @@ use std::{
 };
 
 use ipc::{
-    Channel, FrameBytes, Incoming, ReceivedResources, ReplyChannel, Timeout,
-    wire::{Cap, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str, value},
+    Channel, Incoming, Outgoing, ReceivedResources, ReplyChannel, Timeout, Unsent,
+    wire::{Cap, Header, IpcError, MessageBuf, Session, Str, value},
 };
-use ipc_test::{MockChannel, MockReply, MockResources};
-use syscall::{Handle, ObjectKind, kind};
+use ipc_test::{MockChannel, MockHandle, MockReply, MockResources};
+use syscall::{ObjectKind, kind};
 
-fn cap_of<K: ObjectKind>(raw: u32) -> Cap<K> {
-    Cap::from_handle(Handle::from_abi(
-        std::num::NonZeroU32::new(raw).expect("non-zero"),
-    ))
+fn cap_of<K: ObjectKind>(raw: u32) -> MockHandle<K> {
+    MockHandle::new(raw)
 }
 
-fn frame_of(ordinal: u64, fields: &[u32]) -> MessageBuf {
+fn frame_of<R: ReceivedResources>(ordinal: u64, fields: &[u32]) -> MessageBuf<R> {
     let mut frame = MessageBuf::new();
     frame
         .write_header(&Header::new(ordinal))
@@ -175,10 +173,9 @@ fn the_protocol_identity_comes_from_the_declared_name() {
 #[test]
 fn a_call_of_an_unknown_operation_is_refused() {
     let (answer, _) = serve(CalcServer::default(), 1, calc::dispatch, |channel| {
-        let frame = frame_of(0xDEAD_DEAD_DEAD_DEAD, &[]);
-        let mut reply = [0u8; MESSAGE_INLINE_MAX];
+        let mut frame = frame_of(0xDEAD_DEAD_DEAD_DEAD, &[]);
         channel
-            .call(frame.as_bytes(), &[], &mut reply, Timeout::INFINITE)
+            .call(frame.outgoing(), Timeout::INFINITE)
             .map(|answer| answer.bytes.len())
     });
 
@@ -188,9 +185,10 @@ fn a_call_of_an_unknown_operation_is_refused() {
 #[test]
 fn a_call_frame_without_a_reply_channel_reaches_no_handler() {
     let ((), server) = serve(CalcServer::default(), 1, calc::dispatch, |channel| {
-        let frame = frame_of(calc::add::ORDINAL, &[2, 3]);
+        let mut frame = frame_of(calc::add::ORDINAL, &[2, 3]);
         channel
-            .send(frame.as_bytes(), &[], Timeout::INFINITE)
+            .send(frame.outgoing(), Timeout::INFINITE)
+            .map_err(|(error, _)| error)
             .expect("send ok");
     });
 
@@ -204,9 +202,10 @@ fn an_answer_of_another_operation_is_refused() {
         scope.spawn(|| {
             listener.serve(|mut frame| {
                 let reply = frame.resources.take_reply().expect("a call brings a reply");
-                let answer = frame_of(calc::div::ORDINAL, &[999]);
+                let mut answer = frame_of(calc::div::ORDINAL, &[999]);
                 reply
-                    .send(answer.as_bytes(), &[])
+                    .send(answer.outgoing())
+                    .map_err(|(error, _)| error)
                     .expect("the caller waits");
             });
         });
@@ -324,7 +323,7 @@ fn nested_and_borrowing_aggregates_round_trip() {
 
 ipc::wire_value! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct Vended<S = ipc::wire::Cap<kind::Port>> {
+    pub struct Vended<S = ipc::wire::Cap<kind::Port>> {
         session: S,
         prefix_len: u32,
     }
@@ -335,12 +334,11 @@ ipc::protocol! {
     mod vendor {
         name = "Vendor";
 
-        call fn vend(prefix_len: u32) -> Vended;
+        call fn vend(prefix_len: u32) -> own Vended;
     }
 }
 
-const STAGED_CAP: u32 = 0x9191;
-
+#[derive(Default)]
 struct TrackedResources {
     caps: Vec<Option<TrackedCap>>,
 }
@@ -355,19 +353,38 @@ impl Drop for TrackedCap {
     }
 }
 
+enum NoReply {}
+
+impl ReplyChannel for NoReply {
+    type Resources = TrackedResources;
+
+    fn send(
+        self,
+        _frame: Outgoing<'_, TrackedResources>,
+    ) -> Result<(), Unsent<'_, TrackedResources>> {
+        match self {}
+    }
+}
+
 impl ReceivedResources for TrackedResources {
     type Handle<K: ObjectKind> = TrackedCap;
-    type Reply = core::convert::Infallible;
+    type Reply = NoReply;
 
     fn take_handle<K: ObjectKind>(&mut self, index: u8) -> Option<TrackedCap> {
         self.caps.get_mut(usize::from(index))?.take()
     }
 
-    fn reply_channel(_handle: TrackedCap) -> Option<Self::Reply> {
+    fn put_handle<K: ObjectKind>(&mut self, handle: TrackedCap) -> Option<u8> {
+        let index = u8::try_from(self.caps.len()).ok()?;
+        self.caps.push(Some(handle));
+        Some(index)
+    }
+
+    fn reply_channel(_handle: TrackedCap) -> Option<NoReply> {
         None
     }
 
-    fn take_reply(&mut self) -> Option<Self::Reply> {
+    fn take_reply(&mut self) -> Option<NoReply> {
         None
     }
 }
@@ -379,33 +396,35 @@ struct IncompleteVend {
 impl Channel for IncompleteVend {
     type Resources = TrackedResources;
 
-    fn send(&self, _bytes: &[u8], _handles: &[u32], _wait: Timeout) -> Result<(), IpcError> {
-        Err(IpcError::PeerClosed)
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, TrackedResources>,
+        _wait: Timeout,
+    ) -> Result<(), Unsent<'b, TrackedResources>> {
+        Err((IpcError::PeerClosed, frame))
     }
 
     fn call<'b>(
         &self,
-        bytes: &[u8],
-        _handles: &[u32],
-        reply: &'b mut FrameBytes,
+        frame: Outgoing<'b, TrackedResources>,
         _wait: Timeout,
     ) -> Result<Incoming<'b, TrackedResources>, IpcError> {
-        let header = Header::split(bytes)?.header;
-        let mut frame = MessageBuf::new();
-        frame.write_header(&header)?;
-        frame.write_nested(1, |vended| vended.write_handle(1, STAGED_CAP))?;
-        frame.finish()?;
+        let header = Header::split(frame.as_bytes())?.header;
+        let reply = frame.into_parts().buffer;
+        let mut answer = MessageBuf::<TrackedResources>::new();
+        answer.write_header(&header)?;
+        let staged = TrackedCap {
+            closed: Arc::clone(&self.closed),
+        };
+        answer.write_nested(1, |vended| vended.write_handle::<kind::Port>(1, staged))?;
+        answer.finish()?;
         let bytes = reply
-            .get_mut(..frame.len())
+            .get_mut(..answer.len())
             .ok_or(IpcError::FrameOverflow)?;
-        bytes.copy_from_slice(frame.as_bytes());
+        bytes.copy_from_slice(answer.as_bytes());
         Ok(Incoming {
             bytes,
-            resources: TrackedResources {
-                caps: vec![Some(TrackedCap {
-                    closed: Arc::clone(&self.closed),
-                })],
-            },
+            resources: answer.into_resources(),
         })
     }
 }
@@ -424,49 +443,18 @@ fn an_aggregate_decode_failure_closes_the_delivered_capability() {
     assert_eq!(closed.load(Ordering::SeqCst), 1);
 }
 
-struct TrackedHandle {
-    raw: u32,
-    fates: Fates,
-}
-
-impl Drop for TrackedHandle {
-    fn drop(&mut self) {
-        self.fates.drops.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-impl ipc::IntoWireValue for TrackedHandle {
-    type Read = Cap<kind::Port>;
-
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_handle(field_id, self.raw)
-    }
-
-    fn relinquish(self) {
-        self.fates.relinquishes.fetch_add(1, Ordering::SeqCst);
-        core::mem::forget(self);
-    }
-}
-
 #[derive(Default, Clone)]
 struct Fates {
-    drops: Arc<AtomicUsize>,
-    relinquishes: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
 }
 
 impl Fates {
-    fn handle(&self, raw: u32) -> TrackedHandle {
-        TrackedHandle {
-            raw,
-            fates: self.clone(),
-        }
+    fn handle(&self, raw: u32) -> MockHandle<kind::Port> {
+        MockHandle::tracked(raw, &self.closed)
     }
 
-    fn counts(&self) -> (usize, usize) {
-        (
-            self.drops.load(Ordering::SeqCst),
-            self.relinquishes.load(Ordering::SeqCst),
-        )
+    fn closed(&self) -> usize {
+        self.closed.load(Ordering::SeqCst)
     }
 }
 
@@ -495,6 +483,7 @@ ipc::protocol! {
         name = "OwnedCast";
 
         cast fn deliver(own capability: ipc::wire::Cap<kind::Port>);
+        cast fn deliver_pair(own first: ipc::wire::Cap<kind::Port>, own second: ipc::wire::Cap<kind::Port>);
     }
 }
 
@@ -503,15 +492,22 @@ struct Lender {
 }
 
 impl lender::Service<MockResources> for Lender {
-    fn keep(&mut self, _frame: &MockResources, capability: Cap<kind::Port>) -> u32 {
-        capability.raw().get()
+    fn keep(&mut self, _frame: &MockResources, capability: MockHandle<kind::Port>) -> u32 {
+        capability.raw()
     }
 
-    fn lend(&mut self, _frame: &MockResources) -> impl ipc::IntoWireValue<Read = Cap<kind::Port>> {
+    fn lend(
+        &mut self,
+        _frame: &MockResources,
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Cap<kind::Port>> {
         self.fates.handle(0x61)
     }
 
-    fn lease(&mut self, _frame: &MockResources, len: u32) -> impl ipc::IntoWireValue<Read = Lease> {
+    fn lease(
+        &mut self,
+        _frame: &MockResources,
+        len: u32,
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Lease> {
         Lease {
             session: self.fates.handle(0x62),
             len,
@@ -521,17 +517,26 @@ impl lender::Service<MockResources> for Lender {
 
 #[derive(Default)]
 struct Keeper {
-    claimed: Option<Cap<kind::Port>>,
+    claimed: Vec<MockHandle<kind::Port>>,
 }
 
 impl owned_cast::Service<MockResources> for Keeper {
-    fn deliver(&mut self, _frame: &MockResources, capability: Cap<kind::Port>) {
-        self.claimed = Some(capability);
+    fn deliver(&mut self, _frame: &MockResources, capability: MockHandle<kind::Port>) {
+        self.claimed.push(capability);
+    }
+
+    fn deliver_pair(
+        &mut self,
+        _frame: &MockResources,
+        first: MockHandle<kind::Port>,
+        second: MockHandle<kind::Port>,
+    ) {
+        self.claimed.extend([first, second]);
     }
 }
 
 #[test]
-fn a_delivered_owned_parameter_is_relinquished() {
+fn a_delivered_owned_parameter_stays_open_at_its_sender() {
     let fates = Fates::default();
 
     let (kept, _) = serve(
@@ -549,12 +554,12 @@ fn a_delivered_owned_parameter_is_relinquished() {
     });
 
     assert_eq!(kept, Ok(0x41));
-    assert_eq!(keeper.claimed, Some(cap_of(0x42)));
-    assert_eq!(fates.counts(), (0, 2));
+    assert_eq!(keeper.claimed, [cap_of(0x42)]);
+    assert_eq!(fates.closed(), 0);
 }
 
 #[test]
-fn an_unsent_one_way_parameter_comes_back_to_its_sender() {
+fn an_unsent_one_way_parameter_comes_back_as_its_receiver_reads_it() {
     let fates = Fates::default();
     let (channel, listener) = ipc_test::pair();
     drop(listener);
@@ -564,10 +569,101 @@ fn an_unsent_one_way_parameter_comes_back_to_its_sender() {
         .expect_err("the cast is refused");
 
     assert_eq!(refused.error, IpcError::PeerClosed);
-    assert_eq!(refused.value.raw, 0x43);
-    assert_eq!(fates.counts(), (0, 0));
+    let capability = refused.into_value().expect("the frame is read");
+    assert_eq!(capability, cap_of(0x43));
+    assert_eq!(fates.closed(), 0);
+    drop(capability);
+    assert_eq!(fates.closed(), 1);
+}
+
+#[test]
+fn unsent_one_way_parameters_come_back_in_declaration_order() {
+    let fates = Fates::default();
+    let (channel, listener) = ipc_test::pair();
+    drop(listener);
+
+    let refused = owned_cast::Client::new(channel)
+        .deliver_pair(fates.handle(0x45), fates.handle(0x46))
+        .expect_err("the cast is refused");
+
+    assert_eq!(refused.into_value(), Ok((cap_of(0x45), cap_of(0x46))));
+    assert_eq!(fates.closed(), 2);
+}
+
+#[test]
+fn a_dropped_undelivered_closes_its_handles() {
+    let fates = Fates::default();
+    let (channel, listener) = ipc_test::pair();
+    drop(listener);
+
+    let refused = owned_cast::Client::new(channel)
+        .deliver_pair(fates.handle(0x47), fates.handle(0x48))
+        .expect_err("the cast is refused");
+
+    assert_eq!(fates.closed(), 0);
     drop(refused);
-    assert_eq!(fates.counts(), (1, 0));
+    assert_eq!(fates.closed(), 2);
+}
+
+struct Unwritable;
+
+impl ipc::IntoWireValue<MockResources> for Unwritable {
+    type Read = Cap<kind::Port>;
+
+    fn write_into(
+        self,
+        _frame: &mut MessageBuf<MockResources>,
+        _field_id: u8,
+    ) -> Result<(), IpcError> {
+        Err(IpcError::InvalidValue)
+    }
+}
+
+#[test]
+fn a_frame_refused_while_written_closes_its_written_handles_at_once() {
+    let fates = Fates::default();
+    let (channel, _listener) = ipc_test::pair();
+
+    let refused = owned_cast::Client::new(channel)
+        .deliver_pair(fates.handle(0x49), Unwritable)
+        .expect_err("the second parameter is not written");
+
+    assert_eq!(refused.error, IpcError::InvalidValue);
+    assert_eq!(fates.closed(), 1);
+    assert_eq!(refused.into_value(), Err(IpcError::InvalidValue));
+}
+
+#[test]
+fn a_refusal_closes_the_handles_its_value_leaves_unnamed() {
+    let fates = Fates::default();
+    let mut frame = MessageBuf::<MockResources>::new();
+    frame
+        .write_header(&Header::new(owned_cast::deliver::ORDINAL))
+        .expect("header ok");
+    frame.write_handle(1, fates.handle(0x4A)).expect("first ok");
+    frame
+        .write_handle(2, fates.handle(0x4B))
+        .expect("second ok");
+    frame.finish().expect("finish ok");
+
+    let refused = ipc::Undelivered::__new(
+        (IpcError::PeerClosed, frame.outgoing()),
+        |body, resources| {
+            let field = ipc::wire::FieldCursor::new(body)
+                .next_field()?
+                .ok_or(IpcError::MissingField)?;
+            <Cap<kind::Port> as ipc::WireValue<'_, MockResources>>::from_field(
+                field.data, resources,
+            )
+        },
+    );
+
+    assert_eq!(fates.closed(), 1);
+    let capability = refused.into_value().expect("the frame is read");
+    assert_eq!(capability, cap_of(0x4A));
+    assert_eq!(fates.closed(), 1);
+    drop(capability);
+    assert_eq!(fates.closed(), 2);
 }
 
 #[test]
@@ -579,11 +675,11 @@ fn an_unsent_call_parameter_closes_its_handle() {
     let refused = lender::Client::new(channel).keep(fates.handle(0x44));
 
     assert_eq!(refused, Err(IpcError::PeerClosed));
-    assert_eq!(fates.counts(), (1, 0));
+    assert_eq!(fates.closed(), 1);
 }
 
 #[test]
-fn a_delivered_owned_answer_is_relinquished_with_its_aggregate() {
+fn a_delivered_owned_answer_stays_open_at_its_server() {
     let fates = Fates::default();
 
     let (answers, _) = serve(
@@ -610,7 +706,7 @@ fn a_delivered_owned_answer_is_relinquished_with_its_aggregate() {
             }
         )
     );
-    assert_eq!(fates.counts(), (0, 2));
+    assert_eq!(fates.closed(), 0);
 }
 
 #[test]
@@ -626,7 +722,7 @@ fn an_undelivered_owned_answer_closes_its_handle_and_fails_the_dispatch() {
     });
 
     assert_eq!(dispatched, Err(IpcError::PeerClosed));
-    assert_eq!(fates.counts(), (1, 0));
+    assert_eq!(fates.closed(), 1);
 }
 
 ipc::wire_value! {
@@ -648,7 +744,7 @@ ipc::protocol! {
     }
 }
 
-type DealerSession = ipc::wire::Session<dealer::Protocol>;
+type DealerSession = Session<dealer::Protocol, MockHandle<kind::Port>>;
 
 struct Dealer;
 
@@ -657,7 +753,7 @@ impl dealer::Service<MockResources> for Dealer {
         &mut self,
         _frame: &MockResources,
         key: u32,
-    ) -> impl ipc::IntoWireValue<Read = Result<DealerSession, u16>> {
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Session<dealer::Protocol>, u16>> {
         if key == 0 {
             return Err(3);
         }
@@ -668,7 +764,7 @@ impl dealer::Service<MockResources> for Dealer {
         &mut self,
         _frame: &MockResources,
         len: u32,
-    ) -> impl ipc::IntoWireValue<Read = Bundle> {
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Bundle> {
         Bundle {
             session: DealerSession::from_handle(cap_of(0x5A)),
             len,
@@ -676,7 +772,7 @@ impl dealer::Service<MockResources> for Dealer {
     }
 
     fn take(&mut self, _frame: &MockResources, session: DealerSession) -> u32 {
-        session.into_handle().raw().get()
+        session.into_handle().raw()
     }
 }
 
@@ -716,7 +812,7 @@ fn a_session_parameter_is_typed_as_a_capability() {
 
     assert_eq!(taken, Ok(0x5C));
     assert_eq!(
-        <DealerSession as ipc::WireTyped>::WIRE_TYPE,
+        <Session<dealer::Protocol> as ipc::WireTyped>::WIRE_TYPE,
         ipc::schema::WireType::Capability
     );
 }
@@ -728,6 +824,7 @@ ipc::protocol! {
 
         call(defer) fn hold(tag: u32) -> u32;
         call(defer) fn grant() -> own ipc::wire::Cap<kind::Port>;
+        call(defer) fn grant_lease() -> own Lease;
     }
 }
 
@@ -735,6 +832,7 @@ ipc::protocol! {
 struct Ledger {
     held: Vec<(u32, ledger::hold::Reply<MockReply>)>,
     granted: Vec<ledger::grant::Reply<MockReply>>,
+    leased: Vec<ledger::grant_lease::Reply<MockReply>>,
 }
 
 impl ledger::Service<MockResources> for Ledger {
@@ -744,6 +842,14 @@ impl ledger::Service<MockResources> for Ledger {
 
     fn grant(&mut self, _frame: &MockResources, reply: ledger::grant::Reply<MockReply>) {
         self.granted.push(reply);
+    }
+
+    fn grant_lease(
+        &mut self,
+        _frame: &MockResources,
+        reply: ledger::grant_lease::Reply<MockReply>,
+    ) {
+        self.leased.push(reply);
     }
 }
 
@@ -835,8 +941,40 @@ fn an_undelivered_debt_hands_its_value_back() {
         .expect_err("the caller is gone");
 
     assert_eq!(refused.error, IpcError::PeerClosed);
-    assert_eq!(refused.value.raw, 0x71);
-    assert_eq!(fates.counts(), (0, 0));
-    drop(refused);
-    assert_eq!(fates.counts(), (1, 0));
+    let capability = refused.into_value().expect("the frame is read");
+    assert_eq!(capability, cap_of(0x71));
+    assert_eq!(fates.closed(), 0);
+    drop(capability);
+    assert_eq!(fates.closed(), 1);
+}
+
+#[test]
+fn an_undelivered_aggregate_answer_comes_back_as_its_caller_reads_it() {
+    let fates = Fates::default();
+    let mut ledger = Ledger::default();
+    serve_abandoned(&mut ledger, ledger::dispatch, |channel| {
+        let client = ledger::Client::new(channel).with_wait(Timeout::POLL);
+        assert!(matches!(client.grant_lease(), Err(IpcError::Timeout)));
+    })
+    .expect("dispatch ok");
+    let reply = ledger.leased.pop().expect("the debt is kept");
+
+    let refused = reply
+        .send(Lease {
+            session: fates.handle(0x72),
+            len: 5,
+        })
+        .expect_err("the caller is gone");
+
+    let lease = refused.into_value().expect("the frame is read");
+    assert_eq!(
+        lease,
+        Lease {
+            session: cap_of(0x72),
+            len: 5,
+        }
+    );
+    assert_eq!(fates.closed(), 0);
+    drop(lease);
+    assert_eq!(fates.closed(), 1);
 }

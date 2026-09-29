@@ -10,15 +10,15 @@ use filesystem_abi::{
     namespace_admin, rebase,
 };
 use ipc::wire::{IpcError, Session, Str};
-use kernel_objects::{Delivery, Port, ReceivedHandle, SessionTransport, kind};
+use kernel_objects::{Delivery, IssuedHandle, Port, SessionTransport, kind};
 use runtime::{Mutex, Timeout, log_fmt};
 
 const OPEN_ROOT_TIMEOUT: Timeout = Timeout::from_secs(1);
 const WAITING_REQUESTS_MAX: usize = 64;
 const VIEW_WAITING_REQUESTS_MAX: usize = 8;
 
-type Debt = ReceivedHandle<kind::Reply>;
-type ReceivedSession = Session<file_system::Protocol, ReceivedHandle<kind::Port>>;
+type Debt = IssuedHandle<kind::Reply>;
+type ReceivedSession = Session<file_system::Protocol, IssuedHandle<kind::Port>>;
 type FileSystemClient = Arc<Mutex<file_system::Client<SessionTransport>>>;
 type Route<'m> = Option<(&'m Mount, String, u32)>;
 

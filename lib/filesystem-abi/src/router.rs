@@ -44,7 +44,6 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroU32;
     use std::{
         string::{String, ToString},
         sync::{Arc, Mutex},
@@ -52,12 +51,16 @@ mod tests {
         vec::Vec,
     };
 
-    use ipc::wire::{Cap, Session, Str};
+    use ipc::wire::{Session, Str};
+    use ipc_test::{MockHandle, MockReply, MockResources};
+    use syscall::kind;
 
     use super::{FileSystemError, PATH_MAX, ResolvedPair, namespace};
     use crate::file_system;
 
-    const SESSION: Session<file_system::Protocol> = Session::from_handle(cap(0x31));
+    type FileSystemSession = Session<file_system::Protocol, MockHandle<kind::Port>>;
+
+    const SESSION: FileSystemSession = Session::from_handle(MockHandle::new(0x31));
 
     const MOUNTS: [&str; 2] = ["/boot", "/data"];
 
@@ -65,12 +68,12 @@ mod tests {
         resolved: Arc<Mutex<Vec<String>>>,
     }
 
-    impl<F: ipc::ReceivedResources> namespace::Service<F> for Router {
+    impl namespace::Service<MockResources> for Router {
         fn resolve(
             &mut self,
-            _frame: &F,
+            _frame: &MockResources,
             path: Str<'_, PATH_MAX>,
-            reply: namespace::resolve::Reply<F::Reply>,
+            reply: namespace::resolve::Reply<MockReply>,
         ) {
             self.resolved
                 .lock()
@@ -86,10 +89,10 @@ mod tests {
 
         fn resolve_pair(
             &mut self,
-            _frame: &F,
+            _frame: &MockResources,
             from: Str<'_, PATH_MAX>,
             to: Str<'_, PATH_MAX>,
-            reply: namespace::resolve_pair::Reply<F::Reply>,
+            reply: namespace::resolve_pair::Reply<MockReply>,
         ) {
             let mut resolved = self.resolved.lock().expect("mutex not poisoned");
             resolved.push(from.as_str().to_string());
@@ -102,7 +105,7 @@ mod tests {
         }
     }
 
-    fn pair_of(from: &str, to: &str) -> Result<ResolvedPair, FileSystemError> {
+    fn pair_of(from: &str, to: &str) -> Result<ResolvedPair<FileSystemSession>, FileSystemError> {
         let first = mount_of(from).ok_or(FileSystemError::NotFound)?;
         let second = mount_of(to).ok_or(FileSystemError::NotFound)?;
         if first != second {
@@ -119,13 +122,6 @@ mod tests {
             path.strip_prefix(prefix)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
         })
-    }
-
-    const fn cap<K: syscall::ObjectKind>(raw: u32) -> Cap<K> {
-        match NonZeroU32::new(raw) {
-            Some(id) => Cap::from_handle(syscall::Handle::from_abi(id)),
-            None => panic!("non-zero"),
-        }
     }
 
     fn path(text: &str) -> Str<'_, PATH_MAX> {

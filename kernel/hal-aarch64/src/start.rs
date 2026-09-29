@@ -25,8 +25,8 @@ mod consts;
 mod cpu;
 mod exception;
 mod memory;
-#[cfg(feature = "power-semihosting")]
 mod power;
+mod psci;
 mod sched;
 mod smp;
 

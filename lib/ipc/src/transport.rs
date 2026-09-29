@@ -2,14 +2,18 @@
 //!
 //! Клиентская сторона - [`Channel`]: односторонняя отправка и вызов с ответом. Серверная
 //! сторона - [`Listener`]: приём кадра вместе с ресурсами его доставки. Ответ встречному вызову
-//! уходит каналом [`ReplyChannel`], который приходит в ресурсах кадра вызова. Кадр кодируется в
-//! `bytes`, capability - в отдельном `handles`-векторе.
+//! уходит каналом [`ReplyChannel`], который приходит в ресурсах кадра вызова. Канал принимает
+//! исходящий кадр [`Outgoing`]: байты, заимствованные у построителя
+//! [`MessageBuf`](crate::wire::MessageBuf), и владельцев его capability значением.
 
 use core::fmt;
 
 use syscall::Timeout;
 
-use crate::wire::{IpcError, MESSAGE_INLINE_MAX};
+use crate::{
+    ReceivedResources,
+    wire::{Header, IpcError, MESSAGE_INLINE_MAX},
+};
 
 /// Буфер приёма одного кадра.
 pub type FrameBytes = [u8; MESSAGE_INLINE_MAX];
@@ -22,23 +26,90 @@ pub struct Incoming<'b, R> {
     pub resources: R,
 }
 
+/// Исходящий кадр: байты в буфере построителя [`MessageBuf`](crate::wire::MessageBuf) и
+/// ресурсы с владельцами его capability.
+///
+/// Строит его только [`MessageBuf::outgoing`](crate::wire::MessageBuf::outgoing), и индексы
+/// capability в байтах называют слоты тех же ресурсов. Разрушение кадра закрывает capability,
+/// которые он держит.
+#[derive(Debug)]
+pub struct Outgoing<'b, R> {
+    buffer: &'b mut FrameBytes,
+    len: usize,
+    resources: R,
+}
+
+impl<'b, R> Outgoing<'b, R> {
+    pub(crate) const fn new(buffer: &'b mut FrameBytes, len: usize, resources: R) -> Self {
+        Self {
+            buffer,
+            len,
+            resources,
+        }
+    }
+
+    /// Байты кадра: заголовок и тело.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.buffer.get(..self.len).unwrap_or_default()
+    }
+
+    /// Ресурсы кадра: владельцы capability в порядке слотов.
+    #[must_use]
+    pub const fn resources(&self) -> &R {
+        &self.resources
+    }
+
+    /// Ресурсы кадра без его байтов.
+    #[must_use]
+    pub fn into_resources(self) -> R {
+        self.resources
+    }
+
+    /// Буфер построителя целиком и ресурсы кадра.
+    #[must_use]
+    pub fn into_parts(self) -> OutgoingParts<'b, R> {
+        OutgoingParts {
+            buffer: self.buffer,
+            resources: self.resources,
+        }
+    }
+}
+
+/// Части исходящего кадра - буфер построителя и ресурсы кадра. Вызов принимает кадр ответа в
+/// этот буфер.
+#[derive(Debug)]
+pub struct OutgoingParts<'b, R> {
+    /// Буфер построителя целиком.
+    pub buffer: &'b mut FrameBytes,
+    /// Ресурсы кадра: владельцы capability в порядке слотов.
+    pub resources: R,
+}
+
+/// Отказ отправки кадра: причина и кадр вместе с владельцами его capability.
+pub type Unsent<'b, R> = (IpcError, Outgoing<'b, R>);
+
 /// Клиентская сторона канала.
 pub trait Channel {
-    /// Ресурсы кадра ответа.
-    type Resources: crate::ReceivedResources;
+    /// Ресурсы исходящего кадра и кадра ответа.
+    type Resources: ReceivedResources;
 
     /// Отправляет односторонний кадр. Успех означает, что получатель принял кадр, и его
-    /// capability перенесены. `Timeout` - получатель не принял кадр за срок `wait`, и capability
-    /// остались у отправителя. `PeerClosed` - у канала нет получателя.
-    fn send(&self, bytes: &[u8], handles: &[u32], wait: Timeout) -> Result<(), IpcError>;
+    /// capability перенесены. Отказ возвращает кадр вместе с capability. `Timeout` - получатель
+    /// не принял кадр за срок `wait`, `PeerClosed` - у канала нет получателя.
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, Self::Resources>,
+        wait: Timeout,
+    ) -> Result<(), Unsent<'b, Self::Resources>>;
 
-    /// Отправляет кадр вызова и принимает в `reply` кадр ответа этого вызова. `Timeout` -
-    /// ответ не пришёл за срок `wait`, `PeerClosed` - получатель ушёл либо отменил ответ.
+    /// Отправляет кадр вызова и принимает кадр ответа этого вызова в буфер кадра вызова. Отказ
+    /// разрушает кадр вызова и закрывает его capability, в том числе уже перенесённые серверу.
+    /// `Timeout` - ответ не пришёл за срок `wait`, `PeerClosed` - получатель ушёл либо отменил
+    /// ответ.
     fn call<'b>(
         &self,
-        bytes: &[u8],
-        handles: &[u32],
-        reply: &'b mut FrameBytes,
+        frame: Outgoing<'b, Self::Resources>,
         wait: Timeout,
     ) -> Result<Incoming<'b, Self::Resources>, IpcError>;
 }
@@ -87,23 +158,63 @@ impl From<RecvError> for IpcError {
 /// Канал отправляет единственный кадр ответа и исчерпывается на любом исходе отправки.
 /// Разрушение канала без отправки отменяет ответ, и вызыватель получает `PeerClosed`.
 pub trait ReplyChannel: Sized {
-    /// Отправляет вызывателю кадр `bytes` и его handle-вектор `handles`. `PeerClosed`, если
-    /// вызыватель больше не ждёт ответа. При отказе capability `handles` остаются у
-    /// отправителя.
-    fn send(self, bytes: &[u8], handles: &[u32]) -> Result<(), IpcError>;
+    /// Ресурсы кадра ответа.
+    type Resources: ReceivedResources;
+
+    /// Отправляет вызывателю кадр ответа `frame`. `PeerClosed`, если вызыватель больше не ждёт
+    /// ответа. Отказ возвращает кадр вместе с capability отправителю.
+    fn send(self, frame: Outgoing<'_, Self::Resources>) -> Result<(), Unsent<'_, Self::Resources>>;
 }
 
-/// Неотправленное значение вместе с причиной отказа. Capability значения остались у
-/// отправителя.
+/// Значение неотправленного кадра вместе с причиной отказа.
+///
+/// Кадр разобран при отказе тем же декодером, каким его читает получатель, и `Undelivered`
+/// держит итог разбора - значение `V` с capability, которые оно называет. Capability кадра, не
+/// названные значением, закрыты при разборе, а разрушение `Undelivered` закрывает остальные.
+/// Отказ записи кадра закрывает все его capability, и значение заменяет причина отказа.
 pub struct Undelivered<V> {
     /// Причина отказа отправки.
     pub error: IpcError,
-    /// Значение, которое отправка не передала.
-    pub value: V,
+    value: Result<V, IpcError>,
+}
+
+impl<V> Undelivered<V> {
+    #[doc(hidden)]
+    pub fn __new<R>(
+        (error, frame): Unsent<'_, R>,
+        read: impl FnOnce(&[u8], &mut R) -> Result<V, IpcError>,
+    ) -> Self {
+        let Outgoing {
+            buffer,
+            len,
+            mut resources,
+        } = frame;
+        let value = buffer
+            .get(..len)
+            .ok_or(IpcError::Truncated)
+            .and_then(Header::split)
+            .and_then(|parts| read(parts.body, &mut resources));
+        Self { error, value }
+    }
+
+    pub(crate) fn unwritten(error: IpcError) -> Self {
+        Self {
+            error,
+            value: Err(error),
+        }
+    }
+
+    /// Значение неотправленного кадра в том виде, в каком его читает получатель. Отказ разбора
+    /// кадра приходит как [`IpcError`].
+    pub fn into_value(self) -> Result<V, IpcError> {
+        self.value
+    }
 }
 
 impl ReplyChannel for core::convert::Infallible {
-    fn send(self, _bytes: &[u8], _handles: &[u32]) -> Result<(), IpcError> {
+    type Resources = ();
+
+    fn send(self, _frame: Outgoing<'_, ()>) -> Result<(), Unsent<'_, ()>> {
         match self {}
     }
 }

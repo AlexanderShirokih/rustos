@@ -141,9 +141,11 @@ fn std_rt_lock_serialises_workers() {
 #[kernel_test]
 fn std_rt_start_hands_out_the_bootstrap_handle_once() {
     let root = crate::bootstrap_handle();
-    runtime::start(root.raw());
+    // SAFETY: номер - стартовый handle из `x0` точки входа testrunner, и владелец из
+    // `take_bootstrap` отказывается от записи через `leak`.
+    unsafe { runtime::start(root.raw()) };
     let published = runtime::take_bootstrap().expect("bootstrap handle is published");
-    kernel_tests::kassert_eq!(published.raw(), root.raw());
+    kernel_tests::kassert_eq!(published.leak().raw(), root.raw());
     kernel_tests::kassert!(runtime::take_bootstrap().is_none());
 }
 

@@ -103,14 +103,12 @@ impl<'a, R: ReceivedResources> WireValue<'a, R> for FileSystemError {
     }
 }
 
-impl IntoWireValue for FileSystemError {
+impl<R: ReceivedResources> IntoWireValue<R> for FileSystemError {
     type Read = Self;
 
-    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), IpcError> {
-        buf.write_field(field_id, &value::encode_discriminant(self.discriminant()))
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, &value::encode_discriminant(self.discriminant()))
     }
-
-    fn relinquish(self) {}
 }
 
 impl WireTyped for FileSystemError {
@@ -129,8 +127,8 @@ mod tests {
     const FIELD_ID: u8 = 1;
 
     fn round_trip(error: FileSystemError) -> Result<FileSystemError, IpcError> {
-        let mut buf = MessageBuf::new();
-        error.write_as_field(&mut buf, FIELD_ID).expect("write ok");
+        let mut buf = MessageBuf::<()>::new();
+        error.write_into(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         let mut cursor = FieldCursor::new(buf.as_bytes());
         let field = cursor.next_field().expect("decode ok").expect("present");
