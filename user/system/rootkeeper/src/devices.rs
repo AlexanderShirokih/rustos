@@ -2,24 +2,22 @@
 
 use alloc::{string::String, vec::Vec};
 
-use bootstrap_abi::bootstrap;
+use bootstrap_abi::devices;
 use component_abi::{MmioWindow, ResourceError};
 use device_resolver::{
     DeviceSelector, DeviceTreePlatform, InterruptLine, PlatformDescription, ResolveError,
-    acquire_mmio,
 };
 use device_resolver_aarch64::PLATFORM_BINDINGS;
 use fdt::devicetree::DeviceTree;
 use kernel_objects::{
     BorrowedHandle, IrqControl, IrqLine, MemoryRegion, ObjectKind, OwnedHandle, ReadOnlyMapping,
-    kind,
+    Session, kind,
 };
 use runtime::PortTransport;
-use syscall::Handle;
 use userland_image::{BootPlan, PlanDevice, RequirementSource};
 
 pub(crate) struct DeviceGrants {
-    kernel: Handle<kind::Port>,
+    session: Session<devices::Protocol>,
     platform: Option<Platform>,
     lines: Vec<Root<InterruptLine, IrqLine>>,
     windows: Vec<Root<HeldWindow, MemoryRegion>>,
@@ -65,11 +63,12 @@ pub(crate) enum DeviceRefusal {
     Resolve(ResolveError),
     LineTaken,
     WindowTaken,
+    WindowNotGranted,
     Mint,
 }
 
 impl DeviceGrants {
-    pub(crate) fn new(kernel: Handle<kind::Port>, plan: &BootPlan<'_>) -> Self {
+    pub(crate) fn new(session: Session<devices::Protocol>, plan: &BootPlan<'_>) -> Self {
         let devices = plan.components().any(|component| {
             component.requirements().any(|requirement| {
                 matches!(
@@ -78,9 +77,10 @@ impl DeviceGrants {
                 )
             })
         });
+        let platform = devices.then(|| Platform::acquire(&session)).flatten();
         Self {
-            kernel,
-            platform: devices.then(|| Platform::acquire(kernel)).flatten(),
+            session,
+            platform,
             lines: Vec::new(),
             windows: Vec::new(),
         }
@@ -135,9 +135,11 @@ impl DeviceGrants {
         let window = platform.first_match(device, |description, selector| {
             description.mmio(selector, device.resource)
         })?;
-        let client = bootstrap::Client::new(PortTransport::new(self.kernel));
-        let found =
-            acquire_mmio::<_, MemoryRegion>(&client, window).map_err(DeviceRefusal::Resolve)?;
+        let found = client(&self.session)
+            .acquire_device_memory_containing::<MemoryRegion>(window.base, window.size)
+            .ok()
+            .flatten()
+            .ok_or(DeviceRefusal::WindowNotGranted)?;
         let held = HeldWindow {
             region_base: window.base - found.offset,
             offset: found.offset,
@@ -221,17 +223,17 @@ impl DeviceRefusal {
             Self::Resolve(ResolveError::UnknownController) => "interrupt controller unknown",
             Self::Resolve(ResolveError::Untranslatable) => "device address not translatable",
             Self::Resolve(ResolveError::Malformed) => "device description malformed",
-            Self::Resolve(ResolveError::MmioUnavailable) => "mmio window not granted by the kernel",
             Self::LineTaken => "irq line held by another requirement",
             Self::WindowTaken => "mmio region held by another record",
+            Self::WindowNotGranted => "mmio window not granted by the kernel",
             Self::Mint => "irq line not minted",
         }
     }
 }
 
 impl Platform {
-    fn acquire(kernel: Handle<kind::Port>) -> Option<Self> {
-        let client = bootstrap::Client::new(PortTransport::new(kernel));
+    fn acquire(session: &Session<devices::Protocol>) -> Option<Self> {
+        let client = client(session);
         let fdt = client.acquire_boot_fdt().ok()?.ok()?;
         let region = MemoryRegion::from(fdt.region);
         let mapping = region.map_full_read_only().ok()?;
@@ -271,4 +273,8 @@ impl Platform {
         }
         Err(DeviceRefusal::Resolve(failure))
     }
+}
+
+fn client(session: &Session<devices::Protocol>) -> devices::Client<PortTransport> {
+    devices::Client::new(PortTransport::new(session.handle().as_raw()))
 }

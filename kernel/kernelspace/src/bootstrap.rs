@@ -3,19 +3,19 @@
 extern crate alloc;
 
 use alloc::{sync::Arc, vec::Vec};
-use core::num::NonZeroUsize;
+use core::{marker::PhantomData, num::NonZeroUsize};
 
-use bootstrap_abi::{BootFdt, bootstrap};
+use bootstrap_abi::{BootFdt, bootstrap, devices};
 use capability::{
-    Capability, CapabilityTarget, HandleTable, IpcError as KernelIpcError, IrqControl,
-    KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport,
+    Capability, CapabilityTarget, HandleId, HandleTable, IpcError as KernelIpcError, IrqControl,
+    KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport, deadline_after,
     default_rights_for, interrupts_control, port_recv, port_send, release_delivered, runtime,
 };
 use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::IrqLineSpan;
 use ipc::{
-    FrameBytes, Incoming, Listener, ReceivedResources, RecvError, ReplyChannel,
-    wire::{Cap, IpcError as WireError, MESSAGE_INLINE_MAX, Str},
+    FrameBytes, Incoming, IntoWireValue, Listener, ReceivedResources, RecvError, ReplyChannel,
+    wire::{Cap, IpcError as WireError, MESSAGE_INLINE_MAX, MessageBuf, Session, Str},
 };
 use klog::{info, warn};
 use memory::{
@@ -24,7 +24,7 @@ use memory::{
 };
 use process::{UserImageFromModelError, user_image_parts_from_entry};
 use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
-use syscall::{IpcBuffer, Timeout, decode_tag, encode_tag};
+use syscall::{IpcBuffer, ObjectKind, Timeout, decode_tag, encode_tag, kind};
 use userland::EntryView;
 use userland_image::{ImageDecodeError, ProgramDecodeError, component_name, decode};
 
@@ -35,9 +35,16 @@ use crate::{
 
 const ROOT_RESOURCE_SPAN: NonZeroUsize = NonZeroUsize::new(usize::MAX & !0xFFF).unwrap();
 
+const SENDER_PORT_RIGHTS: Rights = Rights::from_bits_truncate(
+    Rights::WRITE.bits() | Rights::TRANSFER.bits() | Rights::DUPLICATE.bits(),
+);
+
+const DEVICES_BADGE: u64 = 1;
+
 /// Число страниц стека kernel-потока, исполняющего [`run_bootstrap`]. Обобщённый
 /// диспетчер `ipc` держит на стеке два инлайн-кадра контракта разом, и на
-/// операции `acquire_boot_fdt` замеренный high-water доходит до 18392 байт.
+/// операции `acquire_irq_control` контракта `Devices` замеренный от входа потока
+/// high-water доходит до 10640 байт.
 pub const SERVER_STACK_PAGES: usize = 8;
 
 /// Запущенный bootstrap-процесс.
@@ -50,7 +57,7 @@ pub struct BootstrapLaunch {
     pub resources: BootstrapResources,
 }
 
-/// Capability-ресурсы, вендимые bootstrap-сервером корневому процессу.
+/// Capability-ресурсы, которые сервер порта ядра выдаёт по контрактам `Bootstrap` и `Devices`.
 pub struct BootstrapResources {
     pub irq_control: Arc<IrqControl>,
     pub image_region: Arc<MemoryRegion>,
@@ -58,6 +65,8 @@ pub struct BootstrapResources {
     /// Смещение блоба DTB от начала `fdt_region`.
     pub fdt_offset: u32,
     pub device_regions: Vec<Arc<MemoryRegion>>,
+    /// Источник кап сессий `Devices`.
+    pub devices_root: Capability,
 }
 
 /// Ошибки запуска bootstrap-процесса.
@@ -101,10 +110,8 @@ pub fn spawn_process(
     // хэндл bootstrap-процесса - клиентский: отправка, перенос и минт лог-капы.
     let port = Port::new();
     let receiver = Capability::new(CapabilityTarget::Port(port.clone()), Rights::READ);
-    let peer_handle = Capability::new(
-        CapabilityTarget::Port(port.clone()),
-        Rights::WRITE | Rights::TRANSFER | Rights::DUPLICATE,
-    );
+    let peer_handle = Capability::new(CapabilityTarget::Port(port.clone()), SENDER_PORT_RIGHTS);
+    let devices_root = Capability::new(CapabilityTarget::Port(port.clone()), SENDER_PORT_RIGHTS);
 
     // Корневой Resource: полномочие на минтинг физпамяти.
     let root_resource = Resource::new(
@@ -169,15 +176,16 @@ pub fn spawn_process(
             fdt_region,
             fdt_offset,
             device_regions,
+            devices_root,
         },
     })
 }
 
 /// Цикл сервера bootstrap-port: kernel-поток аллоцирует kernel-резидентный
-/// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт
-/// `Bootstrap`. `_receiver` - capability с `READ`: пока сервер работает, она
-/// держит ядро в множестве получателей порта. Поток поднимается со стеком
-/// [`SERVER_STACK_PAGES`].
+/// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракты
+/// `Bootstrap` и `Devices`. На кадр, который не разбирается, сервер отвечает отказом и
+/// продолжает приём. `_receiver` - capability с `READ`, которая держит ядро в множестве
+/// получателей порта, пока сервер работает. Поток поднимается со стеком [`SERVER_STACK_PAGES`].
 pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: BootstrapResources) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap: no kernel handle-table; server not started");
@@ -204,27 +212,19 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
                 return;
             }
         };
-        if frame.bytes.is_empty() {
-            info!("bootstrap: port closed, exiting");
-            return;
-        }
-        match bootstrap::dispatch(&mut server, frame) {
-            Ok(()) => {}
-            // Отказ доставки ответа ушедшему вызывателю порт не закрывает.
-            Err(WireError::PeerClosed) => {
-                warn!("bootstrap: reply delivery failed: caller gone");
-            }
-            Err(e) => {
-                warn!("bootstrap: dispatch failed: {:?}", e);
-                return;
-            }
-        }
+        // Вызыватель уже получил отказ разбора либо доставки ответа, и приём продолжается.
+        let _ = if frame.resources.badge == DEVICES_BADGE {
+            devices::dispatch(&mut server, frame)
+        } else {
+            bootstrap::dispatch(&mut server, frame)
+        };
     }
 }
 
-/// Закрывает bootstrap-port со стороны ядра пустым кадром.
-/// Возврат `Ok` означает, что сервер обработал всё принятое до закрытия.
-pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), KernelIpcError> {
+/// Отправляет серверу порта ядра пустой кадр и возвращается, когда сервер его принял. Возврат
+/// `Ok` означает, что сервер обработал всё принятое до этого кадра. Сам пустой кадр сервер
+/// отбрасывает.
+pub fn drain_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), KernelIpcError> {
     let table = runtime()
         .current_handle_table()
         .ok_or(KernelIpcError::BadHandle)?;
@@ -233,7 +233,7 @@ pub fn close_bootstrap_port(port: &Arc<Port>, timeout_ns: u64) -> Result<(), Ker
     let buffer: KernelIpcBuffer = Arc::new(MutexCell::new(IpcBuffer::zeroed()));
 
     let sender = ThreadTransport::new_kernel(buffer, table);
-    // Кадр закрытия идёт без значка - у него нет учёта отправителя.
+    // Кадр барьера идёт без значка - у него нет учёта отправителя.
     port_send(port, &sender, runtime(), Some(timeout_ns), None)
 }
 
@@ -245,17 +245,54 @@ struct BootstrapServer {
     resources: BootstrapResources,
 }
 
+struct KernelEntry<K: ObjectKind> {
+    table: Arc<MutexCell<HandleTable>>,
+    id: Option<HandleId>,
+    kind: PhantomData<fn() -> K>,
+}
+
 impl BootstrapServer {
-    fn vend<K: syscall::ObjectKind>(&self, target: CapabilityTarget) -> Result<Cap<K>, u32> {
+    fn vend<K: ObjectKind>(&self, cap: Capability) -> Result<KernelEntry<K>, u32> {
         // Таблица ядра хранит запись без статической метки вида. Вид называет операция
         // контракта, и выдача применяет его к номеру записи.
-        let cap = Capability::new_with_default_rights(target);
         let id = self
             .table
             .with_lock(|tbl| tbl.insert(cap))
             .map_err(|_| ACQUIRE_FAILED)?;
 
-        Ok(Cap::from_handle(syscall::Handle::from_abi(id.raw())))
+        Ok(KernelEntry {
+            table: self.table.clone(),
+            id: Some(id),
+            kind: PhantomData,
+        })
+    }
+
+    fn vend_root<K: ObjectKind>(&self, target: CapabilityTarget) -> Result<KernelEntry<K>, u32> {
+        self.vend(Capability::new_with_default_rights(target))
+    }
+}
+
+impl<K: ObjectKind> IntoWireValue for KernelEntry<K> {
+    type Read = Cap<K>;
+
+    fn write_as_field(&self, buf: &mut MessageBuf, field_id: u8) -> Result<(), WireError> {
+        let id = self.id.ok_or(WireError::InvalidValue)?;
+        Cap::<K>::from_handle(syscall::Handle::from_abi(id.raw())).write_as_field(buf, field_id)
+    }
+
+    fn relinquish(mut self) {
+        self.id = None;
+    }
+}
+
+impl<K: ObjectKind> Drop for KernelEntry<K> {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        if let Ok(drained) = self.table.with_lock(|tbl| tbl.remove(id)) {
+            drained.release();
+        }
     }
 }
 
@@ -273,28 +310,46 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
         }
     }
 
-    fn acquire_irq_control(
-        &mut self,
-        _frame: &BootstrapFrame,
-    ) -> Result<Cap<syscall::kind::IrqControl>, u32> {
-        self.vend(CapabilityTarget::IrqControl(
-            self.resources.irq_control.clone(),
-        ))
-    }
-
     fn acquire_userland_image(
         &mut self,
         _frame: &BootstrapFrame,
-    ) -> Result<Cap<syscall::kind::MemoryRegion>, u32> {
-        self.vend(CapabilityTarget::Memory(
+    ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, u32>> {
+        self.vend_root::<kind::MemoryRegion>(CapabilityTarget::Memory(
             self.resources.image_region.clone(),
         ))
     }
 
-    fn acquire_boot_fdt(&mut self, _frame: &BootstrapFrame) -> Result<BootFdt, u32> {
-        let region = self.vend(CapabilityTarget::Memory(self.resources.fdt_region.clone()))?;
+    fn acquire_devices(
+        &mut self,
+        _frame: &BootstrapFrame,
+    ) -> impl IntoWireValue<Read = Result<Session<devices::Protocol>, u32>> {
+        self.resources
+            .devices_root
+            .duplicate(SENDER_PORT_RIGHTS, DEVICES_BADGE)
+            .map_err(|_| ACQUIRE_FAILED)
+            .and_then(|cap| self.vend::<kind::Port>(cap))
+            .map(Session::<devices::Protocol, _>::from_handle)
+    }
+}
 
-        Ok(BootFdt {
+impl devices::Service<BootstrapFrame> for BootstrapServer {
+    fn acquire_irq_control(
+        &mut self,
+        _frame: &BootstrapFrame,
+    ) -> impl IntoWireValue<Read = Result<Cap<kind::IrqControl>, u32>> {
+        self.vend_root::<kind::IrqControl>(CapabilityTarget::IrqControl(
+            self.resources.irq_control.clone(),
+        ))
+    }
+
+    fn acquire_boot_fdt(
+        &mut self,
+        _frame: &BootstrapFrame,
+    ) -> impl IntoWireValue<Read = Result<BootFdt, u32>> {
+        self.vend_root::<kind::MemoryRegion>(CapabilityTarget::Memory(
+            self.resources.fdt_region.clone(),
+        ))
+        .map(|region| BootFdt {
             region,
             offset: self.resources.fdt_offset,
         })
@@ -304,14 +359,14 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
         &mut self,
         _frame: &BootstrapFrame,
         index: u32,
-    ) -> Result<Cap<syscall::kind::MemoryRegion>, u32> {
-        let region = self
-            .resources
+    ) -> impl IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, u32>> {
+        self.resources
             .device_regions
             .get(index as usize)
-            .ok_or(NO_SUCH_WINDOW)?
-            .clone();
-        self.vend(CapabilityTarget::Memory(region))
+            .ok_or(NO_SUCH_WINDOW)
+            .and_then(|region| {
+                self.vend_root::<kind::MemoryRegion>(CapabilityTarget::Memory(region.clone()))
+            })
     }
 }
 
@@ -335,6 +390,7 @@ fn map_kernel_error(error: KernelIpcError) -> WireError {
 }
 
 struct BootstrapFrame {
+    badge: u64,
     reply: Option<KernelReply>,
 }
 
@@ -405,20 +461,25 @@ impl Listener for KernelPort {
         wait: Timeout,
     ) -> Result<Incoming<'b, BootstrapFrame>, RecvError> {
         let receiver = ThreadTransport::new_kernel(self.buffer.clone(), self.table.clone());
-        let timeout_ns = (wait != Timeout::INFINITE).then_some(wait.raw());
+        let deadline_ns =
+            deadline_after(runtime(), (wait != Timeout::INFINITE).then_some(wait.raw()));
         // Роль получателя держит capability сервера всё время его работы.
-        let reply = match port_recv(&self.port, &receiver, runtime(), timeout_ns, None) {
-            Ok(reply) => reply,
-            Err(KernelIpcError::SenderGone) => {
-                return Err(RecvError::SenderGone(
-                    self.buffer.with_lock(|buf| buf.badge),
-                ));
+        let reply = loop {
+            match port_recv(&self.port, &receiver, runtime(), deadline_ns, None) {
+                Ok(reply) => break reply,
+                Err(KernelIpcError::ShouldWait) => {}
+                Err(KernelIpcError::SenderGone) => {
+                    return Err(RecvError::SenderGone(
+                        self.buffer.with_lock(|buf| buf.badge),
+                    ));
+                }
+                Err(KernelIpcError::Timeout) => return Err(RecvError::Timeout),
+                Err(_) => return Err(RecvError::Closed),
             }
-            Err(KernelIpcError::Timeout) => return Err(RecvError::Timeout),
-            Err(_) => return Err(RecvError::Closed),
         };
         // Разрушение ресурсов кадра, который не принят, отменяет ответ его вызывателю.
         let resources = BootstrapFrame {
+            badge: self.buffer.with_lock(|buf| buf.badge),
             reply: reply.map(|reply| KernelReply {
                 reply: Some(reply),
                 buffer: self.buffer.clone(),

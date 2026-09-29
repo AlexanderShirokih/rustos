@@ -25,8 +25,9 @@ extern crate alloc;
 
 use core::{fmt::Write as _, panic::PanicInfo};
 
-use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap};
+use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, devices};
 use io::writer::Writer;
+use kernel_objects::Session;
 use kernel_tests::kernel_test;
 use runtime::{PortTransport, process_exit};
 use spin::{Mutex, Once};
@@ -75,6 +76,7 @@ mod signal;
 mod simd_state;
 mod smp_stress;
 mod spawn_from_image;
+mod startup_exit_protocol;
 mod startup_port;
 mod std_rt;
 mod std_selftest;
@@ -151,6 +153,14 @@ pub(crate) fn bootstrap_handle() -> Handle<kind::Port> {
     *BOOTSTRAP_HANDLE
         .get()
         .expect("bootstrap handle set in _start")
+}
+
+pub(crate) fn devices_session() -> Session<devices::Protocol> {
+    bootstrap::Client::new(PortTransport::new(bootstrap_handle()))
+        .acquire_devices()
+        .expect("acquire_devices call")
+        .map(Session::from_session)
+        .expect("devices session granted")
 }
 
 fn runner_exit(code: u32) -> ! {

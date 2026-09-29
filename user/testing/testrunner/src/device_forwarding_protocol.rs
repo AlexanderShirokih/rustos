@@ -6,8 +6,6 @@
 use ipc::wire::Cap;
 use syscall::kind;
 
-pub const FORWARDED_EXIT_CODE: u64 = 6;
-
 ipc::wire_value! {
     #[derive(Debug)]
     pub struct Forwarded<L = Cap<kind::IrqLine>, W = Cap<kind::MemoryRegion>> {

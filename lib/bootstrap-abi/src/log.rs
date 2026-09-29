@@ -39,30 +39,20 @@ mod tests {
             self.last_log = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
         }
 
-        fn acquire_irq_control(
-            &mut self,
-            _frame: &F,
-        ) -> Result<ipc::wire::Cap<crate::kind::IrqControl>, u32> {
-            Err(1)
-        }
-
         fn acquire_userland_image(
             &mut self,
             _frame: &F,
-        ) -> Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32> {
-            Err(1)
+        ) -> impl ipc::IntoWireValue<Read = Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32>>
+        {
+            Err::<ipc::wire::Cap<crate::kind::MemoryRegion>, u32>(1)
         }
 
-        fn acquire_boot_fdt(&mut self, _frame: &F) -> Result<crate::BootFdt, u32> {
-            Err(1)
-        }
-
-        fn acquire_device_memory(
+        fn acquire_devices(
             &mut self,
             _frame: &F,
-            _index: u32,
-        ) -> Result<ipc::wire::Cap<crate::kind::MemoryRegion>, u32> {
-            Err(1)
+        ) -> impl ipc::IntoWireValue<Read = Result<ipc::wire::Session<crate::devices::Protocol>, u32>>
+        {
+            Err::<ipc::wire::Session<crate::devices::Protocol>, u32>(1)
         }
     }
 

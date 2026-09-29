@@ -12,11 +12,6 @@ boot = true
 
 [[programs]]
 package = "testrunner"
-bin = "spawn-fixture"
-path = "/spawn-fixture"
-
-[[programs]]
-package = "testrunner"
 bin = "port-fixture"
 path = "/port-fixture"
 
@@ -124,6 +119,11 @@ path = "/child-steps-fixture"
 package = "testrunner"
 bin = "handle-table-full-fixture"
 path = "/handle-table-full-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "vend-exhaustion-fixture"
+path = "/vend-exhaustion-fixture"
 
 [[programs]]
 package = "testrunner"

@@ -10,12 +10,16 @@ use core::{
     sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
 };
 
-use bootstrap_abi::bootstrap;
-use kernel_objects::{Error, Port, Reply, Result, kind};
+use bootstrap_abi::{bootstrap, devices};
+use ipc::{
+    Listener as _,
+    wire::{IpcError, MESSAGE_INLINE_MAX},
+};
+use kernel_objects::{Error, MemoryRegion, Port, Reply, Result, kind};
 use kernel_tests::kernel_test;
 use runtime::{
-    PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call,
-    port_send, spawn,
+    Instant, PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr,
+    port_call, port_send, spawn,
 };
 use syscall::{Handle, Rights, SyscallError};
 
@@ -28,6 +32,8 @@ const STACK_SIZE: u64 = 0x4000;
 const SERVE_TIMEOUT: Timeout = Timeout::from_secs(3);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const PARK_SETTLE: Timeout = Timeout::from_millis(100);
+const DEADLINE_RECV: Timeout = Timeout::from_secs(1);
+const SENDER_DELAY: Timeout = Timeout::from_millis(500);
 
 const DYING_CLIENT_BADGE: NonZeroU64 =
     NonZeroU64::new(0x1111_1111_1111_1111).expect("badge is non-zero");
@@ -42,6 +48,8 @@ const SECOND_CLIENT_BADGE: NonZeroU64 =
 const BOOTSTRAP_CLIENT_BADGE: u64 = 0x7777_7777_7777_7777;
 
 const SESSION_PROBE: u64 = 0x6666_6666_6666_6666;
+
+const VEND_EXHAUSTION_FIXTURE: &str = "/vend-exhaustion-fixture/program";
 
 fn received_badge() -> u64 {
     let buffer = ipc_buffer_ptr().expect("thread owns an IPC buffer");
@@ -286,8 +294,8 @@ fn kernel_server_closes_the_capabilities_of_a_discarded_frame() {
         Some(SyscallError::Revoked)
     );
 
-    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
-    client
+    crate::devices_session()
+        .client()
         .acquire_irq_control()
         .expect("acquire_irq_control call")
         .expect("vend ok");
@@ -352,4 +360,151 @@ fn departed_badge_names_the_session_that_left() {
     // Вторая сессия была жива и уходит отдельным событием.
     second.close().expect("close second client capability");
     assert_sender_gone(port.recv(SERVE_TIMEOUT), SECOND_CLIENT_BADGE.get());
+}
+
+fn stale_handle() -> u32 {
+    let port = Port::create().expect("port create");
+    let raw = port.as_raw().raw();
+    port.close().expect("close port");
+    raw
+}
+
+static STALE_FRAME_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
+static STALE_FRAME_SEND: AtomicI64 = AtomicI64::new(i64::MIN);
+static STALE_FRAME_FOLLOWUP: AtomicI64 = AtomicI64::new(i64::MIN);
+
+extern "C" fn stale_frame_client(_arg: usize) -> u32 {
+    let client = client_capability(&STALE_FRAME_CLIENT_CAP);
+    crate::ipc_raw::write_frame(&[1], &[stale_handle()]);
+    STALE_FRAME_SEND.store(port_send(client, SERVE_TIMEOUT), SeqCst);
+    crate::ipc_raw::write_frame(&[2], &[]);
+    STALE_FRAME_FOLLOWUP.store(port_send(client, SERVE_TIMEOUT), SeqCst);
+    0
+}
+
+#[kernel_test]
+fn a_frame_with_a_stale_handle_leaves_a_listener_serving() {
+    let port = Port::create().expect("port create");
+    let client = port
+        .duplicate(Rights::WRITE, None)
+        .expect("mint client capability");
+    STALE_FRAME_CLIENT_CAP.store(client.as_raw().raw(), SeqCst);
+    STALE_FRAME_SEND.store(i64::MIN, SeqCst);
+    STALE_FRAME_FOLLOWUP.store(i64::MIN, SeqCst);
+
+    let worker = spawn(stale_frame_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
+    let server = PortTransport::new(port.as_raw());
+    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    let incoming = server
+        .recv(&mut bytes, SERVE_TIMEOUT)
+        .expect("frame after the refused one");
+    kernel_tests::kassert_eq!(incoming.bytes, &[2u8][..]);
+
+    worker.join(JOIN_TIMEOUT).expect("client joins");
+    kernel_tests::kassert_eq!(
+        SyscallError::from_return(STALE_FRAME_SEND.load(SeqCst)),
+        Some(SyscallError::BadHandle)
+    );
+    kernel_tests::kassert_eq!(STALE_FRAME_FOLLOWUP.load(SeqCst), 0);
+}
+
+static LATE_SENDER_CAP: AtomicU32 = AtomicU32::new(0);
+static LATE_SENDER_RESULT: AtomicI64 = AtomicI64::new(i64::MIN);
+
+extern "C" fn late_stale_sender(_arg: usize) -> u32 {
+    let client = client_capability(&LATE_SENDER_CAP);
+    pause(SENDER_DELAY);
+    crate::ipc_raw::write_frame(&[1], &[stale_handle()]);
+    LATE_SENDER_RESULT.store(port_send(client, SERVE_TIMEOUT), SeqCst);
+    0
+}
+
+#[kernel_test]
+fn a_failed_transfer_does_not_extend_the_receive_deadline() {
+    let port = Port::create().expect("port create");
+    let client = port
+        .duplicate(Rights::WRITE, None)
+        .expect("mint client capability");
+    LATE_SENDER_CAP.store(client.as_raw().raw(), SeqCst);
+    LATE_SENDER_RESULT.store(i64::MIN, SeqCst);
+
+    let worker = spawn(late_stale_sender, 0, STACK_SIZE, Priority::new(1)).expect("spawn sender");
+    let started = Instant::now();
+    let received = port.recv(DEADLINE_RECV);
+    let elapsed = Instant::now().since(started);
+
+    kernel_tests::kassert!(matches!(
+        received,
+        Err(Error::Syscall(SyscallError::Timeout))
+    ));
+    kernel_tests::kassert!(elapsed.raw() < DEADLINE_RECV.raw() + SENDER_DELAY.raw());
+    worker.join(JOIN_TIMEOUT).expect("sender joins");
+    kernel_tests::kassert_eq!(
+        SyscallError::from_return(LATE_SENDER_RESULT.load(SeqCst)),
+        Some(SyscallError::BadHandle)
+    );
+}
+
+#[kernel_test]
+fn kernel_server_serves_past_frames_it_refuses() {
+    let refused: [(&[u8], &[u32], SyscallError); 3] = [
+        (&[0], &[stale_handle()], SyscallError::BadHandle),
+        (&[], &[], SyscallError::PeerClosed),
+        (&[0xFF; 3], &[], SyscallError::PeerClosed),
+    ];
+    for (body, caps, error) in refused {
+        crate::ipc_raw::write_frame(body, caps);
+        kernel_tests::kassert_eq!(
+            SyscallError::from_return(port_call(crate::bootstrap_handle(), SERVE_TIMEOUT)),
+            Some(error)
+        );
+    }
+
+    let image = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()))
+        .acquire_userland_image()
+        .expect("acquire_userland_image call")
+        .expect("vend ok");
+    drop(MemoryRegion::from(image));
+}
+
+#[kernel_test]
+fn kernel_server_closes_what_it_vended_to_a_full_table() {
+    let kernel = Port::from_handle(
+        handle_duplicate(
+            crate::bootstrap_handle(),
+            (Rights::WRITE | Rights::TRANSFER).into(),
+            0,
+        )
+        .expect("copy of the kernel port capability"),
+    );
+    let process = spawn_entry(VEND_EXHAUSTION_FIXTURE, kernel);
+
+    process.join(JOIN_TIMEOUT).expect("fixture exits");
+    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
+}
+
+#[kernel_test]
+fn a_devices_session_does_not_receive() {
+    let session = crate::devices_session().into_handle();
+
+    kernel_tests::kassert!(matches!(
+        session.recv(Timeout::POLL),
+        Err(Error::Syscall(SyscallError::AccessDenied))
+    ));
+}
+
+#[kernel_test]
+fn each_role_refuses_the_operations_of_the_other() {
+    let session = crate::devices_session();
+    let as_bootstrap = bootstrap::Client::new(PortTransport::new(session.handle().as_raw()));
+    let as_devices = devices::Client::new(PortTransport::new(crate::bootstrap_handle()));
+
+    kernel_tests::kassert_eq!(
+        as_bootstrap.acquire_userland_image().err(),
+        Some(IpcError::PeerClosed)
+    );
+    kernel_tests::kassert_eq!(
+        as_devices.acquire_irq_control().err(),
+        Some(IpcError::PeerClosed)
+    );
 }

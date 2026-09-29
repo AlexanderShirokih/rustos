@@ -13,7 +13,6 @@ use syscall::{Handle, kind};
 const LOG_TAG: &str = "failing";
 
 const FAILED_EXIT_CODE: u64 = 1;
-const FAILING_EXIT_CODE: u64 = 5;
 
 component_manifest! {
     struct FailingStartup {}
@@ -26,7 +25,7 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
         process_exit(FAILED_EXIT_CODE)
     }
     log_line("started");
-    process_exit(FAILING_EXIT_CODE)
+    process_exit(FAILED_EXIT_CODE)
 }
 
 #[panic_handler]

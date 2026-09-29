@@ -18,12 +18,11 @@ use syscall::{Handle, Rights, kind};
 
 mod device_forwarding_protocol;
 
-use device_forwarding_protocol::{FORWARDED_EXIT_CODE, Forwarded, device_forwarding};
+use device_forwarding_protocol::{Forwarded, device_forwarding};
 
 const EXPORT_STACK_SIZE: u64 = 0x4000;
 
-const FAILED_EXIT_CODE: u64 = 1;
-const EXPORT_STOPPED_EXIT_CODE: u64 = 5;
+const RESTART_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct ForwardingStartup {
@@ -42,7 +41,7 @@ struct Forwarder {
 impl<F: ReceivedResources> device_forwarding::Service<F> for Forwarder {
     fn forward(&mut self, _frame: &F) -> impl IntoWireValue<Read = Forwarded> {
         let Some((line, window)) = self.copies.take() else {
-            process_exit(FAILED_EXIT_CODE)
+            process_exit(RESTART_EXIT_CODE)
         };
         Forwarded { line, window }
     }
@@ -51,17 +50,17 @@ impl<F: ReceivedResources> device_forwarding::Service<F> for Forwarder {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     let Ok(requirements) = ForwardingStartup::request(parent) else {
-        process_exit(FAILED_EXIT_CODE)
+        process_exit(RESTART_EXIT_CODE)
     };
     let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER;
     let (Ok(line), Ok(window)) = (
         requirements.line.duplicate(rights, None),
         requirements.window.region.duplicate(rights, None),
     ) else {
-        process_exit(FAILED_EXIT_CODE)
+        process_exit(RESTART_EXIT_CODE)
     };
     let Ok(export) = Port::create() else {
-        process_exit(FAILED_EXIT_CODE)
+        process_exit(RESTART_EXIT_CODE)
     };
     let export: &'static Port = Box::leak(Box::new(export));
 
@@ -69,13 +68,13 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
         move || {
             let parent = startup_contract::Client::new(PortTransport::new(parent));
             let _ = serve_export::<device_forwarding::Protocol>(&parent, whole_export(export));
-            process_exit(EXPORT_STOPPED_EXIT_CODE)
+            process_exit(RESTART_EXIT_CODE)
         },
         EXPORT_STACK_SIZE,
         Priority::new(1),
     );
     if exporting.is_err() {
-        process_exit(FAILED_EXIT_CODE)
+        process_exit(RESTART_EXIT_CODE)
     }
 
     let mut forwarder = Forwarder {
@@ -88,16 +87,16 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
             Ok(frame) => {
                 let _ = device_forwarding::dispatch(&mut forwarder, frame);
                 if forwarder.copies.is_none() {
-                    process_exit(FORWARDED_EXIT_CODE)
+                    process_exit(RESTART_EXIT_CODE)
                 }
             }
             Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => process_exit(EXPORT_STOPPED_EXIT_CODE),
+            Err(RecvError::Closed) => process_exit(RESTART_EXIT_CODE),
         }
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(FAILED_EXIT_CODE)
+    process_exit(RESTART_EXIT_CODE)
 }

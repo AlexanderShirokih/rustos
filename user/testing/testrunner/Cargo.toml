@@ -20,12 +20,6 @@ test = false
 bench = false
 
 [[bin]]
-name = "spawn-fixture"
-path = "src/spawn_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "port-fixture"
 path = "src/port_fixture.rs"
 test = false
@@ -76,6 +70,12 @@ bench = false
 [[bin]]
 name = "handle-table-full-fixture"
 path = "src/handle_table_full_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "vend-exhaustion-fixture"
+path = "src/vend_exhaustion_fixture.rs"
 test = false
 bench = false
 

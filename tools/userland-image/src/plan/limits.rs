@@ -4,7 +4,7 @@ use syscall::{HANDLE_TABLE_CAPACITY, IPC_BUFFER_MAX_CAPS, MAX_SEGMENTS_PER_IMG};
 
 use crate::manifest::ProgramManifest;
 
-const BASE: usize = 8;
+const BASE: usize = 9;
 const LAUNCH: usize = MAX_SEGMENTS_PER_IMG + 3;
 const ROOTKEEPER_THREADS: usize = 2;
 const FRAME: usize = ROOTKEEPER_THREADS * (1 + IPC_BUFFER_MAX_CAPS);
@@ -35,12 +35,12 @@ fn validate_component(name: &str, declared: &ProgramManifest) -> Result<()> {
 }
 
 pub(super) fn rootkeeper_handles(declarations: &[&ProgramManifest]) -> usize {
-    // Оценка сверху. `BASE` покрывает порт `Bootstrap`, ресурс, регионы образа и FDT,
-    // `IrqControl`, порты `ComponentStartup` и журнала и поток relay. `LAUNCH` покрывает один
-    // запуск программы, и rootkeeper запускает программы по очереди. `FRAME` покрывает принятый
-    // кадр на каждый принимающий поток. Запись компонента держит `Process`, резерв и источник
-    // журнала в `CHILD_HANDLES`, а также по заявке на требование сессии, по `accept` на экспорт
-    // и копии выдач incarnation.
+    // Оценка сверху. `BASE` покрывает порт `Bootstrap`, сессию `Devices`, ресурс, регионы образа
+    // и FDT, `IrqControl`, порты `ComponentStartup` и журнала и поток relay. `LAUNCH` покрывает
+    // один запуск программы, и rootkeeper запускает программы по очереди. `FRAME` покрывает
+    // принятый кадр на каждый принимающий поток. Запись компонента держит `Process`, резерв и
+    // источник журнала в `CHILD_HANDLES`, а также по заявке на требование сессии, по `accept` на
+    // экспорт и копии выдач incarnation.
     let per_component: usize = declarations
         .iter()
         .map(|declared| {

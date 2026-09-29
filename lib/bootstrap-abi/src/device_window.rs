@@ -7,7 +7,7 @@ use core::ops::Range;
 use ipc::{Channel, ReceivedResources, wire::IpcError};
 use syscall::kind;
 
-use crate::bootstrap;
+use crate::devices;
 
 /// Окно device-памяти, построенное из доставленной capability `H`.
 pub trait DeviceWindow<H>: Sized + From<H> {
@@ -24,7 +24,7 @@ pub struct ContainingWindow<W> {
     pub offset: u64,
 }
 
-impl<C: Channel> bootstrap::Client<C> {
+impl<C: Channel> devices::Client<C> {
     /// Находит перебором `acquire_device_memory` device-окно, которое целиком содержит
     /// `size` байт от физического адреса `base`, и смещение `base` от начала этого окна.
     /// `Ok(None)` - окно пустое, его конец выходит за разрядность `u64` либо набор исчерпан
@@ -70,36 +70,30 @@ mod tests {
     fn cap<K: ObjectKind>(raw: u32) -> Cap<K> {
         Cap::from_handle(Handle::from_abi(NonZeroU32::new(raw).expect("non-zero")))
     }
-    use crate::bootstrap;
+    use crate::devices;
 
     struct Vendor;
 
-    impl<F: ipc::ReceivedResources> bootstrap::Service<F> for Vendor {
-        fn log(
+    impl<F: ipc::ReceivedResources> devices::Service<F> for Vendor {
+        fn acquire_irq_control(
             &mut self,
             _frame: &F,
-            _tag: ipc::wire::Str<'_, { crate::LOG_TAG_MAX }>,
-            _message: ipc::wire::Str<'_, { crate::LOG_MESSAGE_MAX }>,
-        ) {
+        ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::IrqControl>, u32>> {
+            Err::<Cap<kind::IrqControl>, u32>(1)
         }
 
-        fn acquire_irq_control(&mut self, _frame: &F) -> Result<Cap<kind::IrqControl>, u32> {
-            Err(1)
-        }
-
-        fn acquire_userland_image(&mut self, _frame: &F) -> Result<Cap<kind::MemoryRegion>, u32> {
-            Err(1)
-        }
-
-        fn acquire_boot_fdt(&mut self, _frame: &F) -> Result<crate::BootFdt, u32> {
-            Err(1)
+        fn acquire_boot_fdt(
+            &mut self,
+            _frame: &F,
+        ) -> impl ipc::IntoWireValue<Read = Result<crate::BootFdt, u32>> {
+            Err::<crate::BootFdt, u32>(1)
         }
 
         fn acquire_device_memory(
             &mut self,
             _frame: &F,
             index: u32,
-        ) -> Result<Cap<kind::MemoryRegion>, u32> {
+        ) -> impl ipc::IntoWireValue<Read = Result<Cap<kind::MemoryRegion>, u32>> {
             if index >= 2 {
                 return Err(7);
             }
@@ -127,13 +121,13 @@ mod tests {
         }
     }
 
-    fn with_vendor<R>(body: impl FnOnce(&bootstrap::Client<ipc_test::MockChannel>) -> R) -> R {
+    fn with_vendor<R>(body: impl FnOnce(&devices::Client<ipc_test::MockChannel>) -> R) -> R {
         let (client_end, server_end) = ipc_test::pair();
-        let client = bootstrap::Client::new(client_end);
+        let client = devices::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut vendor = Vendor;
-                let _ = server_end.serve_all(|frame| bootstrap::dispatch(&mut vendor, frame));
+                let _ = server_end.serve_all(|frame| devices::dispatch(&mut vendor, frame));
             });
             let result = body(&client);
             drop(client);

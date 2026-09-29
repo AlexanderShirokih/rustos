@@ -4,8 +4,8 @@
 //! хендлы в `caps[..ncaps]`.
 
 use capability::{
-    Capability, Port, PortAccess, Reply, Rights, ThreadTransport, install_handle, port_call,
-    port_recv, port_send, release_delivered, runtime,
+    Capability, IpcError, Port, PortAccess, Reply, Rights, ThreadTransport, deadline_after,
+    install_handle, port_call, port_recv, port_send, release_delivered, runtime,
 };
 use collections::LockCell;
 use memory::virtual_address::VirtualAddress;
@@ -71,20 +71,19 @@ pub(super) fn sys_port_send(handle: u64, timeout_ns: u64) -> Result<u64, Syscall
 pub(super) fn sys_port_recv(handle: u64, timeout_ns: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let context = current_ipc_context()?;
-    let PortAccess { port, hold, .. } = context
-        .handle_table
-        .with_lock(|tbl| tbl.get_port(id, Rights::READ))
-        .map_err(map_ipc_error)?;
-
     let transport = transport_from(&context)?;
-    let reply = port_recv(
-        &port,
-        &transport,
-        runtime(),
-        timeout_from_abi(timeout_ns),
-        hold,
-    )
-    .map_err(map_ipc_error)?;
+    let deadline_ns = deadline_after(runtime(), timeout_from_abi(timeout_ns));
+    // `port_recv` поглощает удержание роли получателя, и повтор берёт порт из таблицы заново.
+    let reply = loop {
+        let PortAccess { port, hold, .. } = context
+            .handle_table
+            .with_lock(|tbl| tbl.get_port(id, Rights::READ))
+            .map_err(map_ipc_error)?;
+        match port_recv(&port, &transport, runtime(), deadline_ns, hold) {
+            Err(IpcError::ShouldWait) => {}
+            result => break result.map_err(map_ipc_error)?,
+        }
+    };
 
     match reply {
         None => Ok(0),

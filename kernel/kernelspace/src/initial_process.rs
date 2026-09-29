@@ -14,7 +14,7 @@ use memory::MemoryRegion;
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
-    bootstrap::{SERVER_STACK_PAGES, close_bootstrap_port, run_bootstrap, spawn_process},
+    bootstrap::{SERVER_STACK_PAGES, drain_bootstrap_port, run_bootstrap, spawn_process},
     kernel_context::{BootDtb, KernelContext, UserlandImage},
     power,
     scheduler_bootstrap::KernelTimerSource,
@@ -22,7 +22,7 @@ use crate::{
     user_process::{SchedulerUserProcessLauncher, UserProcessLauncher},
 };
 
-const KLOG_CLOSE_TIMEOUT_NS: u64 = 1_000_000_000;
+const KLOG_DRAIN_TIMEOUT_NS: u64 = 1_000_000_000;
 
 /// Спавнит начальный процесс с приоритетом `highest`. Он ведёт
 /// bootstrap-цепочку userland и выключает машину по её завершении.
@@ -125,8 +125,8 @@ fn bootstrap_chain(
     signal_wait_one(process_handle, SIGNALED, None)
         .map_err(|e| warn!("initial-process: wait for bootstrap process exit failed: {e:?}"))?;
 
-    if let Err(e) = close_bootstrap_port(&launch.port, KLOG_CLOSE_TIMEOUT_NS) {
-        warn!("initial-process: bootstrap port close failed: {:?}", e);
+    if let Err(e) = drain_bootstrap_port(&launch.port, KLOG_DRAIN_TIMEOUT_NS) {
+        warn!("initial-process: bootstrap port drain failed: {:?}", e);
     }
 
     let exit_code = process_object.exit_code();

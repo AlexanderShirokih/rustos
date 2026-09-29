@@ -68,9 +68,7 @@ dependencies = [
 name = "device-resolver"
 version = "0.1.0"
 dependencies = [
- "bootstrap-abi",
  "fdt",
- "ipc",
  "syscall",
 ]
 

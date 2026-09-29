@@ -52,7 +52,7 @@ fn a_started_process_cannot_pass_its_start_handle_on() {
 
     kernel_tests::kassert!(matches!(
         port.recv(RECV_TIMEOUT),
-        Err(Error::Syscall(SyscallError::AccessDenied))
+        Err(Error::Syscall(SyscallError::Timeout))
     ));
 
     process.join(JOIN_TIMEOUT).expect("fixture exits");

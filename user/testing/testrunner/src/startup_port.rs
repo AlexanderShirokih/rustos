@@ -24,6 +24,9 @@ use crate::{
     ipc_raw,
     parent::{Answer, Child, Parent},
     probe_protocol::probe,
+    startup_exit_protocol::{
+        FIRST_IPC_FAILED_EXIT_CODE, PANIC_EXIT_CODE, SECOND_SESSION_REFUSED_EXIT_CODE,
+    },
 };
 
 type Debt = ReceivedHandle<kind::Reply>;
@@ -68,9 +71,6 @@ const WORKER_STACK_SIZE: u64 = 0x8000;
 const FAILURE_EXIT_CODE: u32 = 5;
 const READ_EXIT_CODE: u32 = 7;
 const TERMINATE_EXIT_CODE: u32 = 9;
-const PANIC_EXIT_CODE: u32 = 8;
-const SECOND_SESSION_REFUSED_EXIT_CODE: u32 = 2;
-const FIRST_IPC_FAILED_EXIT_CODE: u32 = 3;
 
 const SESSION_BADGE: u64 = 0x4242;
 const OUTSIDER_BADGE: NonZeroU64 = NonZeroU64::new(0x7700_0000).expect("badge is non-zero");

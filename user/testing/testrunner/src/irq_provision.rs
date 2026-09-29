@@ -1,11 +1,9 @@
-//! E2E выдачи IRQ-полномочия: `acquire_irq_control` по bootstrap-контракту, усыновление
+//! E2E выдачи IRQ-полномочия: `acquire_irq_control` по сессии `Devices`, усыновление
 //! доставленного capability и минт `IrqLine`.
 //! Сквозной прогон пути выдачи vend -> transfer -> install -> use из userspace.
 
-use bootstrap_abi::bootstrap;
 use kernel_objects::{Error, IrqControl};
 use kernel_tests::kernel_test;
-use runtime::PortTransport;
 use syscall::{IrqTrigger, SyscallError};
 
 const SPI_BASE: u16 = 32;
@@ -22,7 +20,7 @@ const PRIVATE_IRQ_MAX: u16 = SPI_BASE - 1;
 
 #[kernel_test]
 fn acquire_irq_control_and_mint_line() {
-    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    let client = crate::devices_session().client();
 
     let cap = client
         .acquire_irq_control()
@@ -42,7 +40,7 @@ fn acquire_irq_control_and_mint_line() {
 
 #[kernel_test]
 fn minting_a_line_twice_names_the_taken_line() {
-    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    let client = crate::devices_session().client();
     let cap = client
         .acquire_irq_control()
         .expect("acquire_irq_control call")
@@ -82,7 +80,7 @@ fn first_line_outside(control: &IrqControl) -> u16 {
 
 #[kernel_test]
 fn irq_band_ends_at_the_platform_line_count() {
-    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    let client = crate::devices_session().client();
     let cap = client
         .acquire_irq_control()
         .expect("acquire_irq_control call")
@@ -103,7 +101,7 @@ fn irq_band_ends_at_the_platform_line_count() {
 
 #[kernel_test]
 fn irq_band_starts_above_the_private_lines() {
-    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    let client = crate::devices_session().client();
     let cap = client
         .acquire_irq_control()
         .expect("acquire_irq_control call")

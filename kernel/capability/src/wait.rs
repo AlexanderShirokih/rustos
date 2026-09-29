@@ -163,10 +163,9 @@ impl CancelTarget for ParkWaker {
     }
 }
 
-pub(super) fn deadline_after(
-    runtime: &Arc<dyn KernelRuntime>,
-    timeout_ns: Option<u64>,
-) -> Option<u64> {
+/// Момент истечения срока `timeout_ns`, отсчитанного от текущего времени `runtime`. `None` -
+/// срок без ограничения.
+pub fn deadline_after(runtime: &Arc<dyn KernelRuntime>, timeout_ns: Option<u64>) -> Option<u64> {
     timeout_ns.map(|timeout| runtime.now_ns().saturating_add(timeout))
 }
 

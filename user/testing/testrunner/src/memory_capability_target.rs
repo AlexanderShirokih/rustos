@@ -1,10 +1,9 @@
 //! E2E проверка `CapabilityTarget::Memory` через типизированные обёртки
 //! `Resource`/`MemoryRegion`/`Mapping` из EL0.
 
-use bootstrap_abi::bootstrap;
 use kernel_objects::{MemoryRegion, RegionInfo, RegionKind, Resource};
 use kernel_tests::kernel_test;
-use runtime::{MemoryAccess, MemoryProfile, PortTransport, UserMemFlags};
+use runtime::{MemoryAccess, MemoryProfile, UserMemFlags};
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -61,7 +60,7 @@ fn memory_with_profile_refuses_a_cached_region() {
 
 #[kernel_test]
 fn memory_with_profile_retypes_a_device_window() {
-    let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
+    let client = crate::devices_session().client();
     let cap = client
         .acquire_device_memory(0)
         .expect("acquire_device_memory call")

@@ -8,7 +8,7 @@ pub enum IpcError {
     WrongType,
     /// На handle недостаточно прав.
     AccessDenied,
-    /// Операция должна быть повторена позже (queue full / no message).
+    /// Операция не завершена, и вызывающий код её повторяет.
     ShouldWait,
     /// Парный port закрыт.
     PeerClosed,

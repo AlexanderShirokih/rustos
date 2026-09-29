@@ -430,7 +430,9 @@ fn deliver_send(sender: &ThreadTransport, receiver: &ReceiverWaiter) -> SendActi
             SendAction::Done
         }
         Err(e) => {
-            receiver.outcome.set(RendezvousOutcome::TransferFailed(e));
+            receiver
+                .outcome
+                .set(RendezvousOutcome::TransferFailed(IpcError::ShouldWait));
             receiver.waker.signal_match();
             SendAction::Failed(e)
         }
@@ -451,7 +453,9 @@ fn deliver_call(caller: &ThreadTransport, receiver: &ReceiverWaiter, ctx: ParkCt
             }
         }
         Err(e) => {
-            receiver.outcome.set(RendezvousOutcome::TransferFailed(e));
+            receiver
+                .outcome
+                .set(RendezvousOutcome::TransferFailed(IpcError::ShouldWait));
             receiver.waker.signal_match();
             CallAction::Failed(e)
         }
@@ -475,7 +479,7 @@ fn deliver_recv(sender: SenderWaiter, receiver: &ThreadTransport) -> RecvAction 
         Err(e) => {
             sender.outcome.set(RendezvousOutcome::TransferFailed(e));
             sender.waker.signal_match();
-            RecvAction::Failed(e)
+            RecvAction::Failed(IpcError::ShouldWait)
         }
     }
 }
@@ -610,17 +614,20 @@ fn resolve_call(
     }
 }
 
-/// `recv`: блокирующая. Возвращает `Some(reply)`, если встречным был `call`. Семантика `timeout_ns`
-/// и `hold` - как у [`port_send`], на истечении - [`IpcError::Timeout`]. [`IpcError::SenderGone`] -
+/// `recv`: блокирующая. Возвращает `Some(reply)`, если встречным был `call`. `hold` - как у
+/// [`port_send`]. `deadline_ns` - момент истечения срока по часам `runtime` ([`deadline_after`]),
+/// `None` - ожидание без срока. На истечении - [`IpcError::Timeout`]. [`IpcError::SenderGone`] -
 /// нет кадра, а в `IpcBuffer.badge` лежит значок, чьи отправители исчезли.
+///
+/// [`IpcError::ShouldWait`] - перенос кадра отправителя не удался. Вызывающий код повторяет
+/// приём с тем же `deadline_ns`.
 pub fn port_recv(
     port: &Arc<Port>,
     receiver: &ThreadTransport,
     runtime: &Arc<dyn KernelRuntime>,
-    timeout_ns: Option<u64>,
+    deadline_ns: Option<u64>,
     hold: Option<OperationHold>,
 ) -> Result<Option<Arc<Reply>>, IpcError> {
-    let deadline_ns = deadline_after(runtime, timeout_ns);
     match port.recv(receiver, runtime, hold) {
         RecvAction::Done { reply } => Ok(reply),
         RecvAction::Failed(e) => Err(e),
@@ -1143,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn port_recv_poll_without_sender_is_timeout() {
+    fn port_recv_at_the_current_moment_without_sender_is_timeout() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         assert_eq!(
@@ -1943,5 +1950,153 @@ mod tests {
             .copy_user_in(VirtualAddress::new(BASE_B + badge_offset), &mut raw)
             .expect("read badge back");
         assert_eq!(u64::from_le_bytes(raw), BADGE_A);
+    }
+
+    fn transport_with_signal(
+        base: usize,
+        rights: Rights,
+    ) -> (ThreadTransport, Arc<MutexCell<HandleTable>>) {
+        use memory::memory_mapper::MemoryMapper;
+
+        let mapper = PageMapper::new(base);
+        let table = Arc::new(MutexCell::new(HandleTable::new()));
+
+        let id = table
+            .with_lock(|tbl| {
+                tbl.insert(Capability::new(
+                    CapabilityTarget::Signal(crate::Signal::new()),
+                    rights,
+                ))
+            })
+            .unwrap();
+
+        mapper
+            .copy_user_out(VirtualAddress::new(base), &encode_tag(0, 1).to_le_bytes())
+            .unwrap();
+        mapper
+            .copy_user_out(VirtualAddress::new(base + 8), &id.raw().get().to_le_bytes())
+            .unwrap();
+
+        let transport = ThreadTransport::new(mapper, VirtualAddress::new(base), table.clone());
+        (transport, table)
+    }
+
+    #[test]
+    fn a_failed_send_transfer_leaves_the_parked_receiver_waiting() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let RecvAction::Park {
+            outcome: recv_outcome,
+            ..
+        } = ep.recv(&transport(BASE_B), &rt, None)
+        else {
+            panic!("recv must park");
+        };
+        let (sender, sender_table) = transport_with_signal(BASE_A, Rights::READ);
+
+        let action = ep.send(&sender, &rt, None);
+
+        assert!(matches!(action, SendAction::Failed(IpcError::AccessDenied)));
+        assert_eq!(
+            recv_outcome.get(),
+            Some(RendezvousOutcome::TransferFailed(IpcError::ShouldWait))
+        );
+        assert_eq!(sender_table.with_lock(|t| t.live_count()), 1);
+    }
+
+    #[test]
+    fn a_failed_call_transfer_leaves_the_parked_receiver_waiting() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let RecvAction::Park {
+            outcome: recv_outcome,
+            reply_slot,
+            ..
+        } = ep.recv(&transport(BASE_B), &rt, None)
+        else {
+            panic!("recv must park");
+        };
+        let (caller, caller_table) = transport_with_signal(BASE_A, Rights::READ);
+
+        let action = ep.call(&caller, ParkCtx::for_current(&rt), None);
+
+        assert!(matches!(action, CallAction::Failed(IpcError::AccessDenied)));
+        assert_eq!(
+            recv_outcome.get(),
+            Some(RendezvousOutcome::TransferFailed(IpcError::ShouldWait))
+        );
+        assert!(reply_slot.take().is_none());
+        assert_eq!(caller_table.with_lock(|t| t.live_count()), 1);
+    }
+
+    #[test]
+    fn a_failed_transfer_of_a_queued_sender_is_should_wait_for_the_receiver() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let (sender, sender_table) = transport_with_signal(BASE_A, Rights::READ);
+        let SendAction::Park {
+            outcome: send_outcome,
+            ..
+        } = ep.send(&sender, &rt, None)
+        else {
+            panic!("send must park");
+        };
+
+        let action = ep.recv(&transport(BASE_B), &rt, None);
+
+        assert!(matches!(action, RecvAction::Failed(IpcError::ShouldWait)));
+        assert_eq!(
+            send_outcome.get(),
+            Some(RendezvousOutcome::TransferFailed(IpcError::AccessDenied))
+        );
+        assert_eq!(sender_table.with_lock(|t| t.live_count()), 1);
+        assert!(ep.queue_is_empty());
+    }
+
+    #[test]
+    fn port_recv_past_its_deadline_without_a_sender_is_timeout() {
+        let rt = DeadlineRuntime::arc(1_000);
+        let runtime: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+
+        assert_eq!(
+            port_recv(&ep, &transport(BASE_B), &runtime, Some(500), None).map(|_| ()),
+            Err(IpcError::Timeout)
+        );
+        assert!(rt.parks().is_empty());
+        assert!(ep.queue_is_empty());
+    }
+
+    #[test]
+    fn a_reply_to_a_caller_with_a_full_table_fails_for_both_sides() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let caller = ThreadTransport::new(
+            PageMapper::new(BASE_A),
+            VirtualAddress::new(BASE_A),
+            Arc::new(MutexCell::new(HandleTable::with_capacity(0))),
+        );
+        let ctx = ParkCtx::for_current(&rt);
+        let caller_outcome = ctx.outcome.clone();
+        assert!(matches!(
+            ep.call(&caller, ctx, None),
+            CallAction::Park { .. }
+        ));
+        let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None) else {
+            panic!("recv must return a reply for call");
+        };
+        let (server, server_table) = transport_with_signal(BASE_B, Rights::READ | Rights::TRANSFER);
+
+        assert_eq!(reply.reply(&server), Err(IpcError::OutOfHandles));
+        assert_eq!(
+            caller_outcome.get(),
+            Some(RendezvousOutcome::TransferFailed(IpcError::OutOfHandles))
+        );
+        assert_eq!(server_table.with_lock(|t| t.live_count()), 1);
     }
 }

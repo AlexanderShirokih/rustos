@@ -11,10 +11,13 @@ use kernel_objects::Port;
 use runtime::{Priority, Timeout, process_exit, spawn_owned};
 use syscall::{Handle, kind};
 
+mod startup_exit_protocol;
+
+use startup_exit_protocol::PANIC_EXIT_CODE;
+
 const HELPER_STACK_SIZE: u64 = 0x4000;
 
 const FAILED_EXIT_CODE: u64 = 1;
-const PANIC_EXIT_CODE: u64 = 8;
 
 component_manifest! {
     struct HelperPanicStartup {}
@@ -45,5 +48,5 @@ fn helper() -> u32 {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(PANIC_EXIT_CODE)
+    process_exit(u64::from(PANIC_EXIT_CODE))
 }

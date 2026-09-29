@@ -25,12 +25,7 @@ const RECORD_BODY: &[u8] = b"component area of the userland image\n";
 const ESCAPE_RELATIVE: &str = "/../testrunner/sample";
 const ESCAPE_ABSOLUTE: &str = "/testrunner/sample";
 
-const NO_STARTUP_EXIT_CODE: u64 = 1;
-const READ_EXIT_CODE: u64 = 2;
-const NO_BUFFER_EXIT_CODE: u64 = 3;
-const RECORD_UNREADABLE_EXIT_CODE: u64 = 4;
-const AREA_LEAKS_EXIT_CODE: u64 = 5;
-const PANIC_EXIT_CODE: u64 = 6;
+const RESTART_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct AreaStartup {
@@ -42,52 +37,51 @@ component_manifest! {
 pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
     start_component(parent, LOG_TAG);
     let Ok(requirements) = AreaStartup::request(parent) else {
-        process_exit(NO_STARTUP_EXIT_CODE);
+        process_exit(RESTART_EXIT_CODE);
     };
 
     let area = requirements.area.client().with_wait(CALL_TIMEOUT);
-    let code = inspect(&area);
-    if code == READ_EXIT_CODE {
+    if inspect(&area) {
         log_line("area read");
     }
-    process_exit(code)
+    process_exit(RESTART_EXIT_CODE)
 }
 
-fn inspect(client: &file_system::Client<SessionTransport>) -> u64 {
+fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
     let Ok(Ok(cap)) = client.acquire_buffer(BUFFER_SIZE) else {
-        return NO_BUFFER_EXIT_CODE;
+        return false;
     };
     let region = MemoryRegion::from(cap);
     let Ok(buffer) = region.map_full(UserMemFlags::ReadWrite) else {
-        return NO_BUFFER_EXIT_CODE;
+        return false;
     };
 
     let Some(path) = Str::new(RECORD) else {
-        return RECORD_UNREADABLE_EXIT_CODE;
+        return false;
     };
     let Ok(Ok(opened)) = client.open(path, AccessMode::Read, OpenFlags::NONE) else {
-        return RECORD_UNREADABLE_EXIT_CODE;
+        return false;
     };
     if opened.kind != NodeKind::File || opened.size != RECORD_BODY.len() as u64 {
-        return RECORD_UNREADABLE_EXIT_CODE;
+        return false;
     }
     let Ok(Ok(count)) = client.read(opened.fd, 0, BUFFER_SIZE) else {
-        return RECORD_UNREADABLE_EXIT_CODE;
+        return false;
     };
     let mut body = [0; RECORD_BODY.len()];
     if count as usize != RECORD_BODY.len() || buffer.copy_out(&mut body).is_err() {
-        return RECORD_UNREADABLE_EXIT_CODE;
+        return false;
     }
     if body != RECORD_BODY {
-        return RECORD_UNREADABLE_EXIT_CODE;
+        return false;
     }
 
     if escapes(client, ESCAPE_RELATIVE, FileSystemError::InvalidPath)
         || escapes(client, ESCAPE_ABSOLUTE, FileSystemError::NotFound)
     {
-        return AREA_LEAKS_EXIT_CODE;
+        return false;
     }
-    READ_EXIT_CODE
+    true
 }
 
 fn escapes(
@@ -104,5 +98,5 @@ fn escapes(
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     log_fmt(format_args!("panic: {info}"));
-    process_exit(PANIC_EXIT_CODE)
+    process_exit(RESTART_EXIT_CODE)
 }

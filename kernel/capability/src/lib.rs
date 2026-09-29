@@ -72,4 +72,4 @@ pub use spawn::{
 pub use syscall::Rights;
 pub use target::{CapabilityTarget, OperationHold, TargetObject};
 pub use thread::ThreadObject;
-pub use wait::{CancelTarget, Waitable, Waker};
+pub use wait::{CancelTarget, Waitable, Waker, deadline_after};

@@ -40,10 +40,7 @@ mod ipc_raw;
 
 static SLOT: AtomicU64 = AtomicU64::new(0);
 
-const EXIT_BAD_REQUEST: u64 = 101;
-const EXIT_RECV_FAILED: u64 = 102;
-const EXIT_REPLY_FAILED: u64 = 103;
-const EXIT_SPAWN_FAILED: u64 = 104;
+const FAILED_EXIT_CODE: u64 = 101;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
@@ -53,16 +50,16 @@ pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
         let reply = match port.recv(Timeout::INFINITE) {
             Ok(Some(reply)) => reply,
             Err(Error::Syscall(SyscallError::SenderGone)) => thread_exit(0),
-            _ => thread_exit(EXIT_RECV_FAILED),
+            _ => thread_exit(FAILED_EXIT_CODE),
         };
 
         let mut body = [0u8; REQUEST_LEN];
         let (len, ncaps) = ipc_raw::read_frame(&mut body);
         if len < REQUEST_LEN {
-            thread_exit(EXIT_BAD_REQUEST)
+            thread_exit(FAILED_EXIT_CODE)
         }
         let Some((op, arg)) = decode_request(&body) else {
-            thread_exit(EXIT_BAD_REQUEST)
+            thread_exit(FAILED_EXIT_CODE)
         };
 
         match op {
@@ -88,7 +85,7 @@ pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
             OP_CLOSE_CAP => {
                 let cap = if ncaps == 1 { ipc_raw::read_cap(0) } else { 0 };
                 let Some(handle) = owned_of::<kind::Any>(cap) else {
-                    thread_exit(EXIT_BAD_REQUEST)
+                    thread_exit(FAILED_EXIT_CODE)
                 };
                 drop(handle);
                 answer(reply, &[REPLY_OK]);
@@ -102,12 +99,12 @@ pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
             OP_PROCESS_EXIT => {
                 if !start_parked_sibling() {
                     answer(reply, &[REPLY_SPAWN_FAILED]);
-                    thread_exit(EXIT_SPAWN_FAILED)
+                    thread_exit(FAILED_EXIT_CODE)
                 }
                 answer(reply, &[REPLY_OK]);
                 process_exit(arg)
             }
-            _ => thread_exit(EXIT_BAD_REQUEST),
+            _ => thread_exit(FAILED_EXIT_CODE),
         }
     }
 }
@@ -146,7 +143,7 @@ fn owned_of<K: kernel_objects::ObjectKind>(raw: u32) -> Option<OwnedHandle<K>> {
 fn answer(reply: Reply, body: &[u8]) {
     ipc_raw::write_frame(body, &[]);
     if reply.reply().is_err() {
-        thread_exit(EXIT_REPLY_FAILED)
+        thread_exit(FAILED_EXIT_CODE)
     }
 }
 

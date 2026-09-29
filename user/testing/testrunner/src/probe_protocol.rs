@@ -10,7 +10,7 @@ use kernel_objects::Port;
 use runtime::{PortTransport, Priority, Timeout, process_exit, spawn_owned};
 use syscall::{Handle, kind};
 
-const EXPORT_STOPPED_EXIT_CODE: u64 = 6;
+const EXPORT_STOPPED_EXIT_CODE: u64 = 1;
 
 const EXPORT_STACK_SIZE: u64 = 0x4000;
 

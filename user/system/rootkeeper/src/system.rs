@@ -79,6 +79,8 @@ pub enum BudgetFailure {
     Reserve,
     /// Порт `ComponentStartup` не создан.
     StartupPort,
+    /// Ядро не выдало сессию `Devices`.
+    Devices,
 }
 
 /// Требование `name` импортёра. Импортёр получает по нему сессию экспорта `protocol` записи
@@ -165,6 +167,7 @@ impl BootFailure {
             Self::Budget(BudgetFailure::Root) => "root resource unavailable",
             Self::Budget(BudgetFailure::Reserve) => "component reserve not granted",
             Self::Budget(BudgetFailure::StartupPort) => "startup port not created",
+            Self::Budget(BudgetFailure::Devices) => "devices session not granted",
         }
     }
 }
@@ -217,7 +220,13 @@ impl<'a> RootSystem<'a> {
             .map(|record| log_sessions(log_badge(record)))
             .collect::<Option<Vec<_>>>()
             .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
-        let devices = DeviceGrants::new(kernel, &plan);
+        let session = bootstrap::Client::new(PortTransport::new(kernel))
+            .acquire_devices()
+            .ok()
+            .and_then(Result::ok)
+            .map(Session::from_session)
+            .ok_or(BootFailure::Budget(BudgetFailure::Devices))?;
+        let devices = DeviceGrants::new(session, &plan);
 
         for (record, component) in (0..plan.len()).zip(plan.components()) {
             let path = format!("{}/{COMPONENT_PROGRAM_NAME}", component.executable());

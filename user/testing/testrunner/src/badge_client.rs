@@ -2,24 +2,18 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
-
 use kernel_objects::{Port, kind};
-use runtime::{Timeout, thread_exit};
+use runtime::Timeout;
 use syscall::Handle;
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(client: Handle<kind::Port>) -> ! {
-    let port = Port::from_handle(client);
-    let sent = port.send_bytes(b"badged", Timeout::INFINITE);
-    thread_exit(u64::from(sent.is_err()))
-}
+mod fixture_start;
 
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+use fixture_start::{Failed, fixture_start};
+
+fixture_start!(run);
+
+fn run(client: Handle<kind::Port>) -> Result<(), Failed> {
+    Port::from_handle(client)
+        .send_bytes(b"badged", Timeout::INFINITE)
+        .map_err(|_| Failed)
 }

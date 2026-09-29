@@ -2,14 +2,14 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
-
 use filesystem_abi::{AccessMode, OpenFlags, file_system};
 use ipc::wire::Str;
-use runtime::{PortTransport, thread_exit};
+use runtime::PortTransport;
 use syscall::{Handle, Timeout, kind};
+
+mod fixture_start;
+
+use fixture_start::{Failed, fixture_start};
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -17,26 +17,20 @@ const BUFFER_SIZE: u32 = 64 * 1024;
 
 const PATH: &str = "/fixture";
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(service: Handle<kind::Port>) -> ! {
-    thread_exit(u64::from(!populate_session(service)))
-}
+fixture_start!(populate_session);
 
-fn populate_session(service: Handle<kind::Port>) -> bool {
+fn populate_session(service: Handle<kind::Port>) -> Result<(), Failed> {
     let client = file_system::Client::new(PortTransport::new(service)).with_wait(CALL_TIMEOUT);
 
-    let Ok(Ok(_buffer)) = client.acquire_buffer(BUFFER_SIZE) else {
-        return false;
-    };
+    let _buffer = client
+        .acquire_buffer(BUFFER_SIZE)
+        .map_err(|_| Failed)?
+        .map_err(|_| Failed)?;
 
-    let Some(path) = Str::new(PATH) else {
-        return false;
-    };
-    let opened = client.open(path, AccessMode::ReadWrite, OpenFlags::CREATE);
-    matches!(opened, Ok(Ok(_)))
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    thread_exit(1)
+    let path = Str::new(PATH).ok_or(Failed)?;
+    client
+        .open(path, AccessMode::ReadWrite, OpenFlags::CREATE)
+        .map_err(|_| Failed)?
+        .map_err(|_| Failed)?;
+    Ok(())
 }
