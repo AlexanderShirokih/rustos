@@ -51,6 +51,7 @@ collections = { path = "../lib/collections" }
 component-abi = { path = "../lib/component-abi" }
 device-resolver = { path = "../lib/device-resolver" }
 device-resolver-aarch64 = { path = "../lib/device-resolver-aarch64" }
+display-abi = { path = "../lib/display-abi" }
 fdt = { path = "../lib/fdt" }
 filesystem = { path = "../lib/filesystem" }
 filesystem-abi = { path = "../lib/filesystem-abi" }

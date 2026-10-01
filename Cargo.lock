@@ -61,6 +61,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "display-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
+
+[[package]]
 name = "drivers-common"
 version = "0.1.0"
 dependencies = [
@@ -249,7 +257,6 @@ name = "platform-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
- "ipc-test",
  "syscall",
 ]
 

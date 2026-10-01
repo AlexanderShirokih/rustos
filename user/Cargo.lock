@@ -81,6 +81,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "display-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
+
+[[package]]
 name = "driver-pl031"
 version = "0.1.0"
 dependencies = [
@@ -423,6 +431,7 @@ dependencies = [
  "collections",
  "component-abi",
  "component-startup",
+ "display-abi",
  "filesystem",
  "filesystem-abi",
  "filesystem-server",

@@ -1,0 +1,18 @@
+//! Объявляет контракт [`display`] вывода изображения на экран и формат поверхности его сессии.
+//!
+//! Сессия открыта к одному экрану. Клиент рисует в поверхность сессии и вызовом `present`
+//! переносит прямоугольник поверхности на экран.
+//!
+//! Формат поверхности не зависит от экрана. Пиксель занимает [`SURFACE_PIXEL_BYTES`] байта со
+//! значением `0x00RRGGBB` в порядке little-endian. Шаг строки равен ширине экрана, умноженной на
+//! [`SURFACE_PIXEL_BYTES`]. В формат буфера экрана пиксели переводит сервер.
+
+#![cfg_attr(not(test), no_std)]
+
+mod dimension;
+mod error;
+mod protocol;
+
+pub use dimension::{Area, DisplayDimension, SURFACE_PIXEL_BYTES};
+pub use error::DisplayError;
+pub use protocol::display;

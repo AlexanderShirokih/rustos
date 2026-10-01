@@ -305,7 +305,10 @@ const SCOPE_CONSUMER: ComponentSpec<'static> = ComponentSpec {
     ..fixture("/scope-consumer-fixture", "scope-consumer-fixture")
 };
 
-const fn fixture(executable: &'static str, name: &'static str) -> ComponentSpec<'static> {
+pub(crate) const fn fixture(
+    executable: &'static str,
+    name: &'static str,
+) -> ComponentSpec<'static> {
     ComponentSpec {
         executable,
         name,
@@ -348,7 +351,7 @@ const fn file_system_of(
     }
 }
 
-fn scenario(components: &[ComponentSpec<'_>]) -> Composition {
+pub(crate) fn scenario(components: &[ComponentSpec<'_>]) -> Composition {
     started(&[&[PARENT], components].concat())
 }
 
@@ -358,7 +361,7 @@ fn started(records: &[ComponentSpec<'_>]) -> Composition {
     Composition::start(plan, component_scenario_session)
 }
 
-fn finish(composition: Composition) {
+pub(crate) fn finish(composition: Composition) {
     drop(composition);
     stop_component_relay();
 }
@@ -413,7 +416,7 @@ fn region_base(region: &MemoryRegion) -> u64 {
     region.inspect().expect("region inspects").base
 }
 
-fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
+pub(crate) fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
     (0..REVOKE_POLLS).any(|_| {
         let revoked = inspect().err() == Some(Error::Syscall(SyscallError::Revoked));
         if !revoked {

@@ -8,8 +8,5 @@ publish.workspace = true
 ipc = { workspace = true }
 syscall = { workspace = true }
 
-[dev-dependencies]
-ipc-test = { workspace = true }
-
 [lints]
 workspace = true

@@ -1,8 +1,9 @@
 use crate::{
     rule::Rule,
     rules::{
-        comment_on_declaration, comment_on_test, comment_width, cyrillic_in_literal,
-        doc_on_declaration, expect_in_kernel, semicolon_in_prose, tuple_in_public_signature,
+        code_in_crate_root, comment_on_declaration, comment_on_test, comment_width,
+        cyrillic_in_literal, doc_on_declaration, expect_in_kernel, semicolon_in_prose,
+        tuple_in_public_signature,
     },
 };
 
@@ -17,5 +18,6 @@ pub fn compiled() -> Vec<Rule> {
         semicolon_in_prose::rule(),
         tuple_in_public_signature::rule(),
         expect_in_kernel::rule(),
+        code_in_crate_root::rule(),
     ]
 }

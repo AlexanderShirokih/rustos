@@ -1,3 +1,134 @@
+code_in_crate_root|kernel/drivers-aarch64/src/lib.rs|FdtProbeContext|6eacebf4
+code_in_crate_root|kernel/drivers-aarch64/src/lib.rs|FdtProbeFn|1e4a3add
+code_in_crate_root|kernel/drivers-aarch64/src/lib.rs|drivers|4f5249e4
+code_in_crate_root|kernel/drivers-aarch64/src/lib.rs|register_driver|e2499797
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|<AsidAllocatorState as Default>|76c9b637
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|<GlobalAsidAllocator<CPUS> as core::fmt::Debug>|76c9b637
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|ASID_MASK|bcd9ed09
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AcquireOutcome|095e3801
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidAllocatorState|76c9b637
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidAllocatorState|fc430f6e
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidBitmap|41129bb3
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidWidth|447c5134
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidWidth|76c9b637
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|BITMAP_WORDS|35f5cc9c
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|GlobalAsidAllocator<CPUS>|76c9b637
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|GlobalAsidAllocator|20a64ec0
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|pack_tag|8a59b4cb
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|tests|4dfda322
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|unpack_asid|e8be1169
+code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|unpack_generation|8f8d1a42
+code_in_crate_root|kernel/memory/src/lib.rs|PAGE_SIZE|ec26ff2a
+code_in_crate_root|kernel/memory/src/lib.rs|page_round_up|c977c6f7
+code_in_crate_root|kernel/memory/src/lib.rs|tests|4dfda322
+code_in_crate_root|kernel/syscall/src/lib.rs|<file-root>|19e3df34
+code_in_crate_root|lib/bootstrap-abi/src/lib.rs|<file-root>|22258312
+code_in_crate_root|lib/bootstrap-abi/src/lib.rs|<file-root>|98c71a2d
+code_in_crate_root|lib/bootstrap-abi/src/lib.rs|<file-root>|98c71a2d#2
+code_in_crate_root|lib/bootstrap-abi/src/lib.rs|LOG_MESSAGE_MAX|b4dbf8bc
+code_in_crate_root|lib/bootstrap-abi/src/lib.rs|LOG_TAG_MAX|c349525f
+code_in_crate_root|lib/bootstrap-abi/src/lib.rs|tests|4dfda322
+code_in_crate_root|lib/components/src/lib.rs|requirements|2873cfe1
+code_in_crate_root|lib/fdt-test/src/lib.rs|BEGIN_NODE|4f07cf23
+code_in_crate_root|lib/fdt-test/src/lib.rs|EMPTY_RESERVATION_MAP_SIZE|ba8f5d16
+code_in_crate_root|lib/fdt-test/src/lib.rs|END_NODE|afd947af
+code_in_crate_root|lib/fdt-test/src/lib.rs|END|8e67b1aa
+code_in_crate_root|lib/fdt-test/src/lib.rs|HEADER_SIZE|50304084
+code_in_crate_root|lib/fdt-test/src/lib.rs|LAST_COMPATIBLE_VERSION|7c2a8293
+code_in_crate_root|lib/fdt-test/src/lib.rs|MAGIC|12e20bcc
+code_in_crate_root|lib/fdt-test/src/lib.rs|PROP|9893ae58
+code_in_crate_root|lib/fdt-test/src/lib.rs|Token|c2c760b2
+code_in_crate_root|lib/fdt-test/src/lib.rs|VERSION|d560d517
+code_in_crate_root|lib/fdt-test/src/lib.rs|align4|c39ca35e
+code_in_crate_root|lib/fdt-test/src/lib.rs|build|98c70b03
+code_in_crate_root|lib/fdt-test/src/lib.rs|push_prop|379add87
+code_in_crate_root|lib/fdt-test/src/lib.rs|push_u32|f46387f4
+code_in_crate_root|lib/fdt-test/src/lib.rs|tree|511eb395
+code_in_crate_root|lib/fdt-test/src/lib.rs|wrap|d04f72c5
+code_in_crate_root|lib/filesystem-server/src/lib.rs|EXPORT_STACK_SIZE|34e67a78
+code_in_crate_root|lib/filesystem-server/src/lib.rs|FAILED_EXIT_CODE|88025627
+code_in_crate_root|lib/filesystem-server/src/lib.rs|IMAGE|5870b63a
+code_in_crate_root|lib/filesystem-server/src/lib.rs|MOUNT_STACK_SIZE|636495d3
+code_in_crate_root|lib/filesystem-server/src/lib.rs|Shared|c213e3d4
+code_in_crate_root|lib/filesystem-server/src/lib.rs|serve_sessions|319c6740
+code_in_crate_root|lib/filesystem-server/src/lib.rs|serve|8be24894
+code_in_crate_root|lib/ipc-test/src/lib.rs|<Entry as Drop>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockChannel as Channel>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockChannel as Clone>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockChannel as Drop>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockHandle<K> as Eq>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockHandle<K> as IntoWireValue<MockResources>>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockHandle<K> as PartialEq>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockHandle<K> as core::fmt::Debug>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockListener as Drop>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockListener as Listener>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockReply as Drop>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockReply as IntoWireValue<MockResources>>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockReply as ReplyChannel>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockReply as core::fmt::Debug>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|<MockResources as ReceivedResources>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|Answer|588602bf
+code_in_crate_root|lib/ipc-test/src/lib.rs|Deadline|24bb9a55
+code_in_crate_root|lib/ipc-test/src/lib.rs|Deadline|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|Entry|be21fb73
+code_in_crate_root|lib/ipc-test/src/lib.rs|FORWARDED|5bd99aeb
+code_in_crate_root|lib/ipc-test/src/lib.rs|Frame|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|Frame|b2c9f986
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockChannel|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockChannel|c1c66582
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockHandle<K>|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockHandle|84ad443d
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockListener|76c9b637
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockListener|c2627a73
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockReply|4542463d
+code_in_crate_root|lib/ipc-test/src/lib.rs|MockResources|fb25093c
+code_in_crate_root|lib/ipc-test/src/lib.rs|NEXT_FORWARDED|ad59057b
+code_in_crate_root|lib/ipc-test/src/lib.rs|Port|a7208a86
+code_in_crate_root|lib/ipc-test/src/lib.rs|Queue|f670c938
+code_in_crate_root|lib/ipc-test/src/lib.rs|Slot|f589c9b1
+code_in_crate_root|lib/ipc-test/src/lib.rs|lock|70f6ece2
+code_in_crate_root|lib/ipc-test/src/lib.rs|pair|eb889a31
+code_in_crate_root|lib/ipc-test/src/lib.rs|take_forwarded|babfc011
+code_in_crate_root|lib/ipc-test/src/lib.rs|tests|4dfda322
+code_in_crate_root|lib/kernel-objects/src/lib.rs|Session|2692e037
+code_in_crate_root|lib/log-abi/src/lib.rs|<file-root>|19e3df34
+code_in_crate_root|lib/log-abi/src/lib.rs|<file-root>|98c71a2d
+code_in_crate_root|lib/log-abi/src/lib.rs|LOG_MESSAGE_MAX|b4dbf8bc
+code_in_crate_root|lib/log-abi/src/lib.rs|LOG_SOURCE_MAX|4c17d616
+code_in_crate_root|lib/log-abi/src/lib.rs|LOG_TAG_MAX|c349525f
+code_in_crate_root|lib/log-abi/src/lib.rs|TERMINATOR_SIZE|049ef224
+code_in_crate_root|lib/log-abi/src/lib.rs|tests|4dfda322
+code_in_crate_root|lib/rtc-abi/src/lib.rs|<file-root>|98c71a2d
+code_in_crate_root|lib/test-harness-macros/src/lib.rs|TestKind|e9276e43
+code_in_crate_root|lib/test-harness-macros/src/lib.rs|expand_kernel_test|d3c97530
+code_in_crate_root|lib/test-harness-macros/src/lib.rs|parse_kind|3f883c97
+code_in_crate_root|lib/test-harness-macros/src/lib.rs|tests|4dfda322
+code_in_crate_root|lib/test-harness-macros/src/lib.rs|validate_signature|b56c8866
+code_in_crate_root|lib/userland-loader/src/lib.rs|<PendingProcess as Drop>|76c9b637
+code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|76c9b637
+code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|c7c338b1
+code_in_crate_root|lib/userland-loader/src/lib.rs|STARTUP_FAILURE_EXIT_CODE|b339c684
+code_in_crate_root|lib/userland-loader/src/lib.rs|load_entry|d86fa40a
+code_in_crate_root|lib/userland-loader/src/lib.rs|permissions_to_flags|7ef9b161
+code_in_crate_root|lib/userland-loader/src/lib.rs|round_up_to_page|54ca5bdb
+code_in_crate_root|lib/userland-loader/src/lib.rs|state_taken|b2044f72
+code_in_crate_root|lib/userland-loader/src/lib.rs|terminate_and_join|4d8d9b4f
+code_in_crate_root|lib/userland/src/lib.rs|<Entry<'a> as EntryView<'a>>|76c9b637
+code_in_crate_root|lib/userland/src/lib.rs|<Segment<'a> as SegmentView<'a>>|76c9b637
+code_in_crate_root|lib/userland/src/lib.rs|EntryView|48e18cf6
+code_in_crate_root|lib/userland/src/lib.rs|Entry|be21fb73
+code_in_crate_root|lib/userland/src/lib.rs|SegmentPermissions|5c7a254e
+code_in_crate_root|lib/userland/src/lib.rs|SegmentPermissions|76c9b637
+code_in_crate_root|lib/userland/src/lib.rs|SegmentView|5b939337
+code_in_crate_root|lib/userland/src/lib.rs|Segment|753b7e66
+code_in_crate_root|lib/userland/src/lib.rs|USERLAND_ENTRY_PATH_CAPACITY|7fb49f57
+code_in_crate_root|lib/userland/src/lib.rs|USERLAND_PAGE_SIZE|93218819
+code_in_crate_root|lib/userland/src/lib.rs|UserVmWindow|59f3ae6b
+code_in_crate_root|lib/userland/src/lib.rs|UserlandValidationError|6409deba
+code_in_crate_root|lib/userland/src/lib.rs|entry_name|6e1ab51f
+code_in_crate_root|lib/userland/src/lib.rs|tests|4dfda322
+code_in_crate_root|lib/userland/src/lib.rs|user_vm_window|849e30ff
+code_in_crate_root|lib/userland/src/lib.rs|validate_entry|a3585d70
 expect_in_kernel|kernel/capability/src/runtime.rs|runtime|7190aad8
 expect_in_kernel|kernel/syscall/src/runtime.rs|runtime|7190aad8
 tuple_in_public_signature|kernel/capability/src/api.rs|signal_wait_many|6aa77431

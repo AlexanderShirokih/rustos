@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod code_in_crate_root;
 pub mod comment_on_declaration;
 pub mod comment_on_test;
 pub mod comment_width;

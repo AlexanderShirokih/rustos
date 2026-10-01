@@ -8,7 +8,7 @@ use core::fmt;
 use ipc::{
     IntoWireValue, ReceivedResources, WireTyped, WireValue,
     schema::{WireType, max_body_len},
-    wire::{BODY_MAX, ENUM_DISCRIMINANT_WIDTH, IpcError, MessageBuf, Str, value},
+    wire::{BODY_MAX, IpcError, MessageBuf, Str, value},
 };
 use syscall::kind;
 
@@ -29,62 +29,9 @@ pub const SESSION_SCOPE_MAX: usize = 255;
 /// не объявляет. Родитель без журнала отвечает на запрос `Refused`.
 pub const LOG_REQUIREMENT: &str = "log";
 
-macro_rules! discriminant_error {
-    (
-        $(#[$attr:meta])*
-        pub enum $name:ident {
-            $( $(#[$variant_attr:meta])* $variant:ident = $value:literal, )+
-        }
-    ) => {
-        $(#[$attr])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub enum $name {
-            $( $(#[$variant_attr])* $variant, )+
-        }
-
-        impl $name {
-            #[cfg(test)]
-            const VARIANTS: &[Self] = &[$( Self::$variant ),+];
-
-            const fn discriminant(self) -> u16 {
-                match self {
-                    $( Self::$variant => $value, )+
-                }
-            }
-
-            const fn from_discriminant(value: u16) -> Option<Self> {
-                match value {
-                    $( $value => Some(Self::$variant), )+
-                    _ => None,
-                }
-            }
-        }
-
-        impl<'a, R: ReceivedResources> WireValue<'a, R> for $name {
-            type Owned = Self;
-
-            fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
-                Self::from_discriminant(value::decode_discriminant(data)?)
-                    .ok_or(IpcError::InvalidValue)
-            }
-        }
-
-        impl<R: ReceivedResources> IntoWireValue<R> for $name {
-            type Read = Self;
-
-            fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
-                frame.write_field(field_id, &value::encode_discriminant(self.discriminant()))
-            }
-        }
-
-        impl WireTyped for $name {
-            const WIRE_TYPE: WireType = WireType::Uint(ENUM_DISCRIMINANT_WIDTH);
-        }
-    };
-}
-
-discriminant_error! {
+ipc::wire_enum! {
     /// Отказ в сессии требования. `Refused` и `Unavailable` окончательны.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum SessionError {
         /// Повтор запроса заменил заявку либо не хватило ресурса.
         NoSpace = 1,
@@ -95,8 +42,9 @@ discriminant_error! {
     }
 }
 
-discriminant_error! {
+ipc::wire_enum! {
     /// Отказ в заявке на экспорт.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum AcceptError {
         /// Повтор `accept` тем же провайдером заменил этот запрос.
         NoSpace = 1,
@@ -105,8 +53,9 @@ discriminant_error! {
     }
 }
 
-discriminant_error! {
+ipc::wire_enum! {
     /// Отказ в регионе образа.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ResourceError {
         /// Копия capability не создана.
         NoSpace = 1,
@@ -244,8 +193,8 @@ mod tests {
     use syscall::kind;
 
     use super::{
-        AcceptError, PROTOCOL_ID_MAX, ResourceError, SESSION_SCOPE_MAX, SessionError,
-        SessionRequest, SessionRequirement, SessionScope, WireValue, component_startup, value,
+        AcceptError, PROTOCOL_ID_MAX, SESSION_SCOPE_MAX, SessionError, SessionRequest,
+        SessionRequirement, SessionScope, WireValue, component_startup,
     };
 
     const SESSION_CAP: MockHandle<kind::Port> = MockHandle::new(0x28);
@@ -329,37 +278,6 @@ mod tests {
         written.write_into(&mut buf, FIELD_ID).expect("write ok");
         buf.finish().expect("finish ok");
         read_field(&buf)
-    }
-
-    fn outside<T>(variants: &[T]) -> Result<T, IpcError>
-    where
-        T: for<'a> WireValue<'a, (), Owned = T>,
-    {
-        let discriminant = u16::try_from(variants.len() + 1).expect("few variants");
-        read_field(&field_of(&value::encode_discriminant(discriminant)))
-    }
-
-    #[test]
-    fn every_variant_round_trips() {
-        for variant in SessionError::VARIANTS {
-            assert_eq!(round_trip(*variant), Ok(*variant));
-        }
-        for variant in AcceptError::VARIANTS {
-            assert_eq!(round_trip(*variant), Ok(*variant));
-        }
-        for variant in ResourceError::VARIANTS {
-            assert_eq!(round_trip(*variant), Ok(*variant));
-        }
-    }
-
-    #[test]
-    fn a_discriminant_outside_the_set_is_rejected() {
-        assert_eq!(outside(SessionError::VARIANTS), Err(IpcError::InvalidValue));
-        assert_eq!(outside(AcceptError::VARIANTS), Err(IpcError::InvalidValue));
-        assert_eq!(
-            outside(ResourceError::VARIANTS),
-            Err(IpcError::InvalidValue)
-        );
     }
 
     #[test]

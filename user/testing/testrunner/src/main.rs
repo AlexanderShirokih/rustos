@@ -39,6 +39,8 @@ mod answer_exhaustion_protocol;
 mod child_steps_protocol;
 mod clock;
 mod composition;
+mod display;
+mod display_fixture_protocol;
 mod filesystem;
 mod filesystem_bench;
 mod filesystem_scope;

@@ -7,6 +7,7 @@ members = [
     "kernel/hal-aarch64-paging",
     "kernel/hal-common",
     "lib/bootstrap-abi",
+    "lib/display-abi",
     "lib/io",
     "lib/ipc",
     "lib/kernel-objects",
@@ -82,6 +83,7 @@ tempfile = "3"
 ipc = { path = "lib/ipc" }
 ipc-test = { path = "lib/ipc-test" }
 bootstrap-abi = { path = "lib/bootstrap-abi" }
+display-abi = { path = "lib/display-abi" }
 log-abi = { path = "lib/log-abi" }
 platform-abi = { path = "lib/platform-abi" }
 collections = { path = "lib/collections" }

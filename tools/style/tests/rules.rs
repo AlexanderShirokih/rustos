@@ -437,6 +437,75 @@ fn expect_outside_the_kernel_is_out_of_scope() {
     assert!(hits.is_empty(), "{hits:?}");
 }
 
+fn check_root(source: &str) -> Vec<String> {
+    check_one(
+        &rule("code_in_crate_root"),
+        Path::new("lib/demo/src/lib.rs"),
+        source,
+    )
+}
+
+#[test]
+fn declarations_and_reexports_in_the_crate_root_are_accepted() {
+    let hits = check_root(concat!(
+        "//! Demo.\n",
+        "#![no_std]\n",
+        "#[cfg(test)]\n",
+        "extern crate std;\n",
+        "mod mode;\n",
+        "pub mod protocol;\n",
+        "use core::fmt;\n",
+        "pub use mode::Mode;\n",
+    ));
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn a_definition_in_the_crate_root_is_reported() {
+    let hits = check_root(concat!(
+        "mod mode;\n",
+        "pub const SIZE: u32 = 4;\n",
+        "pub struct Mode;\n",
+        "impl Mode {}\n",
+        "fn helper() {}\n",
+        "macro_rules! demo { () => {} }\n",
+    ));
+    assert_eq!(hits.len(), 5, "{hits:?}");
+}
+
+#[test]
+fn a_macro_invocation_in_the_crate_root_is_reported() {
+    let hits = check_root("ipc::protocol! {\n    pub mod display {}\n}\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn an_inline_module_in_the_crate_root_is_reported() {
+    let hits = check_root("#[cfg(test)]\nmod tests {\n    #[test]\n    fn case() {}\n}\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
+fn a_procedural_macro_entry_point_stays_in_the_crate_root() {
+    let hits = check_root(concat!(
+        "#[proc_macro_attribute]\n",
+        "pub fn kernel_test(attr: TokenStream, item: TokenStream) -> TokenStream {\n",
+        "    item\n",
+        "}\n",
+    ));
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
+#[test]
+fn a_definition_outside_the_crate_root_is_out_of_scope() {
+    let hits = check_one(
+        &rule("code_in_crate_root"),
+        Path::new("lib/demo/src/mode.rs"),
+        "pub struct Mode;\n",
+    );
+    assert!(hits.is_empty(), "{hits:?}");
+}
+
 #[test]
 fn fronted_negation_is_reported() {
     let hits = check(

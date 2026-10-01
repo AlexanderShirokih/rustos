@@ -47,7 +47,7 @@ impl<'a> DirEntry<'a> {
         };
         let encoded_name_len =
             u16::try_from(self.name.len()).map_err(|_| IpcError::InvalidValue)?;
-        *kind = self.kind.as_wire();
+        *kind = u8::from(self.kind);
         *name_len = value::encode_u16(encoded_name_len);
         name.copy_from_slice(self.name.as_bytes());
         Ok(len)
@@ -62,7 +62,7 @@ impl<'a> DirEntry<'a> {
         let Some((kind, name_len)) = header.split_first() else {
             return Err(IpcError::Truncated);
         };
-        let kind = NodeKind::from_wire(*kind).ok_or(IpcError::InvalidValue)?;
+        let kind = NodeKind::try_from(*kind)?;
         let name_len = usize::from(value::decode_u16(name_len)?);
         if name_len > NAME_MAX {
             return Err(IpcError::InvalidValue);
@@ -109,7 +109,7 @@ mod tests {
         entry("ab").encode(&mut buf).expect("encode ok");
         assert_eq!(
             &buf[..ENTRY_HEADER_SIZE + 2],
-            &[KIND.as_wire(), 2, 0, b'a', b'b']
+            &[u8::from(KIND), 2, 0, b'a', b'b']
         );
     }
 
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn decode_of_name_over_bound_is_rejected() {
         let mut wire = [0u8; 128];
-        wire[0] = KIND.as_wire();
+        wire[0] = u8::from(KIND);
         wire[1..ENTRY_HEADER_SIZE].copy_from_slice(&value::encode_u16(NAME_MAX as u16 + 1));
         assert_eq!(DirEntry::decode(&wire), Err(IpcError::InvalidValue));
     }
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn non_utf8_name_is_rejected() {
-        let wire = [KIND.as_wire(), 2, 0, 0xFF, 0xFE];
+        let wire = [u8::from(KIND), 2, 0, 0xFF, 0xFE];
         assert_eq!(DirEntry::decode(&wire), Err(IpcError::InvalidValue));
     }
 
@@ -192,7 +192,7 @@ mod tests {
             assert_eq!(entry(name).encode(&mut buf), Err(IpcError::InvalidValue));
 
             let mut wire = [0u8; 16];
-            wire[0] = KIND.as_wire();
+            wire[0] = u8::from(KIND);
             wire[1..ENTRY_HEADER_SIZE].copy_from_slice(&value::encode_u16(name.len() as u16));
             wire[ENTRY_HEADER_SIZE..ENTRY_HEADER_SIZE + name.len()]
                 .copy_from_slice(name.as_bytes());

@@ -43,6 +43,12 @@ impl UserImageParts<'_> {
     }
 }
 
+/// Собирает части [`UserImage`] из записи программы образа.
+///
+/// `user_va_end` - верх user-диапазона архитектуры, его передаёт вызывающий. Вершина стека
+/// равна `user_va_end`, размер стека берётся из заголовка программы. Стек занимает
+/// `[user_va_end - stack_size, user_va_end)`, и сегмент программы в этом диапазоне отвергает
+/// [`UserImage::validate`].
 pub fn user_image_parts_from_entry<'a, E: EntryView<'a>>(
     entry: &E,
     user_va_end: usize,

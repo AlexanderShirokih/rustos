@@ -136,6 +136,11 @@ bin = "crash-filesystem"
 path = "/crash-filesystem"
 
 [[programs]]
+package = "testrunner"
+bin = "display-fixture"
+path = "/display-fixture"
+
+[[programs]]
 package = "driver-pl031"
 path = "/driver-pl031"
 

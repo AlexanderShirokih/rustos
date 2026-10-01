@@ -9,10 +9,27 @@
     clippy::std_instead_of_core
 )]
 
-use ipc::wire::{FieldCursor, FrameParts, Header, value};
+use ipc::{
+    WireValue,
+    wire::{FieldCursor, FrameParts, Header, value},
+};
 use libfuzzer_sys::fuzz_target;
 
 const FIELD_LIMIT: usize = 256;
+
+ipc::wire_enum! {
+    enum Wide {
+        First = 1,
+        Last = 65535,
+    }
+}
+
+ipc::wire_enum! {
+    enum Narrow: u8 {
+        First = 1,
+        Last = 255,
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     let Ok(FrameParts { body, .. }) = Header::split(data) else {
@@ -34,7 +51,8 @@ fuzz_target!(|data: &[u8]| {
             value::decode_i32(field.data),
             value::decode_i64(field.data),
             value::decode_bool(field.data),
-            value::decode_discriminant(field.data),
+            Wide::from_field(field.data, &mut ()),
+            Narrow::from_field(field.data, &mut ()),
             value::decode_str(field.data),
             value::decode_port_index(field.data),
         );

@@ -45,12 +45,6 @@ pub const FIELD_ID_MIN: u8 = 1;
 /// Максимальный допустимый `field_id` записи.
 pub const FIELD_ID_MAX: u8 = 254;
 
-/// Ширина дискриминанта закрытого enum как поля wire-типа.
-pub const ENUM_DISCRIMINANT_WIDTH: u8 = 2;
-
-/// Размер дискриминанта закрытого enum в сообщении (`u16` LE).
-pub const ENUM_DISCRIMINANT_SIZE: usize = ENUM_DISCRIMINANT_WIDTH as usize;
-
 /// Ошибка кодека wire-формата и транспорта.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpcError {
@@ -652,7 +646,7 @@ pub type FieldBytes<'a> = Bytes<'a, FIELD_DATA_MAX>;
 
 /// Кодирование значений в `data` записи поля. Все целые - LE.
 pub mod value {
-    use super::{ENUM_DISCRIMINANT_SIZE, IpcError};
+    use super::IpcError;
 
     macro_rules! int_codec {
         ($encode:ident, $decode:ident, $ty:ty) => {
@@ -692,18 +686,6 @@ pub mod value {
             [1] => Ok(true),
             _ => Err(IpcError::InvalidValue),
         }
-    }
-
-    /// Кодирует дискриминант закрытого enum как `u16` LE.
-    #[must_use]
-    pub fn encode_discriminant(value: u16) -> [u8; ENUM_DISCRIMINANT_SIZE] {
-        value.to_le_bytes()
-    }
-
-    /// Декодирует дискриминант `u16` LE. `InvalidValue` при неверном размере.
-    pub fn decode_discriminant(data: &[u8]) -> Result<u16, IpcError> {
-        let bytes = data.try_into().map_err(|_| IpcError::InvalidValue)?;
-        Ok(u16::from_le_bytes(bytes))
     }
 
     /// Декодирует `data` как UTF-8. `InvalidValue` при некорректной кодировке.
