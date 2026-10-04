@@ -13,7 +13,7 @@
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use syscall::IrqTrigger;
 
 use super::{

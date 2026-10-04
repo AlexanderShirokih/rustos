@@ -88,6 +88,8 @@ impl Iterator for Crlf<'_> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::Crlf;
 
     #[test]

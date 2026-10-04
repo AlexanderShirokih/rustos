@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-collections = { workspace = true }
+io = { workspace = true }
 fdt = { workspace = true }
 memory = { workspace = true }
 

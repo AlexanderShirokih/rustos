@@ -173,10 +173,11 @@ bench = false
 [dependencies]
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
-collections = { workspace = true }
 component-abi = { workspace = true }
 component-startup = { workspace = true }
 display-abi = { workspace = true }
+driver-simplefb = { path = "../../system/driver-simplefb" }
+fdt-test = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
 filesystem-server = { workspace = true }

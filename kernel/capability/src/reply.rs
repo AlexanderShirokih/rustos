@@ -6,7 +6,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 
 use super::{
     errors::IpcError,

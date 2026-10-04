@@ -27,13 +27,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "collections"
-version = "0.1.0"
-dependencies = [
- "spin",
-]
-
-[[package]]
 name = "component-abi"
 version = "0.1.0"
 dependencies = [
@@ -45,7 +38,7 @@ dependencies = [
 name = "fdt"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "io",
 ]
 
 [[package]]
@@ -81,6 +74,10 @@ dependencies = [
  "libc",
  "r-efi",
 ]
+
+[[package]]
+name = "io"
+version = "0.1.0"
 
 [[package]]
 name = "ipc"
@@ -141,12 +138,6 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "spin"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
 
 [[package]]
 name = "syscall"

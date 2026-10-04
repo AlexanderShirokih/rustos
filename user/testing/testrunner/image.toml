@@ -145,6 +145,10 @@ package = "driver-pl031"
 path = "/driver-pl031"
 
 [[programs]]
+package = "driver-simplefb"
+path = "/driver-simplefb"
+
+[[programs]]
 package = "platform"
 path = "/platform"
 

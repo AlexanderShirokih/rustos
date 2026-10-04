@@ -16,7 +16,7 @@ use crate::{
 
 const SCREEN: &str = "screen";
 
-const CALL_WAIT: Timeout = Timeout::from_secs(2);
+const DISPLAY_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const WHOLE_SCREEN: Area = Area {
     x: 0,
@@ -39,7 +39,7 @@ fn session(importer: &Importer) -> display::Client<SessionTransport> {
     importer
         .session::<display::Protocol>(SCREEN)
         .client()
-        .with_wait(CALL_WAIT)
+        .with_wait(DISPLAY_REPLY_TIMEOUT)
 }
 
 fn surface(session: &display::Client<SessionTransport>) -> Result<MemoryRegion, DisplayError> {

@@ -17,6 +17,7 @@ members = [
     "lib/syscall",
     "kernel/kernelspace",
     "kernel/capability",
+    "kernel/base",
     "kernel/log",
     "kernel/memory",
     "kernel/process",
@@ -24,7 +25,6 @@ members = [
     "kernel/syscall",
     "lib/test-harness-macros",
     "lib/test-harness-qemu",
-    "lib/collections",
     "lib/component-abi",
     "lib/device-resolver",
     "lib/fdt",
@@ -85,10 +85,10 @@ bootstrap-abi = { path = "lib/bootstrap-abi" }
 display-abi = { path = "lib/display-abi" }
 log-abi = { path = "lib/log-abi" }
 platform-abi = { path = "lib/platform-abi" }
-collections = { path = "lib/collections" }
 component-abi = { path = "lib/component-abi" }
 device-resolver = { path = "lib/device-resolver" }
 io = { path = "lib/io" }
+kbase = { path = "kernel/base" }
 klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }
 fdt-test = { path = "lib/fdt-test" }

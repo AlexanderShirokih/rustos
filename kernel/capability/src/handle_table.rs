@@ -623,7 +623,7 @@ impl Drop for HandleTable {
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use collections::{LockCell, MutexCell};
+    use kbase::{LockCell, MutexCell};
     use memory::MemoryRegion;
 
     use super::{

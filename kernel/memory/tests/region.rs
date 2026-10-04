@@ -8,8 +8,8 @@ use core::{
 };
 use std::sync::{Arc, Mutex};
 
-use collections::MutexCell;
 use common::{make_range, nz};
+use kbase::MutexCell;
 use memory::{
     AccessMask, BudgetRefund, FrameBitmap, MemFlags, MemoryProfile, MemoryRegion,
     RegionCreateError, RegionSliceError, SliceProfile,

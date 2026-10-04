@@ -4,13 +4,13 @@ use alloc::{
     sync::Arc,
 };
 
-use collections::{LockCell, MutexCell};
 use drivers_common::{
     BootServices, Driver, DriverFactory, DriverRunError, Owners, UncachedPermission,
     probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioService},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
+use kbase::{LockCell, MutexCell};
 
 use super::{controller::Gicv2Controller, service::GicInterruptsService};
 use crate::register_driver;

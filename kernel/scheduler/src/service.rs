@@ -7,7 +7,7 @@ use capability::{
     HandleTable, IpcError, KernelRuntime, LoadImageError, ParkState, ProcessObject,
     StartProcessError, ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken,
 };
-use collections::{LockCell, MutexCell, StaticString};
+use kbase::{LockCell, MutexCell, StaticString};
 use memory::{UserVmContext, virtual_address::VirtualAddress};
 use syscall::MAX_PROCESS_NAME_LEN;
 
@@ -43,7 +43,7 @@ where
     A: ArchContext,
     T: TimerSource,
 {
-    inner: Arc<collections::MutexCell<SchedulerInner<A, T>>>,
+    inner: Arc<kbase::MutexCell<SchedulerInner<A, T>>>,
 }
 
 impl<A, T> Clone for SchedulerHandle<A, T>
@@ -85,7 +85,7 @@ where
         notify_pending_cpus(&self.inner);
     }
 
-    pub(crate) fn new(inner: Arc<collections::MutexCell<SchedulerInner<A, T>>>) -> Self {
+    pub(crate) fn new(inner: Arc<kbase::MutexCell<SchedulerInner<A, T>>>) -> Self {
         Self { inner }
     }
 

@@ -8,8 +8,8 @@
 
 use alloc::sync::Arc;
 
-use collections::MutexCell;
 use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable};
+use kbase::MutexCell;
 use memory::{
     FrameBitmap,
     frame_allocator::{FrameAllocator, PhysicalFrameAllocator},

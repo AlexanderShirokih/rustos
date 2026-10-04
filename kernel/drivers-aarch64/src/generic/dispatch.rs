@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
-use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::IrqHandler;
+use kbase::{LockCell, MutexCell};
 
 pub(crate) trait DispatchController {
     fn dispatch_interrupt(&mut self) -> Option<Arc<dyn IrqHandler>>;

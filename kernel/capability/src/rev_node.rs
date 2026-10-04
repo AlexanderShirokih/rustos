@@ -6,7 +6,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 
 /// Обработчик снятия побочного эффекта капы, вызываемый каскадом при отзыве.
 pub trait RevocationHook: Send + Sync {

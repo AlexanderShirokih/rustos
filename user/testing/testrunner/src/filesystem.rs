@@ -27,10 +27,11 @@ use crate::{
     log_relay::component_log_session,
 };
 
-const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
+const FILE_SYSTEM_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
-const VIEW_WAIT: Timeout = Timeout::from_secs(5);
-const OUTSIDE_WAIT: Timeout = Timeout::from_millis(100);
+const NAMESPACE_REPLY_TIMEOUT: Timeout = Timeout::from_secs(5);
+const MOUNT_END_TIMEOUT: Timeout = Timeout::from_secs(5);
+const OUT_OF_SCOPE_RESOLVE_TIMEOUT: Timeout = Timeout::from_millis(100);
 
 const CLIENT_FIXTURE: &str = "/filesystem-client-fixture/exec";
 
@@ -142,7 +143,7 @@ fn ram_port() -> Port {
 }
 
 fn namespace_client(capability: &Port) -> namespace::Client<PortTransport> {
-    namespace::Client::new(PortTransport::new(capability)).with_wait(VIEW_WAIT)
+    namespace::Client::new(PortTransport::new(capability)).with_wait(NAMESPACE_REPLY_TIMEOUT)
 }
 
 pub(crate) fn mount_ram_window(requirement: &str, scope: &str) -> Mounted {
@@ -193,7 +194,7 @@ pub(crate) fn image_session() -> Session<file_system::Protocol> {
 pub(crate) fn connect(
     session: Session<file_system::Protocol>,
 ) -> file_system::Client<SessionTransport> {
-    session.client().with_wait(CALL_TIMEOUT)
+    session.client().with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
 }
 
 #[derive(Clone, Copy)]
@@ -288,7 +289,7 @@ fn connect_tampered(
         port: client.into_channel(),
         tamper,
     })
-    .with_wait(CALL_TIMEOUT)
+    .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
 }
 
 fn connect_without_reply(
@@ -595,7 +596,7 @@ fn filesystem_rejects_write_through_a_read_only_descriptor() {
 fn a_view_does_not_resolve_outside_its_scope() {
     let uncovered = view_of(UNCOVERED_VIEW);
     let outside = namespace::Client::new(PortTransport::new(&uncovered))
-        .with_wait(OUTSIDE_WAIT)
+        .with_wait(OUT_OF_SCOPE_RESOLVE_TIMEOUT)
         .resolve(path(Path::ROOT.as_str()));
     kernel_tests::kassert_eq!(outside.err(), Some(IpcError::Timeout));
 }
@@ -656,7 +657,7 @@ fn a_mount_of_a_new_session_replaces_the_one_of_the_old() {
     let first = Mounted::new(importer(), REPLACED_VIEW, image_session());
     let _second = Mounted::new(importer(), REPLACED_VIEW, ram_session());
 
-    kernel_tests::kassert!(first.ended(VIEW_WAIT));
+    kernel_tests::kassert!(first.ended(MOUNT_END_TIMEOUT));
     kernel_tests::kassert_eq!(replaced_entry_kind(), NodeKind::File);
     drop(first);
     kernel_tests::kassert_eq!(replaced_entry_kind(), NodeKind::File);
@@ -721,7 +722,7 @@ fn namespace_grafts_the_session_it_is_handed() {
 fn namespace_rejects_admin_operations_on_the_service_port() {
     let capability = view_of(ROOT_VIEW);
     let refused = file_system_mount::Client::new(PortTransport::new(&capability))
-        .with_wait(CALL_TIMEOUT)
+        .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
         .mount(path("/invalid"), Session::from_handle(ram_port()));
     kernel_tests::kassert_eq!(refused.err(), Some(IpcError::PeerClosed));
 
@@ -822,7 +823,7 @@ fn namespace_opens_no_session_for_a_call_without_a_reply_channel() {
             ..Tamper::NONE
         },
     })
-    .with_wait(CALL_TIMEOUT);
+    .with_wait(FILE_SYSTEM_REPLY_TIMEOUT);
     for _ in 0..LEAK_FRAMES {
         let _ = without_reply.resolve_pair(path("/tmp/first"), path("/tmp/second"));
     }
@@ -869,10 +870,10 @@ fn namespace_pair_scope_survives_a_table_change() {
 }
 
 const ROUTER_VIEW_WAITING_REQUESTS_MAX: usize = 8;
-const QUEUE_CALLER_WAIT: Timeout = Timeout::from_secs(20);
+const QUEUED_RESOLVE_TIMEOUT: Timeout = Timeout::from_secs(20);
 const QUEUE_CALLER_STACK_SIZE: u64 = 0x4000;
-const EVICTION_POLL: Timeout = Timeout::from_millis(10);
-const EVICTION_POLLS: usize = 500;
+const EVICTION_POLL_INTERVAL: Timeout = Timeout::from_millis(10);
+const EVICTION_POLL_ATTEMPTS: usize = 500;
 const QUEUE_CALLER_ANSWERED: u32 = 0;
 const QUEUE_CALLER_EVICTED: u32 = 1;
 const QUEUE_CALLER_FAILED: u32 = 2;
@@ -886,7 +887,7 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
             spawn_owned(
                 move || {
                     let client = namespace::Client::new(PortTransport::new(raw))
-                        .with_wait(QUEUE_CALLER_WAIT);
+                        .with_wait(QUEUED_RESOLVE_TIMEOUT);
                     match client.resolve(path(Path::ROOT.as_str())) {
                         Ok(Ok(_)) => QUEUE_CALLER_ANSWERED,
                         Ok(Err(FileSystemError::NoSpace)) => QUEUE_CALLER_EVICTED,
@@ -900,13 +901,13 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
         })
         .collect();
 
-    let evicted = (0..EVICTION_POLLS)
+    let evicted = (0..EVICTION_POLL_ATTEMPTS)
         .find_map(|_| {
             let ended = callers
                 .iter()
                 .position(|caller| caller.wait(Timeout::POLL).is_ok());
             if ended.is_none() {
-                pause(EVICTION_POLL);
+                pause(EVICTION_POLL_INTERVAL);
             }
             ended
         })
@@ -928,7 +929,7 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
 fn a_mount_with_an_empty_path_is_refused() {
     let port = importer().port::<file_system_mount::Protocol>(EMPTY_SCOPE_ADMIN);
     let answer = file_system_mount::Client::new(PortTransport::new(&port))
-        .with_wait(CALL_TIMEOUT)
+        .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
         .mount(Str::new("").expect("empty fits"), ram_session());
     kernel_tests::kassert_eq!(answer, Ok(Err(FileSystemError::InvalidPath)));
 }
@@ -938,7 +939,7 @@ fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
     let mut mounted = Mounted::new(importer(), SHADOW_VIEW, ram_session());
     let window = resolved(importer(), SHADOW_VIEW, Path::ROOT.as_str());
     mounted.close_admin();
-    kernel_tests::kassert!(mounted.ended(CALL_TIMEOUT));
+    kernel_tests::kassert!(mounted.ended(MOUNT_END_TIMEOUT));
     drop(mounted);
 
     let opened = connect(window)
@@ -1325,7 +1326,7 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     const FILLER_LIMIT: usize = 96;
     const RELEASED_SESSIONS: usize = 3;
     const REAP_ATTEMPTS: usize = 64;
-    const REAP_TURN: Timeout = Timeout::from_millis(5);
+    const REAP_SIGNAL_TIMEOUT: Timeout = Timeout::from_millis(5);
 
     let client = connect(resolved(importer(), SPARE_VIEW, Path::ROOT.as_str()));
     let data_region = acquire_buffer(&client);
@@ -1377,7 +1378,7 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
         if read.is_ok() {
             break;
         }
-        let _ = turn.wait(syscall::SIGNALED, REAP_TURN);
+        let _ = turn.wait(syscall::SIGNALED, REAP_SIGNAL_TIMEOUT);
         read = client.read(imported.fd, 0, length).expect("read call");
     }
 
@@ -1599,7 +1600,7 @@ fn send_unparsed_frame_with_capability<K: kernel_objects::ObjectKind>(
         .expect("frame header");
     frame[HEADER_SIZE] = TERMINATOR;
     crate::ipc_raw::write_frame(&frame[..=HEADER_SIZE], &[capability.into_raw().raw()]);
-    kernel_tests::kassert_eq!(port_send(session.as_raw(), CALL_TIMEOUT), 0);
+    kernel_tests::kassert_eq!(port_send(session.as_raw(), FILE_SYSTEM_REPLY_TIMEOUT), 0);
 }
 
 #[kernel_test]

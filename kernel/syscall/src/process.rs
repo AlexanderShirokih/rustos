@@ -12,7 +12,7 @@ use capability::{
     UserImageInstall, UserSegmentInstall, UserStartSpec, UserThreadEntry, default_rights_for,
     install_handle, runtime,
 };
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::{
     MemoryRegion, UserVmContext,
     memory_mapper::{MemoryMappingError, UserCopyError},

@@ -33,13 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "collections"
-version = "0.1.0"
-dependencies = [
- "spin",
-]
-
-[[package]]
 name = "component-abi"
 version = "0.1.0"
 dependencies = [
@@ -78,6 +71,7 @@ name = "display-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "platform-abi",
  "syscall",
 ]
 
@@ -97,11 +91,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-simplefb"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "display-abi",
+ "ipc",
+ "kernel-objects",
+ "platform-abi",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
 name = "fdt"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "io",
 ]
+
+[[package]]
+name = "fdt-test"
+version = "0.1.0"
 
 [[package]]
 name = "files-demo"
@@ -194,9 +206,6 @@ dependencies = [
 [[package]]
 name = "io"
 version = "0.1.0"
-dependencies = [
- "spin",
-]
 
 [[package]]
 name = "ipc"
@@ -210,7 +219,6 @@ name = "kernel-objects"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
- "collections",
  "io",
  "ipc",
  "syscall",
@@ -425,10 +433,11 @@ name = "testrunner"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
- "collections",
  "component-abi",
  "component-startup",
  "display-abi",
+ "driver-simplefb",
+ "fdt-test",
  "filesystem",
  "filesystem-abi",
  "filesystem-server",

@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 use core::{num::NonZeroU64, sync::atomic::AtomicU32};
 
-use collections::{MutexCell, StaticString};
+use kbase::{MutexCell, StaticString};
 use spin::Once;
 use syscall::MAX_PROCESS_NAME_LEN;
 

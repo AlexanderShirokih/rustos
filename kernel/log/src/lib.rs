@@ -10,11 +10,13 @@
 #![no_std]
 extern crate alloc;
 
+mod buffered_writer;
 mod level;
 mod macros;
 mod panic_sink;
 mod stdout;
 
+pub use buffered_writer::BufferedWriter;
 pub use level::Level;
 pub use panic_sink::{panic_logf, panic_printf, set_panic_stdout};
 pub use stdout::{file_tag, logf, logf_tagged, printf, set_stdout};

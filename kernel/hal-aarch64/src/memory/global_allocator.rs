@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::{bump_allocator::BumpAllocator, kernel_vm_allocator::HeapAllocator};
 
 #[global_allocator]

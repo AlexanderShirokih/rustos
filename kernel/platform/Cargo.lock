@@ -14,27 +14,20 @@ dependencies = [
 name = "capability"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "kbase",
  "memory",
  "spin",
  "syscall",
 ]
 
 [[package]]
-name = "collections"
-version = "0.1.0"
-dependencies = [
- "spin",
-]
-
-[[package]]
 name = "drivers-aarch64"
 version = "0.1.0"
 dependencies = [
- "collections",
  "drivers-common",
  "drivers-common-aarch64",
  "io",
+ "kbase",
  "klog",
  "spin",
 ]
@@ -67,7 +60,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 name = "fdt"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "io",
 ]
 
 [[package]]
@@ -75,7 +68,6 @@ name = "hal-aarch64"
 version = "0.1.0"
 dependencies = [
  "capability",
- "collections",
  "drivers-aarch64",
  "drivers-common",
  "drivers-common-aarch64",
@@ -84,6 +76,7 @@ dependencies = [
  "hal-aarch64-paging",
  "hal-common",
  "io",
+ "kbase",
  "kernelspace",
  "klog",
  "memory",
@@ -101,7 +94,7 @@ dependencies = [
 name = "hal-aarch64-asid"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "kbase",
 ]
 
 [[package]]
@@ -115,8 +108,8 @@ dependencies = [
 name = "hal-common"
 version = "0.1.0"
 dependencies = [
- "collections",
  "fdt",
+ "io",
  "memory",
 ]
 
@@ -139,9 +132,6 @@ dependencies = [
 [[package]]
 name = "io"
 version = "0.1.0"
-dependencies = [
- "spin",
-]
 
 [[package]]
 name = "ipc"
@@ -157,15 +147,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "kbase"
+version = "0.1.0"
+dependencies = [
+ "io",
+ "spin",
+]
+
+[[package]]
 name = "kernelspace"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
  "capability",
- "collections",
  "drivers-common",
  "io",
  "ipc",
+ "kbase",
  "klog",
  "memory",
  "process",
@@ -182,8 +180,8 @@ dependencies = [
 name = "klog"
 version = "0.1.0"
 dependencies = [
- "collections",
  "io",
+ "kbase",
  "spin",
 ]
 
@@ -200,7 +198,8 @@ dependencies = [
 name = "memory"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "io",
+ "kbase",
  "spin",
  "syscall",
 ]
@@ -242,7 +241,7 @@ name = "scheduler"
 version = "0.1.0"
 dependencies = [
  "capability",
- "collections",
+ "kbase",
  "memory",
  "spin",
  "syscall",
@@ -337,7 +336,7 @@ name = "syscall-kernel"
 version = "0.1.0"
 dependencies = [
  "capability",
- "collections",
+ "kbase",
  "memory",
  "spin",
  "syscall",

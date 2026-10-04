@@ -4,8 +4,8 @@ mod common;
 
 use std::sync::Arc;
 
-use collections::{LockCell, MutexCell};
 use common::nz;
+use kbase::{LockCell, MutexCell};
 use memory::{
     AccessMask, MemFlags, MemoryRegion,
     memory_mapper::MemoryMapper,

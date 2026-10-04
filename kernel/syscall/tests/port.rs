@@ -12,7 +12,7 @@ mod common;
 use std::sync::Arc;
 
 use capability::{Capability, CapabilityTarget, HandleTable, Rights, Signal};
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::testing::PageMapper;
 use syscall_kernel::{SyscallError, SyscallOp};
 

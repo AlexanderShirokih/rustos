@@ -9,8 +9,8 @@
 
 mod common;
 
-use collections::MutexCell;
 use common::make_range;
+use kbase::MutexCell;
 use memory::{
     FrameBitmap,
     frame::Frame,

@@ -4,7 +4,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 pub use syscall::{SIGNALED, WakeCount};
 
 use super::wait::{Waitable, Waker};

@@ -1,4 +1,4 @@
-use crate::vec::Vec;
+use io::Vec;
 
 extern crate alloc;
 
@@ -58,7 +58,7 @@ trait IntervalStorage<T>: Sized {
 
 impl<T, const N: usize> IntervalStorage<T> for Vec<T, N> {
     type Iter<'a>
-        = crate::vec::VecIter<'a, T>
+        = io::vec::VecIter<'a, T>
     where
         T: 'a;
 

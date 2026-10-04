@@ -16,19 +16,10 @@ dependencies = [
 name = "capability"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "kbase",
  "memory",
  "spin",
  "syscall",
-]
-
-[[package]]
-name = "collections"
-version = "0.1.0"
-dependencies = [
- "rustc-std-workspace-alloc",
- "rustc-std-workspace-core",
- "spin",
 ]
 
 [[package]]
@@ -56,6 +47,7 @@ name = "display-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "platform-abi",
  "syscall",
 ]
 
@@ -82,8 +74,8 @@ dependencies = [
 name = "fdt"
 version = "0.1.0"
 dependencies = [
- "collections",
  "fdt-test",
+ "io",
 ]
 
 [[package]]
@@ -127,7 +119,7 @@ dependencies = [
 name = "hal-aarch64-asid"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "kbase",
 ]
 
 [[package]]
@@ -141,9 +133,9 @@ dependencies = [
 name = "hal-common"
 version = "0.1.0"
 dependencies = [
- "collections",
  "fdt",
  "fdt-test",
+ "io",
  "memory",
 ]
 
@@ -152,7 +144,6 @@ name = "io"
 version = "0.1.0"
 dependencies = [
  "rustc-std-workspace-core",
- "spin",
 ]
 
 [[package]]
@@ -173,11 +164,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kbase"
+version = "0.1.0"
+dependencies = [
+ "io",
+ "spin",
+]
+
+[[package]]
 name = "kernel-objects"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
- "collections",
  "io",
  "ipc",
  "rustc-std-workspace-core",
@@ -191,10 +189,10 @@ version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
  "capability",
- "collections",
  "drivers-common",
  "io",
  "ipc",
+ "kbase",
  "klog",
  "memory",
  "process",
@@ -211,8 +209,8 @@ dependencies = [
 name = "klog"
 version = "0.1.0"
 dependencies = [
- "collections",
  "io",
+ "kbase",
  "spin",
 ]
 
@@ -238,7 +236,8 @@ dependencies = [
 name = "memory"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "io",
+ "kbase",
  "spin",
  "syscall",
 ]
@@ -303,7 +302,7 @@ name = "scheduler"
 version = "0.1.0"
 dependencies = [
  "capability",
- "collections",
+ "kbase",
  "memory",
  "spin",
  "syscall",
@@ -322,7 +321,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
 dependencies = [
  "lock_api",
- "rustc-std-workspace-core",
 ]
 
 [[package]]
@@ -348,7 +346,7 @@ name = "syscall-kernel"
 version = "0.1.0"
 dependencies = [
  "capability",
- "collections",
+ "kbase",
  "memory",
  "spin",
  "syscall",

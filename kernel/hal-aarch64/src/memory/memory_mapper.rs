@@ -2,7 +2,6 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use collections::LockCell;
 use hal_aarch64_paging::{
     entry::{Entry, Invalid as InvalidEntry},
     level::{L0, L1, L2, L3, Level},
@@ -14,6 +13,7 @@ use hal_aarch64_paging::{
     page_table::PageTable,
     table_alloc::TableAlloc,
 };
+use kbase::LockCell;
 use memory::{
     MemFlags,
     aligned::Aligned,

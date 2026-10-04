@@ -1,5 +1,5 @@
 ipc::wire_enum! {
-    /// Отказ операции контракта `Display`.
+    /// Отказ операции контракта `Display` либо `DisplayProvider`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum DisplayError {
         /// Сессия уже получила поверхность.
@@ -10,5 +10,7 @@ ipc::wire_enum! {
         OutOfBounds = 3,
         /// Серверу не хватает памяти на поверхность.
         NoSpace = 4,
+        /// Описание платформы не содержит устройства либо драйвер его не поддерживает.
+        Refused = 5,
     }
 }

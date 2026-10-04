@@ -13,7 +13,6 @@ bench = false
 rustc-dep-of-std = [
     "dep:core",
     "bootstrap-abi/rustc-dep-of-std",
-    "collections/rustc-dep-of-std",
     "io/rustc-dep-of-std",
     "ipc/rustc-dep-of-std",
     "syscall/rustc-dep-of-std",
@@ -22,7 +21,6 @@ rustc-dep-of-std = [
 
 [dependencies]
 bootstrap-abi = { workspace = true }
-collections = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }
 syscall = { workspace = true }

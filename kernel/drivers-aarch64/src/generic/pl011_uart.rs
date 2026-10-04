@@ -6,16 +6,13 @@ use core::hint::spin_loop;
 
 use drivers_common::{
     BootServices, Driver, DriverFactory, DriverRunError, Owners, UncachedPermission,
+    byte_sink::{ByteSink, Pending},
+    crlf::Crlf,
     probe::{ProbeError, ProbeResult},
     services::mmio::{MmioAddress, MmioBound},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt};
-use io::{
-    byte_sink::{ByteSink, Pending},
-    crlf::Crlf,
-    mmio::Reg,
-    writer::Writer,
-};
+use io::{mmio::Reg, writer::Writer};
 
 use crate::register_driver;
 

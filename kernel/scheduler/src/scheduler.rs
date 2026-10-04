@@ -6,7 +6,7 @@ use core::{marker::PhantomData, num::NonZeroUsize};
 use capability::{
     Capability, DrainedHandles, HandleReservation, HandleTable, ProcessObject, ThreadObject,
 };
-use collections::{LockCell, MutexCell, StaticString};
+use kbase::{LockCell, MutexCell, StaticString};
 use memory::{
     AccessMask, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE,
     frame_allocator::FrameAllocator,
@@ -548,7 +548,7 @@ where
 
     /// Количество user-VM-регионов процесса `pid`. `None` если нет процесса или user-vm.
     pub fn process_user_vm_region_count(&self, pid: ProcessId) -> Option<usize> {
-        use collections::LockCell;
+        use kbase::LockCell;
         self.inner.with_lock(|inner| {
             let process = inner.processes.get(pid)?;
             let vm = process.user_vm()?.clone();

@@ -2,7 +2,7 @@
 
 use alloc::sync::Arc;
 
-use collections::MutexCell;
+use kbase::MutexCell;
 use memory::{memory_mapper::MemoryMapper, virtual_address::VirtualAddress};
 
 use crate::handle_table::HandleTable;

@@ -1,0 +1,35 @@
+[package]
+name = "driver-simplefb"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 65536
+
+[[bin]]
+name = "driver-simplefb"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+kernel-objects = { workspace = true }
+component-startup = { workspace = true }
+display-abi = { workspace = true }
+ipc = { workspace = true }
+platform-abi = { workspace = true }
+runtime = { workspace = true }
+syscall = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

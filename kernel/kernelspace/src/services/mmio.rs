@@ -1,10 +1,10 @@
 use alloc::{boxed::Box, format, sync::Arc};
 use core::num::NonZeroUsize;
 
-use collections::{LockCell, MutexCell};
 use drivers_common::services::mmio::{
     CleanupCallback, MmioAddress, MmioBound, MmioMapError, MmioService,
 };
+use kbase::{LockCell, MutexCell};
 use memory::{
     AccessMask, MemFlags, MemoryRegion, PAGE_SIZE,
     mem_flags::{AccessMode, Owners, UncachedPermission},

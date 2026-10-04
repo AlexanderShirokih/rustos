@@ -3,13 +3,10 @@
 //! Используется для логирования до инициализации UART - данные пишутся в буфер,
 //! при вызове `attach()` буфер сбрасывается в реальный writer.
 
-extern crate alloc;
-
 use alloc::{sync::Arc, vec::Vec};
 
+use io::writer::Writer;
 use spin::Mutex;
-
-use crate::writer::Writer;
 
 enum BufferState {
     Buffering(Vec<u8>),
@@ -82,10 +79,10 @@ impl Writer for BufferedWriter {
 mod tests {
     use alloc::{sync::Arc, vec::Vec};
 
+    use io::writer::Writer;
     use spin::Mutex;
 
     use super::*;
-    use crate::writer::Writer;
 
     #[derive(Default)]
     struct RecordingWriter {

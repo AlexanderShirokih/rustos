@@ -3,11 +3,11 @@
 
 use alloc::sync::Arc;
 
-use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::{
     CpuInterfaceError, InterruptsService, IpiError, IpiTarget, IrqBinding, IrqBound, IrqLineSpan,
     IrqNumber, IrqRegistrationError,
 };
+use kbase::{LockCell, MutexCell};
 use klog::debug;
 
 use super::{

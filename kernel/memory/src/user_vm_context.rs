@@ -4,7 +4,7 @@ use alloc::{
 };
 use core::num::NonZeroUsize;
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 
 use crate::{
     memory_mapper::{MemoryMapper, MemoryUnmappingError},

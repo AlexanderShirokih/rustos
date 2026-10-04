@@ -4,11 +4,12 @@
 
 use alloc::boxed::Box;
 
-use collections::{
-    MutexCell, NoLockCell, Vec as StaticVec,
+use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable, preset::Heap};
+use io::Vec as StaticVec;
+use kbase::{
+    MutexCell, NoLockCell,
     interval_set::{Interval, StaticIntervalSet},
 };
-use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable, preset::Heap};
 use memory::{
     FrameBitmap,
     bump_allocator::BumpAllocator,

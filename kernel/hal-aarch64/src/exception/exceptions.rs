@@ -3,7 +3,7 @@ use core::{
     fmt::Write,
 };
 
-use collections::StaticString;
+use kbase::StaticString;
 
 use super::{
     esr::{Esr, ExceptionClass},

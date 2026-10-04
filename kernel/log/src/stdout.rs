@@ -1,7 +1,7 @@
 use core::fmt::{Arguments, Write as _};
 
-use collections::{LockCell, MutexCell};
 use io::writer::Writer;
+use kbase::{LockCell, MutexCell};
 
 use crate::level::{Level, prefix};
 

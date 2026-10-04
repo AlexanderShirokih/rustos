@@ -2,11 +2,11 @@
 //!
 //! Логический идентификатор - индекс в таблице, аппаратный - affinity.
 
-use collections::Vec;
 use fdt::{
     devicetree::{DeviceTree, Node},
     devicetreeext::NodeExt,
 };
+use io::Vec;
 
 const AFFINITY_MASK: u64 = 0x0000_00FF_00FF_FFFF;
 

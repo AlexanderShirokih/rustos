@@ -15,7 +15,7 @@ doctest = false
 
 [dependencies]
 io = { workspace = true }
-collections = { workspace = true }
+kbase = { workspace = true }
 drivers-common = { workspace = true }
 drivers-common-aarch64 = { workspace = true }
 klog = { workspace = true }

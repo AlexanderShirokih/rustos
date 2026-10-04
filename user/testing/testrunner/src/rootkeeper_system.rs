@@ -53,7 +53,7 @@ const STARVED: &str = "starved";
 const FILES: &str = "files";
 const ROOT_VIEW: &str = "root";
 const RTC_REQUIREMENT: &str = "rtc";
-const PLATFORM_REQUIREMENT: &str = "platform";
+pub(crate) const PLATFORM_REQUIREMENT: &str = "platform";
 const AREA: &str = "area";
 const SPARE_VIEW: &str = "spare";
 const TMP_VIEW: &str = "tmp";
@@ -68,19 +68,21 @@ const NESTED_SPARE_MOUNT: &str = "/boot/spare";
 const NESTED_SPARE_PATH: &str = "/boot/spare/x";
 const AREA_SCOPE: &str = "/boot/scope-consumer-fixture";
 
-const CALL_WAIT: Timeout = Timeout::from_secs(2);
-const REFUSAL_WAIT: Timeout = Timeout::from_secs(1);
-const SHORT_WAIT: Timeout = Timeout::from_millis(500);
-const QUIET_WAIT: Timeout = Timeout::from_millis(200);
-const HELD_WAIT: Timeout = Timeout::from_secs(3);
-const BUDGET_WAIT: Timeout = Timeout::from_secs(8);
-const REQUEST_WAIT: Timeout = Timeout::from_secs(15);
-const RTC_CALL_WAIT: Timeout = Timeout::from_secs(15);
-const REVOKE_POLL: Timeout = Timeout::from_millis(10);
-const VIEW_WAIT: Timeout = Timeout::from_secs(5);
-const OUTSIDE_WAIT: Timeout = Timeout::from_millis(100);
+const COMPONENT_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
+const PARENT_REFUSAL_TIMEOUT: Timeout = Timeout::from_secs(1);
+const IDLE_PROVIDER_REQUEST_TIMEOUT: Timeout = Timeout::from_millis(500);
+const STALE_VIEW_TIMEOUT: Timeout = Timeout::from_millis(500);
+const REQUEST_DELIVERY_PAUSE: Timeout = Timeout::from_millis(200);
+const SERVED_CHILD_REPLY_TIMEOUT: Timeout = Timeout::from_millis(200);
+const REQUEST_ACROSS_EXIT_TIMEOUT: Timeout = Timeout::from_secs(3);
+const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(8);
+const HELD_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(15);
+const RTC_REPLY_TIMEOUT: Timeout = Timeout::from_secs(15);
+const POLL_INTERVAL: Timeout = Timeout::from_millis(10);
+const RESOLVE_TIMEOUT: Timeout = Timeout::from_secs(5);
+const FREED_PREFIX_TIMEOUT: Timeout = Timeout::from_millis(100);
 
-const REVOKE_POLLS: usize = 300;
+const POLL_ATTEMPTS: usize = 300;
 const SEARCH_CYCLES: usize = 300;
 
 const REQUEST_STACK_SIZE: u64 = 0x8000;
@@ -96,7 +98,7 @@ const PING: u64 = 0x5A;
 
 const STARVED_MEMORY: u64 = 4096;
 
-const PL031: &str = "/pl031@9010000";
+pub(crate) const PL031: &str = "/pl031@9010000";
 const FIRST_VIRTIO: &str = "/virtio_mmio@a000000";
 const SECOND_VIRTIO: &str = "/virtio_mmio@a000200";
 const ABSENT: &str = "/absent@0";
@@ -152,7 +154,7 @@ const HOLDER: ComponentSpec<'static> = ComponentSpec {
     ..fixture("/budget-holder-fixture", "budget-holder-fixture")
 };
 
-const PLATFORM: ComponentSpec<'static> = ComponentSpec {
+pub(crate) const PLATFORM: ComponentSpec<'static> = ComponentSpec {
     executable: "/platform",
     name: "platform",
     mountpoint: None,
@@ -262,15 +264,15 @@ fn ping(importer: &Importer, requirement: &str) -> Result<u64, IpcError> {
     importer
         .session::<probe::Protocol>(requirement)
         .client()
-        .with_wait(CALL_WAIT)
+        .with_wait(COMPONENT_REPLY_TIMEOUT)
         .ping(PING)
 }
 
 fn ping_found(found: &Found) -> Result<u64, IpcError> {
-    component_startup::open::<probe::Protocol>(found, CALL_WAIT)?
+    component_startup::open::<probe::Protocol>(found, COMPONENT_REPLY_TIMEOUT)?
         .map_err(|_| IpcError::PeerClosed)?
         .client()
-        .with_wait(CALL_WAIT)
+        .with_wait(COMPONENT_REPLY_TIMEOUT)
         .ping(PING)
 }
 
@@ -284,11 +286,11 @@ fn first_found<P: Protocol>(importer: &Importer, requirement: &str) -> Found {
 
 fn await_found(importer: &Importer, requirement: &str, count: usize) -> Vec<Found> {
     let mut found = importer.found::<probe::Protocol>(requirement);
-    for _ in 0..REVOKE_POLLS {
+    for _ in 0..POLL_ATTEMPTS {
         if found.len() == count {
             break;
         }
-        pause(REVOKE_POLL);
+        pause(POLL_INTERVAL);
         found = importer.found::<probe::Protocol>(requirement);
     }
     found
@@ -345,18 +347,21 @@ fn requested<P: Protocol>(
     request::<P>(importer.handle(), requirement, wait).map(|answer| answer.map(drop))
 }
 
-const fn platform_of(name: &'static str) -> crate::composition::Import {
+pub(crate) const fn platform_of(name: &'static str) -> crate::composition::Import {
     crate::composition::Import {
         declaration: RequirementDeclaration::all(name, platform::Protocol::ID),
         namespace_root: None,
     }
 }
 
-fn platform_session(importer: &Importer, requirement: &str) -> platform::Client<SessionTransport> {
+pub(crate) fn platform_session(
+    importer: &Importer,
+    requirement: &str,
+) -> platform::Client<SessionTransport> {
     importer
         .session::<platform::Protocol>(requirement)
         .client()
-        .with_wait(CALL_WAIT)
+        .with_wait(COMPONENT_REPLY_TIMEOUT)
 }
 
 fn line(
@@ -397,10 +402,10 @@ fn region_base(region: &MemoryRegion) -> u64 {
 }
 
 pub(crate) fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
-    (0..REVOKE_POLLS).any(|_| {
+    (0..POLL_ATTEMPTS).any(|_| {
         let revoked = inspect().err() == Some(Error::Syscall(SyscallError::Revoked));
         if !revoked {
-            pause(REVOKE_POLL);
+            pause(POLL_INTERVAL);
         }
         revoked
     })
@@ -421,7 +426,9 @@ fn held_request(found: Found, wait: Timeout) -> JoinHandle {
 }
 
 fn answered(request: &JoinHandle) -> u32 {
-    request.wait(REQUEST_WAIT).expect("request thread ends");
+    request
+        .wait(HELD_REQUEST_TIMEOUT)
+        .expect("request thread ends");
     request.exit_code().expect("request thread exit code")
 }
 
@@ -445,7 +452,7 @@ fn resolve(
 
 fn resolved(view: &Port, text: &str) -> file_system::Client<SessionTransport> {
     connect(
-        resolve(view, text, VIEW_WAIT)
+        resolve(view, text, RESOLVE_TIMEOUT)
             .expect("resolve call")
             .expect("path is covered by a mount"),
     )
@@ -589,7 +596,7 @@ fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
     }]);
     let importer = composition.importer(&[probe_of(PROBE)]);
 
-    let answer = requested::<probe::Protocol>(&importer, PROBE, CALL_WAIT);
+    let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
 
     kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Refused)));
     finish(composition);
@@ -600,7 +607,7 @@ fn an_importer_cannot_take_the_requests_of_a_child_export() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
     let parent = startup_contract::Client::new(PortTransport::new(importer.handle()))
-        .with_wait(REFUSAL_WAIT);
+        .with_wait(PARENT_REFUSAL_TIMEOUT);
 
     let taken = accept::<probe::Protocol>(&parent).map(|answer| answer.map(drop));
     let log = session::<log::Protocol>(&parent, LOG_REQUIREMENT, Attributes::empty())
@@ -619,7 +626,7 @@ fn an_importer_stays_waiting_while_its_provider_lives_without_accept() {
     let importer = composition.importer(&[probe_of(PROBE)]);
     let started = await_component_lines(IDLE_EXPORT.name, 1);
 
-    let waited = requested::<probe::Protocol>(&importer, PROBE, SHORT_WAIT);
+    let waited = requested::<probe::Protocol>(&importer, PROBE, IDLE_PROVIDER_REQUEST_TIMEOUT);
 
     kernel_tests::kassert_eq!(started, ["started"]);
     kernel_tests::kassert_eq!(waited, Err(IpcError::Timeout));
@@ -664,14 +671,14 @@ fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
     let started = await_component_lines(IDLE_EXPORT.name, 1);
     let held = held_request(
         first_found::<probe::Protocol>(&importer, HELD),
-        REQUEST_WAIT,
+        HELD_REQUEST_TIMEOUT,
     );
     let again = first_found::<probe::Protocol>(&importer, HELD);
-    pause(QUIET_WAIT);
+    pause(REQUEST_DELIVERY_PAUSE);
 
     composition.terminate(IDLE_EXPORT.name, TERMINATE_EXIT_CODE);
     let held_answer = answered(&held);
-    let again = component_startup::open::<probe::Protocol>(&again, CALL_WAIT)
+    let again = component_startup::open::<probe::Protocol>(&again, COMPONENT_REPLY_TIMEOUT)
         .map(|answer| answer.map(drop));
     let pinged = ping(&importer, PROBE);
 
@@ -693,9 +700,9 @@ fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
     let found = first_found::<probe::Protocol>(&importer, PROBE);
 
     composition.terminate(EXPORT.name, 0);
-    let answer = component_startup::open::<probe::Protocol>(&found, CALL_WAIT)
+    let answer = component_startup::open::<probe::Protocol>(&found, COMPONENT_REPLY_TIMEOUT)
         .map(|answer| answer.map(drop));
-    let again = requested::<probe::Protocol>(&importer, PROBE, CALL_WAIT);
+    let again = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let lines = await_component_lines(EXPORT.name, 2);
 
     kernel_tests::kassert_eq!(started, ["started"]);
@@ -746,8 +753,11 @@ fn a_child_exit_is_handled_while_an_importer_waits_for_an_accept() {
     let importer = composition.importer(&[probe_of(HELD)]);
     let idle_started = await_component_lines(IDLE_EXPORT.name, 1);
     let leaving_started = await_component_lines(leaving.name, 1);
-    let held = held_request(first_found::<probe::Protocol>(&importer, HELD), HELD_WAIT);
-    pause(QUIET_WAIT);
+    let held = held_request(
+        first_found::<probe::Protocol>(&importer, HELD),
+        REQUEST_ACROSS_EXIT_TIMEOUT,
+    );
+    pause(REQUEST_DELIVERY_PAUSE);
 
     composition.terminate(leaving.name, TERMINATE_EXIT_CODE);
     let restarted = await_component_lines(leaving.name, 2);
@@ -799,7 +809,7 @@ fn a_component_out_of_restarts_does_not_stop_the_root() {
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
     let restarted = await_component_lines(ROUTER_NAME, 2);
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
-    let refused = component_startup::open::<namespace::Protocol>(&router, CALL_WAIT)
+    let refused = component_startup::open::<namespace::Protocol>(&router, COMPONENT_REPLY_TIMEOUT)
         .map(|answer| answer.map(drop));
     let pinged = ping(&importer, PROBE);
 
@@ -816,7 +826,8 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
 
     let found = importer.found::<probe::Protocol>(PROBE);
     let served = found.get(1).map(|found| {
-        component_startup::open::<probe::Protocol>(found, QUIET_WAIT).map(|answer| answer.map(drop))
+        component_startup::open::<probe::Protocol>(found, SERVED_CHILD_REPLY_TIMEOUT)
+            .map(|answer| answer.map(drop))
     });
     let removed = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/")
         .unlink(path(HELD_PATH), NodeKind::File)
@@ -835,7 +846,7 @@ fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
 
     let held = component_startup::open::<probe::Protocol>(
         &first_found::<probe::Protocol>(&importer, HELD),
-        BUDGET_WAIT,
+        BUDGET_RETURN_TIMEOUT,
     )
     .map(|answer| answer.map(drop));
     let pinged = ping(&importer, PROBE);
@@ -878,7 +889,7 @@ fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
     let clock = importer
         .session::<rtc::Protocol>(RTC_REQUIREMENT)
         .client()
-        .with_wait(RTC_CALL_WAIT);
+        .with_wait(RTC_REPLY_TIMEOUT);
 
     let now = clock.now().expect("rtc answers the time");
     let ticked = clock.tick().expect("rtc alarm fires");
@@ -995,8 +1006,11 @@ fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
         .map_write_combining()
         .expect("device window maps write-combining");
     let magic: u32 = mapping.mmio().read(0);
+    let device_end = usize::try_from(device.size).expect("window size fits usize");
+    let past_end = mapping.copy_in_at(device_end - 1, &[0u8; 2]);
 
     kernel_tests::kassert_eq!(magic, VIRTIO_MAGIC);
+    kernel_tests::kassert_eq!(past_end, Err(Error::OutOfBounds));
     drop(mapping);
     drop(session);
     finish(composition);
@@ -1121,7 +1135,7 @@ fn a_directory_session_is_opened_anew_for_every_incarnation() {
         admin("area-admin"),
     ]);
     let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
-    let directory = resolve(&root, AREA_SCOPE, VIEW_WAIT)
+    let directory = resolve(&root, AREA_SCOPE, RESOLVE_TIMEOUT)
         .expect("resolve call")
         .expect("component directory exists");
     let mounted = Mounted::new(&importer, AREA, directory);
@@ -1184,14 +1198,14 @@ fn a_restarted_router_is_mounted_again_by_every_file_system() {
     ]);
     let importer = composition.importer(&[view(ROOT_VIEW, ""), view(TMP_VIEW, "/tmp")]);
     let before = importer.port::<namespace::Protocol>(ROOT_VIEW);
-    let mounted = resolution(&before, IMAGE_MOUNT, VIEW_WAIT);
+    let mounted = resolution(&before, IMAGE_MOUNT, RESOLVE_TIMEOUT);
 
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
     let renewed = [(ROOT_VIEW, IMAGE_MOUNT), (TMP_VIEW, "/")].map(|(requirement, text)| {
         let port = importer.port::<namespace::Protocol>(requirement);
-        resolution(&port, text, VIEW_WAIT)
+        resolution(&port, text, RESOLVE_TIMEOUT)
     });
-    let stale = resolution(&before, IMAGE_MOUNT, SHORT_WAIT);
+    let stale = resolution(&before, IMAGE_MOUNT, STALE_VIEW_TIMEOUT);
 
     kernel_tests::kassert_eq!(mounted, Ok(Ok(())));
     kernel_tests::kassert_eq!(renewed, [Ok(Ok(())), Ok(Ok(()))]);
@@ -1228,12 +1242,12 @@ fn a_removed_file_system_frees_its_prefix() {
     let importer =
         composition.importer(&[view(ROOT_VIEW, ""), view(SPARE_VIEW, NESTED_SPARE_MOUNT)]);
     let spare = importer.port::<namespace::Protocol>(SPARE_VIEW);
-    let mounted = resolution(&spare, "/", VIEW_WAIT);
+    let mounted = resolution(&spare, "/", RESOLVE_TIMEOUT);
 
     composition.terminate(NESTED_SPARE_FS.name, TERMINATE_EXIT_CODE);
-    let freed = resolution(&spare, "/", OUTSIDE_WAIT);
+    let freed = resolution(&spare, "/", FREED_PREFIX_TIMEOUT);
     let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
-    let nested = resolution(&root, NESTED_SPARE_PATH, VIEW_WAIT);
+    let nested = resolution(&root, NESTED_SPARE_PATH, RESOLVE_TIMEOUT);
 
     kernel_tests::kassert_eq!(mounted, Ok(Ok(())));
     kernel_tests::kassert_eq!(freed, Err(IpcError::Timeout));
@@ -1256,7 +1270,7 @@ fn a_mount_ends_when_its_file_system_closes_its_port() {
             resolve(
                 &importer.port::<namespace::Protocol>(SPARE_VIEW),
                 "/",
-                VIEW_WAIT,
+                RESOLVE_TIMEOUT,
             )
             .expect("resolve call")
             .expect("spare mounted"),
@@ -1265,8 +1279,8 @@ fn a_mount_ends_when_its_file_system_closes_its_port() {
     let other = importer.port::<namespace::Protocol>(OTHER_VIEW);
 
     composition.terminate(SPARE_FS.name, TERMINATE_EXIT_CODE);
-    let freed = resolution(&other, "/", OUTSIDE_WAIT);
-    let ended = mounted.ended(CALL_WAIT);
+    let freed = resolution(&other, "/", FREED_PREFIX_TIMEOUT);
+    let ended = mounted.ended(COMPONENT_REPLY_TIMEOUT);
 
     kernel_tests::kassert_eq!(freed, Err(IpcError::Timeout));
     kernel_tests::kassert!(ended);
@@ -1470,7 +1484,7 @@ fn a_session_with_two_matching_exports_is_refused() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
 
-    let answer = requested::<probe::Protocol>(&importer, PROBE, CALL_WAIT);
+    let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let found_count = importer.found::<probe::Protocol>(PROBE).len();
 
     kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Refused)));
@@ -1534,8 +1548,8 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
     );
     let role_only = filters_found(&importer, &[pair("role", "c")]);
     let bytes = query(&[pair("role", "c")]);
-    let parent =
-        startup_contract::Client::new(PortTransport::new(importer.handle())).with_wait(CALL_WAIT);
+    let parent = startup_contract::Client::new(PortTransport::new(importer.handle()))
+        .with_wait(COMPONENT_REPLY_TIMEOUT);
     let filtered = session::<probe::Protocol>(
         &parent,
         PROBE,
@@ -1544,7 +1558,7 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
     .expect("session call")
     .expect("one export matches")
     .client()
-    .with_wait(CALL_WAIT)
+    .with_wait(COMPONENT_REPLY_TIMEOUT)
     .ping(PING);
 
     kernel_tests::kassert_eq!(unfiltered, [""]);
@@ -1567,7 +1581,7 @@ fn a_query_with_a_repeated_key_is_refused_and_the_next_one_is_served() {
     };
 
     let answer = startup_contract::Client::new(PortTransport::new(importer.handle()))
-        .with_wait(CALL_WAIT)
+        .with_wait(COMPONENT_REPLY_TIMEOUT)
         .session(requirement, Bytes::new(&bytes).expect("query fits"))
         .map(|answer| answer.map(drop));
     let pinged = ping(&importer, PROBE);
@@ -1590,7 +1604,8 @@ fn an_importer_finds_a_root_export_but_cannot_open_it() {
         component_startup::open::<hardware::Protocol>(found, STARTUP_REQUEST_TIMEOUT)
             .map(|answer| answer.map(drop))
     });
-    let direct = requested::<hardware::Protocol>(&importer, HARDWARE_REQUIREMENT, CALL_WAIT);
+    let direct =
+        requested::<hardware::Protocol>(&importer, HARDWARE_REQUIREMENT, COMPONENT_REPLY_TIMEOUT);
 
     kernel_tests::kassert_eq!(found.len(), 1);
     kernel_tests::kassert_eq!(opened, Some(Ok(Err(SessionError::Refused))));

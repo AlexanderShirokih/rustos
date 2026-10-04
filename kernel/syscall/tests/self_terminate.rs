@@ -21,7 +21,7 @@ use capability::{
     ProcessObject, Rights, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
     UserStartSpec, UserThreadEntry, WaitToken, install_runtime,
 };
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use syscall_kernel::{SyscallError, SyscallOp, SyscallRuntime};
 

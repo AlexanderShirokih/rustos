@@ -55,7 +55,7 @@ fn mapped_regions_exclude_unmapped_intervals_except_kernel() {
             .expect("layout has room for six regions");
     }
 
-    let mut mapped = collections::Vec::new();
+    let mut mapped = io::Vec::new();
     layout
         .push_mapped_non_heap_regions(&mut mapped)
         .expect("mapped regions fit the region list");

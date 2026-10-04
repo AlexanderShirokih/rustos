@@ -76,6 +76,7 @@ mod rootkeeper_system;
 mod signal;
 #[cfg(target_arch = "aarch64")]
 mod simd_state;
+mod simplefb;
 mod smp_stress;
 mod spawn_from_image;
 mod startup_exit_protocol;

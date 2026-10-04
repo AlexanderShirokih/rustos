@@ -38,7 +38,7 @@ pub(super) fn user_copy_err(_e: UserCopyError) -> SyscallError {
 mod tests {
     use alloc::sync::Arc;
 
-    use collections::MutexCell;
+    use kbase::MutexCell;
     use memory::{
         MemFlags, PAGE_SIZE, memory_mapper::MemoryMapper, testing::PageMapper,
         user_vm_allocator::UserVmAllocator, virtual_address::PageAlignedVirtualAddress,

@@ -1,6 +1,6 @@
 use core::{mem, ptr::NonNull};
 
-use collections::{CriticalSection as _, DaifCriticalSection};
+use kbase::{CriticalSection as _, DaifCriticalSection};
 use memory::{memory_mapper::AddressSpaceHandle, physical_address::PhysicalAddress};
 use scheduler::{ArchContext, UserEntry};
 

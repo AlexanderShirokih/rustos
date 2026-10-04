@@ -43,7 +43,7 @@ static PANICKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBoo
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::sync::atomic::Ordering;
 
-    use collections::{CriticalSection as _, DaifCriticalSection};
+    use kbase::{CriticalSection as _, DaifCriticalSection};
 
     // IRQ маскируются на весь путь паники, поэтому печать причины не прерывается,
     // а обработчик не вытесняется до выключения машины.

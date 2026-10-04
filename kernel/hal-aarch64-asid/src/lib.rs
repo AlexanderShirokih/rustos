@@ -22,7 +22,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use collections::{BitSet, LockCell, MutexCell, bits_to_words};
+use kbase::{BitSet, LockCell, MutexCell, bits_to_words};
 
 /// Ширина ASID, поддерживаемая железом.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

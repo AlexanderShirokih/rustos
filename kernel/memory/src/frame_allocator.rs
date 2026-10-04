@@ -5,7 +5,8 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use collections::{LockCell, Vec};
+use io::Vec;
+use kbase::LockCell;
 
 use crate::{
     frame::Frame, frame_bitmap::FrameBitmap, memory_range::MemoryRange,

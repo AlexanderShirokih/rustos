@@ -7,7 +7,7 @@ use capability::{
     Capability, IpcError, Port, PortAccess, Reply, Rights, ThreadTransport, deadline_after,
     install_handle, port_call, port_recv, port_send, release_delivered, runtime,
 };
-use collections::LockCell;
+use kbase::LockCell;
 use memory::virtual_address::VirtualAddress;
 use syscall::SyscallError;
 

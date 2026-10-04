@@ -5,7 +5,7 @@
 //! спит на том же "data"-сигнале, пока кольцо пусто. Запись не блокируется, и на полном кольце
 //! возвращает [`RingError::Full`]. Capability через кольцо не передаются.
 
-use collections::{PopOutcome, PushOutcome, RingError, SpscRing};
+use io::{PopOutcome, PushOutcome, RingError, SpscRing};
 use ipc::wire::IpcError;
 use syscall::{Handle, SIGNALED, SYSCALL_RETURN_TIMEOUT, Timeout, WakeCount, kind};
 

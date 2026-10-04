@@ -4,7 +4,7 @@ use capability::{
     HandleTable, IpcError, LoadImageError, ProcessObject, SpawnError, StartProcessError,
     ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry,
 };
-use collections::MutexCell;
+use kbase::MutexCell;
 use memory::{UserVmContext, frame_allocator::FrameAllocator};
 use spin::Once;
 

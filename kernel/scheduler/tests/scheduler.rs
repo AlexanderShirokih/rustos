@@ -62,7 +62,7 @@ impl capability::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.now_ns())
     }
 
-    fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<capability::HandleTable>>> {
+    fn current_handle_table(&self) -> Option<Arc<kbase::MutexCell<capability::HandleTable>>> {
         self.with(|rt| rt.current_handle_table())
     }
 
@@ -879,7 +879,7 @@ fn kernel_thread_completion_signals_terminated() {
 #[test]
 fn process_exit_terminates_all_threads_and_releases_handles() {
     use capability::{Capability, CapabilityTarget, KernelRuntime, Rights, Signal};
-    use collections::LockCell;
+    use kbase::LockCell;
     use scheduler::SchedulerService;
 
     reset_switches();
@@ -1315,12 +1315,12 @@ fn load_user_image_into_rejects_double_load() {
 }
 
 fn loader_table_with_handle() -> (
-    Arc<collections::MutexCell<capability::HandleTable>>,
+    Arc<kbase::MutexCell<capability::HandleTable>>,
     capability::HandleId,
 ) {
     use capability::{Capability, CapabilityTarget, Rights, Signal};
-    use collections::LockCell;
-    let table = Arc::new(collections::MutexCell::new(capability::HandleTable::new()));
+    use kbase::LockCell;
+    let table = Arc::new(kbase::MutexCell::new(capability::HandleTable::new()));
     let id = table
         .with_lock(|tbl| {
             tbl.insert(Capability::new(
@@ -1335,7 +1335,7 @@ fn loader_table_with_handle() -> (
 #[test]
 fn start_user_process_creates_thread_and_marks_loader_state() {
     use capability::{Capability, HandleTable, Rights, UserStartSpec, UserThreadEntry};
-    use collections::LockCell;
+    use kbase::LockCell;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1465,7 +1465,7 @@ impl capability::CancelTarget for CleanupQuarantineProbe {
 #[test]
 fn start_user_process_cancels_loader_waiters_outside_scheduler_lock() {
     use capability::{UserStartSpec, UserThreadEntry};
-    use collections::LockCell;
+    use kbase::LockCell;
 
     reset_switches();
     let factory = new_factory_static();
@@ -1590,7 +1590,7 @@ fn start_user_process_preserves_handles_on_spawn_failure() {
         Capability, CapabilityTarget, KernelRuntime, Rights, Signal, StartProcessError,
         UserStartSpec, UserThreadEntry,
     };
-    use collections::LockCell;
+    use kbase::LockCell;
     use scheduler::SchedulerService;
 
     reset_switches();
@@ -1738,21 +1738,18 @@ fn process_holder(process: &Arc<capability::ProcessObject>) -> capability::Capab
 }
 
 fn put_handle(
-    table: &Arc<collections::MutexCell<capability::HandleTable>>,
+    table: &Arc<kbase::MutexCell<capability::HandleTable>>,
     handle: capability::Capability,
 ) -> capability::HandleId {
-    use collections::LockCell;
+    use kbase::LockCell;
 
     table
         .with_lock(|tbl| tbl.insert(handle))
         .expect("insert handle")
 }
 
-fn take_handle(
-    table: &Arc<collections::MutexCell<capability::HandleTable>>,
-    id: capability::HandleId,
-) {
-    use collections::LockCell;
+fn take_handle(table: &Arc<kbase::MutexCell<capability::HandleTable>>, id: capability::HandleId) {
+    use kbase::LockCell;
 
     table
         .with_lock(|tbl| tbl.remove(id))
@@ -2010,10 +2007,10 @@ fn revoking_the_root_capability_takes_the_derived_holder_away() {
     let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
 
     let (process, _) = user_process_with_thread(&handle, "revoked");
-    let table = Arc::new(collections::MutexCell::new(capability::HandleTable::new()));
+    let table = Arc::new(kbase::MutexCell::new(capability::HandleTable::new()));
     let root_id = put_handle(&table, process_holder(&process));
     {
-        use collections::LockCell;
+        use kbase::LockCell;
 
         table
             .with_lock(|tbl| {
@@ -2062,7 +2059,7 @@ fn a_process_without_a_capability_lives_until_it_is_terminated() {
 #[test]
 fn process_terminate_drains_handle_table_held_outside_process() {
     use capability::{Capability, CapabilityTarget, Port, Rights, UserStartSpec, UserThreadEntry};
-    use collections::LockCell;
+    use kbase::LockCell;
 
     reset_switches();
     let factory = new_factory_static();
@@ -2077,7 +2074,7 @@ fn process_terminate_drains_handle_table_held_outside_process() {
 
     let port = Port::new();
     let port_weak = Arc::downgrade(&port);
-    let loader_table = Arc::new(collections::MutexCell::new(capability::HandleTable::new()));
+    let loader_table = Arc::new(kbase::MutexCell::new(capability::HandleTable::new()));
     let handle_id = loader_table
         .with_lock(|tbl| {
             tbl.insert(Capability::new(

@@ -1,7 +1,8 @@
 //! Раскладка физической памяти ядра.
 
-use collections::{Vec, interval_set::StaticIntervalSet};
 use hal_aarch64_paging::{mem_flags::Aarch64MemFlags, preset::Mmio};
+use io::Vec;
+use kbase::interval_set::StaticIntervalSet;
 use memory::{
     aligned::{Address, Aligned},
     memory_range::MemoryRange,

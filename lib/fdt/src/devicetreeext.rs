@@ -4,7 +4,7 @@ use core::{
     str::Split,
 };
 
-use collections::Vec;
+use io::Vec;
 
 use crate::devicetree::{DeviceTree, Node, NodeIter, Property};
 

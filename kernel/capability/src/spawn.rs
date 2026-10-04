@@ -1,6 +1,6 @@
 use alloc::{sync::Arc, vec::Vec};
 
-use collections::MutexCell;
+use kbase::MutexCell;
 use memory::{
     MemFlags, MemoryRegion, PAGE_SIZE,
     memory_mapper::MemoryMappingError,

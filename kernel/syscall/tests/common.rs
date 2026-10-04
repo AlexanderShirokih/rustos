@@ -10,7 +10,7 @@ use capability::{
     StartProcessError, ThreadObject, UserImageInstall, UserStartSpec, UserThreadEntry, WaitToken,
     install_runtime,
 };
-use collections::MutexCell;
+use kbase::MutexCell;
 use memory::{
     UserVmContext,
     frame_allocator::FrameAllocator,

@@ -84,10 +84,10 @@ fn map_bind_error(err: IrqRegistrationError) -> IpcError {
 
 #[cfg(test)]
 mod tests {
-    use collections::{LockCell, MutexCell};
     use drivers_common::services::interrupts::{
         CpuInterfaceError, IrqBound, IrqLineSpan, IrqRegistrationError, TriggerType,
     };
+    use kbase::{LockCell, MutexCell};
 
     use super::{
         Arc, InterruptsControl, InterruptsControlAdapter, InterruptsService, IrqBinding, IrqNumber,

@@ -13,13 +13,12 @@ use fdt::{
     devicetreeext::{self, SkippedWindow},
 };
 use hal_common::cpu::CpuTopology;
-use io::buffered_writer::BufferedWriter;
 use kernelspace::{
     kernel_context::{BootDtb, KernelContext, KmmioArena, UserlandImage},
     kmain::kmain,
     scheduler_bootstrap::KernelTimerSource,
 };
-use klog::{info, warn};
+use klog::{BufferedWriter, info, warn};
 use memory::{
     AccessMask, MemoryRegion, PAGE_SIZE,
     physical_address::{PageAlignedAddress, PhysicalAddress},

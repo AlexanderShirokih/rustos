@@ -31,11 +31,11 @@ const CHILD_SLACK: u64 = 1024 * 1024;
 
 const CHILD_LOG_BADGE: NonZeroU64 = NonZeroU64::new(0x0500_0000).expect("badge is non-zero");
 
-const BUDGET_DEADLINE: Timeout = Timeout::from_secs(1);
+const BUDGET_RETURN_DEADLINE: Timeout = Timeout::from_secs(1);
 
-const TURN: Timeout = Timeout::from_millis(20);
-const POLL: Timeout = Timeout::from_millis(10);
-const REQUEST_WAIT: Timeout = Timeout::from_secs(5);
+const LAUNCH_CHECK_INTERVAL: Timeout = Timeout::from_millis(20);
+const POLL_INTERVAL: Timeout = Timeout::from_millis(10);
+const REQUEST_COUNT_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
@@ -176,7 +176,7 @@ impl Parent {
             ProcessName::new(child.name).expect("fixture process name"),
             resource,
             child.budget,
-            BUDGET_DEADLINE,
+            BUDGET_RETURN_DEADLINE,
         )?;
         state.records.push(Record {
             requirements: child.requirements,
@@ -204,15 +204,17 @@ impl Parent {
     }
 
     pub(crate) fn await_requests(&self, count: usize) -> bool {
-        self.poll(REQUEST_WAIT, |state| {
+        self.poll(REQUEST_COUNT_TIMEOUT, |state| {
             (state.requests >= count).then_some(())
         })
         .is_some()
     }
 
     pub(crate) fn await_accepts(&self, count: usize) -> bool {
-        self.poll(REQUEST_WAIT, |state| (state.accepts >= count).then_some(()))
-            .is_some()
+        self.poll(REQUEST_COUNT_TIMEOUT, |state| {
+            (state.accepts >= count).then_some(())
+        })
+        .is_some()
     }
 
     pub(crate) fn restart(&self, child: u16) {
@@ -304,7 +306,7 @@ impl Parent {
             if Instant::now().since(since).raw() >= wait.raw() {
                 return None;
             }
-            pause(POLL);
+            pause(POLL_INTERVAL);
         }
     }
 }
@@ -451,7 +453,11 @@ fn turn(state: &Mutex<State>, port: Handle<kind::Port>) -> ControlFlow<()> {
             state.depart(departure);
         }
         let next = state.children.next_launch();
-        if next.raw() < TURN.raw() { next } else { TURN }
+        if next.raw() < LAUNCH_CHECK_INTERVAL.raw() {
+            next
+        } else {
+            LAUNCH_CHECK_INTERVAL
+        }
     };
 
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];

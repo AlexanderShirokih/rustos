@@ -13,6 +13,8 @@
 
 extern crate alloc;
 
+pub mod byte_sink;
+pub mod crlf;
 pub mod driver;
 pub mod probe;
 pub mod scanner;

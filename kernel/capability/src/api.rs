@@ -3,7 +3,7 @@ use alloc::{
     vec::Vec,
 };
 
-use collections::{LockCell, MutexCell, StaticString};
+use kbase::{LockCell, MutexCell, StaticString};
 use syscall::{IrqTrigger, MAX_PROCESS_NAME_LEN, Rights, WakeCount};
 
 use super::{
@@ -442,7 +442,7 @@ mod tests {
         sync::{Mutex, OnceLock},
     };
 
-    use collections::MutexCell;
+    use kbase::MutexCell;
 
     use super::*;
     use crate::{

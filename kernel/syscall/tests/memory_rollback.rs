@@ -20,7 +20,7 @@ use core::{
 use std::sync::{Arc, OnceLock};
 
 use capability::{Capability, HandleId, HandleTable, Resource};
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::{
     AccessMask, MemoryRegion,
     frame::Frame,

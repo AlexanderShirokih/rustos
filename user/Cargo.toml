@@ -8,6 +8,7 @@ members = [
     "examples/files-demo",
     "examples/hello-std",
     "system/driver-pl031",
+    "system/driver-simplefb",
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
     "system/namespace-router",
@@ -46,11 +47,11 @@ userland-loader = { path = "../lib/userland-loader" }
 
 # Крейты корневого workspace
 bootstrap-abi = { path = "../lib/bootstrap-abi" }
-collections = { path = "../lib/collections" }
 component-abi = { path = "../lib/component-abi" }
 device-resolver = { path = "../lib/device-resolver" }
 display-abi = { path = "../lib/display-abi" }
 fdt = { path = "../lib/fdt" }
+fdt-test = { path = "../lib/fdt-test" }
 filesystem = { path = "../lib/filesystem" }
 filesystem-abi = { path = "../lib/filesystem-abi" }
 filesystem-client = { path = "../lib/filesystem-client" }

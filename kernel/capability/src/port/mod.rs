@@ -24,7 +24,7 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use syscall::Rights;
 
 #[cfg(test)]
@@ -710,7 +710,7 @@ mod tests {
         sync::atomic::{AtomicBool, AtomicU32, Ordering},
     };
 
-    use collections::MutexCell;
+    use kbase::MutexCell;
     use memory::{MemFlags, testing::PageMapper, virtual_address::VirtualAddress};
     use syscall::encode_tag;
 

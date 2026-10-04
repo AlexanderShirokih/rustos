@@ -19,7 +19,7 @@ use std::sync::Arc;
 use capability::{
     Capability, CapabilityTarget, HandleId, HandleTable, ProcessObject, Rights, default_rights_for,
 };
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::{
     AccessMask, MemFlags, MemoryRegion, physical_address::PageAlignedAddress, testing::PageMapper,
 };

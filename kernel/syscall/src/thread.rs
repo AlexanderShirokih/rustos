@@ -4,7 +4,7 @@
 //! имеет not-returning контракт (`-> !`).
 
 use capability::{CapabilityTarget, Rights, UserThreadEntry, runtime};
-use collections::LockCell;
+use kbase::LockCell;
 use syscall::SyscallError;
 
 use super::{

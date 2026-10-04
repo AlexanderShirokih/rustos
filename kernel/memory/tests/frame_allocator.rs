@@ -5,8 +5,8 @@ mod common;
 
 use std::collections::HashSet;
 
-use collections::{MutexCell, NoLockCell};
 use common::{make_range, nz};
+use kbase::{MutexCell, NoLockCell};
 use memory::{
     FrameBitmap,
     frame::Frame,

@@ -6,8 +6,8 @@ use alloc::{sync::Arc, vec::Vec};
 use core::fmt::Display;
 
 use drivers_common::{BootServices, RuntimeDriverRegistry, scanner::EmbeddedDriversScanner};
-use io::{buffered_writer::BufferedWriter, writer::Writer};
-use klog::{fatal, info};
+use io::writer::Writer;
+use klog::{BufferedWriter, fatal, info};
 use scheduler::{ArchContext, ArchCpu, Bootstrapped, Scheduler, SchedulerConfig};
 
 use crate::{
@@ -236,7 +236,8 @@ mod tests {
     use std::sync::Mutex;
 
     use drivers_common::{BootServices, Driver, DriverRunError, RuntimeDriverRegistry};
-    use io::{buffered_writer::BufferedWriter, writer::Writer};
+    use io::writer::Writer;
+    use klog::BufferedWriter;
 
     use super::{BootError, run_all_drivers};
     use crate::driver_init::PendingDriver;

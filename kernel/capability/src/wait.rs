@@ -284,7 +284,7 @@ mod tests {
         fn now_ns(&self) -> u64 {
             0
         }
-        fn current_handle_table(&self) -> Option<Arc<collections::MutexCell<HandleTable>>> {
+        fn current_handle_table(&self) -> Option<Arc<kbase::MutexCell<HandleTable>>> {
             None
         }
         fn exit_current_thread(&self, _exit_code: i32) -> ! {

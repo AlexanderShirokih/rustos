@@ -7,7 +7,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU32;
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::{memory_mapper::UserCopyError, virtual_address::VirtualAddress};
 use syscall::{IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, Rights, decode_tag, encode_tag};
 
@@ -352,7 +352,7 @@ fn transfer_caps(
 mod tests {
     use alloc::sync::Arc;
 
-    use collections::{LockCell, MutexCell};
+    use kbase::{LockCell, MutexCell};
     use memory::{
         MemFlags, PAGE_SIZE, memory_mapper::MemoryMapper, testing::PageMapper,
         virtual_address::VirtualAddress,

@@ -7,7 +7,7 @@
 //! вызовами `pop` выгребает `FRAMES` кадров, producer шлёт те же `FRAMES`
 //! (повтор на `Full`). Проверяем, что все кадры получены по порядку.
 
-use collections::{RingError, SpscRing};
+use io::{RingError, SpscRing};
 use kernel_objects::{Resource, RingConsumer, RingProducer, Signal, kind};
 use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags, spawn};

@@ -4,7 +4,6 @@ use alloc::{
     sync::Arc,
 };
 
-use collections::{LockCell, MutexCell};
 use drivers_common::{
     BootServices, DeviceNode, Driver, DriverFactory, DriverRunError, NodeProperty, Owners,
     UncachedPermission,
@@ -12,6 +11,7 @@ use drivers_common::{
     services::mmio::{MmioAddress, MmioService},
 };
 use drivers_common_aarch64::{FdtProbeContext, ProbeContextExt, require_compatible};
+use kbase::{LockCell, MutexCell};
 
 use super::{
     controller::Gicv3Controller,

@@ -20,7 +20,7 @@ use capability::{
     ProcessObject, Rights, Signal, SpawnError, StartProcessError, ThreadObject, UserImageInstall,
     UserStartSpec, UserThreadEntry,
 };
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use memory::{MemFlags, UserVmContext, frame_allocator::FrameAllocator, testing::PageMapper};
 use syscall_kernel::{SyscallError, SyscallOp};
 

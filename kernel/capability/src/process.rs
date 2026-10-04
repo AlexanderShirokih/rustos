@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 use syscall::Rights;
 
 use super::{

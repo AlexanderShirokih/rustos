@@ -6,7 +6,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use collections::{LockCell, MutexCell};
+use kbase::{LockCell, MutexCell};
 
 use super::signal::{SIGNALED, Signal};
 

@@ -8,7 +8,7 @@ use core::fmt::{self, Write};
 /// # Пример
 ///
 /// ```
-/// use collections::StaticString;
+/// use kbase::StaticString;
 /// use core::fmt::Write;
 ///
 /// let mut buf = StaticString::<128>::new();

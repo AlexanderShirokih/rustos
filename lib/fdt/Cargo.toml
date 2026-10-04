@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-collections = { workspace = true }
+io = { workspace = true }
 
 [dev-dependencies]
 fdt-test = { workspace = true }

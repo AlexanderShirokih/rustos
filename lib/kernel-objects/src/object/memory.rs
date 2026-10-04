@@ -139,9 +139,11 @@ pub struct MmioWindow {
 /// Маппинг страниц устройства. Держит срез этих страниц, через который сделан маппинг.
 #[derive(Debug)]
 pub struct MmioMapping {
-    _mapping: Mapping,
+    mapping: Mapping,
     _pages: MemoryRegion,
     start: usize,
+    head: usize,
+    size: usize,
 }
 
 /// Маппинг региона, чья маска доступа не допускает запись. Страницы неизменны во всех адресных
@@ -314,15 +316,19 @@ impl MmioWindow {
             self.region
                 .slice_with_flags(first, size_bytes, MemoryAccess::RW, region_flags)?;
         let mapping = pages.map(size_bytes, UserMemFlags::ReadWrite)?;
-        let start = mapping
-            .va
-            .checked_add(self.offset - first)
-            .and_then(|start| usize::try_from(start).ok())
-            .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
+        let invalid = || Error::Syscall(SyscallError::InvalidArgument);
+        let head = usize::try_from(self.offset - first).map_err(|_| invalid())?;
+        let start = usize::try_from(mapping.va)
+            .ok()
+            .and_then(|va| va.checked_add(head))
+            .ok_or_else(invalid)?;
+        let size = usize::try_from(self.size).map_err(|_| invalid())?;
         Ok(MmioMapping {
-            _mapping: mapping,
+            mapping,
             _pages: pages,
             start,
+            head,
+            size,
         })
     }
 }
@@ -331,6 +337,30 @@ impl MmioMapping {
     /// MMIO-хэндлер по началу устройства.
     pub fn mmio(&self) -> Mmio {
         Mmio::new(self.start)
+    }
+
+    /// Копирует в `dst` байты устройства со смещения `offset` от его начала операциями
+    /// [`Mapping::copy_out_at`]. Если диапазон выходит за границы области, выданной устройству,
+    /// возвращает ошибку `OutOfBounds`.
+    pub fn copy_out_at(&self, offset: usize, dst: &mut [u8]) -> Result<()> {
+        let offset = self.device_offset(offset, dst.len())?;
+        self.mapping.copy_out_at(offset, dst)
+    }
+
+    /// Копирует `src` в устройство со смещения `offset` от его начала операциями
+    /// [`Mapping::copy_in_at`]. Если диапазон выходит за границы области, выданной устройству,
+    /// возвращает ошибку `OutOfBounds`.
+    pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
+        let offset = self.device_offset(offset, src.len())?;
+        self.mapping.copy_in_at(offset, src)
+    }
+
+    fn device_offset(&self, offset: usize, len: usize) -> Result<usize> {
+        let end = offset.checked_add(len).ok_or(Error::OutOfBounds)?;
+        if end > self.size {
+            return Err(Error::OutOfBounds);
+        }
+        Ok(self.head + offset)
     }
 }
 

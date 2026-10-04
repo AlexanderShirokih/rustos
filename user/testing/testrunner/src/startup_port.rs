@@ -50,17 +50,18 @@ const PROBE_REQUIREMENT: &str = "probe";
 const FIRST_REQUIREMENT: &str = "first";
 const SECOND_REQUIREMENT: &str = "second";
 
-const STEP_WAIT: Timeout = Timeout::from_secs(5);
-const SHORT_WAIT: Timeout = Timeout::from_millis(100);
-const RECV_WAIT: Timeout = Timeout::from_secs(1);
-const DEPARTURE_WAIT: Timeout = Timeout::from_secs(5);
-const UNANSWERED_WAIT: Timeout = Timeout::from_secs(10);
-const QUIET_WAIT: Timeout = Timeout::from_millis(200);
-const IDLE_WAIT: Timeout = Timeout::from_millis(500);
-const WORKER_WAIT: Timeout = Timeout::from_secs(5);
-const REFUSAL_WAIT: Timeout = Timeout::from_secs(1);
-const TAKE_DOWN_BOUND: Timeout = Timeout::from_secs(1);
-const SEND_WAIT: Timeout = Timeout::from_millis(500);
+const STEP_REPORT_TIMEOUT: Timeout = Timeout::from_secs(5);
+const NO_EVENT_TIMEOUT: Timeout = Timeout::from_millis(100);
+const SENDER_GONE_TIMEOUT: Timeout = Timeout::from_secs(1);
+const DEPARTURE_TIMEOUT: Timeout = Timeout::from_secs(5);
+const UNANSWERED_IMPORTER_DEPARTURE_TIMEOUT: Timeout = Timeout::from_secs(10);
+const NO_DEPARTURE_TIMEOUT: Timeout = Timeout::from_millis(200);
+const NO_REPORT_TIMEOUT: Timeout = Timeout::from_millis(200);
+const NO_ACCEPT_PAUSE: Timeout = Timeout::from_millis(500);
+const IMPORTER_THREAD_TIMEOUT: Timeout = Timeout::from_secs(5);
+const OUTSIDER_REFUSAL_TIMEOUT: Timeout = Timeout::from_secs(1);
+const TAKE_DOWN_DURATION_MAX: Timeout = Timeout::from_secs(1);
+const REVOKED_SEND_TIMEOUT: Timeout = Timeout::from_millis(500);
 
 const WORKER_STACK_SIZE: u64 = 0x8000;
 
@@ -150,7 +151,7 @@ impl Steps {
     }
 
     fn next(&mut self) -> Reported {
-        self.report(STEP_WAIT)
+        self.report(STEP_REPORT_TIMEOUT)
             .expect("the fixture reports its step")
     }
 
@@ -229,7 +230,9 @@ fn ask(importer: &Port, requirement: &'static str) -> JoinHandle {
 }
 
 fn finished(worker: JoinHandle) -> u32 {
-    worker.wait(WORKER_WAIT).expect("importer thread ends");
+    worker
+        .wait(IMPORTER_THREAD_TIMEOUT)
+        .expect("importer thread ends");
     let code = worker.exit_code().expect("importer thread exit code");
     worker.join(Timeout::POLL).expect("importer thread joins");
     code
@@ -277,7 +280,7 @@ fn an_undelivered_request_waits_for_the_next_accept() {
     kernel_tests::kassert_eq!(steps.next(), started(true));
 
     kernel_tests::kassert_eq!(
-        steps.run(Step::accept(SHORT_WAIT)),
+        steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
     let importer = probe_importer(&parent, provider);
@@ -300,7 +303,7 @@ fn a_session_the_importer_did_not_receive_is_closed_by_the_provider() {
         asked(&request::<probe::Protocol>(
             importer.as_raw(),
             PROBE_REQUIREMENT,
-            SHORT_WAIT
+            NO_EVENT_TIMEOUT
         )),
         failed(IpcError::Timeout)
     );
@@ -310,7 +313,7 @@ fn a_session_the_importer_did_not_receive_is_closed_by_the_provider() {
         answered(false)
     );
     kernel_tests::kassert_eq!(
-        steps.run(Step::recv(RECV_WAIT)),
+        steps.run(Step::recv(SENDER_GONE_TIMEOUT)),
         report(outcome::SENDER_GONE, SESSION_BADGE)
     );
 }
@@ -358,7 +361,7 @@ fn a_repeated_session_request_takes_the_place_of_the_waiting_one() {
         asked(&request::<probe::Protocol>(
             importer.as_raw(),
             PROBE_REQUIREMENT,
-            SHORT_WAIT
+            NO_EVENT_TIMEOUT
         )),
         failed(IpcError::Timeout)
     );
@@ -368,7 +371,7 @@ fn a_repeated_session_request_takes_the_place_of_the_waiting_one() {
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     kernel_tests::kassert_eq!(finished(repeat), GRANTED);
     kernel_tests::kassert_eq!(
-        steps.run(Step::accept(SHORT_WAIT)),
+        steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
 }
@@ -401,7 +404,7 @@ fn a_repeated_accept_takes_the_place_of_the_waiting_one() {
     let importer = probe_importer(&parent, provider);
 
     kernel_tests::kassert_eq!(
-        steps.run(Step::accept(SHORT_WAIT)),
+        steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
     steps.send(Step::accept(Timeout::INFINITE));
@@ -426,11 +429,11 @@ fn the_departure_of_an_importer_removes_its_waiting_request() {
     kernel_tests::kassert!(parent.await_requests(1));
     parent.terminate(importer, READ_EXIT_CODE);
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(importer, Outcome::Exit(READ_EXIT_CODE)))
     );
     kernel_tests::kassert_eq!(
-        steps.run(Step::accept(SHORT_WAIT)),
+        steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
 }
@@ -447,7 +450,7 @@ fn a_waiting_request_outlives_the_departure_of_the_provider() {
     kernel_tests::kassert!(parent.await_requests(1));
     steps.send(Step::exit(FAILURE_EXIT_CODE));
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
 
@@ -472,7 +475,7 @@ fn a_session_request_lost_with_the_provider_is_repeated_by_the_start() {
     kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     steps.send(Step::exit(FAILURE_EXIT_CODE));
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
     kernel_tests::kassert!(parent.await_requests(2));
@@ -481,7 +484,7 @@ fn a_session_request_lost_with_the_provider_is_repeated_by_the_start() {
     kernel_tests::kassert_eq!(steps.next(), started(true));
     kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(parent.departure(QUIET_WAIT), None);
+    kernel_tests::kassert_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
     kernel_tests::kassert_eq!(parent.status(importer), Some(Status::Running));
 }
 
@@ -499,7 +502,7 @@ fn an_accept_is_paired_only_with_requests_routed_to_its_provider() {
     let asking = ask(&importer, PROBE_REQUIREMENT);
     kernel_tests::kassert!(parent.await_requests(1));
     kernel_tests::kassert_eq!(
-        other.run(Step::accept(SHORT_WAIT)),
+        other.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
     kernel_tests::kassert_eq!(routed.run(Step::accept(Timeout::INFINITE)), accepted());
@@ -514,7 +517,7 @@ fn an_unexpected_call_on_the_startup_port_refuses_its_caller() {
 
     kernel_tests::kassert_eq!(
         probe::Client::new(PortTransport::new(&outsider))
-            .with_wait(REFUSAL_WAIT)
+            .with_wait(OUTSIDER_REFUSAL_TIMEOUT)
             .ping(PING),
         Err(IpcError::PeerClosed)
     );
@@ -522,7 +525,7 @@ fn an_unexpected_call_on_the_startup_port_refuses_its_caller() {
         asked(&request::<probe::Protocol>(
             outsider.as_raw(),
             PROBE_REQUIREMENT,
-            REFUSAL_WAIT
+            OUTSIDER_REFUSAL_TIMEOUT
         )),
         refused(SessionError::Refused)
     );
@@ -549,18 +552,18 @@ fn a_refused_requirement_ends_the_start_and_keeps_the_earlier_capabilities() {
         answered(true)
     );
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(
             two,
             Outcome::Exit(SECOND_SESSION_REFUSED_EXIT_CODE)
         ))
     );
     kernel_tests::kassert_eq!(
-        steps.run(Step::recv(RECV_WAIT)),
+        steps.run(Step::recv(SENDER_GONE_TIMEOUT)),
         report(outcome::SENDER_GONE, SESSION_BADGE)
     );
     kernel_tests::kassert_eq!(
-        steps.run(Step::recv(SHORT_WAIT)),
+        steps.run(Step::recv(NO_EVENT_TIMEOUT)),
         report(outcome::RECV_TIMEOUT, 0)
     );
 }
@@ -585,7 +588,7 @@ fn an_unanswered_requirement_ends_the_start_after_the_request_timeout() {
             ),
     );
     kernel_tests::kassert_eq!(
-        parent.departure(UNANSWERED_WAIT),
+        parent.departure(UNANSWERED_IMPORTER_DEPARTURE_TIMEOUT),
         Some(departed(two, Outcome::Exit(FIRST_IPC_FAILED_EXIT_CODE)))
     );
     kernel_tests::kassert!(Instant::now().since(since).raw() >= STARTUP_REQUEST_TIMEOUT.raw());
@@ -602,9 +605,9 @@ fn a_restart_of_a_running_child_changes_nothing() {
     kernel_tests::kassert!(badge.is_some());
 
     parent.restart(provider);
-    kernel_tests::kassert_eq!(steps.report(QUIET_WAIT), None);
+    kernel_tests::kassert_eq!(steps.report(NO_REPORT_TIMEOUT), None);
     kernel_tests::kassert_eq!(
-        steps.run(Step::accept(SHORT_WAIT)),
+        steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
     kernel_tests::kassert_eq!(parent.badge(provider), badge);
@@ -620,12 +623,12 @@ fn the_exit_of_an_earlier_launch_is_reported_once_and_spares_the_next_launch() {
 
     steps.send(Step::exit(FAILURE_EXIT_CODE));
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
     parent.restart(provider);
     kernel_tests::kassert_eq!(steps.next(), started(true));
-    kernel_tests::kassert_eq!(parent.departure(QUIET_WAIT), None);
+    kernel_tests::kassert_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
     kernel_tests::kassert_eq!(steps.run(Step::log()), report(outcome::LOGGED, 0));
     kernel_tests::kassert_eq!(parent.status(provider), Some(Status::Running));
 }
@@ -639,12 +642,12 @@ fn a_child_terminated_by_its_parent_departs_with_the_named_code() {
 
     parent.terminate(provider, TERMINATE_EXIT_CODE);
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(TERMINATE_EXIT_CODE)))
     );
     parent.terminate(provider, TERMINATE_EXIT_CODE);
     kernel_tests::kassert_eq!(parent.status(provider), Some(Status::Departed));
-    kernel_tests::kassert_eq!(parent.departure(QUIET_WAIT), None);
+    kernel_tests::kassert_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
 }
 
 #[kernel_test]
@@ -653,10 +656,10 @@ fn a_living_child_that_closes_its_start_session_is_terminated() {
     let closed = parent.add(Child::new(CLOSED_ENTRY, CLOSED));
 
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(closed, Outcome::TakenDown))
     );
-    kernel_tests::kassert!(parent.last_depart().raw() < TAKE_DOWN_BOUND.raw());
+    kernel_tests::kassert!(parent.last_depart().raw() < TAKE_DOWN_DURATION_MAX.raw());
 }
 
 #[kernel_test]
@@ -665,7 +668,7 @@ fn a_panic_in_a_helper_thread_ends_the_child_process() {
     let helper = parent.add(Child::new(HELPER_PANIC_ENTRY, HELPER_PANIC));
 
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(helper, Outcome::Exit(PANIC_EXIT_CODE)))
     );
 }
@@ -679,7 +682,7 @@ fn a_child_whose_parent_refuses_log_starts_without_it() {
     kernel_tests::kassert_eq!(steps.next(), started(false));
     steps.send(Step::exit(0));
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(0)))
     );
 }
@@ -696,12 +699,12 @@ fn a_log_session_of_a_departed_incarnation_is_revoked() {
 
     parent.terminate(provider, TERMINATE_EXIT_CODE);
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(TERMINATE_EXIT_CODE)))
     );
     ipc_raw::write_frame(&[], &[]);
     kernel_tests::kassert_eq!(
-        port_send(copy.as_raw(), SEND_WAIT),
+        port_send(copy.as_raw(), REVOKED_SEND_TIMEOUT),
         SyscallError::Revoked.as_return_value()
     );
 }
@@ -722,7 +725,7 @@ fn an_idle_provider_calls_accept_once() {
     kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
     steps.send(Step::wait());
 
-    pause(IDLE_WAIT);
+    pause(NO_ACCEPT_PAUSE);
     kernel_tests::kassert_eq!(parent.accepts(), 1);
     kernel_tests::kassert_eq!(parent.requests(), 1);
 }
@@ -742,7 +745,7 @@ fn a_parent_at_resource_depth_six_restarts_its_child() {
 
     steps.send(Step::exit(FAILURE_EXIT_CODE));
     kernel_tests::kassert_eq!(
-        parent.departure(DEPARTURE_WAIT),
+        parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
     parent.restart(provider);

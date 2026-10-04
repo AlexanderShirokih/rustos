@@ -6,7 +6,7 @@ use core::{
 };
 
 use capability::{HandleTable, ProcessObject};
-use collections::{LockCell, MutexCell, StaticString};
+use kbase::{LockCell, MutexCell, StaticString};
 use memory::{MemoryRegion, UserVmContext, user_vm_allocator::UserVmAllocator};
 use syscall::{MAX_PROCESS_NAME_LEN, ProcessName};
 

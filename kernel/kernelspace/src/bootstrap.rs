@@ -11,13 +11,13 @@ use capability::{
     KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport, deadline_after,
     default_rights_for, interrupts_control, port_recv, port_send, release_delivered, runtime,
 };
-use collections::{LockCell, MutexCell};
 use drivers_common::services::interrupts::IrqLineSpan;
 use ipc::{
     FrameBytes, Incoming, IntoWireValue, Listener, Outgoing, ReceivedResources, RecvError,
     ReplyChannel, Unsent,
     wire::{Cap, IpcError as WireError, MESSAGE_INLINE_MAX, MessageBuf, Session, Str},
 };
+use kbase::{LockCell, MutexCell};
 use klog::{info, warn};
 use memory::{
     AccessMask, MemoryRegion, page_round_up,

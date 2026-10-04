@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 
 use capability::{Capability, IpcError, ResourceBudgetRefund, RevocationHook, Rights};
-use collections::LockCell;
+use kbase::LockCell;
 use memory::{
     AccessMask, MappingTag, MemoryRegion, PAGE_SIZE, RegionCreateError, RegionSliceError,
     SliceProfile, UserVmContext, WeakUserVmContext,
@@ -794,7 +794,7 @@ mod tests {
         use capability::{
             Capability, CapabilityTarget, DrainedHandles, HandleTable, RevocationHook,
         };
-        use collections::MutexCell;
+        use kbase::MutexCell;
         use memory::{
             MemFlags, MemoryRegion,
             physical_address::PageAlignedAddress,

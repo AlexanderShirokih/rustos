@@ -21,7 +21,6 @@ drivers-aarch64 = { path = "../drivers-aarch64" }
 
 # Крейты корневого workspace
 capability = { path = "../capability" }
-collections = { path = "../../lib/collections" }
 drivers-common = { path = "../drivers-common" }
 drivers-common-aarch64 = { path = "../drivers-common-aarch64" }
 fdt = { path = "../../lib/fdt" }
@@ -30,6 +29,7 @@ hal-aarch64-paging = { path = "../hal-aarch64-paging" }
 hal-common = { path = "../hal-common" }
 io = { path = "../../lib/io" }
 kernelspace = { path = "../kernelspace" }
+kbase = { path = "../base" }
 klog = { path = "../log" }
 memory = { path = "../memory" }
 process = { path = "../process" }

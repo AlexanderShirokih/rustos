@@ -13,9 +13,9 @@ kernel-tests = [
 [dependencies]
 spin = { workspace = true }
 bootstrap-abi = { workspace = true }
-collections = { workspace = true }
+kbase = { workspace = true }
 drivers-common = { workspace = true }
-io = { workspace = true, features = ["alloc"] }
+io = { workspace = true }
 ipc = { workspace = true }
 capability = { workspace = true }
 memory = { workspace = true }

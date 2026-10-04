@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-use collections::{CriticalSection as _, DaifCriticalSection};
+use kbase::{CriticalSection as _, DaifCriticalSection};
 use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{MemFlags, virtual_address::PageAlignedVirtualAddress};

@@ -18,12 +18,12 @@ use core::{
     sync::atomic::{AtomicIsize, AtomicUsize, Ordering},
 };
 
-use collections::MutexCell;
 use hal_aarch64_paging::{
     level::{L0, L1, L2, L3, Level},
     mapper::PageMapper,
     page_table::PageTable,
 };
+use kbase::MutexCell;
 use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{
