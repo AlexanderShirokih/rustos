@@ -25,7 +25,6 @@ use memory::{
     AccessMask, MemoryRegion,
     frame::Frame,
     frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
-    physical_address::PageAlignedAddress,
     range_allocator::RangeError,
     testing::PageMapper,
     user_vm_allocator::UserVmAllocator,
@@ -74,7 +73,7 @@ impl FrameAllocator for SpyFrameAllocator {
         self.allocated.fetch_add(1, Ordering::SeqCst);
         Some(Frame::new(self.next.fetch_add(1, Ordering::SeqCst)))
     }
-    fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+    fn allocate_frames(&self, _count: NonZeroUsize) -> Option<Frame> {
         unimplemented!()
     }
     fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
@@ -109,12 +108,7 @@ fn setup() -> TestEnv {
 }
 
 fn insert_metering_resource(table: &Arc<MutexCell<HandleTable>>) -> (u64, Arc<Resource>) {
-    let resource = Resource::new(
-        PageAlignedAddress::ZERO,
-        NonZeroUsize::new(usize::MAX & !0xFFF).unwrap(),
-        AccessMask::RW,
-        1024,
-    );
+    let resource = Resource::new(AccessMask::RW, 1024);
     let id = table
         .with_lock(|tbl| tbl.insert(Capability::new_with_default_rights(resource.clone())))
         .expect("insert resource");

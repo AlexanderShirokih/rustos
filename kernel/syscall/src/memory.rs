@@ -8,13 +8,16 @@ use core::num::NonZeroUsize;
 use capability::{Capability, IpcError, ResourceBudgetRefund, RevocationHook, Rights};
 use collections::LockCell;
 use memory::{
-    AccessMask, MappingTag, MemoryProfile, MemoryRegion, PAGE_SIZE, RegionCreateError,
-    RegionSliceError, UserVmContext, WeakUserVmContext,
+    AccessMask, MappingTag, MemoryRegion, PAGE_SIZE, RegionCreateError, RegionSliceError,
+    SliceProfile, UserVmContext, WeakUserVmContext,
     memory_mapper::{MemoryMappingError, MemoryRemappingError},
     range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
 };
-use syscall::{MEMORY_ALLOCATE_GUARD_PAGE, SyscallError, UserMemFlags};
+use syscall::{
+    MEMORY_ALLOCATE_GUARD_PAGE, MEMORY_REGION_CONTIGUOUS, MEMORY_REGION_WRITE_COMBINING,
+    SyscallError, UserMemFlags,
+};
 
 use super::{
     bridge::{SyscallFrame, parse_handle_id},
@@ -87,8 +90,20 @@ fn parse_allocate_flags(raw: u64) -> Result<(UserMemFlags, usize), SyscallError>
     Ok((flags, guard_pages))
 }
 
-fn parse_profile(raw: u64) -> Result<MemoryProfile, SyscallError> {
-    MemoryProfile::from_raw(raw).map_err(|_| SyscallError::InvalidArgument)
+fn parse_contiguous(raw: u64) -> Result<bool, SyscallError> {
+    match raw {
+        0 => Ok(false),
+        MEMORY_REGION_CONTIGUOUS => Ok(true),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+fn parse_slice_profile(raw: u64) -> Result<SliceProfile, SyscallError> {
+    match raw {
+        0 => Ok(SliceProfile::Inherited),
+        MEMORY_REGION_WRITE_COMBINING => Ok(SliceProfile::WriteCombining),
+        _ => Err(SyscallError::InvalidArgument),
+    }
 }
 
 fn parse_size(size_bytes: u64) -> Result<NonZeroUsize, SyscallError> {
@@ -122,17 +137,20 @@ fn access_mask_for(flags: UserMemFlags) -> AccessMask {
     }
 }
 
-/// `memory_create_virtual(resource_handle, size_bytes, access_mask) -> region_handle`
+/// `memory_create_virtual(resource_handle, size_bytes, access_mask, region_flags) -> region_handle`
 ///
-/// Требует `Rights::WRITE` на ресурс. Бюджет возвращается при дропе региона.
+/// Требует `Rights::WRITE` на ресурс. Бюджет возвращается при дропе региона. С битом
+/// `MEMORY_REGION_CONTIGUOUS` в `region_flags` вызов выделяет фреймы одним смежным участком.
 pub fn sys_memory_create_virtual(
     resource_h: u64,
     size_bytes: u64,
     access_raw: u64,
+    region_flags: u64,
 ) -> Result<u64, SyscallError> {
     let resource_id = parse_handle_id(resource_h)?;
     let size = parse_size(size_bytes)?;
     let access = parse_access_mask(access_raw)?;
+    let contiguous = parse_contiguous(region_flags)?;
     let pages = NonZeroUsize::new(size.get() / PAGE_SIZE).ok_or(SyscallError::InvalidArgument)?;
     if pages.get() * PAGE_SIZE.get() != size.get() {
         return Err(SyscallError::InvalidArgument);
@@ -148,8 +166,12 @@ pub fn sys_memory_create_virtual(
     let fa = runtime()
         .frame_allocator()
         .ok_or(SyscallError::OutOfMemory)?;
-    let region = MemoryRegion::create_virtual(fa, pages, access)
-        .map_err(|e| region_create_err_to_syscall(&e))?;
+    let region = if contiguous {
+        MemoryRegion::create_contiguous(fa, pages, access)
+    } else {
+        MemoryRegion::create_virtual(fa, pages, access)
+    }
+    .map_err(|e| region_create_err_to_syscall(&e))?;
     // Метерим после выделения. На нехватке бюджета регион дропается (фреймы
     // возвращаются в FA), и нет списания. Списать раньше нельзя - refund существует
     // только на регионе, а до его создания утёк бы при OOM фреймов.
@@ -165,11 +187,12 @@ pub fn sys_memory_create_virtual(
     Ok(u64::from(id.raw().get()))
 }
 
-/// `memory_slice(region_handle, offset, size_bytes, access_mask) -> region_handle`
+/// `memory_slice(region_handle, offset, size_bytes, access_mask, region_flags) -> region_handle`
 ///
 /// Деривация узкого под-региона `[offset, offset+size)`. Требует
 /// `Rights::DUPLICATE` на исходном регионе. Запрошенный доступ не шире гранта
-/// (права хендла, суженные access-маской региона). Нарезка ничего не
+/// (права хендла, суженные access-маской региона). С битом `MEMORY_REGION_WRITE_COMBINING`
+/// в `region_flags` вызов создаёт срез профиля `WriteCombining`. Нарезка ничего не
 /// аллоцирует - бюджет не списывается, обязательства возврата под-регион не содержит.
 /// Под-регион - производная капа источника. Отзыв источника отзывает и её.
 pub fn sys_memory_slice(
@@ -177,11 +200,13 @@ pub fn sys_memory_slice(
     offset_raw: u64,
     size_bytes: u64,
     access_raw: u64,
+    region_flags: u64,
 ) -> Result<u64, SyscallError> {
     let region_id = parse_handle_id(region_h)?;
     let offset = usize::try_from(offset_raw).map_err(|_| SyscallError::InvalidArgument)?;
     let size = parse_size(size_bytes)?;
     let access = parse_access_mask(access_raw)?;
+    let profile = parse_slice_profile(region_flags)?;
 
     let (region, grant) = lookup_memory_grant(region_id, Rights::DUPLICATE)?;
     if !grant.allows(access) {
@@ -189,7 +214,7 @@ pub fn sys_memory_slice(
     }
 
     let sub = region
-        .slice(offset, size, access)
+        .slice(offset, size, access, profile)
         .map_err(|e| slice_err_to_syscall(&e))?;
 
     let table = capability::runtime()
@@ -197,29 +222,6 @@ pub fn sys_memory_slice(
         .ok_or(SyscallError::BadHandle)?;
     let id = table
         .with_lock(|tbl| tbl.derive(region_id, Arc::new(sub)))
-        .map_err(|rejected| map_ipc_error(rejected.release()))?;
-    Ok(u64::from(id.raw().get()))
-}
-
-/// `memory_with_profile(region_handle, profile) -> region_handle`
-///
-/// Деривация поверх того же PA с профилем `profile_raw`. Требует
-/// `Rights::DUPLICATE`, бюджет не списывает. Результат - производная капа
-/// источника. Отзыв источника отзывает и её.
-pub fn sys_memory_with_profile(region_h: u64, profile_raw: u64) -> Result<u64, SyscallError> {
-    let region_id = parse_handle_id(region_h)?;
-    let profile = parse_profile(profile_raw)?;
-
-    let region = lookup_memory(region_id, Rights::DUPLICATE)?;
-    let derived = region
-        .with_profile(profile)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
-    let table = capability::runtime()
-        .current_handle_table()
-        .ok_or(SyscallError::BadHandle)?;
-    let id = table
-        .with_lock(|tbl| tbl.derive(region_id, Arc::new(derived)))
         .map_err(|rejected| map_ipc_error(rejected.release()))?;
     Ok(u64::from(id.raw().get()))
 }
@@ -505,7 +507,8 @@ pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError
 /// Primary возврат - `size_bytes`. Secondary - `base_pa | (profile_raw << 5) |
 /// (kind_tag << 3) | access_bits`. `base_pa` page-aligned, и его младшие 12 бит
 /// свободны под `profile_raw` (биты 5..7), `kind_tag` (биты 3..5) и
-/// `access_bits` (биты 0..3). Для `Virtual` `base_pa = 0`.
+/// `access_bits` (биты 0..3). У непрерывного `Virtual`-региона `base_pa` равен адресу
+/// первой страницы, у прочих `Virtual`-регионов `base_pa` равен `0`.
 pub fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
     let result = (|| -> Result<(u64, u64), SyscallError> {
         let id = parse_handle_id(frame.arg(0))?;
@@ -552,9 +555,9 @@ fn region_create_err_to_syscall(err: &RegionCreateError) -> SyscallError {
 
 fn slice_err_to_syscall(err: &RegionSliceError) -> SyscallError {
     match err {
-        RegionSliceError::OutOfBounds | RegionSliceError::MisalignedOffset => {
-            SyscallError::InvalidArgument
-        }
+        RegionSliceError::OutOfBounds
+        | RegionSliceError::MisalignedOffset
+        | RegionSliceError::CacheableSource => SyscallError::InvalidArgument,
         RegionSliceError::AccessEscalation => SyscallError::AccessDenied,
     }
 }
@@ -601,6 +604,30 @@ mod tests {
             Err(SyscallError::InvalidArgument)
         );
         assert_eq!(parse_flags(guarded), Err(SyscallError::InvalidArgument));
+    }
+
+    #[test]
+    fn region_flags_accept_only_the_bit_of_each_call() {
+        assert_eq!(parse_contiguous(0), Ok(false));
+        assert_eq!(parse_contiguous(MEMORY_REGION_CONTIGUOUS), Ok(true));
+        assert_eq!(
+            parse_contiguous(MEMORY_REGION_WRITE_COMBINING),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            parse_contiguous(MEMORY_REGION_CONTIGUOUS | MEMORY_ALLOCATE_GUARD_PAGE),
+            Err(SyscallError::InvalidArgument)
+        );
+
+        assert_eq!(parse_slice_profile(0), Ok(SliceProfile::Inherited));
+        assert_eq!(
+            parse_slice_profile(MEMORY_REGION_WRITE_COMBINING),
+            Ok(SliceProfile::WriteCombining)
+        );
+        assert_eq!(
+            parse_slice_profile(MEMORY_REGION_CONTIGUOUS),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     #[test]
@@ -727,6 +754,10 @@ mod tests {
         assert_eq!(
             slice_err_to_syscall(&RegionSliceError::AccessEscalation),
             SyscallError::AccessDenied
+        );
+        assert_eq!(
+            slice_err_to_syscall(&RegionSliceError::CacheableSource),
+            SyscallError::InvalidArgument
         );
     }
 

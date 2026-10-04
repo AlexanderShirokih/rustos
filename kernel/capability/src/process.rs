@@ -197,9 +197,7 @@ impl ProcessObject {
 
 #[cfg(test)]
 mod tests {
-    use core::num::NonZeroUsize;
-
-    use memory::{AccessMask, physical_address::PageAlignedAddress};
+    use memory::AccessMask;
 
     use super::{super::signal::SIGNALED, *};
 
@@ -276,12 +274,7 @@ mod tests {
 
     #[test]
     fn clearing_metering_preserves_termination_state() {
-        let parent = Resource::new(
-            PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
-            NonZeroUsize::new(0x1000).unwrap(),
-            AccessMask::RW,
-            4,
-        );
+        let parent = Resource::new(AccessMask::RW, 4);
         let child = parent.split(4).unwrap();
         let process = ProcessObject::new();
         process.set_metering(MeteringGrant {

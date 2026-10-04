@@ -52,8 +52,8 @@ pub mod virtual_address;
 pub use frame_bitmap::FrameBitmap;
 pub use mem_flags::MemFlags;
 pub use region::{
-    AccessMask, BudgetRefund, MemoryBacking, MemoryRegion, ProfileChangeError, RegionCreateError,
-    RegionSliceError, VirtualBacking,
+    AccessMask, BudgetRefund, MemoryBacking, MemoryRegion, RegionCreateError, RegionSliceError,
+    SliceProfile, VirtualBacking,
 };
 pub use relocatable_ptr::RelocatablePtr;
 pub use syscall::MemoryProfile;

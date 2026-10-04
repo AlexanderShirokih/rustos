@@ -1,6 +1,7 @@
 #![allow(unsafe_code)]
 
 use alloc::{boxed::Box, vec};
+use core::num::NonZeroUsize;
 
 use crate::{frame::Frame, memory_range::MemoryRange, physical_address::PageAlignedAddress};
 
@@ -262,78 +263,22 @@ impl FrameBitmap {
         (value & (1u64 << pos.bit)) != 0
     }
 
-    /// Выделяет до `max_count` смежных страниц.
-    /// Возвращает (первый фрейм, количество выделенных).
-    ///
-    /// Алгоритм first-fit: находит первый свободный участок и выделяет
-    /// максимально возможное количество смежных страниц (до max_count).
-    pub fn alloc_contiguous(&mut self, max_count: usize) -> Option<(Frame, usize)> {
-        if max_count == 0 || self.free == 0 {
-            return None;
-        }
-
-        // Максимальный номер фрейма в регионе (эксклюзивная граница)
-        let region_frame_count = self.target_region.frame_count();
-        let max_frame_num = self.base_frame.number() + region_frame_count;
-
-        // Ищем первый свободный бит
-        let word_idx = self.bitmap.iter().position(|word| *word != u64::MAX)?;
-
-        // Находим первый свободный бит в этом слове
-        let first_bit = (!self.read(word_idx)).trailing_zeros() as usize;
-        let start_frame_num =
-            self.base_frame.number() + word_idx * Self::BITS_PER_ENTRY + first_bit;
-
-        // Проверяем, что первый свободный бит в пределах региона
-        if start_frame_num >= max_frame_num {
-            return None;
-        }
-
-        // Подсчёт последовательных свободных битов (до max_count) в пределах региона
-        let mut count = 0;
-        let mut w = word_idx;
-        let mut b = first_bit;
-
-        while count < max_count && w < self.bitmap.len() {
-            let word = self.read(w);
-            while b < Self::BITS_PER_ENTRY && count < max_count {
-                // Проверяем, не вышли ли за границу региона
-                let current_frame_num = self.base_frame.number() + w * Self::BITS_PER_ENTRY + b;
-                if current_frame_num >= max_frame_num {
-                    // Достигли конца региона
-                    break;
-                }
-
-                if (word & (1u64 << b)) != 0 {
-                    // Бит занят - прерываем
-                    break;
-                }
-                count += 1;
-                b += 1;
+    /// Выделяет первый свободный участок из `count` смежных фреймов и возвращает его
+    /// первый фрейм. Участок не выходит за конец региона. Возвращает `None`, если регион
+    /// не содержит свободного участка такой длины.
+    pub fn alloc_contiguous(&mut self, count: NonZeroUsize) -> Option<Frame> {
+        let mut run_start = 0;
+        for index in 0..self.target_region.frame_count() {
+            let frame = self.base_frame.add(index);
+            if self.is_allocated(frame) {
+                run_start = index + 1;
+            } else if index + 1 - run_start == count.get() {
+                let first = self.base_frame.add(run_start);
+                self.set_range_unchecked(first, frame.add(1));
+                return Some(first);
             }
-
-            // Проверяем причину выхода из внутреннего цикла
-            let current_frame_num = self.base_frame.number() + w * Self::BITS_PER_ENTRY + b;
-            if current_frame_num >= max_frame_num {
-                break; // Достигли конца региона
-            }
-            if b < Self::BITS_PER_ENTRY && (self.read(w) & (1u64 << b)) != 0 {
-                break; // Встретили занятый бит
-            }
-            w += 1;
-            b = 0;
         }
-
-        if count == 0 {
-            return None;
-        }
-
-        // Помечаем биты как занятые
-        let start_frame = Frame::new(start_frame_num);
-        let end_frame = Frame::new(start_frame_num + count);
-        self.set_range_unchecked(start_frame, end_frame);
-
-        Some((start_frame, count))
+        None
     }
 
     fn mask_lower(bits: usize) -> u64 {

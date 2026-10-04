@@ -14,7 +14,7 @@ impl Rights {
     /// отвечают `AccessDenied`.
     pub const NONE: Self = Self(0);
     /// Право снять с handle копию и вывести из него производную капу. Гейтит
-    /// `HandleDuplicate`, `MemorySlice`, `MemoryWithProfile` и `ResourceSplit`.
+    /// `HandleDuplicate`, `MemorySlice` и `ResourceSplit`.
     pub const DUPLICATE: Self = Self(1 << 0);
     /// Право отдать handle другому процессу. Гейтит перенос через `IpcBuffer.caps` и
     /// стартовый handle в `ProcessStart`.

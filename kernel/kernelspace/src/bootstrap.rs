@@ -34,8 +34,6 @@ use crate::{
     user_process::{SpawnUserError, UserProcessLauncher},
 };
 
-const ROOT_RESOURCE_SPAN: NonZeroUsize = NonZeroUsize::new(usize::MAX & !0xFFF).unwrap();
-
 const SENDER_PORT_RIGHTS: Rights = Rights::from_bits_truncate(
     Rights::WRITE.bits() | Rights::TRANSFER.bits() | Rights::DUPLICATE.bits(),
 );
@@ -110,12 +108,7 @@ pub fn spawn_process(
     let hardware_root = Capability::new(CapabilityTarget::Port(port.clone()), SENDER_PORT_RIGHTS);
 
     // Корневой Resource: полномочие на минтинг физпамяти.
-    let root_resource = Resource::new(
-        PageAlignedAddress::ZERO,
-        ROOT_RESOURCE_SPAN,
-        AccessMask::RW,
-        1 << 20,
-    );
+    let root_resource = Resource::new(AccessMask::RW, 1 << 20);
 
     let interrupts = interrupts_control()
         .ok_or(BootstrapSpawnError::InterruptsUnavailable)?

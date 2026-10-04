@@ -50,6 +50,7 @@ pub fn frame_allocator() -> Option<&'static (dyn FrameAllocator + Send + Sync)> 
 mod tests {
     extern crate std;
 
+    use core::num::NonZeroUsize;
     use std::{
         boxed::Box,
         panic::{AssertUnwindSafe, catch_unwind},
@@ -105,7 +106,7 @@ mod tests {
         fn allocate_frame(&self) -> Option<Frame> {
             None
         }
-        fn allocate_frames(&self, _max: usize) -> Option<(Frame, usize)> {
+        fn allocate_frames(&self, _count: NonZeroUsize) -> Option<Frame> {
             None
         }
         fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {

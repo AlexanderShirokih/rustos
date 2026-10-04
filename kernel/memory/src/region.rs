@@ -57,13 +57,6 @@ pub trait BudgetRefund: Send + Sync {
     fn refund(&self);
 }
 
-/// Отказ смены профиля региона ([`MemoryRegion::with_profile`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProfileChangeError {
-    /// `with_profile` отказывает при переходе в `Cached` и при переходе из `Cached`.
-    CachedIsFixed,
-}
-
 /// PA-бэкинг региона - откуда берётся физическая память и кто ею владеет.
 pub enum MemoryBacking {
     /// Анонимные фреймы, выделенные из `FrameAllocator`.
@@ -84,14 +77,15 @@ pub enum MemoryBacking {
 pub struct VirtualBacking {
     frames: Vec<Frame>,
     fa: &'static (dyn FrameAllocator + Send + Sync),
+    contiguous: bool,
     zeroed: AtomicBool,
     refund: Mutex<Option<Arc<dyn BudgetRefund>>>,
 }
 
-/// Ошибки [`MemoryRegion::create_virtual`].
+/// Ошибки [`MemoryRegion::create_virtual`] и [`MemoryRegion::create_contiguous`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionCreateError {
-    /// Аллокация фрейма через `fa` отказала. Уже выделенные фреймы возвращены в `fa`.
+    /// Аллокатор `fa` не выделил фреймы. Конструктор вернул уже выделенные фреймы в `fa`.
     OutOfMemory,
 }
 
@@ -104,6 +98,19 @@ pub enum RegionSliceError {
     MisalignedOffset,
     /// Запрошенный доступ шире исходного.
     AccessEscalation,
+    /// Источник среза `WriteCombining` имеет профиль `Cached`. Линейная карта ядра отображает
+    /// страницы источника кэшируемыми.
+    CacheableSource,
+}
+
+/// Профиль среза [`MemoryRegion::slice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceProfile {
+    /// Срез наследует профиль источника.
+    Inherited,
+    /// Срез получает профиль `WriteCombining`. Для источника `Cached` [`MemoryRegion::slice`]
+    /// возвращает [`RegionSliceError::CacheableSource`].
+    WriteCombining,
 }
 
 pub struct MemoryRegion {
@@ -132,20 +139,46 @@ impl MemoryRegion {
                 return Err(RegionCreateError::OutOfMemory);
             }
         }
-        Ok(Self {
+        Ok(Self::from_frames(fa, frames, false, access))
+    }
+
+    /// Выделяет `pages` смежных фреймов из `fa` одним участком и оборачивает их в
+    /// Virtual-регион. [`physical_base`](Self::physical_base) возвращает PA первого фрейма
+    /// такого региона либо его среза.
+    pub fn create_contiguous(
+        fa: &'static (dyn FrameAllocator + Send + Sync),
+        pages: NonZeroUsize,
+        access: AccessMask,
+    ) -> Result<Self, RegionCreateError> {
+        let first = fa
+            .allocate_frames(pages)
+            .ok_or(RegionCreateError::OutOfMemory)?;
+        let frames = (0..pages.get()).map(|index| first.add(index)).collect();
+        Ok(Self::from_frames(fa, frames, true, access))
+    }
+
+    fn from_frames(
+        fa: &'static (dyn FrameAllocator + Send + Sync),
+        frames: Vec<Frame>,
+        contiguous: bool,
+        access: AccessMask,
+    ) -> Self {
+        let size_bytes = frames.len() * PAGE_SIZE;
+        Self {
             backing: MemoryBacking::Virtual {
                 owner: Arc::new(VirtualBacking {
                     frames,
                     fa,
+                    contiguous,
                     zeroed: AtomicBool::new(false),
                     refund: Mutex::new(None),
                 }),
                 first: 0,
             },
-            size_bytes: pages.get() * PAGE_SIZE,
+            size_bytes,
             access_mask: access,
             refund: None,
-        })
+        }
     }
 
     /// Регион поверх фиксированного PA-диапазона Device-MMIO. `access` не должен
@@ -185,34 +218,16 @@ impl MemoryRegion {
         }
     }
 
-    /// Возвращает регион поверх того же PA-диапазона с профилем `profile`.
-    /// Профиль меняется в пределах [`MemoryProfile::WriteCombining`] и
-    /// [`MemoryProfile::Device`]. Результат разделяет владение бэкингом с
-    /// исходным регионом и отдельного `refund` не хранит.
-    pub fn with_profile(&self, profile: MemoryProfile) -> Result<Self, ProfileChangeError> {
-        match self.backing {
-            MemoryBacking::Physical {
-                pa_base,
-                profile: current,
-            } if current != MemoryProfile::Cached && profile != MemoryProfile::Cached => Ok(Self {
-                backing: MemoryBacking::Physical { pa_base, profile },
-                size_bytes: self.size_bytes,
-                access_mask: self.access_mask,
-                refund: None,
-            }),
-            _ => Err(ProfileChangeError::CachedIsFixed),
-        }
-    }
-
-    /// Возвращает под-регион `[offset_bytes, offset_bytes + size)` с маской
-    /// доступа `access`. `offset_bytes` должен быть выровнен на страницу, окно
-    /// должно умещаться внутри исходного региона, `access` - не шире исходного.
+    /// Возвращает под-регион `[offset_bytes, offset_bytes + size)` с маской доступа `access`.
+    /// Профиль под-региона задаёт `profile`. `offset_bytes` должен быть выровнен на страницу.
+    /// Под-регион должен умещаться в исходном, `access` должен входить в маску исходного.
     /// Результат разделяет владение бэкингом с исходным регионом и отдельного `refund` не хранит.
     pub fn slice(
         &self,
         offset_bytes: usize,
         size: NonZeroUsize,
         access: AccessMask,
+        profile: SliceProfile,
     ) -> Result<Self, RegionSliceError> {
         if !self.access_mask.allows(access) {
             return Err(RegionSliceError::AccessEscalation);
@@ -226,15 +241,22 @@ impl MemoryRegion {
         if end > self.size_bytes {
             return Err(RegionSliceError::OutOfBounds);
         }
+        let profile = match (profile, self.profile()) {
+            (SliceProfile::Inherited, source) => source,
+            (SliceProfile::WriteCombining, MemoryProfile::Cached) => {
+                return Err(RegionSliceError::CacheableSource);
+            }
+            (SliceProfile::WriteCombining, _) => MemoryProfile::WriteCombining,
+        };
 
         match &self.backing {
-            MemoryBacking::Physical { pa_base, profile } => {
+            MemoryBacking::Physical { pa_base, .. } => {
                 let sub_pa = pa_base
                     .as_usize()
                     .checked_add(offset_bytes)
                     .and_then(PageAlignedAddress::from_usize)
                     .ok_or(RegionSliceError::OutOfBounds)?;
-                Ok(Self::create_physical(sub_pa, size, access, *profile))
+                Ok(Self::create_physical(sub_pa, size, access, profile))
             }
             MemoryBacking::Virtual { owner, first } => Ok(Self {
                 backing: MemoryBacking::Virtual {
@@ -317,11 +339,15 @@ impl MemoryRegion {
         }
     }
 
-    /// Базовый PA для `Physical`-региона. `None` для анонимного `Virtual`.
-    /// Userspace сопоставляет выданный device-регион с FDT-узлом по этому PA.
+    /// Базовый PA `Physical`-региона либо PA первого фрейма непрерывного `Virtual`-региона.
+    /// Для прочих `Virtual`-регионов возвращает `None`. Userspace сопоставляет выданный
+    /// device-регион с FDT-узлом по этому PA.
     pub fn physical_base(&self) -> Option<PageAlignedAddress> {
-        match self.backing {
-            MemoryBacking::Physical { pa_base, .. } => Some(pa_base),
+        match &self.backing {
+            MemoryBacking::Physical { pa_base, .. } => Some(*pa_base),
+            MemoryBacking::Virtual { owner, first } if owner.contiguous => {
+                owner.frames.get(*first).map(Frame::page_address)
+            }
             MemoryBacking::Virtual { .. } => None,
         }
     }

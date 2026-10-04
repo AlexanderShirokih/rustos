@@ -12,7 +12,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -278,7 +278,7 @@ impl FrameAllocator for CountingFrameAllocator {
         Some(Frame::new(self.next.fetch_add(1, Ordering::SeqCst)))
     }
 
-    fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+    fn allocate_frames(&self, _count: NonZeroUsize) -> Option<Frame> {
         None
     }
 

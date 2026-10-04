@@ -104,6 +104,7 @@ const RELATIVE: &str = "pl031@9010000";
 
 const VIRTIO_REGION: u64 = 0xa00_0000;
 const VIRTIO_STRIDE: u64 = 0x200;
+const VIRTIO_MAGIC: u32 = 0x7472_6976;
 
 const PARENT: ComponentSpec<'static> = ComponentSpec {
     executable: "/testrunner",
@@ -974,6 +975,29 @@ fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets_and_size
     kernel_tests::kassert!(
         first.region.inspect().expect("region inspects").size_bytes > VIRTIO_STRIDE
     );
+    drop(session);
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
+    let session = platform_session(&importer, PLATFORM_REQUIREMENT);
+    let granted = window(&session, SECOND_VIRTIO).expect("second window");
+    let device = kernel_objects::MmioWindow {
+        region: granted.region,
+        offset: granted.offset,
+        size: granted.size,
+    };
+
+    let mapping = device
+        .map_write_combining()
+        .expect("device window maps write-combining");
+    let magic: u32 = mapping.mmio().read(0);
+
+    kernel_tests::kassert_eq!(magic, VIRTIO_MAGIC);
+    drop(mapping);
     drop(session);
     finish(composition);
 }

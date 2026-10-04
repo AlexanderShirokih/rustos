@@ -1,9 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
-use core::num::NonZeroUsize;
+mod common;
+
 use std::sync::Arc;
 
 use collections::{LockCell, MutexCell};
+use common::nz;
 use memory::{
     AccessMask, MemFlags, MemoryRegion,
     memory_mapper::MemoryMapper,
@@ -17,10 +19,6 @@ use memory::{
 const PAGE: usize = memory::PAGE_SIZE.get();
 const ARENA: usize = 0x4000_0000;
 const REGION_PA: usize = 0x8000_0000;
-
-fn nz(v: usize) -> NonZeroUsize {
-    NonZeroUsize::new(v).unwrap()
-}
 
 fn region() -> Arc<MemoryRegion> {
     Arc::new(MemoryRegion::create_physical_device(

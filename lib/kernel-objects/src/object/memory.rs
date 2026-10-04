@@ -19,7 +19,10 @@ const _: () = assert!(
 
 use bootstrap_abi::DeviceWindow;
 use io::mmio::Mmio;
-use syscall::{MemoryAccess, MemoryProfile, SyscallError, UserMemFlags, kind};
+use syscall::{
+    MEMORY_REGION_CONTIGUOUS, MEMORY_REGION_WRITE_COMBINING, MemoryAccess, MemoryProfile,
+    SyscallError, UserMemFlags, kind,
+};
 
 use crate::{
     error::{Error, Result, unit, value},
@@ -100,8 +103,8 @@ impl RegionKind {
 pub struct RegionInfo {
     /// Размер региона в байтах.
     pub size_bytes: u64,
-    /// Базовый PA `Physical`-региона (для корреляции с FDT-узлом). `0` для
-    /// `Virtual`.
+    /// Базовый PA `Physical`-региона (для корреляции с FDT-узлом) либо адрес первой страницы
+    /// непрерывного `Virtual`-региона. У прочих `Virtual`-регионов поле равно `0`.
     pub base: u64,
     /// Backing региона.
     pub kind: RegionKind,
@@ -124,8 +127,8 @@ pub struct Mapping {
     size_bytes: u64,
 }
 
-/// Окно регистров устройства: регион, смещение первого регистра от начала региона и размер окна
-/// в байтах.
+/// Окно устройства: регион, смещение начала устройства от начала региона и размер устройства в
+/// байтах.
 #[derive(Debug)]
 pub struct MmioWindow {
     pub region: MemoryRegion,
@@ -133,11 +136,12 @@ pub struct MmioWindow {
     pub size: u64,
 }
 
-/// Маппинг окна регистров устройства. Освобождается вместе с маппингом региона.
+/// Маппинг страниц устройства. Держит срез этих страниц, через который сделан маппинг.
 #[derive(Debug)]
 pub struct MmioMapping {
     _mapping: Mapping,
-    registers: usize,
+    _pages: MemoryRegion,
+    start: usize,
 }
 
 /// Маппинг региона, чья маска доступа не допускает запись. Страницы неизменны во всех адресных
@@ -163,9 +167,9 @@ impl OwnedHandle<kind::Resource> {
     }
 
     /// Отрезает от бюджета ресурса не меньше `budget_bytes` байт в отдельный
-    /// `Resource` с тем же физическим диапазоном и потолком доступа. Размер
-    /// округляется вверх до целой страницы, и исходный ресурс теряет округлённый
-    /// размер до ухода производного. Нулевой `budget_bytes` даёт `InvalidArgument`.
+    /// `Resource` с тем же потолком доступа. Размер округляется вверх до целой
+    /// страницы, и исходный ресурс теряет округлённый размер до ухода производного.
+    /// Для нулевого `budget_bytes` возвращает `InvalidArgument`.
     pub fn split(&self, budget_bytes: u64) -> Result<Self> {
         svc::resource_split(self.as_raw(), budget_pages(budget_bytes))
             .map(Self::from)
@@ -174,9 +178,23 @@ impl OwnedHandle<kind::Resource> {
 
     /// Создаёт регион с Virtual backing размера `size_bytes` и маской `access`.
     pub fn create_virtual(&self, size_bytes: u64, access: MemoryAccess) -> Result<MemoryRegion> {
-        svc::memory_create_virtual(self.as_raw(), size_bytes, access.raw())
+        svc::memory_create_virtual(self.as_raw(), size_bytes, access.raw(), 0)
             .map(MemoryRegion::from)
             .map_err(Error::Syscall)
+    }
+
+    /// Создаёт регион с Virtual backing из физически смежных страниц. [`RegionInfo::base`]
+    /// региона содержит адрес первой страницы. Без свободного смежного участка нужной длины
+    /// возвращает `OutOfMemory`.
+    pub fn create_contiguous(&self, size_bytes: u64, access: MemoryAccess) -> Result<MemoryRegion> {
+        svc::memory_create_virtual(
+            self.as_raw(),
+            size_bytes,
+            access.raw(),
+            MEMORY_REGION_CONTIGUOUS,
+        )
+        .map(MemoryRegion::from)
+        .map_err(Error::Syscall)
     }
 
     /// Выделяет анонимный регион размера `size_bytes` и сразу маппит его на
@@ -220,17 +238,25 @@ impl OwnedHandle<kind::MemoryRegion> {
         size_bytes: u64,
         access: MemoryAccess,
     ) -> Result<MemoryRegion> {
-        svc::memory_slice(self.as_raw(), offset, size_bytes, access.raw())
-            .map(MemoryRegion::from)
-            .map_err(Error::Syscall)
+        self.slice_with_flags(offset, size_bytes, access, 0)
     }
 
-    /// Деривация региона поверх того же PA с профилем `profile`. Профиль
-    /// меняется в пределах некэшируемых. Требует `DUPLICATE` на хэндле региона.
-    pub fn with_profile(&self, profile: MemoryProfile) -> Result<MemoryRegion> {
-        svc::memory_with_profile(self.as_raw(), profile.raw())
-            .map(MemoryRegion::from)
-            .map_err(Error::Syscall)
+    fn slice_with_flags(
+        &self,
+        offset: u64,
+        size_bytes: u64,
+        access: MemoryAccess,
+        region_flags: u64,
+    ) -> Result<MemoryRegion> {
+        svc::memory_slice(
+            self.as_raw(),
+            offset,
+            size_bytes,
+            access.raw(),
+            region_flags,
+        )
+        .map(MemoryRegion::from)
+        .map_err(Error::Syscall)
     }
 
     /// Декодирует сырой возврат `memory_region_inspect` в [`RegionInfo`].
@@ -260,29 +286,51 @@ impl DeviceWindow<syscall_user::IssuedHandle<kind::MemoryRegion>> for MemoryRegi
 }
 
 impl MmioWindow {
-    /// Маппит регион окна целиком на запись. Смещение за концом региона и окно, которое выходит
-    /// за конец региона, отвергаются `InvalidArgument`.
+    /// Маппит страницы устройства на чтение и запись с профилем региона. Требует `READ`,
+    /// `WRITE` и `DUPLICATE` на хэндле региона. Для устройства за концом региона возвращает
+    /// `InvalidArgument`.
     pub fn map(&self) -> Result<MmioMapping> {
-        let mapping = self.region.map_full(UserMemFlags::ReadWrite)?;
-        let registers = self
+        self.map_pages(0)
+    }
+
+    /// Маппит страницы устройства на чтение и запись с профилем
+    /// [`MemoryProfile::WriteCombining`]. Требует `READ`, `WRITE` и `DUPLICATE` на хэндле
+    /// региона. Для региона профиля `Cached` и для устройства за концом региона возвращает
+    /// `InvalidArgument`.
+    pub fn map_write_combining(&self) -> Result<MmioMapping> {
+        self.map_pages(MEMORY_REGION_WRITE_COMBINING)
+    }
+
+    fn map_pages(&self, region_flags: u64) -> Result<MmioMapping> {
+        let page = syscall::PAGE_SIZE as u64;
+        let first = self.offset - self.offset % page;
+        let size_bytes = self
             .offset
             .checked_add(self.size)
-            .is_some_and(|end| self.offset < mapping.size_bytes && end <= mapping.size_bytes)
-            .then(|| mapping.va.checked_add(self.offset))
-            .flatten()
-            .and_then(|registers| usize::try_from(registers).ok())
+            .and_then(|end| end.checked_next_multiple_of(page))
+            .map(|end| end - first)
+            .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
+        let pages =
+            self.region
+                .slice_with_flags(first, size_bytes, MemoryAccess::RW, region_flags)?;
+        let mapping = pages.map(size_bytes, UserMemFlags::ReadWrite)?;
+        let start = mapping
+            .va
+            .checked_add(self.offset - first)
+            .and_then(|start| usize::try_from(start).ok())
             .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
         Ok(MmioMapping {
             _mapping: mapping,
-            registers,
+            _pages: pages,
+            start,
         })
     }
 }
 
 impl MmioMapping {
-    /// MMIO-хэндлер по первому регистру устройства.
+    /// MMIO-хэндлер по началу устройства.
     pub fn mmio(&self) -> Mmio {
-        Mmio::new(self.registers)
+        Mmio::new(self.start)
     }
 }
 

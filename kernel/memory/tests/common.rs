@@ -6,6 +6,7 @@
 
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
+use core::num::NonZeroUsize;
 use std::sync::Arc;
 
 use memory::{
@@ -19,6 +20,11 @@ const TEST_FRAME_SIZE: usize = PageAlignedAddress::ALIGNMENT;
 #[allow(dead_code)]
 pub fn frame_to_address(frame: usize) -> PageAlignedAddress {
     PageAlignedAddress::from_usize(frame * TEST_FRAME_SIZE).expect("frame_to_address: not aligned")
+}
+
+#[allow(dead_code)]
+pub fn nz(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).expect("nz: zero")
 }
 
 #[allow(dead_code)]

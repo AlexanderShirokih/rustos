@@ -17,6 +17,17 @@ pub struct InvalidUserMemFlags;
 /// Прочие memory-вызовы отвергают бит как `InvalidArgument`.
 pub const MEMORY_ALLOCATE_GUARD_PAGE: u64 = 1 << 8;
 
+/// Бит аргумента `region_flags` у `MemoryCreateVirtual`. С этим битом ядро выделяет регион
+/// из физически смежных страниц. `MemoryRegionInspect` возвращает в `base_pa` адрес первой
+/// страницы региона. `MemoryCreateVirtual` отвергает прочие биты как `InvalidArgument`.
+pub const MEMORY_REGION_CONTIGUOUS: u64 = 1 << 0;
+
+/// Бит аргумента `region_flags` у `MemorySlice`. С этим битом ядро создаёт срез профиля
+/// [`MemoryProfile::WriteCombining`](crate::MemoryProfile::WriteCombining) у региона профиля
+/// `Device` либо `WriteCombining`. Для `Cached`-региона вызов возвращает `InvalidArgument`.
+/// `MemorySlice` отвергает прочие биты как `InvalidArgument`.
+pub const MEMORY_REGION_WRITE_COMBINING: u64 = 1 << 1;
+
 impl UserMemFlags {
     pub const fn from_raw(raw: u64) -> Result<Self, InvalidUserMemFlags> {
         match raw {

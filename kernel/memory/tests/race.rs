@@ -6,6 +6,7 @@
 
 mod common;
 
+use core::num::NonZeroUsize;
 use std::{
     collections::HashSet,
     sync::{Arc, Barrier, Mutex},
@@ -27,7 +28,7 @@ const ROUNDS: usize = 512;
 
 const REGIONS: [(usize, usize); 3] = [(64, 96), (512, 64), (4096, 48)];
 
-const BLOCK_FRAMES: usize = 4;
+const BLOCK_FRAMES: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 fn allocator() -> Allocator {
     // Регионов больше одного: путь выбора региона тоже общий для CPU.
@@ -149,7 +150,7 @@ fn race_block_allocations_never_overlap_single_frames() {
         // битмап.
         contend(move |index| {
             let (frame, count) = if index % 2 == 0 {
-                allocator.allocate_frames(BLOCK_FRAMES)?
+                (allocator.allocate_frames(BLOCK_FRAMES)?, BLOCK_FRAMES.get())
             } else {
                 (allocator.allocate_frame()?, 1)
             };

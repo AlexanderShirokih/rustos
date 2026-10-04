@@ -1,6 +1,9 @@
 #![allow(unsafe_code)]
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use collections::{LockCell, Vec};
 
@@ -46,10 +49,11 @@ pub trait FrameAllocator {
     /// Выделяет свободный фрейм из любого управляемого региона.
     fn allocate_frame(&self) -> Option<Frame>;
 
-    /// Выделяет до `max_count` смежных фреймов внутри одного управляемого региона. Диапазон
-    /// не продолжается в соседний регион, даже если тот примыкает вплотную. Возвращает
-    /// первый фрейм диапазона и число выделенных фреймов. При отсутствии участка - `None`.
-    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)>;
+    /// Выделяет `count` смежных фреймов внутри одного управляемого региона и возвращает
+    /// первый из них. Участок не продолжается в соседний регион, даже если тот примыкает
+    /// вплотную. Возвращает `None`, если ни один регион не содержит свободного участка такой
+    /// длины.
+    fn allocate_frames(&self, count: NonZeroUsize) -> Option<Frame>;
 
     /// Освобождает выделенный фрейм. Повторный вызов на тот же фрейм отказывает
     /// [`FrameError::NotAllocated`] - операция не идемпотентна.
@@ -245,14 +249,10 @@ impl<L: LockCell<FrameBitmap>> FrameAllocator for PhysicalFrameAllocator<L> {
         None
     }
 
-    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
-        for region in &self.regions {
-            let result = region.with_lock(|bitmap| bitmap.alloc_contiguous(max_count));
-            if result.is_some() {
-                return result;
-            }
-        }
-        None
+    fn allocate_frames(&self, count: NonZeroUsize) -> Option<Frame> {
+        self.regions
+            .iter()
+            .find_map(|region| region.with_lock(|bitmap| bitmap.alloc_contiguous(count)))
     }
 
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {

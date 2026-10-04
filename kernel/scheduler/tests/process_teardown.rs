@@ -55,7 +55,7 @@ impl FrameAllocator for WitnessAllocator {
         Some(Frame::new(2000 + self.released_at_deallocate().len()))
     }
 
-    fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+    fn allocate_frames(&self, _count: NonZeroUsize) -> Option<Frame> {
         None
     }
 

@@ -6,7 +6,7 @@ mod common;
 use std::collections::HashSet;
 
 use collections::{MutexCell, NoLockCell};
-use common::make_range;
+use common::{make_range, nz};
 use memory::{
     FrameBitmap,
     frame::Frame,
@@ -331,144 +331,15 @@ fn reserve_in_second_region_works() {
 // =============================================================================
 
 #[test]
-fn allocate_frames_returns_contiguous_frames() {
-    let allocator = single_region_allocator(0, 64);
-
-    // Запрашиваем 8 смежных фреймов
-    let result = allocator.allocate_frames(8);
-    assert!(result.is_some(), "should allocate 8 contiguous frames");
-
-    let (first_frame, count) = result.unwrap();
-    assert_eq!(count, 8, "should return exactly 8 frames");
-
-    // Проверка, что все фреймы помечены как allocated
-    for i in 0..8 {
-        let frame = Frame::new(first_frame.number() + i);
-        assert!(
-            allocator.is_allocated(frame),
-            "frame {} should be allocated",
-            frame.number()
-        );
-    }
-
-    // Следующие фреймы не должны быть затронуты
-    let next_frame = Frame::new(first_frame.number() + 8);
-    assert!(
-        !allocator.is_allocated(next_frame),
-        "frame after allocated range should be free"
-    );
-}
-
-#[test]
-fn allocate_frames_returns_less_when_not_enough() {
-    // Регион с 10 фреймами (фрейм 0 зарезервирован, остаётся 9)
-    let allocator = single_region_allocator(0, 10);
-
-    // Запрашиваем 100 фреймов, но доступно только 9
-    let result = allocator.allocate_frames(100);
-    assert!(result.is_some(), "should return available frames");
-
-    let (first_frame, count) = result.unwrap();
-    // Должно вернуть максимум 9 (10 - зарезервированный фрейм 0)
-    assert!(
-        count <= 9,
-        "should return at most 9 frames (10 - reserved frame 0), got {count}"
-    );
-    assert!(count > 0, "should return at least some frames");
-
-    // Проверяем, что фреймы действительно выделены
-    for i in 0..count {
-        let frame = Frame::new(first_frame.number() + i);
-        assert!(
-            allocator.is_allocated(frame),
-            "frame {} should be allocated",
-            frame.number()
-        );
-    }
-}
-
-#[test]
-fn allocate_frames_returns_none_when_exhausted() {
-    let allocator = single_region_allocator(0, 16);
-
-    // Выделяем все фреймы по одному
-    while allocator.allocate_frame().is_some() {}
-
-    // Теперь allocate_frames возвращает None
-    let result = allocator.allocate_frames(4);
-    assert!(
-        result.is_none(),
-        "allocate_frames should return None when all frames exhausted"
-    );
-}
-
-#[test]
-fn allocate_frames_searches_multiple_regions() {
-    // Первый регион маленький (4 фрейма), второй большой (32 фрейма)
+fn allocate_frames_skips_a_region_without_a_long_enough_run() {
+    // В первом регионе свободен только фрейм 3, второй вмещает весь участок.
     let allocator = multi_region_allocator(&[(0, 4), (100, 32)]);
-
-    // Полностью исчерпываем первый регион
-    // Фрейм 0 зарезервирован, остаётся 3 фрейма (1, 2, 3)
-    for _ in 0..3 {
-        allocator.allocate_frame().unwrap();
-    }
-
-    // Первый регион исчерпан, allocate_frames ищет во втором
-    let result = allocator.allocate_frames(8);
-    assert!(
-        result.is_some(),
-        "should find contiguous frames in second region"
-    );
-
-    let (first_frame, count) = result.unwrap();
-    assert_eq!(count, 8, "should allocate exactly 8 frames");
-
-    // Фреймы должны быть из второго региона (>= 100)
-    assert!(
-        first_frame.number() >= 100,
-        "frames should come from second region, got frame {}",
-        first_frame.number()
-    );
-}
-
-#[test]
-fn allocate_frames_returns_short_run_when_first_free_segment_is_small() {
-    // Документирует opportunistic-семантику alloc_contiguous: первая
-    // же дырка возвращается целиком, длинный run дальше игнорируется.
-    let allocator = single_region_allocator(0, 64);
-
-    // Свободно: только фрейм 5 и хвост [10..20).
     allocator
-        .reserve_frames_exact(Frame::new(1), Frame::new(5))
-        .expect("reserve [1,5)");
-    allocator
-        .reserve_frames_exact(Frame::new(6), Frame::new(10))
-        .expect("reserve [6,10)");
-    allocator
-        .reserve_frames_exact(Frame::new(20), Frame::new(64))
-        .expect("reserve [20,64)");
+        .reserve_frames_exact(Frame::new(1), Frame::new(3))
+        .expect("reserve [1,3)");
 
-    let (first_frame, count) = allocator
-        .allocate_frames(5)
-        .expect("opportunistic: returns at least 1");
-    assert_eq!(first_frame.number(), 5);
-    assert_eq!(count, 1);
-}
-
-#[test]
-fn allocate_frames_skips_exhausted_first_region_for_longer_run() {
-    // Opportunistic-семантика между регионами: `allocate_frames` берёт run из
-    // первого региона, где он есть. Если первый регион занят целиком, переходит
-    // ко второму и возвращает его (потенциально более длинный) run.
-    let allocator = multi_region_allocator(&[(0, 4), (100, 32)]);
-
-    // Полностью занимаем первый регион (фрейм 0 уже зарезервирован).
-    allocator
-        .reserve_frames_exact(Frame::new(1), Frame::new(4))
-        .expect("reserve [1,4)");
-
-    let (first_frame, count) = allocator
-        .allocate_frames(16)
+    let first_frame = allocator
+        .allocate_frames(nz(8))
         .expect("second region provides the run");
 
     assert!(
@@ -476,52 +347,18 @@ fn allocate_frames_skips_exhausted_first_region_for_longer_run() {
         "run must come from the second region, got frame {}",
         first_frame.number()
     );
-    assert_eq!(count, 16, "second region has room for the full request");
-}
-
-#[test]
-fn allocate_frames_prefers_first_region_even_with_short_run() {
-    // Зеркало предыдущего теста: пока в первом регионе есть хоть один свободный
-    // фрейм, run берётся оттуда, даже если второй регион предложил бы больше.
-    let allocator = multi_region_allocator(&[(0, 4), (100, 32)]);
-
-    // Оставляем в первом регионе единственную дырку - фрейм 3.
-    allocator
-        .reserve_frames_exact(Frame::new(1), Frame::new(3))
-        .expect("reserve [1,3)");
-
-    let (first_frame, count) = allocator
-        .allocate_frames(16)
-        .expect("first region still has a frame");
-
-    assert!(
-        first_frame.number() < 100,
-        "run must come from the first region, got frame {}",
-        first_frame.number()
-    );
-    assert_eq!(count, 1, "only one frame free in the first region");
-}
-
-#[test]
-fn allocate_frames_spans_word_boundary() {
-    // 128 фреймов = 2 u64-word. Проверяем счёт через границу.
-    let allocator = single_region_allocator(0, 128);
-    let (first_frame, count) = allocator
-        .allocate_frames(80)
-        .expect("80 contiguous within 128-frame region");
-    assert_eq!(count, 80);
-    assert!(first_frame.number() + 80 > 64);
+    assert!(!allocator.is_allocated(Frame::new(3)));
 }
 
 #[test]
 fn allocate_frames_full_region_excluding_reserved_zero() {
     let allocator = single_region_allocator(0, 16);
-    let (first_frame, count) = allocator
-        .allocate_frames(15)
-        .expect("15 free frames available");
-    assert_eq!(first_frame.number(), 1);
-    assert_eq!(count, 15);
-    assert!(allocator.allocate_frames(1).is_none());
+
+    let first_frame = allocator.allocate_frames(nz(15));
+    let next = allocator.allocate_frames(nz(1));
+
+    assert_eq!(first_frame, Some(Frame::new(1)));
+    assert!(next.is_none());
 }
 
 // =============================================================================

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{frame_to_address, make_range};
+use common::{frame_to_address, make_range, nz};
 use memory::{FrameBitmap, frame::Frame};
 
 #[test]
@@ -432,32 +432,19 @@ fn cleared_frame_can_be_reallocated_via_wrap() {
 // =============================================================================
 
 #[test]
-fn alloc_contiguous_zero_count_returns_none() {
+fn alloc_contiguous_skips_a_short_free_run() {
+    // Свободно: только фрейм 5 и хвост [10..20).
     let region = make_range(0, 64);
     let mut bitmap = FrameBitmap::new(region);
+    bitmap.set_range_unchecked(Frame::new(0), Frame::new(5));
+    bitmap.set_range_unchecked(Frame::new(6), Frame::new(10));
+    bitmap.set_range_unchecked(Frame::new(20), Frame::new(64));
 
-    assert!(
-        bitmap.alloc_contiguous(0).is_none(),
-        "max_count == 0 must allocate nothing"
-    );
-    // Ничего не выделено.
-    assert_eq!(bitmap.remaining(), 64);
-}
+    let first = bitmap.alloc_contiguous(nz(5));
 
-#[test]
-fn alloc_contiguous_on_fully_occupied_non_word_aligned_region_returns_none() {
-    // 100 фреймов не кратно 64 (1 полное слово + 36 бит во втором).
-    let region = make_range(0, 100);
-    let mut bitmap = FrameBitmap::new(region);
-
-    // Занимаем весь регион.
-    bitmap.set_range_unchecked(Frame::new(0), Frame::new(100));
-    assert_eq!(bitmap.remaining(), 0);
-
-    assert!(
-        bitmap.alloc_contiguous(4).is_none(),
-        "fully occupied region must yield no contiguous run"
-    );
+    assert_eq!(first, Some(Frame::new(10)));
+    assert!(!bitmap.is_allocated(Frame::new(5)));
+    assert!(!bitmap.is_allocated(Frame::new(15)));
 }
 
 #[test]
@@ -466,39 +453,14 @@ fn alloc_contiguous_does_not_run_past_region_end() {
     // существуют, но лежат за границей региона и не должны выделяться.
     let region = make_range(0, 100);
     let mut bitmap = FrameBitmap::new(region);
-
-    // Оставляем свободным только хвост [90..100) - ровно у границы региона.
     bitmap.set_range_unchecked(Frame::new(0), Frame::new(90));
 
-    let (first, count) = bitmap
-        .alloc_contiguous(64)
-        .expect("tail must be allocatable");
+    let beyond_end = bitmap.alloc_contiguous(nz(11));
+    let tail = bitmap.alloc_contiguous(nz(10));
 
-    assert_eq!(first.number(), 90, "run must start at the first free frame");
-    assert_eq!(
-        count, 10,
-        "run must stop at the region boundary, not bleed into padding bits"
-    );
-
-    // Padding-фреймы за границей региона не выделены.
+    assert_eq!(beyond_end, None, "padding bits must not extend the run");
+    assert_eq!(tail, Some(Frame::new(90)));
     assert!(!bitmap.is_allocated(Frame::new(100)));
-    assert!(!bitmap.is_allocated(Frame::new(110)));
-}
-
-#[test]
-fn alloc_contiguous_run_exactly_at_region_boundary() {
-    // Регион ровно на одно слово (64 фрейма). Просим больше, чем есть -
-    // должны получить ровно весь регион, без выхода за его пределы.
-    let region = make_range(0, 64);
-    let mut bitmap = FrameBitmap::new(region);
-
-    let (first, count) = bitmap
-        .alloc_contiguous(128)
-        .expect("single-word region must allocate fully");
-
-    assert_eq!(first.number(), 0);
-    assert_eq!(count, 64, "must clamp to the region's frame count");
-    assert_eq!(bitmap.remaining(), 0);
 }
 
 #[test]

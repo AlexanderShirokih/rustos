@@ -13,7 +13,10 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+use core::{
+    num::NonZeroUsize,
+    sync::atomic::{AtomicIsize, AtomicUsize, Ordering},
+};
 
 use collections::MutexCell;
 use hal_aarch64_paging::{
@@ -427,9 +430,9 @@ impl FrameAllocator for CappedAllocator<'_> {
         self.outstanding.fetch_add(1, Ordering::SeqCst);
         Some(frame)
     }
-    fn allocate_frames(&self, max_count: usize) -> Option<(Frame, usize)> {
+    fn allocate_frames(&self, count: NonZeroUsize) -> Option<Frame> {
         // На пути `Aarch64MemoryMapper::map` не вызывается, делегируем без декремента.
-        self.inner.allocate_frames(max_count)
+        self.inner.allocate_frames(count)
     }
     fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
         let r = self.inner.deallocate_frame(frame);

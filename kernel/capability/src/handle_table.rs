@@ -1041,18 +1041,11 @@ mod tests {
 
     #[test]
     fn get_resource_type_checks() {
-        use core::num::NonZeroUsize;
-
-        use memory::{AccessMask, physical_address::PageAlignedAddress};
+        use memory::AccessMask;
 
         use super::super::resource::Resource;
 
-        let resource = Resource::new(
-            PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
-            NonZeroUsize::new(4096).unwrap(),
-            AccessMask::RW,
-            0,
-        );
+        let resource = Resource::new(AccessMask::RW, 0);
         let mut table = HandleTable::new();
         let res_rights = Rights::WRITE | Rights::READ;
         let res_id = table

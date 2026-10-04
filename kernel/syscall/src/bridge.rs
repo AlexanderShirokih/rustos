@@ -178,12 +178,12 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             frame.set_return(0);
         }
         SyscallOp::MemoryCreateVirtual => {
-            let r =
-                super::memory::sys_memory_create_virtual(frame.arg(0), frame.arg(1), frame.arg(2));
-            frame.set_return(encode_return(r));
-        }
-        SyscallOp::MemoryWithProfile => {
-            let r = super::memory::sys_memory_with_profile(frame.arg(0), frame.arg(1));
+            let r = super::memory::sys_memory_create_virtual(
+                frame.arg(0),
+                frame.arg(1),
+                frame.arg(2),
+                frame.arg(3),
+            );
             frame.set_return(encode_return(r));
         }
         SyscallOp::MemorySlice => {
@@ -192,6 +192,7 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
                 frame.arg(1),
                 frame.arg(2),
                 frame.arg(3),
+                frame.arg(4),
             );
             frame.set_return(encode_return(r));
         }

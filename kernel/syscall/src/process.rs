@@ -98,9 +98,8 @@ pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
 /// `resource_split(resource_handle, budget_pages) -> resource_handle`
 ///
 /// Выделяет `budget_pages` страниц бюджета в производный `Resource` с тем же
-/// физдиапазоном и потолком доступа. Требует `Rights::WRITE` на списание с
-/// исходного ресурса и `Rights::DUPLICATE` на деривацию. Отзыв исходной капы
-/// отзывает и производную.
+/// потолком доступа. Требует `Rights::WRITE` на списание с исходного ресурса и
+/// `Rights::DUPLICATE` на деривацию. Отзыв исходной капы отзывает и производную.
 pub fn sys_resource_split(resource_h: u64, budget_pages: u64) -> Result<u64, SyscallError> {
     let resource_id = parse_handle_id(resource_h)?;
     if budget_pages == 0 {

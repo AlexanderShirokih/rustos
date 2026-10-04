@@ -522,7 +522,7 @@ pub fn process_start<K: ObjectKind>(
 }
 
 /// Выделяет `budget_pages` страниц бюджета `resource` в производный `Resource` с тем же
-/// физдиапазоном и потолком доступа.
+/// потолком доступа.
 ///
 /// Требует `Rights::WRITE | Rights::DUPLICATE`, а нулевой `budget_pages` даёт
 /// `InvalidArgument`. Страницы возвращаются исходному ресурсу с уходом производного, а
@@ -603,43 +603,31 @@ pub fn thread_terminate(handle: Handle<kind::Thread>, exit_code: u64) -> i64 {
 /// Аргументы:
 ///  - `resource` - handle на метеринг-`Resource`, требует `WRITE`,
 ///  - `size_bytes` - ненулевой и кратный [`PAGE_SIZE`](syscall::PAGE_SIZE),
-///  - `access_mask` - биты R/W/X, нулевая маска даёт `InvalidArgument`.
+///  - `access_mask` - ненулевая маска битов R/W/X,
+///  - `region_flags` - [`MEMORY_REGION_CONTIGUOUS`](syscall::MEMORY_REGION_CONTIGUOUS) либо
+///    ноль.
 ///
 /// С ресурса списывается `size_bytes / PAGE_SIZE` страниц. Обратно они возвращаются с
 /// уходом последней ссылки на регион.
 /// Возврат: region handle либо `-(SyscallError)`. Нехватка бюджета даёт
-/// `ResourceExhausted`.
+/// `ResourceExhausted`. Без свободного смежного участка для непрерывного региона вызов
+/// возвращает `OutOfMemory`.
 pub fn memory_create_virtual(
     resource: Handle<kind::Resource>,
     size_bytes: u64,
     access_mask: u64,
+    region_flags: u64,
 ) -> Result<IssuedHandle<kind::MemoryRegion>, SyscallError> {
-    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x2. Память не передаётся ядру.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x3. Память не передаётся ядру.
     let ret = unsafe {
         svc!(
             SyscallOp::MemoryCreateVirtual,
             resource,
             size_bytes,
-            access_mask
+            access_mask,
+            region_flags
         )
     };
-    IssuedHandle::from_syscall_return(ret)
-}
-
-/// Выводит регион поверх того же PA с профилем `profile_raw`. `region` - handle на
-/// исходный регион, требует `DUPLICATE`.
-///
-/// Профиль меняется только в пределах некэшируемых. Кэшируемый регион и переход к нему
-/// дают `InvalidArgument`. Бюджет вызов не списывает, а производный регион становится
-/// капой-потомком исходной.
-/// Возврат: region handle либо `-(SyscallError)`.
-pub fn memory_with_profile(
-    region: Handle<kind::MemoryRegion>,
-    profile_raw: u64,
-) -> Result<IssuedHandle<kind::MemoryRegion>, SyscallError> {
-    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x1: region_handle,
-    // profile_raw. Память не передаётся ядру.
-    let ret = unsafe { svc!(SyscallOp::MemoryWithProfile, region, profile_raw) };
     IssuedHandle::from_syscall_return(ret)
 }
 
@@ -648,7 +636,10 @@ pub fn memory_with_profile(
 ///  - `region` - handle на исходный регион, требует `DUPLICATE`,
 ///  - `offset` - page-aligned смещение окна,
 ///  - `size_bytes` - длина окна,
-///  - `access_mask` - биты R/W/X, не шире гранта.
+///  - `access_mask` - биты R/W/X, не шире гранта,
+///  - `region_flags` -
+///    [`MEMORY_REGION_WRITE_COMBINING`](syscall::MEMORY_REGION_WRITE_COMBINING) либо ноль
+///    для профиля исходного региона.
 ///
 /// Грант - это права handle, суженные access-маской региона, а превышение даёт
 /// `AccessDenied`. Окно `[offset, offset+size_bytes)` обязано укладываться в исходный
@@ -660,16 +651,18 @@ pub fn memory_slice(
     offset: u64,
     size_bytes: u64,
     access_mask: u64,
+    region_flags: u64,
 ) -> Result<IssuedHandle<kind::MemoryRegion>, SyscallError> {
-    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x3: region_handle, offset,
-    // size_bytes, access_mask. Память не передаётся ядру.
+    // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x4: region_handle, offset,
+    // size_bytes, access_mask, region_flags. Память не передаётся ядру.
     let ret = unsafe {
         svc!(
             SyscallOp::MemorySlice,
             region,
             offset,
             size_bytes,
-            access_mask
+            access_mask,
+            region_flags
         )
     };
     IssuedHandle::from_syscall_return(ret)
@@ -736,8 +729,9 @@ pub fn memory_free(va: u64, size_bytes: u64) -> i64 {
 /// валиден только при успехе.
 ///
 /// `base_pa` page-aligned, так что его младшие 12 бит свободны под остальные поля:
-/// `access_bits` в `[0..3)`, `kind_tag` в `[3..5)` и `profile_raw` в `[5..7)`. У `Virtual`
-/// `base_pa` равен нулю.
+/// `access_bits` в `[0..3)`, `kind_tag` в `[3..5)` и `profile_raw` в `[5..7)`. У
+/// непрерывного `Virtual`-региона `base_pa` равен адресу первой страницы, у прочих
+/// `Virtual`-регионов `base_pa` равен нулю.
 pub fn memory_region_inspect(handle: Handle<kind::MemoryRegion>) -> (i64, u64) {
     // SAFETY: svc-immediate содержит номер операции, x0 - handle. Ядро пишет size_bytes в x0,
     // base|kind|access - в x1.

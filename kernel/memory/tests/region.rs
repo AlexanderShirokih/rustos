@@ -1,16 +1,20 @@
 #![allow(clippy::unwrap_used, clippy::unwrap_in_result)]
 
+mod common;
+
 use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use std::sync::{Arc, Mutex};
 
+use collections::MutexCell;
+use common::{make_range, nz};
 use memory::{
-    AccessMask, BudgetRefund, MemFlags, MemoryProfile, MemoryRegion, ProfileChangeError,
-    RegionCreateError, RegionSliceError,
+    AccessMask, BudgetRefund, FrameBitmap, MemFlags, MemoryProfile, MemoryRegion,
+    RegionCreateError, RegionSliceError, SliceProfile,
     frame::Frame,
-    frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
+    frame_allocator::{FrameAllocator, FrameError, PhysicalFrameAllocator, ReserveFrameError},
     memory_mapper::MemoryMappingError,
     physical_address::PageAlignedAddress,
     testing::{Call, MapExactCall, PageMapper, UnmapCall},
@@ -74,7 +78,7 @@ impl FrameAllocator for MockFrameAllocator {
         Some(frame)
     }
 
-    fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+    fn allocate_frames(&self, _count: NonZeroUsize) -> Option<Frame> {
         None
     }
 
@@ -86,10 +90,6 @@ impl FrameAllocator for MockFrameAllocator {
     fn is_allocated(&self, _frame: Frame) -> bool {
         false
     }
-}
-
-fn nz(v: usize) -> NonZeroUsize {
-    NonZeroUsize::new(v).unwrap()
 }
 
 fn aligned_va(addr: usize) -> PageAlignedVirtualAddress {
@@ -152,7 +152,7 @@ fn slice_physical_narrows_pa_size_and_access() {
         MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
     assert_eq!(region.profile(), MemoryProfile::Device);
     let sub = region
-        .slice(0x1000, nz(0x1000), AccessMask::R)
+        .slice(0x1000, nz(0x1000), AccessMask::R, SliceProfile::Inherited)
         .expect("in-bounds slice with subset access");
     assert_eq!(sub.kind_tag(), 2);
     assert_eq!(sub.size_bytes(), 0x1000);
@@ -176,101 +176,53 @@ fn create_physical_device_stays_device_profile() {
 }
 
 #[test]
-fn with_profile_moves_between_uncached_profiles() {
-    let region =
-        MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x2000), AccessMask::RW);
-    let combining = region
-        .with_profile(MemoryProfile::WriteCombining)
-        .expect("device window accepts write-combining");
-    assert_eq!(combining.profile(), MemoryProfile::WriteCombining);
-    assert_eq!(combining.physical_base(), region.physical_base());
-    assert_eq!(combining.size_bytes(), region.size_bytes());
-    assert_eq!(combining.access_mask(), region.access_mask());
-
-    let back = combining
-        .with_profile(MemoryProfile::Device)
-        .expect("write-combining window returns to device registers");
-    assert_eq!(back.profile(), MemoryProfile::Device);
-}
-
-#[test]
-fn with_profile_refuses_to_leave_cached() {
-    let region =
-        MemoryRegion::create_physical_normal(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::R);
-    assert_eq!(
-        region.with_profile(MemoryProfile::WriteCombining).err(),
-        Some(ProfileChangeError::CachedIsFixed)
-    );
-}
-
-#[test]
-fn with_profile_refuses_to_enter_cached() {
-    let region =
-        MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::R);
-    assert_eq!(
-        region.with_profile(MemoryProfile::Cached).err(),
-        Some(ProfileChangeError::CachedIsFixed)
-    );
-}
-
-#[test]
-fn with_profile_refuses_virtual_backing() {
-    let fa = Box::leak(Box::new(MockFrameAllocator::with_limit(1)));
-    let region = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RW).expect("alloc");
-    assert_eq!(
-        region.with_profile(MemoryProfile::WriteCombining).err(),
-        Some(ProfileChangeError::CachedIsFixed)
-    );
-}
-
-#[test]
-fn aliases_of_one_physical_range_never_mix_cached_and_uncached() {
-    let device =
-        MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::RW);
-    let combining = device
-        .with_profile(MemoryProfile::WriteCombining)
-        .expect("device window accepts write-combining");
-
-    assert_eq!(device.physical_base(), combining.physical_base());
-    for alias in [&device, &combining] {
-        assert_ne!(alias.profile(), MemoryProfile::Cached);
-        assert_eq!(
-            alias.with_profile(MemoryProfile::Cached).err(),
-            Some(ProfileChangeError::CachedIsFixed)
-        );
-    }
-
-    let cached =
-        MemoryRegion::create_physical_normal(aligned_pa(0x4000_0000), nz(0x1000), AccessMask::R);
-    for profile in [MemoryProfile::WriteCombining, MemoryProfile::Device] {
-        assert_eq!(
-            cached.with_profile(profile).err(),
-            Some(ProfileChangeError::CachedIsFixed)
-        );
-    }
-}
-
-#[test]
-fn with_profile_keeps_the_derived_window_sliceable() {
-    let region =
-        MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x2000), AccessMask::RW);
-    let combining = region
-        .with_profile(MemoryProfile::WriteCombining)
-        .expect("device window accepts write-combining");
-    let sub = combining
-        .slice(0x1000, nz(0x1000), AccessMask::R)
-        .expect("in-bounds slice");
-    assert_eq!(sub.profile(), MemoryProfile::WriteCombining);
-}
-
-#[test]
 fn slice_physical_normal_preserves_cached_profile() {
     let region =
         MemoryRegion::create_physical_normal(aligned_pa(0x4000_0000), nz(0x2000), AccessMask::R);
     let sub = region
-        .slice(0x1000, nz(0x1000), AccessMask::R)
+        .slice(0x1000, nz(0x1000), AccessMask::R, SliceProfile::Inherited)
         .expect("in-bounds slice");
     assert_eq!(sub.profile(), MemoryProfile::Cached);
+}
+
+#[test]
+fn write_combining_slice_retypes_a_device_window() {
+    let device =
+        MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x2000), AccessMask::RW);
+
+    let combining = device
+        .slice(0, nz(0x2000), AccessMask::RW, SliceProfile::WriteCombining)
+        .expect("device window accepts write-combining");
+    let nested = combining
+        .slice(
+            0x1000,
+            nz(0x1000),
+            AccessMask::R,
+            SliceProfile::WriteCombining,
+        )
+        .expect("write-combining window accepts write-combining");
+
+    assert_eq!(combining.profile(), MemoryProfile::WriteCombining);
+    assert_eq!(nested.profile(), MemoryProfile::WriteCombining);
+}
+
+#[test]
+fn write_combining_slice_refuses_cacheable_sources() {
+    let physical =
+        MemoryRegion::create_physical_normal(aligned_pa(0x4000_0000), nz(PAGE_SIZE), AccessMask::R);
+    let virt = MemoryRegion::create_virtual(leak_fa(), nz(1), AccessMask::R).unwrap();
+
+    for source in [&physical, &virt] {
+        assert!(matches!(
+            source.slice(
+                0,
+                nz(PAGE_SIZE),
+                AccessMask::R,
+                SliceProfile::WriteCombining
+            ),
+            Err(RegionSliceError::CacheableSource)
+        ));
+    }
 }
 
 #[test]
@@ -304,7 +256,7 @@ fn slice_rejects_window_past_region_end() {
     let region =
         MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
     assert!(matches!(
-        region.slice(0x3000, nz(0x2000), AccessMask::R),
+        region.slice(0x3000, nz(0x2000), AccessMask::R, SliceProfile::Inherited),
         Err(RegionSliceError::OutOfBounds)
     ));
 }
@@ -314,7 +266,7 @@ fn slice_rejects_access_wider_than_region() {
     let region =
         MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::R);
     assert!(matches!(
-        region.slice(0, nz(0x1000), AccessMask::RW),
+        region.slice(0, nz(0x1000), AccessMask::RW, SliceProfile::Inherited),
         Err(RegionSliceError::AccessEscalation)
     ));
 }
@@ -324,7 +276,7 @@ fn slice_rejects_misaligned_offset() {
     let region =
         MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(0x4000), AccessMask::RW);
     assert!(matches!(
-        region.slice(0x800, nz(0x1000), AccessMask::R),
+        region.slice(0x800, nz(0x1000), AccessMask::R, SliceProfile::Inherited),
         Err(RegionSliceError::MisalignedOffset)
     ));
 }
@@ -335,7 +287,12 @@ fn slice_of_virtual_maps_the_selected_frames() {
     let region = MemoryRegion::create_virtual(fa, nz(2), AccessMask::RW).unwrap();
     let frames = fa.allocated();
     let sub = region
-        .slice(PAGE_SIZE, nz(PAGE_SIZE), AccessMask::R)
+        .slice(
+            PAGE_SIZE,
+            nz(PAGE_SIZE),
+            AccessMask::R,
+            SliceProfile::Inherited,
+        )
         .expect("virtual slice");
     let mapper = PageMapper::new();
     sub.install(&mapper, aligned_va(0x4000_0000), MemFlags::user_ro())
@@ -349,7 +306,9 @@ fn slice_of_virtual_maps_the_selected_frames() {
 fn slice_installs_at_offset_pa() {
     let region =
         MemoryRegion::create_physical_device(aligned_pa(0x8000_0000), nz(0x2000), AccessMask::RW);
-    let sub = region.slice(0x1000, nz(0x1000), AccessMask::R).unwrap();
+    let sub = region
+        .slice(0x1000, nz(0x1000), AccessMask::R, SliceProfile::Inherited)
+        .unwrap();
     let mapper = PageMapper::new();
     let va = aligned_va(0x4000_0000);
     sub.install(&mapper, va, MemFlags::user_ro())
@@ -371,6 +330,29 @@ fn physical_base_some_for_physical_none_for_virtual() {
     let fa = leak_fa();
     let virt = MemoryRegion::create_virtual(fa, nz(1), AccessMask::RW).unwrap();
     assert_eq!(virt.physical_base(), None);
+}
+
+#[test]
+fn contiguous_region_reports_the_physical_base_of_each_slice() {
+    let fa: &'static PhysicalFrameAllocator<MutexCell<FrameBitmap>> = Box::leak(Box::new(
+        PhysicalFrameAllocator::new([make_range(0, 16)].into_iter()).unwrap(),
+    ));
+    let region = MemoryRegion::create_contiguous(fa, nz(4), AccessMask::RW).unwrap();
+    let sub = region
+        .slice(
+            PAGE_SIZE,
+            nz(PAGE_SIZE),
+            AccessMask::R,
+            SliceProfile::Inherited,
+        )
+        .expect("contiguous slice");
+
+    let base = region.physical_base().map(PageAlignedAddress::as_usize);
+    let sub_base = sub.physical_base().map(PageAlignedAddress::as_usize);
+
+    assert_eq!(region.kind_tag(), 1);
+    assert!(base.is_some());
+    assert_eq!(sub_base, base.map(|base| base + PAGE_SIZE));
 }
 
 #[test]
@@ -424,7 +406,12 @@ fn virtual_slice_keeps_frames_and_refund_alive() {
         .expect("alloc must succeed")
         .with_refund(refund.clone());
     let sub = region
-        .slice(PAGE_SIZE, nz(PAGE_SIZE), AccessMask::R)
+        .slice(
+            PAGE_SIZE,
+            nz(PAGE_SIZE),
+            AccessMask::R,
+            SliceProfile::Inherited,
+        )
         .expect("virtual slice");
 
     drop(region);

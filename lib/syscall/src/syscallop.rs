@@ -178,8 +178,8 @@ pub enum SyscallOp {
     /// Возвращает `resource_handle`.
     ProcessResourceSelf = 0x46,
 
-    /// Выделяет часть бюджета `Resource` в отдельный ресурс с тем же
-    /// физдиапазоном и потолком доступа. Аргументы:
+    /// Выделяет часть бюджета `Resource` в отдельный ресурс с тем же потолком доступа.
+    /// Аргументы:
     ///  - `arg0=resource_handle`,
     ///  - `arg1=budget_pages` (> 0).
     ///
@@ -276,27 +276,22 @@ pub enum SyscallOp {
     /// Создаёт `CapabilityTarget::Memory` с Virtual backing. Аргументы:
     ///  - `arg0=resource_handle` (требует `Rights::WRITE`, метерится `size_bytes / PAGE` страниц),
     ///  - `arg1=size_bytes` (кратен [`crate::PAGE_SIZE`] и ненулевой),
-    ///  - `arg2=access_mask` (биты R/W/X, нулевая маска - `InvalidArgument`).
+    ///  - `arg2=access_mask` (ненулевая маска битов R/W/X),
+    ///  - `arg3=region_flags` ([`crate::MEMORY_REGION_CONTIGUOUS`] либо ноль).
     ///
     /// Списанные страницы возвращаются ресурсу с уходом последней ссылки на регион.
-    /// Нехватка бюджета - `ResourceExhausted`.
+    /// Нехватка бюджета - `ResourceExhausted`. Без свободного смежного участка для
+    /// непрерывного региона вызов возвращает `OutOfMemory`.
     /// Возвращает `region_handle`.
     MemoryCreateVirtual = 0x60,
-
-    /// Деривация региона поверх того же PA с другим профилем памяти. Аргументы:
-    ///  - `arg0=region_handle` (требует `Rights::DUPLICATE`),
-    ///  - `arg1=profile_raw` (см. `MemoryProfile`).
-    ///
-    /// Профиль меняется в пределах некэшируемых. Кэшируемый регион и переход к
-    /// нему отвергаются как `InvalidArgument`. Бюджет не списывается, производный регион -
-    /// капа-потомок исходной. Возвращает `region_handle`.
-    MemoryWithProfile = 0x61,
 
     /// Деривация узкого под-региона из Memory-региона. Аргументы:
     ///  - `arg0=region_handle` (требует `Rights::DUPLICATE`),
     ///  - `arg1=offset` (выровнен на страницу),
     ///  - `arg2=size_bytes`,
-    ///  - `arg3=access_mask`.
+    ///  - `arg3=access_mask`,
+    ///  - `arg4=region_flags` ([`crate::MEMORY_REGION_WRITE_COMBINING`] либо ноль для
+    ///    профиля исходного региона).
     ///
     /// Окно `[offset, offset+size)` должно укладываться в исходный регион, доступ - не шире гранта.
     /// Грант - права handle, суженные access-маской региона, превышение даёт `AccessDenied`.
@@ -352,9 +347,9 @@ pub enum SyscallOp {
     /// Требует `Rights::READ`.
     /// Primary возврат - `size_bytes`,
     /// secondary - `base_pa | (profile_raw << 5) | (kind_tag << 3) | access_bits`
-    /// (base_pa page-aligned, для `Virtual` base_pa = 0). Младшие 12 бит base_pa свободны,
-    /// и в них лежат `access_bits` в `[0..3)`, `kind_tag` в `[3..5)` и `profile_raw`
-    /// в `[5..7)`.
+    /// (base_pa page-aligned, у непрерывного `Virtual` равен адресу первой страницы, у
+    /// прочих `Virtual` равен 0). Младшие 12 бит base_pa свободны, и в них лежат `access_bits` в
+    /// `[0..3)`, `kind_tag` в `[3..5)` и `profile_raw` в `[5..7)`.
     MemoryRegionInspect = 0x67,
 
     // 0x70..=0x7F - IRQ CapabilityTarget.
@@ -409,7 +404,6 @@ impl SyscallOp {
             0x55 => Some(Self::ThreadIpcBufferAddr),
             0x56 => Some(Self::ThreadYield),
             0x60 => Some(Self::MemoryCreateVirtual),
-            0x61 => Some(Self::MemoryWithProfile),
             0x62 => Some(Self::MemorySlice),
             0x63 => Some(Self::MemoryMap),
             0x64 => Some(Self::MemoryRemap),
@@ -465,10 +459,6 @@ mod tests {
         assert_eq!(
             SyscallOp::from_raw(0x60),
             Some(SyscallOp::MemoryCreateVirtual)
-        );
-        assert_eq!(
-            SyscallOp::from_raw(0x61),
-            Some(SyscallOp::MemoryWithProfile)
         );
         assert_eq!(SyscallOp::from_raw(0x62), Some(SyscallOp::MemorySlice));
         assert_eq!(SyscallOp::from_raw(0x63), Some(SyscallOp::MemoryMap));

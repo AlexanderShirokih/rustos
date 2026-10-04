@@ -127,7 +127,7 @@ mod tests {
             fn allocate_frame(&self) -> Option<Frame> {
                 Some(Frame::new(self.next.fetch_add(1, Ordering::Relaxed)))
             }
-            fn allocate_frames(&self, _max_count: usize) -> Option<(Frame, usize)> {
+            fn allocate_frames(&self, _count: NonZeroUsize) -> Option<Frame> {
                 None
             }
             fn deallocate_frame(&self, _frame: Frame) -> Result<(), FrameError> {
@@ -189,17 +189,8 @@ mod tests {
 
     #[test]
     fn defaults_for_resource_grants_rw_transfer_duplicate_no_execute() {
-        use core::num::NonZeroUsize;
-
-        use memory::physical_address::PageAlignedAddress;
-
         use super::super::resource::Resource;
-        let resource = Resource::new(
-            PageAlignedAddress::from_usize(0x4000_0000).unwrap(),
-            NonZeroUsize::new(0x1000).unwrap(),
-            memory::AccessMask::RW,
-            0,
-        );
+        let resource = Resource::new(memory::AccessMask::RW, 0);
         let r = default_rights_for(&CapabilityTarget::Resource(resource));
         assert!(r.contains(Rights::READ));
         assert!(r.contains(Rights::WRITE));
