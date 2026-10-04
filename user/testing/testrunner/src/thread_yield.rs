@@ -14,7 +14,6 @@ extern "C" fn yielding_worker(_arg: usize) -> u32 {
     0
 }
 
-/// Уступивший квант поток возвращается на CPU: круги уступок подряд завершаются в срок.
 #[kernel_test]
 fn yielded_thread_returns_to_the_cpu() {
     let worker =

@@ -2,47 +2,27 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
-
 use kernel_objects::Port;
-use runtime::{Timeout, take_bootstrap, thread_exit};
+use runtime::Timeout;
 
+mod fixture_start;
 mod handle_table_fill;
 
+use fixture_start::{Failed, fixture_start};
 use handle_table_fill::fill_handle_table;
 
-const FAILED_EXIT_CODE: u64 = 1;
+fixture_start!(run);
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(server: u32) -> ! {
-    // SAFETY: `server` - значение `x0` точки входа, и точка входа исполняется один раз.
-    unsafe { runtime::start(server) };
-    let Some(server) = take_bootstrap() else {
-        thread_exit(FAILED_EXIT_CODE);
-    };
-    let server = Port::from(server.assume_kind());
-    let Ok(parking) = Port::create() else {
-        thread_exit(FAILED_EXIT_CODE);
-    };
+fn run(server: &Port) -> Result<(), Failed> {
+    let parking = Port::create().map_err(|_| Failed)?;
 
-    let Some(spare) = fill_handle_table() else {
-        thread_exit(FAILED_EXIT_CODE);
-    };
+    let spare = fill_handle_table().ok_or(Failed)?;
     drop(spare);
 
     if server.recv(Timeout::INFINITE).is_ok() {
-        thread_exit(FAILED_EXIT_CODE);
+        return Err(Failed);
     }
 
     let _ = parking.recv(Timeout::INFINITE);
-    thread_exit(FAILED_EXIT_CODE)
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    Err(Failed)
 }

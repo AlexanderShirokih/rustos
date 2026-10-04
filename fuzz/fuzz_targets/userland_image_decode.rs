@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             for export in manifest.exports() {
-                let _ = export.len();
+                let _ = export.protocol();
             }
         }
 

@@ -2,10 +2,7 @@
 //! архитектур корневого манифеста.
 //!
 //! Архитектура крейта - имя записи реестра, и узнаётся она по сегменту имени крейта или его
-//! пути, по `forced-target`, равному bare-таргету записи, либо по ключу
-//! `metadata.molecular.arch`. Ключ нужен крейтам отделённых workspace: `forced-target` задаёт
-//! триплет всем сборкам крейта, а такой крейт собирает чужой workspace под свой таргет. Ключ
-//! читается и у пакета, и у workspace целиком.
+//! пути либо по `forced-target`, равному bare-таргету записи.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -30,8 +27,6 @@ pub(crate) struct ArchEntry {
 #[derive(Deserialize)]
 pub(super) struct CargoMetadata {
     pub(super) packages: Vec<MetaPackage>,
-    #[serde(default, rename = "metadata")]
-    pub(super) workspace_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -165,7 +160,6 @@ pub(super) fn collect_workspace(
     crates: &mut BTreeSet<WorkspaceCrate>,
     edges: &mut BTreeSet<Edge>,
 ) -> Result<Vec<Member>> {
-    let workspace_arch = workspace_arch(meta, registry)?;
     let mut members = Vec::new();
     for pkg in &meta.packages {
         let manifest_dir = pkg
@@ -175,21 +169,11 @@ pub(super) fn collect_workspace(
         let manifest = read_manifest(&pkg.manifest_path).ok();
         let dir = relative_dir(&pkg.name, manifest_dir, root)?;
         let forced_target = forced_target(manifest.as_ref());
-        let declared = declared_arch(
-            &pkg.name,
-            forced_target.as_deref(),
-            manifest.as_ref(),
-            registry,
-        )?;
+        let declared = declared_arch(&pkg.name, forced_target.as_deref(), registry)?;
         crates.insert(WorkspaceCrate {
             name: pkg.name.clone(),
             dir: dir.clone(),
-            arch: crate_arch(
-                &pkg.name,
-                &dir,
-                registry,
-                [workspace_arch.clone(), declared].into_iter().flatten(),
-            )?,
+            arch: crate_arch(&pkg.name, &dir, registry, declared)?,
             owns_process_state: process_state_manifest(manifest.as_ref()),
             links_std: links_std(&pkg.targets)?,
         });
@@ -275,31 +259,18 @@ fn crate_arch(
 fn declared_arch(
     name: &str,
     forced_target: Option<&str>,
-    manifest: Option<&toml::Table>,
     registry: &[ArchEntry],
 ) -> Result<Option<String>> {
-    let mut declared = None;
-    if let Some(target) = forced_target {
-        let entry = registry
-            .iter()
-            .find(|entry| entry.bare == target)
-            .with_context(|| {
-                format!("crate {name}: forced-target `{target}` names no registered architecture")
-            })?;
-        declared = Some(entry.name.clone());
-    }
-    if let Some(value) = molecular_key(manifest, "arch").and_then(toml::Value::as_str) {
-        let entry = registered(value, registry)
-            .with_context(|| format!("crate {name}: metadata.molecular.arch"))?;
-        match &declared {
-            Some(known) if known != &entry.name => bail!(
-                "crate {name}: forced-target names `{known}`, metadata.molecular.arch names `{}`",
-                entry.name
-            ),
-            _ => declared = Some(entry.name.clone()),
-        }
-    }
-    Ok(declared)
+    let Some(target) = forced_target else {
+        return Ok(None);
+    };
+    let entry = registry
+        .iter()
+        .find(|entry| entry.bare == target)
+        .with_context(|| {
+            format!("crate {name}: forced-target `{target}` names no registered architecture")
+        })?;
+    Ok(Some(entry.name.clone()))
 }
 
 pub(crate) fn registered<'a>(name: &str, registry: &'a [ArchEntry]) -> Result<&'a ArchEntry> {
@@ -367,18 +338,6 @@ fn forced_target(manifest: Option<&toml::Table>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn workspace_arch(meta: &CargoMetadata, registry: &[ArchEntry]) -> Result<Option<String>> {
-    let Some(value) = meta
-        .workspace_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("molecular")?.get("arch")?.as_str())
-    else {
-        return Ok(None);
-    };
-    let entry = registered(value, registry).context("workspace.metadata.molecular.arch")?;
-    Ok(Some(entry.name.clone()))
-}
-
 fn molecular_key<'a>(manifest: Option<&'a toml::Table>, key: &str) -> Option<&'a toml::Value> {
     manifest?
         .get("package")
@@ -440,7 +399,6 @@ mod tests {
                     targets: Vec::new(),
                 })
                 .collect(),
-            workspace_metadata: None,
         }
     }
 
@@ -484,39 +442,23 @@ name = \"aarch64\"
 bare = \"aarch64-unknown-none-softfloat\"
 system = \"targets/aarch64-unknown-molecular.json\"
 ";
+
         let error = registry_of(text).unwrap_err();
+
         assert!(error.to_string().contains("registered twice"), "{error}");
-    }
-
-    #[test]
-    fn workspace_arch_key_marks_every_member() {
-        let mut meta = metadata(&[("a-program", "/repo/user/a-program", &[])]);
-        meta.workspace_metadata = Some(serde_json::json!({ "molecular": { "arch": "aarch64" } }));
-        let (collected_crates, _) = collect(&meta).unwrap();
-
-        let member = collected_crates
-            .iter()
-            .find(|krate| krate.name == "a-program")
-            .expect("member is collected");
-        assert_eq!(member.arch.as_deref(), Some("aarch64"));
     }
 
     #[test]
     fn the_arch_segment_of_the_path_names_the_registered_arch() {
         let registry = registry();
-        assert_eq!(
-            crate_arch("hal", "kernel/hal-aarch64", &registry, []).unwrap(),
-            Some("aarch64".to_string())
-        );
-        assert_eq!(
-            crate_arch("a-lib", "lib/a-lib", &registry, []).unwrap(),
-            None
-        );
-        // Сегмент вне реестра архитектурой не считается, так как имя её называть не обязано.
-        assert_eq!(
-            crate_arch("hal-riscv64", "kernel/hal-riscv64", &registry, []).unwrap(),
-            None
-        );
+
+        let registered = crate_arch("hal", "kernel/hal-aarch64", &registry, []).unwrap();
+        let neutral = crate_arch("a-lib", "lib/a-lib", &registry, []).unwrap();
+        let unregistered = crate_arch("hal-riscv64", "kernel/hal-riscv64", &registry, []).unwrap();
+
+        assert_eq!(registered.as_deref(), Some("aarch64"));
+        assert_eq!(neutral, None);
+        assert_eq!(unregistered, None);
     }
 
     #[test]
@@ -527,6 +469,7 @@ system = \"targets/aarch64-unknown-molecular.json\"
             bare: "riscv64gc-unknown-none-elf".to_string(),
             system: "targets/riscv64-unknown-molecular.json".to_string(),
         });
+
         let error = crate_arch(
             "hal-riscv64",
             "kernel/hal-riscv64",
@@ -534,6 +477,7 @@ system = \"targets/aarch64-unknown-molecular.json\"
             ["aarch64".to_string()],
         )
         .unwrap_err();
+
         assert!(error.to_string().contains("conflicts"), "{error}");
     }
 
@@ -545,27 +489,28 @@ system = \"targets/aarch64-unknown-molecular.json\"
             bare: "riscv64gc-unknown-none-elf".to_string(),
             system: "targets/riscv64-unknown-molecular.json".to_string(),
         });
-        let declared = declared_arch(
+
+        let declared =
+            declared_arch("hal-riscv64", Some("riscv64gc-unknown-none-elf"), &registry).unwrap();
+        let arch = crate_arch(
             "hal-riscv64",
-            Some("riscv64gc-unknown-none-elf"),
-            None,
+            "kernel/hal-riscv64",
             &registry,
+            declared.clone(),
         )
         .unwrap();
+
         assert_eq!(declared.as_deref(), Some("riscv64"));
-        let arch = crate_arch("hal-riscv64", "kernel/hal-riscv64", &registry, declared).unwrap();
         assert_eq!(arch.as_deref(), Some("riscv64"));
     }
 
     #[test]
     fn a_forced_target_outside_the_registry_is_error() {
-        let error = declared_arch(
-            "hal-riscv64",
-            Some("riscv64gc-unknown-none-elf"),
-            None,
-            &registry(),
-        )
-        .unwrap_err();
+        let registry = registry();
+
+        let error = declared_arch("hal-riscv64", Some("riscv64gc-unknown-none-elf"), &registry)
+            .unwrap_err();
+
         assert!(
             error.to_string().contains("riscv64gc-unknown-none-elf"),
             "{error}"
@@ -582,24 +527,30 @@ system = \"targets/aarch64-unknown-molecular.json\"
             links_std: false,
         };
         let crates: BTreeSet<WorkspaceCrate> = [krate("aarch64"), krate("riscv64")].into();
-        assert!(merge_crates(crates).is_err());
+
+        let merged = merge_crates(crates);
+
+        assert!(merged.is_err());
     }
 
     #[test]
     fn relative_dir_joins_components_below_root() {
         let dir = relative_dir("a-lib", Path::new("/repo/lib/a-lib"), Path::new("/repo")).unwrap();
+
         assert_eq!(dir, "lib/a-lib");
     }
 
     #[test]
     fn crate_outside_root_is_error() {
         let dir = relative_dir("stray", Path::new("/elsewhere/stray"), Path::new("/repo"));
+
         assert!(dir.is_err());
     }
 
     #[test]
     fn crate_at_root_is_error() {
         let dir = relative_dir("root", Path::new("/repo"), Path::new("/repo"));
+
         assert!(dir.is_err());
     }
 
@@ -610,12 +561,13 @@ system = \"targets/aarch64-unknown-molecular.json\"
             "/repo/kernel/a-kernel",
             &[("a-lib", "/repo/lib/a-lib")],
         )]);
-        let (collected_crates, collected_edges) = collect(&meta).unwrap();
 
+        let (collected_crates, collected_edges) = collect(&meta).unwrap();
         let dirs: Vec<(&str, &str)> = collected_crates
             .iter()
             .map(|krate| (krate.name.as_str(), krate.dir.as_str()))
             .collect();
+
         assert_eq!(
             dirs,
             [("a-kernel", "kernel/a-kernel"), ("a-lib", "lib/a-lib")]
@@ -633,6 +585,9 @@ system = \"targets/aarch64-unknown-molecular.json\"
             "/repo/kernel/a-kernel",
             &[("vendored", "/vendor/vendored")],
         )]);
-        assert!(collect(&meta).is_err());
+
+        let collected = collect(&meta);
+
+        assert!(collected.is_err());
     }
 }

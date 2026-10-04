@@ -19,7 +19,6 @@ const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 const CLASS_SIZES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
 
-/// Блок каждого класса выдаётся, полностью пишется и возвращается в список.
 #[kernel_test]
 fn std_rt_heap_serves_every_size_class() {
     for size in CLASS_SIZES {
@@ -45,7 +44,6 @@ fn std_rt_heap_serves_every_size_class() {
 
 const LIVE_BLOCKS: usize = 64;
 
-/// Одновременно живые блоки одного класса не пересекаются.
 #[kernel_test]
 fn std_rt_heap_blocks_do_not_overlap() {
     const SIZE: usize = 64;
@@ -72,7 +70,6 @@ fn std_rt_heap_blocks_do_not_overlap() {
     }
 }
 
-/// Запрос сверх крупнейшего класса уходит прямо к ядру и возвращается ему же.
 #[kernel_test]
 fn std_rt_heap_serves_large_allocations() {
     for size in [4096usize, 8192, 64 * 1024] {
@@ -89,7 +86,6 @@ fn std_rt_heap_serves_large_allocations() {
     }
 }
 
-/// Блок выровнен по запрошенной границе, даже когда она больше размера.
 #[kernel_test]
 fn std_rt_heap_honours_alignment() {
     for align in [16usize, 32, 64, 128, 256, 512, 1024, 2048] {
@@ -116,7 +112,6 @@ extern "C" fn lock_worker(_arg: usize) -> u32 {
     0
 }
 
-/// Инкремент неатомарного счётчика под `Mutex` не теряет ни одного шага.
 #[kernel_test]
 fn std_rt_lock_serialises_workers() {
     {
@@ -137,7 +132,6 @@ fn std_rt_lock_serialises_workers() {
     kernel_tests::kassert_eq!(*counter, LOCK_WORKERS * LOCK_ITERS);
 }
 
-/// Стартовый handle доезжает от точки входа до потребителя и уходит первому вызову.
 #[kernel_test]
 fn std_rt_start_hands_out_the_bootstrap_handle_once() {
     let root = crate::bootstrap_handle();
@@ -151,7 +145,6 @@ fn std_rt_start_hands_out_the_bootstrap_handle_once() {
 
 const RANDOM_MAX_LEN: usize = 17;
 
-/// Буфер любой длины заполняется целиком, а хвост короче слова генератор не отвергает.
 #[kernel_test]
 fn std_rt_random_fills_buffers_of_any_length() {
     let mut buffer = [0u8; RANDOM_MAX_LEN];
@@ -159,8 +152,6 @@ fn std_rt_random_fills_buffers_of_any_length() {
         runtime::random::fill_bytes(&mut buffer[..len]);
     }
 
-    // SplitMix64 биективен, а состояние сдвигается на каждый вызов. Два подряд идущих слова
-    // различаются всегда, поэтому проверка не плавает.
     let mut first = [0u8; 8];
     let mut second = [0u8; 8];
     runtime::random::fill_bytes(&mut first);
@@ -204,8 +195,6 @@ extern "C" fn tls_worker(_arg: usize) -> u32 {
     0
 }
 
-/// Значение под ключом принадлежит потоку и сохраняется через переключения контекста, а уход
-/// потока вызывает деструктор.
 #[kernel_test]
 fn std_rt_thread_locals_are_private_and_destroyed() {
     let key = runtime::tls::create(Some(count_destroyed));

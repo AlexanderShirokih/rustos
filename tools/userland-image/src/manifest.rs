@@ -3,8 +3,15 @@ use component_abi::RequirementMode;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ProgramManifest {
     pub requirements: Vec<ManifestRequirement>,
-    /// Протоколы экспортов в порядке объявления, по `Protocol::ID` на экспорт.
-    pub exports: Vec<String>,
+    pub exports: Vec<ProgramExport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgramExport {
+    /// Идентификатор протокола экспорта.
+    pub protocol: String,
+    /// Фильтры экспорта, каждый - пары ключа и значения.
+    pub filters: Vec<Vec<(String, String)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,8 +24,12 @@ pub(crate) struct ManifestRequirement {
 
 impl ProgramManifest {
     pub(crate) fn program_bytes(&self) -> Vec<u8> {
-        use component_abi::{RequirementDeclaration, encode_manifest_into, manifest_len};
+        use component_abi::{
+            Attribute, ExportDeclaration, RequirementDeclaration, encode_manifest_into,
+            manifest_len,
+        };
         use userland::{Program, Segment, SegmentPermissions, encode_program};
+
         let requirements: Vec<_> = self
             .requirements
             .iter()
@@ -31,9 +42,35 @@ impl ProgramManifest {
                 }
             })
             .collect();
-        let exports: Vec<_> = self.exports.iter().map(String::as_str).collect();
+
+        let exports: Vec<_> = self
+            .exports
+            .iter()
+            .map(|export| {
+                let filters: Vec<&'static [Attribute<'static>]> = export
+                    .filters
+                    .iter()
+                    .map(|filter| {
+                        let pairs: Vec<_> = filter
+                            .iter()
+                            .map(|(key, value)| Attribute {
+                                key: String::leak(key.clone()).as_bytes(),
+                                value: String::leak(value.clone()).as_bytes(),
+                            })
+                            .collect();
+                        &*Vec::leak(pairs)
+                    })
+                    .collect();
+                ExportDeclaration::filtered(
+                    String::leak(export.protocol.clone()),
+                    Vec::leak(filters),
+                )
+            })
+            .collect();
+
         let mut manifest = vec![0; manifest_len(&requirements, &exports)];
         encode_manifest_into(&mut manifest, &requirements, &exports);
+
         encode_program(&Program {
             manifest: &manifest,
             entry_va: 4096,

@@ -58,11 +58,8 @@ extern "C" fn consumer_worker(arg: usize) -> u32 {
 
 #[kernel_test]
 fn ring_transport_round_trip() {
-    // Логическая длина кольца влезает в одну страницу; регион аллоцируем и
-    // маппим постранично (ядро оперирует страничными размерами).
     let region_len = SpscRing::region_bytes(RING_CAPACITY, SLOT_PAYLOAD);
     kernel_tests::kassert!(region_len as u64 <= PAGE_SIZE);
-    // Регион-носитель кольца минтится под метеринг-бюджет процесса.
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
@@ -81,7 +78,6 @@ fn ring_transport_round_trip() {
         ok: core::sync::atomic::AtomicBool::new(false),
     };
 
-    // На producer-конце главный поток оборачивает тот же регион в producer-кольцо.
     let base = shared.region_va as *mut u8;
     // SAFETY: страница только что замаплена RW и остаётся действительной до конца теста;
     // `region_len <= PAGE_SIZE`, кольцо в её границах; главный поток -
@@ -90,12 +86,10 @@ fn ring_transport_round_trip() {
         unsafe { SpscRing::from_raw(base, region_len, SLOT_PAYLOAD) }.expect("producer ring");
     let producer = RingProducer::new(producer_ring, data_signal.borrow());
 
-    // Спавним consumer-поток в текущем процессе.
     let arg = (&raw const shared) as usize;
     let thread =
         spawn(consumer_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn consumer worker");
 
-    // Producer: шлём FRAMES кадров; на полном кольце повторяем.
     let mut sent = 0u32;
     while sent < FRAMES {
         match producer.push(&sent.to_le_bytes()) {
@@ -105,7 +99,6 @@ fn ring_transport_round_trip() {
         }
     }
 
-    // Ожидание consumer с конечным таймаутом (по thread-handle).
     thread
         .join(JOIN_TIMEOUT)
         .expect("consumer joins before timeout");

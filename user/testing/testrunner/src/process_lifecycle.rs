@@ -66,8 +66,6 @@ fn thread_exit_publishes_exit_code() {
     kernel_tests::kassert_eq!(thread.exit_code().expect("thread exit code"), EXIT_CODE);
 }
 
-/// Потомок, завершившийся `ThreadExit(N)`, наблюдается родителем как
-/// терминированный процесс с тем же кодом.
 #[kernel_test]
 fn child_process_exit_code_is_observable() {
     let fixture = Fixture::spawn();
@@ -85,8 +83,6 @@ fn child_process_exit_code_is_observable() {
     );
 }
 
-/// `ProcessExit(N)` снимает процесс вместе с припаркованным потоком, которого
-/// `ThreadExit` вызывающего не касается.
 #[kernel_test]
 fn process_exit_terminates_the_parked_sibling() {
     let fixture = Fixture::spawn();
@@ -108,7 +104,6 @@ fn process_exit_terminates_the_parked_sibling() {
 fn closing_the_last_child_capability_removes_the_child() {
     let fixture = Fixture::spawn();
 
-    // Запрос до закрытия: сессия заведомо жива и обслужена.
     kernel_tests::kassert_eq!(
         fixture.request_status(OP_WRITE_SLOT, LIFETIME_PROBE, &[]),
         REPLY_OK
@@ -125,8 +120,6 @@ fn removing_a_holder_removes_the_processes_it_held() {
     let holder = Fixture::spawn();
     let (child_process, child_port) = Fixture::spawn().into_parts();
 
-    // Капа передаётся переносом. Дубликат - производная нашей корневой капы, и её
-    // закрытие отзывает дубликат напрямую, минуя каскад.
     let child_cap = child_process.into_raw().raw();
     kernel_tests::kassert_eq!(
         holder.request_status(OP_HOLD_CAP, 0, &[child_cap]),
@@ -144,7 +137,6 @@ fn removing_a_holder_removes_the_processes_it_held() {
 fn closing_the_last_holder_from_inside_leaves_the_request_unanswered() {
     let (process, port) = Fixture::spawn().into_parts();
 
-    // Капа передаётся переносом. Единственный держатель остаётся в таблице фикстуры.
     let own_cap = process.into_raw().raw();
     ipc_raw::write_frame(&encode_request(OP_CLOSE_CAP, 0), &[own_cap]);
 

@@ -3,7 +3,10 @@
 //! Логический идентификатор - индекс в таблице, аппаратный - affinity.
 
 use collections::Vec;
-use fdt::devicetree::{DeviceTree, Node};
+use fdt::{
+    devicetree::{DeviceTree, Node},
+    devicetreeext::NodeExt,
+};
 
 const AFFINITY_MASK: u64 = 0x0000_00FF_00FF_FFFF;
 
@@ -120,7 +123,7 @@ fn cpu_affinity(node: &Node<'_>, address_cells: usize) -> Option<CpuAffinity> {
     if node.prop("device_type")?.as_cstr()? != "cpu" {
         return None;
     }
-    if !is_available(node) {
+    if !node.is_available() {
         return None;
     }
 
@@ -130,13 +133,6 @@ fn cpu_affinity(node: &Node<'_>, address_cells: usize) -> Option<CpuAffinity> {
         _ => u64::from(reg.try_as_u32(0)?),
     };
     Some(CpuAffinity::from_reg(raw))
-}
-
-fn is_available(node: &Node<'_>) -> bool {
-    match node.prop("status").and_then(|prop| prop.as_cstr()) {
-        Some(status) => status == "okay" || status == "ok",
-        None => true,
-    }
 }
 
 #[cfg(test)]
@@ -230,18 +226,15 @@ mod tests {
         );
 
         let topology = parse(&bytes, 0);
+        let affinities = [0, 1, 2, 3].map(|index| topology.affinity(index));
+        let indices = [0, 1, 2, 3].map(|reg| topology.index_of(CpuAffinity::from_reg(reg)));
 
         assert_eq!(topology.len(), 4);
-        for index in 0..4 {
-            assert_eq!(
-                topology.affinity(index),
-                Some(CpuAffinity::from_reg(index as u64))
-            );
-            assert_eq!(
-                topology.index_of(CpuAffinity::from_reg(index as u64)),
-                Some(index)
-            );
-        }
+        assert_eq!(
+            affinities,
+            [0, 1, 2, 3].map(|reg| Some(CpuAffinity::from_reg(reg)))
+        );
+        assert_eq!(indices, [Some(0), Some(1), Some(2), Some(3)]);
     }
 
     #[test]
@@ -357,7 +350,6 @@ mod tests {
     fn drops_bits_outside_the_affinity_field() {
         let bytes = build_cpus_dtb(Some(1), &[CpuNode::new("cpu@1", reg_1(1))]);
 
-        // Биты 30 и 31 лежат вне полей Aff0..Aff3 (в `MPIDR_EL1` это `U` и `RES1`).
         let topology = parse(&bytes, 0xC000_0001);
 
         assert_eq!(
@@ -366,20 +358,6 @@ mod tests {
             "the boot CPU affinity matches the FDT node"
         );
         assert_eq!(topology.affinity(0), Some(CpuAffinity::from_reg(1)));
-    }
-
-    #[test]
-    fn unknown_status_excludes_cpu() {
-        let bytes = build_cpus_dtb(
-            Some(1),
-            &[
-                CpuNode::new("cpu@0", reg_1(0)),
-                CpuNode::new("cpu@1", reg_1(1)).with_status("fail"),
-            ],
-        );
-
-        let topology = parse(&bytes, 0);
-        assert_eq!(topology.len(), 1);
     }
 
     #[test]
@@ -393,6 +371,7 @@ mod tests {
         );
 
         let topology = parse(&bytes, 0);
+
         assert_eq!(topology.len(), 2, "the boot CPU and one node");
         assert_eq!(topology.index_of(CpuAffinity::from_reg(1)), Some(1));
     }

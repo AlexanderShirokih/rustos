@@ -1,13 +1,11 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{
     any::TypeId,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use component_abi::{
-    AcceptError, SessionError, SessionRequest, SessionRequirement, component_startup,
-};
+use component_abi::{AcceptError, SessionError, SessionRequest, component_startup};
 use kernel_objects::{
     BorrowedHandle, Error, IssuedHandle, ObjectKind, OwnedHandle, Port, Process, Resource, kind,
 };
@@ -30,7 +28,8 @@ pub struct Children<'a, C, V> {
     port: Port,
     next_badge: AtomicU64,
     entries: Vec<Entry<'a, C, V>>,
-    importers: Vec<Importer<C>>,
+    importers: BTreeMap<u64, Importer<C>>,
+    holdings: BTreeMap<u64, Holdings>,
     requests: Vec<PendingRequest<C>>,
     accepts: Vec<PendingAccept<C>>,
 }
@@ -68,10 +67,20 @@ pub enum Status {
     Removed,
 }
 
-/// Отказ [`Children::grant`].
+/// Назначение выдачи под требование. Выдачи одного требования с разным назначением имеют
+/// разные корни.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Ресурс, выданный по самому требованию.
+    Requirement,
+    /// Сессия перечисления экспортов либо результата поиска.
+    Search,
+}
+
+/// Отказ [`Children::grant`] и [`Children::issue`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantError {
-    /// Значок не принадлежит работающей incarnation.
+    /// Значок не принадлежит работающей incarnation либо импортёру.
     NotRunning,
     /// Копия capability не создана либо вид `K` отличается от прежней выдачи требования.
     Kernel(Error),
@@ -88,27 +97,27 @@ struct Entry<'a, C, V> {
 }
 
 enum State {
-    Waiting {
-        exhausted_since: Option<Instant>,
-    },
-    Running {
-        badge: u64,
-        process: Process,
-        grants: Vec<Grant>,
-    },
+    Waiting { exhausted_since: Option<Instant> },
+    Running { badge: u64, process: Process },
     Departed,
     Removed,
 }
 
+#[derive(Default)]
+struct Holdings {
+    roots: Vec<Grant>,
+}
+
 struct Grant {
     requirement: String,
+    purpose: Purpose,
     kind: TypeId,
     held: OwnedHandle<kind::Any>,
 }
 
 struct Importer<C> {
     key: C,
-    badge: u64,
+    owner: Option<u64>,
 }
 
 struct PendingRequest<C, R = ImporterDebt> {
@@ -116,7 +125,6 @@ struct PendingRequest<C, R = ImporterDebt> {
     protocol: String,
     importer: u64,
     requirement: String,
-    index: u16,
     reply: R,
 }
 
@@ -149,7 +157,8 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             port: Port::create()?,
             next_badge: AtomicU64::new(0),
             entries: Vec::new(),
-            importers: Vec::new(),
+            importers: BTreeMap::new(),
+            holdings: BTreeMap::new(),
             requests: Vec::new(),
             accepts: Vec::new(),
         })
@@ -227,31 +236,26 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .iter()
             .find(|entry| entry.running_badge() == Some(badge))
             .map(|entry| entry.child)
-            .or_else(|| {
-                self.importers
-                    .iter()
-                    .find(|importer| importer.badge == badge)
-                    .map(|importer| importer.key)
-            })
+            .or_else(|| self.importers.get(&badge).map(|importer| importer.key))
     }
 
-    /// Ставит заявку импортёра на экспорт `requirement.protocol` записи `provider`. Заявка
-    /// сохраняется при перезапуске. Повтор имени и номера заменяет прежнюю заявку импортёра
-    /// и отвечает на неё `SessionError::NoSpace`.
+    /// Ставит заявку импортёра со значком `importer` по требованию `requirement` на экспорт
+    /// `protocol` записи `provider`. Заявка сохраняется при перезапуске. Повтор заявки того же
+    /// импортёра на тот же экспорт по тому же требованию заменяет прежнюю и отвечает на неё
+    /// `SessionError::NoSpace`.
     pub fn request(
         &mut self,
         provider: C,
         importer: u64,
-        requirement: SessionRequirement<'_>,
+        requirement: &str,
+        protocol: &str,
         reply: ImporterDebt,
     ) {
-        let protocol = requirement.protocol.as_str();
         let request = PendingRequest {
             provider,
             protocol: String::from(protocol),
             importer,
-            requirement: String::from(requirement.name.as_str()),
-            index: requirement.index,
+            requirement: String::from(requirement),
             reply,
         };
         if let Some(replaced) = queue_request(&mut self.requests, request) {
@@ -290,17 +294,15 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         self.match_pair(provider, protocol);
     }
 
-    /// Снимает incarnation либо импортёра, чья сессия со значком `badge` закрылась, и отзывает
-    /// выданное им. Живой процесс завершается с исходом [`Outcome::TakenDown`]. Импортёр и
-    /// чужой значок дают `None`.
+    /// Снимает incarnation либо клиентскую capability, чья сессия со значком `badge`
+    /// закрылась. Уход incarnation либо импортёра из [`importer`](Self::importer) отзывает
+    /// выданное им. Живой процесс завершается с исходом [`Outcome::TakenDown`]. Клиентская
+    /// capability и чужой значок дают `None`.
     pub fn depart(&mut self, badge: u64) -> Option<Departure<C>> {
-        if let Some(index) = self
-            .importers
-            .iter()
-            .position(|importer| importer.badge == badge)
-        {
-            self.importers.swap_remove(index);
-            self.drop_debts(badge);
+        if let Some(importer) = self.importers.remove(&badge) {
+            if importer.owner.is_none() {
+                self.release(badge);
+            }
             return None;
         }
 
@@ -308,9 +310,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .entries
             .iter_mut()
             .find(|entry| entry.running_badge() == Some(badge))?;
-        let State::Running {
-            process, grants, ..
-        } = core::mem::replace(&mut entry.state, State::Departed)
+        let State::Running { process, .. } = core::mem::replace(&mut entry.state, State::Departed)
         else {
             return None;
         };
@@ -318,10 +318,9 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             child: entry.child,
             outcome: outcome_of(&process),
         };
-        drop(grants);
-        drop(process);
 
-        self.drop_debts(badge);
+        self.release(badge);
+        drop(process);
         Some(departure)
     }
 
@@ -382,53 +381,64 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         source: BorrowedHandle<'_, K>,
         rights: Rights,
     ) -> Result<OwnedHandle<K>, GrantError> {
-        let grants = running_grants(&mut self.entries, badge)?;
-        if let Some(copy) = granted(grants, requirement, rights)? {
-            return Ok(copy);
+        if !self.running(badge) {
+            return Err(GrantError::NotRunning);
         }
 
-        let held = source.duplicate(rights | Rights::DUPLICATE, None)?;
-        let copy = held.duplicate(rights, None)?;
-        grants.push(Grant {
-            requirement: String::from(requirement),
-            kind: TypeId::of::<K>(),
-            held: held.erase(),
-        });
-        Ok(copy)
+        let copy = self.holdings.entry(badge).or_default().copy_root::<K>(
+            requirement,
+            Purpose::Requirement,
+            rights,
+            None,
+            || source.duplicate(rights | Rights::DUPLICATE, None),
+        )?;
+        Ok(copy.assume_kind())
     }
 
-    /// Создаёт для incarnation со значком `badge` клиентскую capability к [`port`](Self::port)
-    /// под требование `requirement`, запросы которой [`caller`](Self::caller) называет ключом
-    /// `key`. [`depart`](Self::depart) incarnation закрывает эту capability вместе с копиями.
-    /// Повторный вызов для того же требования возвращает копию прежней capability.
-    pub fn grant_importer(
+    /// Создаёт для incarnation либо импортёра со значком `owner` клиентскую capability к
+    /// [`port`](Self::port) под требование `requirement` с назначением `purpose`. Запросы по ней
+    /// [`caller`](Self::caller) называет ключом `key`. Каждая копия получает свой значок, и уход
+    /// одной копии не закрывает другие. Уход владельца отзывает все копии его выдачи.
+    pub fn issue(
         &mut self,
-        badge: u64,
+        owner: u64,
         requirement: &str,
+        purpose: Purpose,
         key: C,
     ) -> Result<Port, GrantError> {
-        let rights = Rights::WRITE | Rights::TRANSFER;
-        let grants = running_grants(&mut self.entries, badge)?;
-        if let Some(copy) = granted(grants, requirement, rights)? {
-            return Ok(copy);
+        let owner_alive = self.running(owner)
+            || self
+                .importers
+                .get(&owner)
+                .is_some_and(|importer| importer.owner.is_none());
+        if !owner_alive {
+            return Err(GrantError::NotRunning);
         }
 
-        let importer =
-            NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed));
-        let held = self
-            .port
-            .duplicate(rights | Rights::DUPLICATE, Some(importer))?;
-        let copy = held.duplicate(rights, None)?;
-        grants.push(Grant {
-            requirement: String::from(requirement),
-            kind: TypeId::of::<kind::Port>(),
-            held: held.erase(),
-        });
-        self.importers.push(Importer {
-            key,
-            badge: importer.get(),
-        });
-        Ok(copy)
+        // Запись импортёра существует до минта значка, чтобы обработать событие его ухода.
+        let badge = NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed));
+        self.importers.insert(
+            badge.get(),
+            Importer {
+                key,
+                owner: Some(owner),
+            },
+        );
+
+        let rights = Rights::WRITE | Rights::TRANSFER;
+        let port = &self.port;
+        let holdings = self.holdings.entry(owner).or_default();
+        let copy =
+            holdings.copy_root::<kind::Port>(requirement, purpose, rights, Some(badge), || {
+                port.duplicate(rights | Rights::DUPLICATE, None)
+            });
+        match copy {
+            Ok(copy) => Ok(Port::from(copy.assume_kind::<kind::Port>())),
+            Err(error) => {
+                self.importers.remove(&badge.get());
+                Err(error)
+            }
+        }
     }
 
     /// Создаёт клиентскую capability к [`port`](Self::port), запросы которой
@@ -437,10 +447,8 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     pub fn importer(&mut self, key: C) -> Result<Port, Error> {
         let badge = NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed));
         let port = self.port.duplicate(Rights::WRITE, Some(badge))?;
-        self.importers.push(Importer {
-            key,
-            badge: badge.get(),
-        });
+        self.importers
+            .insert(badge.get(), Importer { key, owner: None });
         Ok(port)
     }
 
@@ -454,6 +462,12 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             State::Departed => Status::Departed,
             State::Removed => Status::Removed,
         })
+    }
+
+    fn running(&self, badge: u64) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.running_badge() == Some(badge))
     }
 
     fn entry_mut(&mut self, child: C) -> Option<&mut Entry<'a, C, V>> {
@@ -482,7 +496,6 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             protocol,
             importer,
             requirement,
-            index,
             reply,
         } = self.requests.remove(request);
         let sent = accept
@@ -500,16 +513,51 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
                     protocol,
                     importer,
                     requirement,
-                    index,
                     reply,
                 },
             );
         }
     }
 
-    fn drop_debts(&mut self, badge: u64) {
-        self.requests.retain(|request| request.importer != badge);
-        self.accepts.retain(|accept| accept.badge != badge);
+    fn release(&mut self, owner: u64) {
+        self.requests.retain(|request| request.importer != owner);
+        self.accepts.retain(|accept| accept.badge != owner);
+        self.importers
+            .retain(|_, importer| importer.owner != Some(owner));
+        self.holdings.remove(&owner);
+    }
+}
+
+impl Holdings {
+    fn copy_root<K: ObjectKind + 'static>(
+        &mut self,
+        requirement: &str,
+        purpose: Purpose,
+        rights: Rights,
+        badge: Option<NonZeroU64>,
+        source: impl FnOnce() -> Result<OwnedHandle<K>, Error>,
+    ) -> Result<OwnedHandle<kind::Any>, GrantError> {
+        let root = self
+            .roots
+            .iter()
+            .find(|grant| grant.requirement == requirement && grant.purpose == purpose);
+        match root {
+            Some(grant) if grant.kind != TypeId::of::<K>() => {
+                Err(GrantError::Kernel(Error::Syscall(SyscallError::WrongType)))
+            }
+            Some(grant) => Ok(grant.held.borrow().duplicate(rights, badge)?),
+            None => {
+                let held = source()?.erase();
+                let copy = held.borrow().duplicate(rights, badge)?;
+                self.roots.push(Grant {
+                    requirement: String::from(requirement),
+                    purpose,
+                    kind: TypeId::of::<K>(),
+                    held,
+                });
+                Ok(copy)
+            }
+        }
     }
 }
 
@@ -557,45 +605,12 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
                 self.state = State::Running {
                     badge: session.badge.get(),
                     process,
-                    grants: Vec::new(),
                 };
                 None
             }
             Err(_) => Some(Outcome::LaunchFailed),
         }
     }
-}
-
-fn running_grants<'e, C, V>(
-    entries: &'e mut [Entry<'_, C, V>],
-    badge: u64,
-) -> Result<&'e mut Vec<Grant>, GrantError> {
-    entries
-        .iter_mut()
-        .find_map(|entry| match &mut entry.state {
-            State::Running {
-                badge: running,
-                grants,
-                ..
-            } if *running == badge => Some(grants),
-            _ => None,
-        })
-        .ok_or(GrantError::NotRunning)
-}
-
-fn granted<K: ObjectKind + 'static>(
-    grants: &[Grant],
-    requirement: &str,
-    rights: Rights,
-) -> Result<Option<OwnedHandle<K>>, GrantError> {
-    let Some(grant) = grants.iter().find(|grant| grant.requirement == requirement) else {
-        return Ok(None);
-    };
-    if grant.kind != TypeId::of::<K>() {
-        return Err(GrantError::Kernel(Error::Syscall(SyscallError::WrongType)));
-    }
-    let copy = grant.held.duplicate(rights, None)?;
-    Ok(Some(copy.assume_kind()))
 }
 
 fn outcome_of(process: &Process) -> Outcome {
@@ -613,14 +628,15 @@ fn outcome_of(process: &Process) -> Outcome {
     }
 }
 
-fn queue_request<C, R>(
+fn queue_request<C: PartialEq, R>(
     requests: &mut Vec<PendingRequest<C, R>>,
     request: PendingRequest<C, R>,
 ) -> Option<PendingRequest<C, R>> {
     if let Some(pending) = requests.iter_mut().find(|pending| {
         pending.importer == request.importer
             && pending.requirement == request.requirement
-            && pending.index == request.index
+            && pending.provider == request.provider
+            && pending.protocol == request.protocol
     }) {
         Some(core::mem::replace(pending, request))
     } else {
@@ -633,33 +649,32 @@ fn queue_request<C, R>(
 mod tests {
     use super::{PendingRequest, String, Vec, queue_request};
 
-    fn request(importer: u64, index: u16, reply: u16) -> PendingRequest<u16, u16> {
+    fn request(importer: u64, provider: u16, reply: u16) -> PendingRequest<u16, u16> {
         PendingRequest {
-            provider: index + 1,
+            provider,
             protocol: String::from("Clock"),
             importer,
             requirement: String::from("clocks"),
-            index,
             reply,
         }
     }
 
     #[test]
-    fn different_provider_numbers_wait_together_and_only_same_number_is_replaced() {
+    fn requests_for_different_exports_wait_together_and_only_the_same_export_is_replaced() {
         let mut pending = Vec::new();
-        assert!(queue_request(&mut pending, request(10, 0, 1)).is_none());
-        assert!(queue_request(&mut pending, request(10, 1, 2)).is_none());
-        assert!(queue_request(&mut pending, request(11, 0, 3)).is_none());
+        assert!(queue_request(&mut pending, request(10, 1, 1)).is_none());
+        assert!(queue_request(&mut pending, request(10, 2, 2)).is_none());
+        assert!(queue_request(&mut pending, request(11, 1, 3)).is_none());
 
-        let replaced = queue_request(&mut pending, request(10, 0, 4)).expect("same key replaces");
+        let replaced = queue_request(&mut pending, request(10, 1, 4)).expect("same key replaces");
 
         assert_eq!(replaced.reply, 1);
         assert_eq!(
             pending
                 .iter()
-                .map(|request| (request.importer, request.index, request.reply))
+                .map(|request| (request.importer, request.provider, request.reply))
                 .collect::<Vec<_>>(),
-            [(10, 0, 4), (10, 1, 2), (11, 0, 3)]
+            [(10, 1, 4), (10, 2, 2), (11, 1, 3)]
         );
     }
 }

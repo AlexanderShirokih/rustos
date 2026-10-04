@@ -27,7 +27,6 @@ members = [
     "lib/collections",
     "lib/component-abi",
     "lib/device-resolver",
-    "lib/device-resolver-aarch64",
     "lib/fdt",
     "lib/fdt-test",
     "lib/filesystem",
@@ -89,7 +88,6 @@ platform-abi = { path = "lib/platform-abi" }
 collections = { path = "lib/collections" }
 component-abi = { path = "lib/component-abi" }
 device-resolver = { path = "lib/device-resolver" }
-device-resolver-aarch64 = { path = "lib/device-resolver-aarch64" }
 io = { path = "lib/io" }
 klog = { path = "kernel/log" }
 fdt = { path = "lib/fdt" }

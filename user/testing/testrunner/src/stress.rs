@@ -1030,8 +1030,6 @@ fn the_same_seed_repeats_the_step_sequence() {
     let sequence_of_the_seed = sequence(0x51ED);
     kernel_tests::kassert_eq!(sequence_of_the_seed, sequence(0x51ED));
 
-    // Освобождение идёт по выбору генератора. Элемент, созданный раньше, освобождается
-    // позже созданного после него.
     kernel_tests::kassert!(
         sequence_of_the_seed
             .iter()

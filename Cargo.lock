@@ -47,16 +47,7 @@ version = "0.1.0"
 dependencies = [
  "fdt",
  "fdt-test",
- "syscall",
-]
-
-[[package]]
-name = "device-resolver-aarch64"
-version = "0.1.0"
-dependencies = [
- "device-resolver",
- "fdt",
- "fdt-test",
+ "platform-abi",
  "syscall",
 ]
 
@@ -256,6 +247,8 @@ dependencies = [
 name = "platform-abi"
 version = "0.1.0"
 dependencies = [
+ "fdt",
+ "fdt-test",
  "ipc",
  "syscall",
 ]

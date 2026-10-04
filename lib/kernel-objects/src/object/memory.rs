@@ -124,11 +124,13 @@ pub struct Mapping {
     size_bytes: u64,
 }
 
-/// Окно регистров устройства: регион и смещение первого регистра от начала региона.
+/// Окно регистров устройства: регион, смещение первого регистра от начала региона и размер окна
+/// в байтах.
 #[derive(Debug)]
 pub struct MmioWindow {
     pub region: MemoryRegion,
     pub offset: u64,
+    pub size: u64,
 }
 
 /// Маппинг окна регистров устройства. Освобождается вместе с маппингом региона.
@@ -258,11 +260,14 @@ impl DeviceWindow<syscall_user::IssuedHandle<kind::MemoryRegion>> for MemoryRegi
 }
 
 impl MmioWindow {
-    /// Маппит регион окна целиком на запись. Смещение за концом региона отвергается
-    /// `InvalidArgument`.
+    /// Маппит регион окна целиком на запись. Смещение за концом региона и окно, которое выходит
+    /// за конец региона, отвергаются `InvalidArgument`.
     pub fn map(&self) -> Result<MmioMapping> {
         let mapping = self.region.map_full(UserMemFlags::ReadWrite)?;
-        let registers = (self.offset < mapping.size_bytes)
+        let registers = self
+            .offset
+            .checked_add(self.size)
+            .is_some_and(|end| self.offset < mapping.size_bytes && end <= mapping.size_bytes)
             .then(|| mapping.va.checked_add(self.offset))
             .flatten()
             .and_then(|registers| usize::try_from(registers).ok())
@@ -487,7 +492,6 @@ mod tests {
         fn mapping(&mut self) -> ManuallyDrop<Mapping> {
             let va = u64::try_from(self.base().expose_provenance()).unwrap();
             let size_bytes = u64::try_from(BUFFER_BYTES).unwrap();
-            // Освобождение в `Drop` подавлено, ядро эти страницы не выдавало.
             ManuallyDrop::new(Mapping { va, size_bytes })
         }
     }
@@ -511,6 +515,7 @@ mod tests {
         }
         pattern
     }
+
     #[test]
     fn head_len_reaches_word_boundary_within_len() {
         let mut buffer = WordAlignedBuffer::untouched();
@@ -519,6 +524,7 @@ mod tests {
         for shift in SHIFTS {
             for len in lens() {
                 let base = aligned.wrapping_add(shift);
+
                 let head = head_len(base, len);
 
                 assert!(head <= len, "shift {shift}, len {len}: head {head}");
@@ -534,15 +540,17 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn head_len_is_len_when_range_ends_before_word_boundary() {
         let mut buffer = WordAlignedBuffer::untouched();
         let base = buffer.base().wrapping_add(3);
 
-        assert_eq!(head_len(base, 2), 2);
-        assert_eq!(head_len(base, 5), 5);
-        assert_eq!(head_len(base, 6), 5);
+        let heads = [2, 5, 6].map(|len| head_len(base, len));
+
+        assert_eq!(heads, [2, 5, 5]);
     }
+
     #[test]
     fn copy_in_at_writes_exactly_the_range() {
         let pattern = source_bytes();
@@ -551,8 +559,6 @@ mod tests {
             for len in lens() {
                 let mut buffer = WordAlignedBuffer::untouched();
                 let mapping = buffer.mapping();
-                // Источник берётся с невыровненного адреса, и слова из него читаются без учёта
-                // выравнивания.
                 let source = &pattern[1..=len];
 
                 mapping.copy_in_at(shift, source).unwrap();
@@ -565,6 +571,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn copy_out_at_reads_back_written_range() {
         let pattern = source_bytes();
@@ -575,8 +582,6 @@ mod tests {
                 let mapping = buffer.mapping();
                 let source = &pattern[1..=len];
                 mapping.copy_in_at(shift, source).unwrap();
-                // Приёмник берётся с невыровненного адреса, и слова в него пишутся без учёта
-                // выравнивания.
                 let mut target = [UNTOUCHED; BUFFER_BYTES];
 
                 mapping.copy_out_at(shift, &mut target[1..=len]).unwrap();
@@ -589,8 +594,11 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn zero_at_clears_exactly_the_range() {
+        let zeros = [0; LEN_MAX];
+
         for shift in SHIFTS {
             for len in lens() {
                 let mut buffer = WordAlignedBuffer::untouched();
@@ -598,7 +606,6 @@ mod tests {
 
                 mapping.zero_at(shift, len).unwrap();
 
-                let zeros = [0; LEN_MAX];
                 assert_eq!(
                     buffer.0,
                     untouched_except(shift, &zeros[..len]),
@@ -607,45 +614,37 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn range_beyond_mapping_is_out_of_bounds() {
         let mut buffer = WordAlignedBuffer::untouched();
         let mapping = buffer.mapping();
         let mut target = [UNTOUCHED; 8];
 
-        assert_eq!(
+        let results = [
             mapping.copy_in_at(BUFFER_BYTES, &[1]),
-            Err(Error::OutOfBounds)
-        );
-        assert_eq!(
             mapping.copy_in_at(BUFFER_BYTES - 4, &[1; 5]),
-            Err(Error::OutOfBounds)
-        );
-        assert_eq!(
             mapping.copy_out_at(BUFFER_BYTES - 7, &mut target),
-            Err(Error::OutOfBounds)
-        );
-        assert_eq!(
             mapping.copy_out_at(usize::MAX, &mut target[..1]),
-            Err(Error::OutOfBounds)
-        );
-        assert_eq!(
             mapping.zero_at(0, BUFFER_BYTES + 1),
-            Err(Error::OutOfBounds)
-        );
-        assert_eq!(mapping.zero_at(usize::MAX, 1), Err(Error::OutOfBounds));
+            mapping.zero_at(usize::MAX, 1),
+        ];
 
+        assert_eq!(results, [Err(Error::OutOfBounds); 6]);
         assert_eq!(buffer.0, [UNTOUCHED; BUFFER_BYTES]);
         assert_eq!(target, [UNTOUCHED; 8]);
     }
+
     #[test]
     fn range_ending_at_mapping_size_is_accepted() {
         let mut buffer = WordAlignedBuffer::untouched();
         let mapping = buffer.mapping();
 
-        assert_eq!(mapping.copy_in_at(BUFFER_BYTES, &[]), Ok(()));
-        assert_eq!(mapping.zero_at(0, BUFFER_BYTES), Ok(()));
+        let copied = mapping.copy_in_at(BUFFER_BYTES, &[]);
+        let zeroed = mapping.zero_at(0, BUFFER_BYTES);
 
+        assert_eq!(copied, Ok(()));
+        assert_eq!(zeroed, Ok(()));
         assert_eq!(buffer.0, [0; BUFFER_BYTES]);
     }
 
@@ -653,16 +652,17 @@ mod tests {
     fn a_budget_rounds_up_to_whole_pages() {
         let page = syscall::PAGE_SIZE as u64;
 
-        assert_eq!(budget_pages(0), 0);
-        assert_eq!(budget_pages(1), 1);
-        assert_eq!(budget_pages(page), 1);
-        assert_eq!(budget_pages(page + 1), 2);
+        let pages = [0, 1, page, page + 1].map(budget_pages);
+
+        assert_eq!(pages, [0, 1, 1, 2]);
     }
 
     #[test]
     fn the_largest_budget_converts_without_overflow() {
         let page = syscall::PAGE_SIZE as u64;
 
-        assert_eq!(budget_pages(u64::MAX), u64::MAX / page + 1);
+        let pages = budget_pages(u64::MAX);
+
+        assert_eq!(pages, u64::MAX / page + 1);
     }
 }

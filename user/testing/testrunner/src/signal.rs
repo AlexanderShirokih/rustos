@@ -39,8 +39,6 @@ extern "C" fn delayed_signaler(raw: usize) -> u32 {
     u32::from(signal_set(handle, SIGNALED, 0, WakeCount::All) != 0)
 }
 
-/// Ожидающий блокируется в `SignalWaitOne` и просыпается сигналом, поднятым
-/// другим потоком уже после блокировки.
 #[kernel_test]
 fn wait_blocks_until_another_thread_signals() {
     let signal = Signal::create().expect("signal create must succeed");
@@ -49,7 +47,6 @@ fn wait_blocks_until_another_thread_signals() {
     let worker =
         spawn(delayed_signaler, raw, STACK_SIZE, Priority::new(1)).expect("spawn signaler");
 
-    // Бит ещё не поднят. Ожидание уйдёт в блокировку, а не вернётся сразу.
     kernel_tests::kassert!(signal.wait(SIGNALED, Timeout::POLL).is_err());
 
     let observed = signal
@@ -91,7 +88,6 @@ fn wait_many_blocks_until_another_thread_signals() {
         WaitItem::new(idle.as_raw(), SIGNALED),
         WaitItem::new(target.as_raw(), SIGNALED),
     ];
-    // Биты ещё не подняты. Ожидание уходит в блокировку вместо немедленного возврата.
     kernel_tests::kassert!(matches!(
         wait_any(&items, Timeout::POLL),
         Err(kernel_objects::Error::Syscall(SyscallError::Timeout))

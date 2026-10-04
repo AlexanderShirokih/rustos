@@ -32,7 +32,6 @@ fn start_error_closes_passed_handles() {
         priority: Priority::new(0),
     };
 
-    // Процесс без load_image не стартует: start возвращает ошибку.
     let error = process.start(entry, owned, None).err();
     kernel_tests::kassert!(error.is_some());
 

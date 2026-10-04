@@ -2,14 +2,15 @@
 #![no_main]
 #![allow(unsafe_code)]
 
+use bootstrap_abi::image;
 use component_startup::{
-    Requirements as _, SessionError, StartupError, StartupFailure, component_manifest,
+    Attributes, Requirements as _, SessionError, all, component_manifest,
     session as request_session, start_parent,
 };
-use kernel_objects::{IssuedHandle, Port, Signal};
+use kernel_objects::{Port, Signal};
 use rtc_abi::rtc;
 use runtime::{Timeout, log_fmt, log_line, start_component};
-use syscall::{SIGNALED, kind};
+use syscall::SIGNALED;
 
 mod fixture_start;
 mod probe_protocol;
@@ -25,14 +26,14 @@ component_manifest! {
             rtc: session(rtc::Protocol),
             probes: all(probe::Protocol),
             one: session(probe::Protocol),
+            images: all(image::Protocol),
         },
     }
 }
 
 fixture_start!(run);
 
-fn run(parent: IssuedHandle<kind::Port>) -> Result<(), Failed> {
-    let parent = Port::from(parent);
+fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), "multiplicity");
     let requirements = MultiplicityStartup::request(parent.as_raw()).map_err(|_| Failed)?;
 
@@ -43,8 +44,15 @@ fn run(parent: IssuedHandle<kind::Port>) -> Result<(), Failed> {
     log_line("started");
 
     let mut count: u16 = 0;
-    for session in &requirements.probes {
-        let session = session.map_err(|_| Failed)?;
+    for found in requirements
+        .probes
+        .all(Attributes::empty())
+        .map_err(|_| Failed)?
+    {
+        let session = requirements
+            .probes
+            .open(&found.map_err(|_| Failed)?)
+            .map_err(|_| Failed)?;
         let value = u64::from(count);
 
         if session.client().with_wait(SESSION_PING_TIMEOUT).ping(value) != Ok(value) {
@@ -57,39 +65,54 @@ fn run(parent: IssuedHandle<kind::Port>) -> Result<(), Failed> {
     }
     log_fmt(format_args!("providers {count}"));
 
-    match requirements.probes.session(count) {
-        Err(StartupError {
-            failure: StartupFailure::Session(SessionError::Unbound),
-            ..
-        }) => log_line("unbound"),
+    let requests = start_parent(parent.as_raw()).with_wait(SESSION_PING_TIMEOUT);
+    match all::<probe::Protocol>(&requests, "one", Attributes::empty()) {
+        Ok(Err(SessionError::Refused)) => log_line("all refused"),
+        _ => return Err(Failed),
+    }
+
+    let image = requirements
+        .images
+        .all(Attributes::empty())
+        .map_err(|_| Failed)?
+        .next()
+        .ok_or(Failed)?
+        .map_err(|_| Failed)?;
+    let image = requirements.images.open(&image).map_err(|_| Failed)?;
+    match image.client().with_wait(SESSION_PING_TIMEOUT).region() {
+        Ok(Ok(_)) => log_line("image found"),
         _ => return Err(Failed),
     }
 
     if count == 0 {
         let timer = Signal::create().map_err(|_| Failed)?;
         loop {
-            match requirements.probes.session(0) {
-                Ok(session) => {
+            let found = requirements
+                .probes
+                .all(Attributes::empty())
+                .map_err(|_| Failed)?
+                .next();
+            match found {
+                Some(Ok(found)) => {
+                    let session = requirements.probes.open(&found).map_err(|_| Failed)?;
                     if session.client().with_wait(SESSION_PING_TIMEOUT).ping(7) != Ok(7) {
                         return Err(Failed);
                     }
-                    let requests = start_parent(parent.as_raw()).with_wait(SESSION_PING_TIMEOUT);
-                    let one = request_session::<probe::Protocol>(&requests, "one", 0)
-                        .map_err(|_| Failed)?
-                        .map_err(|_| Failed)?;
+
+                    let one =
+                        request_session::<probe::Protocol>(&requests, "one", Attributes::empty())
+                            .map_err(|_| Failed)?
+                            .map_err(|_| Failed)?;
                     if one.client().with_wait(SESSION_PING_TIMEOUT).ping(8) != Ok(8) {
                         return Err(Failed);
                     }
                     log_line("late provider");
                     break;
                 }
-                Err(StartupError {
-                    failure: StartupFailure::Session(SessionError::Unbound),
-                    ..
-                }) => {
+                None => {
                     let _ = timer.wait(SIGNALED, Timeout::from_millis(20));
                 }
-                Err(_) => return Err(Failed),
+                Some(Err(_)) => return Err(Failed),
             }
         }
     }

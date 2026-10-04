@@ -2,25 +2,21 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::panic::PanicInfo;
 
 use component_startup::{Requirements as _, component_manifest};
 use kernel_objects::Port;
-use runtime::{log_line, process_exit, start_component};
-use syscall::{Handle, kind};
+use runtime::{log_line, start_component};
 
+mod fixture_start;
 mod probe_protocol;
 
+use fixture_start::{Failed, fixture_start};
 use probe_protocol::{probe, serve_probe};
 
 const LOG_TAG: &str = "export";
-
-const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct ExportStartup {
@@ -28,20 +24,12 @@ component_manifest! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    if ExportStartup::request(parent).is_err() {
-        process_exit(FAILED_EXIT_CODE)
-    }
-    let Ok(export) = Port::create() else {
-        process_exit(FAILED_EXIT_CODE)
-    };
-    log_line("started");
-    serve_probe(parent, Box::leak(Box::new(export)))
-}
+fixture_start!(run);
 
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(FAILED_EXIT_CODE)
+fn run(parent: &Port) -> Result<(), Failed> {
+    start_component(parent.as_raw(), LOG_TAG);
+    ExportStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let export = Port::create().map_err(|_| Failed)?;
+    log_line("started");
+    serve_probe(parent.as_raw(), Box::leak(Box::new(export)))
 }

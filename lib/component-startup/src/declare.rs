@@ -1,6 +1,6 @@
 use core::fmt;
 
-use component_abi::{SessionError, component_startup};
+use component_abi::{Attributes, SessionError, component_startup};
 use ipc::wire::IpcError;
 use kernel_objects::{PortTransport, Session, kind};
 use syscall::Handle;
@@ -54,7 +54,12 @@ impl core::error::Error for StartupError {}
 /// который порождает [`ipc::protocol!`].
 ///
 /// `session(P)` даёт поле `Option<Session<P>>`, `all(P)` - [`Providers<P>`](crate::Providers).
-/// Функция `request` не запрашивает `all` и принимает `Unbound` на `session` как `None`.
+/// Функция `request` запрашивает `session` без атрибутов, принимает `Unbound` как `None` и не
+/// запрашивает `all`.
+///
+/// Экспорт `P => [{ compatible = "a" }, { compatible = "b", role = "c" }]` объявляет фильтры.
+/// Экспорт совпадает с запросом, если все пары одного из фильтров есть среди атрибутов
+/// запроса. Экспорт без фильтров совпадает только с запросом без атрибутов.
 ///
 /// ```no_run
 /// use component_startup::{component_manifest, Requirements};
@@ -84,9 +89,9 @@ impl core::error::Error for StartupError {}
 /// ```
 #[macro_export]
 macro_rules! component_manifest {
-    (exports: [$($export:path),* $(,)?] $(,)?) => {
+    (exports: [$($export:path $(=> [$($filter:tt)*])?),* $(,)?] $(,)?) => {
         $crate::component_abi::__component_manifest_record! {
-            exports = [$($export),*]
+            exports = [$($export $(=> [$($filter)*])?),*]
             requirements {}
         }
     };
@@ -94,7 +99,7 @@ macro_rules! component_manifest {
         $(#[$attribute:meta])*
         $visibility:vis struct $name:ident {
             $(requirements: { $($requirement:ident: $kind:ident $(($($parameter:tt)*))?),* $(,)? } $(,)?)?
-            $(exports: [$($export:path),* $(,)?] $(,)?)?
+            $(exports: [$($export:path $(=> [$($filter:tt)*])?),* $(,)?] $(,)?)?
         }
     ) => {
         $(#[$attribute])*
@@ -125,7 +130,7 @@ macro_rules! component_manifest {
         }
 
         $crate::component_abi::__component_manifest_record! {
-            exports = [$($($export),*)?]
+            exports = [$($($export $(=> [$($filter)*])?),*)?]
             requirements { $($($requirement: $kind $(($($parameter)*))?),*)? }
         }
     };
@@ -151,7 +156,9 @@ pub fn start_session<P: ipc::Protocol>(
     requests: &component_startup::Client<PortTransport>,
     requirement: &'static str,
 ) -> Result<Option<Session<P>>, StartupError> {
-    match request_session(requirement, || session::<P>(requests, requirement, 0)) {
+    match request_session(requirement, || {
+        session::<P>(requests, requirement, Attributes::empty())
+    }) {
         Err(StartupError {
             failure: StartupFailure::Session(SessionError::Unbound),
             ..
@@ -166,12 +173,19 @@ pub(crate) fn request_session<T>(
 ) -> Result<T, StartupError> {
     loop {
         match request() {
-            Ok(Ok(session)) => return Ok(session),
-            Ok(Err(error)) => return Err(failed(requirement, StartupFailure::Session(error))),
             Err(IpcError::PeerClosed) => {}
-            Err(error) => return Err(failed(requirement, StartupFailure::Ipc(error))),
+            answer => return answered(requirement, answer),
         }
     }
+}
+
+pub(crate) fn answered<T>(
+    requirement: &'static str,
+    answer: Result<Result<T, SessionError>, IpcError>,
+) -> Result<T, StartupError> {
+    answer
+        .map_err(|error| failed(requirement, StartupFailure::Ipc(error)))?
+        .map_err(|error| failed(requirement, StartupFailure::Session(error)))
 }
 
 const fn failed(requirement: &'static str, failure: StartupFailure) -> StartupError {

@@ -51,8 +51,6 @@ fn badge_client(badged: &Port, plain: &Port) -> u32 {
 #[kernel_test]
 fn server_reads_badge_of_receiving_handle() {
     let port = Port::create().expect("port create");
-    // Права сужены до WRITE: клиенту нужен только send. Оригинал незаклеймён,
-    // и badge=0 у копии оставляет её незаклеймённой.
     let badged = port
         .duplicate(Rights::WRITE, Some(BADGE))
         .expect("mint badged copy");

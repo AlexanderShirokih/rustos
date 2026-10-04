@@ -282,7 +282,7 @@ fn map_segment_permissions(flags: SegmentFlags, entry: &str) -> Result<SegmentPe
 
 #[cfg(test)]
 mod tests {
-    use component_abi::{RequirementDeclaration, manifest_len};
+    use component_abi::{Attribute, ExportDeclaration, RequirementDeclaration, manifest_len};
     use userland::{ProgramView, decode_program};
 
     use super::*;
@@ -349,8 +349,16 @@ mod tests {
     fn section_is_copied_once_even_without_a_plan() {
         const REQUIREMENTS: &[RequirementDeclaration] =
             &[RequirementDeclaration::session("clock", "Clock")];
-        const LEN: usize = manifest_len(REQUIREMENTS, &["Display"]);
-        let manifest = encode_manifest::<LEN>(REQUIREMENTS, &["Display"]);
+        const EXPORTS: &[ExportDeclaration] = &[ExportDeclaration::filtered(
+            "Display",
+            &[&[Attribute {
+                key: b"compatible",
+                value: b"simple-framebuffer",
+            }]],
+        )];
+        const LEN: usize = manifest_len(REQUIREMENTS, EXPORTS);
+        let manifest = encode_manifest::<LEN>(REQUIREMENTS, EXPORTS);
+
         for declaration in [None, Some(manifest.as_slice())] {
             let mut file = tempfile::NamedTempFile::new().expect("ELF file");
             std::io::Write::write_all(&mut file, &elf_with_manifest(declaration, 0))

@@ -1,8 +1,10 @@
-//! Точка входа фикстуры, для которой прогон проверяет только исход "прошла или нет".
+//! Точка входа фикстуры, код выхода которой не содержит данных.
 //!
-//! `fixture_start!(run)` объявляет кучу процесса, `_start` и `panic_handler`. `_start` передаёт
-//! владельца стартового handle в `run` и завершает поток кодом 0, если `run` вернула `Ok`, и
-//! кодом 1 иначе. Паника и запуск без стартового handle тоже завершают поток кодом 1.
+//! `fixture_start!(run)` объявляет кучу процесса, `_start` и `panic_handler`. `_start` держит
+//! владельца стартового handle до завершения процесса и передаёт `run` ссылку на него. Если `run`
+//! вернула `Ok`, процесс завершается кодом 0, иначе кодом 1. Паника в любом потоке и запуск без
+//! стартового handle тоже завершают процесс кодом 1. Когда фикстуру запускает rootkeeper, код 1
+//! означает отказ записи плана, и rootkeeper перезапускает запись, пока у неё есть перезапуски.
 
 /// Отказ шага фикстуры.
 pub struct Failed;
@@ -16,14 +18,15 @@ macro_rules! fixture_start {
             // SAFETY: `start` - значение `x0` точки входа, и точка входа исполняется один раз.
             unsafe { runtime::start(start) };
             let Some(start) = runtime::take_bootstrap() else {
-                runtime::thread_exit(1)
+                runtime::process_exit(1)
             };
-            runtime::thread_exit(u64::from($run(start.assume_kind()).is_err()))
+            let start = kernel_objects::OwnedHandle::from(start.assume_kind());
+            runtime::process_exit(u64::from($run(&start).is_err()))
         }
 
         #[panic_handler]
         fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-            runtime::thread_exit(1)
+            runtime::process_exit(1)
         }
     };
 }

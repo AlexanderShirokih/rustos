@@ -1,16 +1,12 @@
-//! Обход описания и отказы резолвера на биндинге, объявленном самим тестом:
-//! нейтральному крейту незачем знать контроллеры платформы. Первая ячейка
-//! specifier - номер линии, вторая - триггер.
-
 #![allow(clippy::expect_used)]
 
 use device_resolver::{
     ControllerBinding, ControllerBindings, ControllerId, DeviceInterrupt, DeviceMmio,
-    DeviceSelector, DeviceTreePlatform, InterruptLine, InterruptSpecifier, PlatformDescription,
-    ResolveError,
+    DeviceTreePlatform, InterruptLine, InterruptSpecifier, PlatformDescription, ResolveError,
 };
 use fdt::devicetree::DeviceTree;
 use fdt_test::Token::{Cells, End, Node, Strings};
+use platform_abi::DeviceId;
 use syscall::IrqTrigger;
 
 const CONTROLLER_PHANDLE: u32 = 0x8001;
@@ -68,6 +64,12 @@ fn platform_dtb(controller: &str) -> Vec<u8> {
         Cells("reg", &[0, 0x0902_0000, 0, 0x1000]),
         Cells("interrupts", &[35, 1]),
         End,
+        Node("clock@9040000"),
+        Strings("compatible", &[CLOCK]),
+        Strings("status", &["disabled"]),
+        Cells("reg", &[0, 0x0904_0000, 0, 0x1000]),
+        Cells("interrupts", &[38, 0]),
+        End,
         Node("serial@9000000"),
         Strings("compatible", &[SERIAL]),
         Cells("reg", &[0, 0x0900_0000, 0, 0x1000]),
@@ -107,11 +109,8 @@ fn platform_dtb(controller: &str) -> Vec<u8> {
     ])
 }
 
-fn selector(compatible: &str, instance: u16) -> DeviceSelector<'_> {
-    DeviceSelector {
-        compatible,
-        instance,
-    }
+fn id(path: &str) -> DeviceId {
+    DeviceId::new(path).expect("path is a device id")
 }
 
 fn with_platform<R>(controller: &str, body: impl FnOnce(&DeviceTreePlatform<'_>) -> R) -> R {
@@ -123,152 +122,154 @@ fn with_platform<R>(controller: &str, body: impl FnOnce(&DeviceTreePlatform<'_>)
 
 #[test]
 fn a_described_device_yields_its_line_and_window() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        let interrupt = platform
-            .interrupt(selector(CLOCK, 0), 0)
-            .expect("clock line is described");
-        assert_eq!(interrupt.line.number(), 34);
-        assert_eq!(interrupt.line.controller(), ControllerId::PLATFORM);
-        assert_eq!(interrupt.trigger, IrqTrigger::Level);
+    let clock = id("/clock@9010000");
 
-        assert_eq!(
-            platform.mmio(selector(CLOCK, 0), 0),
-            Ok(DeviceMmio {
-                base: 0x0901_0000,
-                size: 0x1000,
-            })
-        );
+    let (interrupt, mmio) = with_platform(TEST_CONTROLLER, |platform| {
+        (platform.interrupt(&clock, 0), platform.mmio(&clock, 0))
     });
+
+    assert_eq!(
+        interrupt,
+        Ok(DeviceInterrupt {
+            line: InterruptLine::new(ControllerId::PLATFORM, 34),
+            trigger: IrqTrigger::Level,
+        })
+    );
+    assert_eq!(
+        mmio,
+        Ok(DeviceMmio {
+            base: 0x0901_0000,
+            size: 0x1000,
+        })
+    );
 }
 
 #[test]
-fn the_instance_index_picks_among_devices_of_one_compatible() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        let second = platform
-            .interrupt(selector(CLOCK, 1), 0)
-            .expect("second clock is described");
+fn devices_of_one_compatible_are_addressed_by_their_paths() {
+    let second = id("/clock@9020000");
 
-        assert_eq!(second.line.number(), 35);
-        assert_eq!(second.trigger, IrqTrigger::Edge);
-        assert_eq!(
-            platform
-                .mmio(selector(CLOCK, 1), 0)
-                .map(|window| window.base),
-            Ok(0x0902_0000)
-        );
+    let (interrupt, mmio) = with_platform(TEST_CONTROLLER, |platform| {
+        (platform.interrupt(&second, 0), platform.mmio(&second, 0))
     });
+
+    assert_eq!(
+        interrupt,
+        Ok(DeviceInterrupt {
+            line: InterruptLine::new(ControllerId::PLATFORM, 35),
+            trigger: IrqTrigger::Edge,
+        })
+    );
+    assert_eq!(mmio.map(|window| window.base), Ok(0x0902_0000));
 }
 
 #[test]
-fn a_device_outside_the_description_is_named_apart() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        assert_eq!(
-            platform.interrupt(selector("test,absent-device", 0), 0),
-            Err(ResolveError::DeviceNotFound)
-        );
-        assert_eq!(
-            platform.mmio(selector("test,absent-device", 0), 0),
-            Err(ResolveError::DeviceNotFound)
-        );
-        // Экземпляр за концом набора совместимых - тот же отказ поиска.
-        assert_eq!(
-            platform.interrupt(selector(CLOCK, 2), 0),
-            Err(ResolveError::DeviceNotFound)
-        );
-    });
+fn an_absent_or_disabled_device_is_not_found() {
+    let absent = id("/absent@0");
+    let disabled = id("/clock@9040000");
+
+    let (absent_interrupt, absent_mmio, disabled_mmio) =
+        with_platform(TEST_CONTROLLER, |platform| {
+            (
+                platform.interrupt(&absent, 0),
+                platform.mmio(&absent, 0),
+                platform.mmio(&disabled, 0),
+            )
+        });
+
+    assert_eq!(absent_interrupt, Err(ResolveError::DeviceNotFound));
+    assert_eq!(absent_mmio, Err(ResolveError::DeviceNotFound));
+    assert_eq!(disabled_mmio, Err(ResolveError::DeviceNotFound));
 }
 
 #[test]
 fn a_device_without_interrupts_is_named_apart() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        assert_eq!(
-            platform.interrupt(selector(SERIAL, 0), 0),
-            Err(ResolveError::NoInterrupts)
-        );
-    });
+    let serial = id("/serial@9000000");
+
+    let interrupt = with_platform(TEST_CONTROLLER, |platform| platform.interrupt(&serial, 0));
+
+    assert_eq!(interrupt, Err(ResolveError::NoInterrupts));
 }
 
 #[test]
 fn a_resource_index_past_the_set_is_named_apart() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        assert_eq!(
-            platform.interrupt(selector(CLOCK, 0), 1),
-            Err(ResolveError::ResourceOutOfRange)
-        );
-        assert_eq!(
-            platform.mmio(selector(CLOCK, 0), 1),
-            Err(ResolveError::ResourceOutOfRange)
-        );
+    let clock = id("/clock@9010000");
+
+    let (interrupt, mmio) = with_platform(TEST_CONTROLLER, |platform| {
+        (platform.interrupt(&clock, 1), platform.mmio(&clock, 1))
     });
+
+    assert_eq!(interrupt, Err(ResolveError::ResourceOutOfRange));
+    assert_eq!(mmio, Err(ResolveError::ResourceOutOfRange));
 }
 
 #[test]
 fn an_unknown_controller_is_an_error_and_not_a_default() {
-    with_platform("test,absent-controller", |platform| {
-        assert_eq!(
-            platform.interrupt(selector(CLOCK, 0), 0),
-            Err(ResolveError::UnknownController)
-        );
-        // Окна устройства толкования прерываний не требуют.
-        assert!(platform.mmio(selector(CLOCK, 0), 0).is_ok());
+    let clock = id("/clock@9010000");
+
+    let (interrupt, mmio) = with_platform("test,absent-controller", |platform| {
+        (platform.interrupt(&clock, 0), platform.mmio(&clock, 0))
     });
+
+    assert_eq!(interrupt, Err(ResolveError::UnknownController));
+    assert!(mmio.is_ok());
 }
 
 #[test]
 fn a_device_behind_an_identity_bus_is_found_with_its_inherited_controller() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        let interrupt = platform
-            .interrupt(selector(NESTED_CLOCK, 0), 0)
-            .expect("nested device is described");
-        assert_eq!(interrupt.line.number(), 36);
-        assert_eq!(interrupt.trigger, IrqTrigger::Level);
+    let nested = id("/soc/clock@9030000");
 
-        assert_eq!(
-            platform.mmio(selector(NESTED_CLOCK, 0), 0),
-            Ok(DeviceMmio {
-                base: 0x0903_0000,
-                size: 0x1000,
-            })
-        );
+    let (interrupt, mmio) = with_platform(TEST_CONTROLLER, |platform| {
+        (platform.interrupt(&nested, 0), platform.mmio(&nested, 0))
     });
+
+    assert_eq!(
+        interrupt,
+        Ok(DeviceInterrupt {
+            line: InterruptLine::new(ControllerId::PLATFORM, 36),
+            trigger: IrqTrigger::Level,
+        })
+    );
+    assert_eq!(
+        mmio,
+        Ok(DeviceMmio {
+            base: 0x0903_0000,
+            size: 0x1000,
+        })
+    );
 }
 
 #[test]
 fn a_window_behind_a_translating_bus_gets_its_translated_base() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        // Линия шиной не переносится и читается наравне с остальными.
-        assert_eq!(
-            platform
-                .interrupt(selector(BRIDGED_CLOCK, 0), 0)
-                .map(|interrupt| interrupt.line.number()),
-            Ok(37)
-        );
-        assert_eq!(
-            platform.mmio(selector(BRIDGED_CLOCK, 0), 0),
-            Ok(DeviceMmio {
-                base: 0x1004_0000,
-                size: 0x1000,
-            })
-        );
+    let bridged = id("/bridge/clock@40000");
+
+    let (interrupt, mmio) = with_platform(TEST_CONTROLLER, |platform| {
+        (platform.interrupt(&bridged, 0), platform.mmio(&bridged, 0))
     });
+
+    assert_eq!(interrupt.map(|interrupt| interrupt.line.number()), Ok(37));
+    assert_eq!(
+        mmio,
+        Ok(DeviceMmio {
+            base: 0x1004_0000,
+            size: 0x1000,
+        })
+    );
 }
 
 #[test]
 fn a_window_outside_the_bus_ranges_is_untranslatable() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        assert_eq!(
-            platform.mmio(selector(BRIDGED_CLOCK, 0), 1),
-            Err(ResolveError::Untranslatable)
-        );
-    });
+    let bridged = id("/bridge/clock@40000");
+
+    let mmio = with_platform(TEST_CONTROLLER, |platform| platform.mmio(&bridged, 1));
+
+    assert_eq!(mmio, Err(ResolveError::Untranslatable));
 }
 
 #[test]
 fn a_window_behind_a_bus_without_ranges_is_untranslatable() {
-    with_platform(TEST_CONTROLLER, |platform| {
-        assert_eq!(
-            platform.mmio(selector(UNMAPPED_CLOCK, 0), 0),
-            Err(ResolveError::Untranslatable)
-        );
-    });
+    let unmapped = id("/spmi/clock@40000");
+
+    let mmio = with_platform(TEST_CONTROLLER, |platform| platform.mmio(&unmapped, 0));
+
+    assert_eq!(mmio, Err(ResolveError::Untranslatable));
 }

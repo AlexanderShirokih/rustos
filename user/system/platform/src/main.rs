@@ -1,8 +1,8 @@
-//! Компонент `platform`: разбирает описание платформы и выдаёт драйверам линии прерываний и
-//! окна регистров устройств по сессиям `Platform`.
+//! Компонент `platform`: разбирает описание платформы и выдаёт драйверам описание, линии
+//! прерываний и окна регистров устройств по сессиям `Platform`.
 //!
-//! Полномочия на устройства компонент получает сессией `Hardware` у родителя. Выданные линии и
-//! регионы принадлежат сессии, которая их взяла, и отзываются с её концом либо с концом
+//! Полномочия на устройства компонент получает сессией `Hardware` у родителя. Выданные описание,
+//! линии и регионы принадлежат сессии, которая их взяла, и отзываются с её концом либо с концом
 //! процесса `platform`.
 
 #![no_std]
@@ -20,8 +20,7 @@ use bootstrap_abi::hardware;
 use component_startup::{
     MintedSession, Requirements as _, SessionError, component_manifest, mint_session, serve_export,
 };
-use device_resolver::DeviceTreePlatform;
-use device_resolver_aarch64::PLATFORM_BINDINGS;
+use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
 use fdt::devicetree::DeviceTree;
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqControl, MemoryRegion, Port};
@@ -34,7 +33,7 @@ use syscall::{Handle, kind};
 
 mod sessions;
 
-use sessions::{Platform, SessionRecord};
+use sessions::{HardwareDescription, Platform, SessionRecord};
 
 const LOG_TAG: &str = "platform";
 
@@ -104,6 +103,10 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
         Platform::new(
             &shared.sessions,
             DeviceTreePlatform::new(tree, PLATFORM_BINDINGS),
+            HardwareDescription {
+                region,
+                offset: u64::from(fdt.offset),
+            },
             lines,
             hardware,
         ),

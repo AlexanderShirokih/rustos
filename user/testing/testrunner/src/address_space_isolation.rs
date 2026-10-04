@@ -39,8 +39,6 @@ fn two_processes_see_distinct_memory_at_same_va() {
     kernel_tests::kassert_eq!(a.request_status(OP_WRITE_SLOT, SENTINEL_A, &[]), REPLY_OK);
     kernel_tests::kassert_eq!(b.request_status(OP_WRITE_SLOT, SENTINEL_B, &[]), REPLY_OK);
 
-    // Читаем уже после обеих записей: если бы AS разделяли страницу, запись B
-    // затёрла бы значение A.
     let slot_a = read_slot(&a);
     let slot_b = read_slot(&b);
 

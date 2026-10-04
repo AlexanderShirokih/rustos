@@ -69,14 +69,7 @@ name = "device-resolver"
 version = "0.1.0"
 dependencies = [
  "fdt",
- "syscall",
-]
-
-[[package]]
-name = "device-resolver-aarch64"
-version = "0.1.0"
-dependencies = [
- "device-resolver",
+ "platform-abi",
  "syscall",
 ]
 
@@ -285,7 +278,6 @@ dependencies = [
  "bootstrap-abi",
  "component-startup",
  "device-resolver",
- "device-resolver-aarch64",
  "fdt",
  "ipc",
  "kernel-objects",
@@ -299,6 +291,7 @@ dependencies = [
 name = "platform-abi"
 version = "0.1.0"
 dependencies = [
+ "fdt",
  "ipc",
  "syscall",
 ]

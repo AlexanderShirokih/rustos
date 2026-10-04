@@ -1,7 +1,3 @@
-//! Тесты успешного пробирования покрывают регистрацию `DriverHandle` в `handles`,
-//! `IntoIterator`, Occupied-ветку (один узел не регистрируется дважды) и
-//! приоритет первого совпавшего драйвера.
-
 #![allow(clippy::unwrap_used)]
 
 extern crate alloc;
@@ -23,9 +19,6 @@ impl NodeProperty for EmptyProp {
     }
     fn raw(&self) -> &[u8] {
         &[]
-    }
-    fn as_cstr(&self) -> Option<&str> {
-        None
     }
 }
 
@@ -55,6 +48,9 @@ impl DeviceNode for SimpleNode {
     fn prop(&self, _name: &str) -> Option<Self::Property<'_>> {
         None
     }
+    fn is_available(&self) -> bool {
+        true
+    }
     fn children(&self) -> Self::ChildIter<'_> {
         self.children.iter().copied()
     }
@@ -72,8 +68,6 @@ impl DriverFactory for NoopFactory {
 
 #[allow(clippy::unnecessary_wraps)]
 fn always_match(_ctx: &mut ProbeContext<SimpleNode>) -> ProbeResult {
-    // Сигнатура обязана совпадать с типом поля `probe` (fn -> ProbeResult),
-    // поэтому Result остаётся при постоянном Ok.
     Ok(Box::new(NoopFactory))
 }
 
@@ -91,8 +85,6 @@ fn match_console(ctx: &mut ProbeContext<SimpleNode>) -> ProbeResult {
 
 #[test]
 fn probe_context_fold_sums_over_hierarchy() {
-    // Иерархия из трёх узлов (id=10, 20, 30). fold суммирует id всех узлов,
-    // у которых есть родитель (т.е. все, кроме корня): 20 + 30 = 50.
     let n10 = SimpleNode {
         id: 10,
         children: &[],
@@ -108,12 +100,12 @@ fn probe_context_fold_sums_over_hierarchy() {
     let ctx = ProbeContext::new(n30, alloc::vec![n10, n20, n30], None);
 
     let sum: usize = ctx.fold(|parent, node, _ctx| parent.map(|_| node.id()));
-    assert_eq!(sum, 50);
+    let root_parent = ctx.parent(&n10).map(DeviceNode::id);
+    let leaf_parent = ctx.parent(&n30).map(DeviceNode::id);
 
-    // parent() корня (первого в иерархии) -> None.
-    assert!(ctx.parent(&n10).is_none());
-    // parent() узла -> предыдущий в иерархии.
-    assert_eq!(ctx.parent(&n30).map(DeviceNode::id), Some(20));
+    assert_eq!(sum, 50);
+    assert_eq!(root_parent, None);
+    assert_eq!(leaf_parent, Some(20));
 }
 
 #[test]
@@ -127,11 +119,12 @@ fn console_designation_singles_out_one_node() {
         children: &[],
     };
 
-    let ctx = ProbeContext::new(designated, alloc::vec![designated], Some(20));
-    assert!(ctx.is_console());
+    let designated_is_console =
+        ProbeContext::new(designated, alloc::vec![designated], Some(20)).is_console();
+    let other_is_console = ProbeContext::new(other, alloc::vec![other], Some(20)).is_console();
 
-    let ctx = ProbeContext::new(other, alloc::vec![other], Some(20));
-    assert!(!ctx.is_console());
+    assert!(designated_is_console);
+    assert!(!other_is_console);
 }
 
 #[test]
@@ -142,7 +135,10 @@ fn without_designation_every_node_may_be_the_console() {
     };
 
     let ctx = ProbeContext::new(node, alloc::vec![node], None);
-    assert!(ctx.is_console());
+
+    let is_console = ctx.is_console();
+
+    assert!(is_console);
 }
 
 #[test]
@@ -155,15 +151,13 @@ fn successful_probe_registers_handle() {
         name: "matcher",
         probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
     }];
-
     let mut scanner = EmbeddedDriversScanner::new(None);
-    scanner.scan_and_probe(root, &drivers).unwrap();
 
-    // IntoIterator выдаёт зарегистрированные хэндлы.
+    scanner.scan_and_probe(root, &drivers).unwrap();
     let handles: Vec<_> = scanner.into_iter().collect();
+
     assert_eq!(handles.len(), 1);
     assert_eq!(handles[0].name, "matcher");
-    // Фабрика реально создаёт драйвер.
     assert!(handles[0].factory.create().is_ok());
 }
 
@@ -173,7 +167,6 @@ fn first_matching_driver_wins() {
         id: 0,
         children: &[],
     };
-    // Первый драйвер всегда matches; второй тоже, но не должен сработать.
     let drivers = [
         DriverDescriptor {
             name: "first",
@@ -184,11 +177,11 @@ fn first_matching_driver_wins() {
             probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
         },
     ];
-
     let mut scanner = EmbeddedDriversScanner::new(None);
-    scanner.scan_and_probe(root, &drivers).unwrap();
 
+    scanner.scan_and_probe(root, &drivers).unwrap();
     let handles: Vec<_> = scanner.into_iter().collect();
+
     assert_eq!(handles.len(), 1);
     assert_eq!(handles[0].name, "first");
 }
@@ -209,11 +202,11 @@ fn skips_non_matching_driver_then_registers_matching() {
             probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
         },
     ];
-
     let mut scanner = EmbeddedDriversScanner::new(None);
-    scanner.scan_and_probe(root, &drivers).unwrap();
 
+    scanner.scan_and_probe(root, &drivers).unwrap();
     let handles: Vec<_> = scanner.into_iter().collect();
+
     assert_eq!(handles.len(), 1);
     assert_eq!(handles[0].name, "match");
 }
@@ -232,18 +225,15 @@ fn occupied_entry_keeps_first_registration_per_node() {
         id: 0,
         children: &ROOT_CHILDREN,
     };
-
     let drivers = [DriverDescriptor {
         name: "matcher",
         probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
     }];
-
     let mut scanner = EmbeddedDriversScanner::new(None);
-    scanner.scan_and_probe(root, &drivers).unwrap();
 
-    // id=0 и id=7 -> ровно два уникальных ключа (повторный id=7 в Occupied-ветке
-    // отбрасывается, но узлу id=7 на верхнем уровне хэндл уже выдан).
+    scanner.scan_and_probe(root, &drivers).unwrap();
     let handles: Vec<_> = scanner.into_iter().collect();
+
     assert_eq!(handles.len(), 2);
 }
 
@@ -273,10 +263,10 @@ fn designated_console_driver_is_yielded_first() {
             probe: always_match as fn(&mut ProbeContext<SimpleNode>) -> ProbeResult,
         },
     ];
-
     let mut scanner = EmbeddedDriversScanner::new(Some(5));
-    scanner.scan_and_probe(root, &drivers).unwrap();
 
+    scanner.scan_and_probe(root, &drivers).unwrap();
     let names: Vec<_> = scanner.into_iter().map(|handle| handle.name).collect();
+
     assert_eq!(names, ["console", "other", "other"]);
 }

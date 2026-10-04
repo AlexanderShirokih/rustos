@@ -5,9 +5,8 @@
 use component_startup::{Requirements as _, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, namespace};
 use ipc::wire::Str;
-use kernel_objects::{IssuedHandle, MemoryRegion, Port, SessionTransport};
+use kernel_objects::{MemoryRegion, Port, SessionTransport};
 use runtime::{Timeout, UserMemFlags, log_line, start_component};
-use syscall::kind;
 
 mod fixture_start;
 
@@ -33,8 +32,7 @@ component_manifest! {
 
 fixture_start!(run);
 
-fn run(parent: IssuedHandle<kind::Port>) -> Result<(), Failed> {
-    let parent = Port::from(parent);
+fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
     let requirements = AreaStartup::request(parent.as_raw()).map_err(|_| Failed)?;
     let area = requirements.area.ok_or(Failed)?;

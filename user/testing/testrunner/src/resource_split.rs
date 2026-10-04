@@ -30,7 +30,6 @@ fn split_chain_depth_is_capped() {
     let mut held = alloc::vec::Vec::new();
     held.push(Resource::self_resource().expect("self metering resource"));
     let denied = loop {
-        // Отказ обязан наступить не позже потолка, на какой бы глубине self-ресурс ни стоял.
         kernel_tests::kassert!(held.len() <= DEPTH_CEILING + 1);
         let leaf = held.last().expect("chain is non-empty");
         match leaf.split(1) {
@@ -43,7 +42,6 @@ fn split_chain_depth_is_capped() {
         kernel_objects::Error::Syscall(SyscallError::ResourceExhausted)
     ));
 
-    // Отказ по глубине не тронул бюджет листа. Страница из него минтится и после.
     let leaf = held.last().expect("chain is non-empty");
     let region = leaf
         .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
@@ -55,8 +53,6 @@ fn split_chain_depth_is_capped() {
 fn closing_the_derived_resource_returns_its_budget() {
     let parent = Resource::self_resource().expect("self metering resource");
 
-    // Бюджет исходного ресурса конечен. Цикл сходится, только если закрытие
-    // производного возвращает страницы.
     for _ in 0..64 {
         let child = parent.split(CHILD_BYTES).expect("split");
         let region = child
@@ -72,8 +68,6 @@ fn child_started_with_a_resource_is_metered_by_it() {
     let metered = Fixture::spawn_with_slack(FIXTURE_SLACK_BYTES);
     let oversized = metered.budget_bytes().div_ceil(USERLAND_PAGE_SIZE) * OVERSIZE_FACTOR;
 
-    // Потомок на ресурсе родителя запрос проводит. Он упирается в корневой
-    // бюджет, которому такой размер по силам.
     let inherited = Fixture::spawn();
     kernel_tests::kassert_eq!(
         inherited.request_status(OP_ALLOCATE_PAGES, oversized, &[]),
@@ -81,8 +75,6 @@ fn child_started_with_a_resource_is_metered_by_it() {
     );
     kernel_tests::kassert_eq!(inherited.request_status(OP_EXIT, 0, &[]), REPLY_OK);
 
-    // Тот же запрос у потомка на отделённом бюджете отвергается. Метеринг идёт
-    // по переданному ресурсу, минуя корневой.
     kernel_tests::kassert_eq!(
         metered.request_status(OP_ALLOCATE_PAGES, oversized, &[]),
         REPLY_BUDGET_EXHAUSTED
@@ -92,8 +84,6 @@ fn child_started_with_a_resource_is_metered_by_it() {
 
 #[kernel_test]
 fn child_stack_is_charged_to_the_image_budget() {
-    // Бюджет ровно на сегменты образа. Стек - такой же сегмент, оплатить его
-    // нечем, и загрузка отказывает вместо того, чтобы взять фреймы мимо учёта.
     let denied = Fixture::try_spawn_with_slack(0);
     kernel_tests::kassert_eq!(
         denied.err(),
@@ -119,17 +109,12 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
         arg: 0,
         priority: Priority::new(0),
     };
-    // Отдача ресурса кладёт капу на него в чужую таблицу: гейт тот же, что у
-    // деривации `ResourceSplit`.
     let error = process.start(entry, bootstrap, Some(&write_only)).err();
     kernel_tests::kassert!(matches!(
         error,
         Some(kernel_objects::Error::Syscall(SyscallError::AccessDenied))
     ));
 
-    // Для контроля тот же старт с полноправным ресурсом доходит до проверки
-    // состояния процесса и отказывает другим кодом. Разные исходы на одном
-    // вызове и показывают, что `AccessDenied` пришёл от прав на `resource_h`.
     let bootstrap = Signal::create().expect("signal create");
     let error = process.start(entry, bootstrap, Some(&resource)).err();
     kernel_tests::kassert!(matches!(
@@ -140,8 +125,6 @@ fn starting_a_child_on_a_write_only_resource_is_denied() {
 
 #[kernel_test]
 fn granted_resource_rights_shrink_to_the_passing_handle() {
-    // Ресурс отдан хэндлом без `TRANSFER`: капа, которую потомок снимет через
-    // `ProcessResourceSelf`, не шире прав этого хэндла, и разослать её потомок не может.
     let parent = Resource::self_resource().expect("self metering resource");
     let untransferable = parent
         .duplicate(Rights::WRITE | Rights::DUPLICATE, None)
@@ -153,7 +136,6 @@ fn granted_resource_rights_shrink_to_the_passing_handle() {
     );
     kernel_tests::kassert_eq!(child.request_status(OP_EXIT, 0, &[]), REPLY_OK);
 
-    // Для контроля у потомка на полноправном ресурсе та же проба проходит.
     let entitled = Fixture::spawn();
     kernel_tests::kassert_eq!(
         entitled.request_status(OP_DUPLICATE_TRANSFER_CAP, 0, &[]),

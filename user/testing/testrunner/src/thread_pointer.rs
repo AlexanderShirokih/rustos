@@ -73,8 +73,6 @@ extern "C" fn pointer_worker(arg: usize) -> u32 {
     0
 }
 
-/// Каждый поток сохраняет свой указатель через переключения контекста, а свежий поток входит
-/// в EL0 с обнулённым.
 #[kernel_test]
 fn thread_pointer_is_private_to_the_thread() {
     let entry_pointer = thread_pointer();

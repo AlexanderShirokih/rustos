@@ -3,8 +3,6 @@ pub trait NodeProperty {
     fn name(&self) -> &str;
 
     fn raw(&self) -> &[u8];
-
-    fn as_cstr(&self) -> Option<&str>;
 }
 
 /// Узел дерева устройств. Тип реализует `Copy`, и копия указывает на тот же узел тем же
@@ -26,6 +24,9 @@ pub trait DeviceNode: Copy {
     fn name(&self) -> &str;
 
     fn prop(&self, name: &str) -> Option<Self::Property<'_>>;
+
+    /// Узел доступен, если у него нет свойства `status` либо его значение `okay` или `ok`.
+    fn is_available(&self) -> bool;
 
     fn children(&self) -> Self::ChildIter<'_>;
 }

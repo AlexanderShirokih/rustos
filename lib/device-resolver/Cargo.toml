@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 fdt = { workspace = true }
+platform-abi = { workspace = true }
 syscall = { workspace = true }
 
 [dev-dependencies]

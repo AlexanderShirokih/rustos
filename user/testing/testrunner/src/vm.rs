@@ -14,8 +14,6 @@ use runtime::UserMemFlags;
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xC0DE_F00D_DEAD_BEEF;
 
-/// `MemoryAllocate` выдаёт writable-страницу, `MemoryRemap` снимает с неё
-/// право записи, не теряя содержимого.
 #[kernel_test]
 fn allocate_write_then_remap_readonly() {
     let resource = Resource::self_resource().expect("self metering resource");
@@ -41,8 +39,6 @@ fn allocate_write_then_remap_readonly() {
     }
 }
 
-/// `MemoryFree` возвращает диапазон в free-list: следующий `MemoryAllocate`
-/// того же размера выдаёт тот же VA (coalesce + first-fit).
 #[kernel_test]
 fn allocate_free_reuses_va() {
     let resource = Resource::self_resource().expect("self metering resource");
@@ -65,7 +61,6 @@ fn allocate_free_reuses_va() {
         .expect("second allocate");
     kernel_tests::kassert_eq!(second.va(), va);
 
-    // Переиспользованный VA приходит занулённым, а не с чужим содержимым.
     // SAFETY: см. выше.
     unsafe {
         kernel_tests::kassert_eq!(slot.read_volatile(), 0);

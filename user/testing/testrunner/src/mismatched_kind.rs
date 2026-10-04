@@ -93,7 +93,6 @@ fn sending_worker(arg: usize, signal: Signal) -> u32 {
     0
 }
 
-/// Объявленный видом порта параметр довозит `Signal`, и отличает их прямой syscall.
 #[kernel_test]
 fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     let service = Port::create_service(None).expect("port create");
@@ -124,8 +123,6 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     kind_probe::dispatch(&mut probe, frame).expect("frame dispatched");
     let owned = probe.handed.take().expect("the capability has an owner");
 
-    // Декодирование и claim прошли, потому что вид поля их не проверяет. Операция порта
-    // над записью сигнала отказывает в ядре.
     kernel_tests::kassert_eq!(
         port_send(owned.as_raw(), Timeout::POLL),
         SyscallError::WrongType.as_return_value()
@@ -138,7 +135,6 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
         SyscallError::BadHandle.as_return_value()
     );
 
-    // Следующий корректный запрос обслуживает тот же живой получатель.
     let frame = transport
         .recv(&mut bytes, RECV_TIMEOUT)
         .expect("next request delivered");

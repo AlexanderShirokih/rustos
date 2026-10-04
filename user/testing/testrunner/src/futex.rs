@@ -173,8 +173,6 @@ fn wake_all_releases_every_waiter() {
     kernel_tests::kassert!(released_in_time);
 }
 
-// Regression guard: пробуждение, пришедшее между проверкой значения и
-// парковкой, снимает парковку и не теряется на липком бите.
 #[kernel_test]
 fn wake_inside_the_park_window_is_not_lost() {
     let shared = Arc::new(Handoff {
@@ -314,8 +312,6 @@ fn colliding_pair(cells: &[Futex]) -> Option<(usize, usize)> {
     None
 }
 
-// Regression guard: бакет общий, а пробуждение адресное - ждущий на соседнем
-// адресе того же бакета остаётся в ожидании.
 #[kernel_test]
 fn a_wake_leaves_a_colliding_address_parked() {
     let shared = Arc::new(Colliding {

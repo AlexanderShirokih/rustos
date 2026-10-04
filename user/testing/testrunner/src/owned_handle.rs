@@ -19,7 +19,6 @@ fn is_closed(handle: Handle<kind::Signal>) -> bool {
 fn drop_closes_handle() {
     let owned = mint();
     let stale = owned.as_raw();
-    // Хэндл жив до drop.
     kernel_tests::kassert_eq!(signal_set(stale, SIGNALED, 0, WakeCount::None), 0);
 
     drop(owned);
@@ -42,7 +41,6 @@ fn close_does_not_double_close() {
 
     owned.close().expect("close must succeed");
 
-    // close закрыл хэндл: операция на сыром id - BadHandle.
     kernel_tests::kassert!(is_closed(stale));
 }
 
@@ -54,7 +52,6 @@ fn duplicate_is_independent() {
         .expect("duplicate must succeed");
     let original_raw = original.as_raw();
 
-    // Drop дубликата не трогает оригинал.
     drop(duplicate);
 
     kernel_tests::kassert_eq!(signal_set(original_raw, SIGNALED, 0, WakeCount::None), 0);
@@ -71,7 +68,6 @@ fn borrow_duplicate_is_independent() {
         .expect("borrow duplicate must succeed");
     let original_raw = original.as_raw();
 
-    // Дубликат поверх заимствования независим. Его Drop не трогает оригинал.
     drop(duplicate);
 
     kernel_tests::kassert_eq!(signal_set(original_raw, SIGNALED, 0, WakeCount::None), 0);

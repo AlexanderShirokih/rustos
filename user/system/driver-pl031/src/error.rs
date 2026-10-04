@@ -1,6 +1,6 @@
 use component_startup::{StartupError, StartupFailure};
 use ipc::wire::IpcError;
-use platform_abi::PlatformError;
+use platform_abi::{DescriptionError, PlatformError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -12,6 +12,10 @@ pub enum Error {
     Start,
     /// `platform` отказал в линии либо окне.
     Platform(PlatformError),
+    /// Описание платформы либо его узел не разобран.
+    Description(DescriptionError),
+    /// В описании платформы нет доступного PL031.
+    NoDevice,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
@@ -31,6 +35,12 @@ impl From<IpcError> for Error {
 impl From<PlatformError> for Error {
     fn from(error: PlatformError) -> Self {
         Self::Platform(error)
+    }
+}
+
+impl From<DescriptionError> for Error {
+    fn from(error: DescriptionError) -> Self {
+        Self::Description(error)
     }
 }
 

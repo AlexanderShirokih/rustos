@@ -1,3 +1,4 @@
+use platform_abi::DeviceId;
 use syscall::IrqTrigger;
 
 /// Контроллер прерываний, в пространстве которого нумеруется линия. Платформа с
@@ -30,19 +31,10 @@ pub struct DeviceMmio {
     pub size: u64,
 }
 
-/// Селектор устройства: совместимость и номер экземпляра среди совместимых.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeviceSelector<'a> {
-    /// Строка совместимости устройства.
-    pub compatible: &'a str,
-    /// Номер экземпляра среди устройств той же совместимости.
-    pub instance: u16,
-}
-
 /// Отказ разбора описания платформы.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveError {
-    /// Описание не содержит устройства, названного селектором.
+    /// Описание не содержит доступного устройства по пути из [`DeviceId`].
     DeviceNotFound,
     /// Устройство описано без линий прерываний.
     NoInterrupts,
@@ -60,18 +52,14 @@ pub enum ResolveError {
     Malformed,
 }
 
-/// Описание платформы, отвечающее по селектору устройства. Формат описания -
+/// Описание платформы, отвечающее по идентичности устройства. Формат описания -
 /// деталь реализации.
 pub trait PlatformDescription {
-    /// Линия прерывания `index` устройства `device` вместе с её триггером.
-    fn interrupt(
-        &self,
-        device: DeviceSelector<'_>,
-        index: u16,
-    ) -> Result<DeviceInterrupt, ResolveError>;
+    /// Линия прерывания `resource` устройства `device` вместе с её триггером.
+    fn interrupt(&self, device: &DeviceId, resource: u16) -> Result<DeviceInterrupt, ResolveError>;
 
-    /// MMIO-окно `index` устройства `device`.
-    fn mmio(&self, device: DeviceSelector<'_>, index: u16) -> Result<DeviceMmio, ResolveError>;
+    /// MMIO-окно `resource` устройства `device`.
+    fn mmio(&self, device: &DeviceId, resource: u16) -> Result<DeviceMmio, ResolveError>;
 }
 
 impl ControllerId {

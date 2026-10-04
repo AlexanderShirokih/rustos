@@ -37,7 +37,6 @@ const TWO_REQUIREMENTS_ENTRY: &str = "/two-requirements-fixture/exec";
 const HELPER_PANIC_ENTRY: &str = "/helper-panic-fixture/exec";
 const CLOSED_ENTRY: &str = "/managed-startup-closed/exec";
 const EXPORT_ENTRY: &str = "/export-fixture/exec";
-const IDLE_EXPORT_ENTRY: &str = "/idle-export-fixture/exec";
 
 const PROVIDER: &str = "provider";
 const SECOND_PROVIDER: &str = "second-provider";
@@ -569,7 +568,9 @@ fn a_refused_requirement_ends_the_start_and_keeps_the_earlier_capabilities() {
 #[kernel_test]
 fn an_unanswered_requirement_ends_the_start_after_the_request_timeout() {
     let parent = Parent::start();
-    let provider = parent.add(Child::new(IDLE_EXPORT_ENTRY, PROVIDER).export::<probe::Protocol>());
+    let mut steps = Steps::new();
+    let provider = parent.add(steps.child(PROVIDER));
+    kernel_tests::kassert_eq!(steps.next(), started(true));
 
     let since = Instant::now();
     let two = parent.add(
@@ -588,7 +589,6 @@ fn an_unanswered_requirement_ends_the_start_after_the_request_timeout() {
         Some(departed(two, Outcome::Exit(FIRST_IPC_FAILED_EXIT_CODE)))
     );
     kernel_tests::kassert!(Instant::now().since(since).raw() >= STARTUP_REQUEST_TIMEOUT.raw());
-    // `start` обрывается тайм-аутом `first` до запроса `second`.
     kernel_tests::kassert_eq!(parent.requests(), 1);
 }
 
@@ -811,7 +811,6 @@ fn next_launch_is_infinite_without_a_waiting_record_and_poll_with_a_fresh_one() 
             Timeout::from_secs(1),
         )
         .expect("record added");
-    // Запись без исчерпанного бюджета запускается на ближайшем обороте родителя.
     kernel_tests::kassert_eq!(children.next_launch(), Timeout::POLL);
 }
 
@@ -820,7 +819,6 @@ fn a_grant_of_another_kind_on_a_granted_requirement_is_wrong_type() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    // Ребёнок стартовал, и журнал выдан ему как `Port`.
     kernel_tests::kassert_eq!(steps.next(), started(true));
 
     let mismatched = parent.log_copy_as_resource(provider);

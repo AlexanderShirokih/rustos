@@ -5,8 +5,12 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+fdt = { workspace = true }
 ipc = { workspace = true }
 syscall = { workspace = true }
+
+[dev-dependencies]
+fdt-test = { workspace = true }
 
 [lints]
 workspace = true

@@ -38,8 +38,6 @@ fn memory_capability_target_map_and_inspect() {
     );
 }
 
-// Regression guard: фреймы кэшируемого региона отображены линейной картой ядра, и
-// второе отображение с иным кэшированием теряет когерентность.
 #[kernel_test]
 fn memory_with_profile_refuses_a_cached_region() {
     let resource = Resource::self_resource().expect("self metering resource");

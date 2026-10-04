@@ -2,22 +2,17 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
-
 use component_startup::{Requirements as _, component_manifest};
 use kernel_objects::Port;
-use runtime::{Timeout, log_line, process_exit, start_component};
-use syscall::{Handle, kind};
+use runtime::{Timeout, log_line, start_component};
 
+mod fixture_start;
 mod probe_protocol;
 
+use fixture_start::{Failed, fixture_start};
 use probe_protocol::probe;
 
 const LOG_TAG: &str = "importer";
-
-const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct ImporterStartup {
@@ -25,27 +20,15 @@ component_manifest! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    let Ok(requirements) = ImporterStartup::request(parent) else {
-        process_exit(FAILED_EXIT_CODE)
-    };
+fixture_start!(run);
 
-    let Some(probe) = requirements.probe else {
-        process_exit(FAILED_EXIT_CODE)
-    };
+fn run(parent: &Port) -> Result<(), Failed> {
+    start_component(parent.as_raw(), LOG_TAG);
+    let requirements = ImporterStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let _session = requirements.probe.ok_or(Failed)?;
     log_line("started");
 
-    let _session = probe;
-    let Ok(own) = Port::create() else {
-        process_exit(FAILED_EXIT_CODE)
-    };
+    let own = Port::create().map_err(|_| Failed)?;
     let _ = own.recv(Timeout::INFINITE);
-    process_exit(FAILED_EXIT_CODE)
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(FAILED_EXIT_CODE)
+    Err(Failed)
 }

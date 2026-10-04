@@ -8,7 +8,11 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use component_abi::{RequirementDeclaration, SessionError, component_startup as startup_contract};
+use component_abi::{
+    Attributes, RequirementDeclaration, STARTUP_REQUEST_TIMEOUT, SessionError,
+    component_startup as startup_contract,
+};
+use component_startup::Found;
 use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
 use ipc::{
     Protocol,
@@ -195,11 +199,7 @@ impl Drop for TurnThread {
 
 impl Importer {
     pub(crate) fn session<P: Protocol>(&self, requirement: &str) -> Session<P> {
-        self.session_at(requirement, 0)
-    }
-
-    pub(crate) fn session_at<P: Protocol>(&self, requirement: &str, index: u16) -> Session<P> {
-        let session = request_at::<P>(self.handle(), requirement, index, IMPORTER_WAIT)
+        let session = request::<P>(self.handle(), requirement, IMPORTER_WAIT)
             .expect("session call")
             .expect("session granted");
         if P::ID == namespace::Protocol::ID
@@ -213,6 +213,33 @@ impl Importer {
             return Session::from_handle(Port::from(scoped.into_handle()));
         }
         session
+    }
+
+    pub(crate) fn found<P: Protocol>(&self, requirement: &str) -> Vec<Found> {
+        self.found_with::<P>(requirement, Attributes::empty())
+    }
+
+    pub(crate) fn found_with<P: Protocol>(
+        &self,
+        requirement: &str,
+        attributes: Attributes<'_>,
+    ) -> Vec<Found> {
+        drained(
+            &self
+                .enumeration::<P>(requirement, attributes)
+                .expect("all call")
+                .expect("enumeration granted"),
+        )
+    }
+
+    pub(crate) fn enumeration<P: Protocol>(
+        &self,
+        requirement: &str,
+        attributes: Attributes<'_>,
+    ) -> Result<Result<Session<startup_contract::Protocol>, SessionError>, IpcError> {
+        let parent = startup_contract::Client::new(PortTransport::new(self.handle()))
+            .with_wait(IMPORTER_WAIT);
+        component_startup::all::<P>(&parent, requirement, attributes)
     }
 
     pub(crate) fn port<P: Protocol>(&self, requirement: &str) -> Port {
@@ -303,17 +330,19 @@ pub(crate) fn request<P: Protocol>(
     requirement: &str,
     wait: Timeout,
 ) -> Result<Result<Session<P>, SessionError>, IpcError> {
-    request_at(importer, requirement, 0, wait)
+    let parent = startup_contract::Client::new(PortTransport::new(importer)).with_wait(wait);
+    component_startup::session::<P>(&parent, requirement, Attributes::empty())
 }
 
-pub(crate) fn request_at<P: Protocol>(
-    importer: Handle<kind::Port>,
-    requirement: &str,
-    index: u16,
-    wait: Timeout,
-) -> Result<Result<Session<P>, SessionError>, IpcError> {
-    let parent = startup_contract::Client::new(PortTransport::new(importer)).with_wait(wait);
-    component_startup::session::<P>(&parent, requirement, index)
+pub(crate) fn drained(enumeration: &Session<startup_contract::Protocol>) -> Vec<Found> {
+    let mut found = Vec::new();
+    while let Some(result) = component_startup::next(enumeration, STARTUP_REQUEST_TIMEOUT)
+        .expect("next call")
+        .expect("next answered")
+    {
+        found.push(result);
+    }
+    found
 }
 
 fn await_budget(plan: &BootPlan<'_>) {

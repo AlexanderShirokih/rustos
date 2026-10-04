@@ -96,8 +96,6 @@ extern "C" fn refused_client(_arg: usize) -> u32 {
 #[kernel_test]
 fn sender_is_refused_when_the_last_receiver_goes() {
     let port = Port::create().expect("port create");
-    // У клиентской капы нет значка. Множество получателей считается отдельно от
-    // множеств значков.
     let client = port
         .duplicate(Rights::WRITE, None)
         .expect("mint client capability");
@@ -108,11 +106,8 @@ fn sender_is_refused_when_the_last_receiver_goes() {
 
     let worker = spawn(refused_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
     port.recv(SERVE_TIMEOUT).expect("handshake frame");
-    // Кадр принят - клиент вышел из send; пауза отдаёт ему процессор, чтобы он
-    // припарковался в call до обнуления множества получателей.
     pause(PARK_SETTLE);
 
-    // Корневая капа - единственный держатель READ.
     drop(port);
     worker.join(JOIN_TIMEOUT).expect("client joins");
 
@@ -121,8 +116,6 @@ fn sender_is_refused_when_the_last_receiver_goes() {
         SyscallError::from_return(REFUSED_PARKED_CALL.load(SeqCst)),
         Some(SyscallError::PeerClosed)
     );
-    // Свежий call идёт по капе, выведенной из закрытой корневой, поэтому отказ
-    // приходит отзывом деривации, а не признаком пустого множества.
     kernel_tests::kassert_eq!(
         SyscallError::from_return(REFUSED_FRESH_CALL.load(SeqCst)),
         Some(SyscallError::Revoked)
@@ -132,7 +125,6 @@ fn sender_is_refused_when_the_last_receiver_goes() {
 #[kernel_test]
 fn badge_departs_when_the_client_process_dies() {
     let port = Port::create().expect("port create");
-    // TRANSFER нужен, чтобы капа ушла потомку стартовым хэндлом.
     let client = port
         .duplicate(Rights::WRITE | Rights::TRANSFER, Some(DYING_CLIENT_BADGE))
         .expect("mint client capability");
@@ -144,7 +136,6 @@ fn badge_departs_when_the_client_process_dies() {
     process.join(JOIN_TIMEOUT).expect("client terminates");
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 
-    // Капа осталась в таблице клиента: держателей значка лишила смерть процесса.
     assert_sender_gone(port.recv(SERVE_TIMEOUT), DYING_CLIENT_BADGE.get());
 }
 
@@ -170,7 +161,6 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
     let plain = port
         .duplicate(Rights::WRITE, None)
         .expect("mint unbadged capability");
-    // Обе капы отданы клиенту. Закрывает их он.
     LIVING_CLIENT_RESULT.store(i64::MIN, SeqCst);
 
     let worker = spawn_owned(
@@ -185,7 +175,6 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
 
     assert_sender_gone(port.recv(SERVE_TIMEOUT), LIVING_CLIENT_BADGE.get());
 
-    // Кадр без значка приходит следом: его отправитель был жив, когда значок ушёл.
     port.recv(SERVE_TIMEOUT)
         .expect("frame from the living client");
     kernel_tests::kassert_eq!(received_badge(), 0);
@@ -220,25 +209,19 @@ fn departed_badge_waits_for_the_busy_server() {
     port.recv(SERVE_TIMEOUT).expect("client frame");
     kernel_tests::kassert_eq!(received_badge(), SERVED_CLIENT_BADGE.get());
 
-    // Сервер разбирает принятый кадр и в recv не стоит, пока значок уходит.
     while SERVED_CLIENT_CLOSED.load(SeqCst) == 0 {
         core::hint::spin_loop();
     }
 
-    // POLL не паркуется, поэтому событие могло дождаться сервера только в
-    // состоянии порта.
     assert_sender_gone(port.recv(Timeout::POLL), SERVED_CLIENT_BADGE.get());
 
     worker.join(JOIN_TIMEOUT).expect("client joins");
     kernel_tests::kassert_eq!(SERVED_CLIENT_RESULT.load(SeqCst), 0);
 }
 
-/// Сервер-потомок узнаёт об уходе клиента без capability на его процесс.
-/// Закрытие клиентской капы завершает фикстуру, и родителю не нужен terminate.
 #[kernel_test]
 fn served_child_exits_when_its_client_capability_goes() {
     let fixture = Fixture::spawn();
-    // Запрос до закрытия: сессия заведомо жива и обслужена.
     kernel_tests::kassert_eq!(
         fixture.request_status(OP_WRITE_SLOT, SESSION_PROBE, &[]),
         REPLY_OK
@@ -249,8 +232,6 @@ fn served_child_exits_when_its_client_capability_goes() {
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 }
 
-/// Уход значка на bootstrap-порту не закрывает kernel-сервер. Следующий кадр
-/// принимает он же.
 #[kernel_test]
 fn kernel_server_serves_past_a_departed_badge() {
     let session = Port::from(
@@ -263,7 +244,6 @@ fn kernel_server_serves_past_a_departed_badge() {
     );
     session.close().expect("close badged bootstrap capability");
 
-    // Cast встречается с получателем, поэтому его успех означает живого сервера.
     let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
     client
         .log_str(
@@ -333,7 +313,6 @@ fn departed_badge_names_the_session_that_left() {
     let second_worker =
         spawn(second_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn second client");
 
-    // Порядок прихода кадров не определён, поэтому значки сверяются как множество.
     let mut seen = [0u64; 2];
     for slot in &mut seen {
         port.recv(SERVE_TIMEOUT).expect("client frame");
@@ -349,11 +328,9 @@ fn departed_badge_names_the_session_that_left() {
     kernel_tests::kassert_eq!(FIRST_CLIENT_RESULT.load(SeqCst), 0);
     kernel_tests::kassert_eq!(SECOND_CLIENT_RESULT.load(SeqCst), 0);
 
-    // Уходит только первая сессия: событие обязано назвать её значок.
     first.close().expect("close first client capability");
     assert_sender_gone(port.recv(SERVE_TIMEOUT), FIRST_CLIENT_BADGE.get());
 
-    // Вторая сессия была жива и уходит отдельным событием.
     second.close().expect("close second client capability");
     assert_sender_gone(port.recv(SERVE_TIMEOUT), SECOND_CLIENT_BADGE.get());
 }

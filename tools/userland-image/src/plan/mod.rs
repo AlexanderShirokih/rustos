@@ -70,7 +70,7 @@ pub(crate) fn compile_plan(source: &str, programs: &[PlanProgram<'_>]) -> Result
             ensure!(
                 declared
                     .exports()
-                    .any(|protocol| protocol == filesystem_abi::file_system::Protocol::ID),
+                    .any(|export| export.protocol() == filesystem_abi::file_system::Protocol::ID),
                 "component with mountpoint must export FileSystem"
             );
         }

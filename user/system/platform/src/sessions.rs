@@ -1,11 +1,10 @@
-//! Сессии `Platform` и линии и регионы, которые они взяли.
+//! Сессии `Platform` и описание, линии и регионы, которые они взяли.
 
 use alloc::vec::Vec;
+use core::fmt;
 
 use bootstrap_abi::hardware;
-use device_resolver::{
-    DeviceSelector, DeviceTreePlatform, InterruptLine, PlatformDescription, ResolveError,
-};
+use device_resolver::{DeviceTreePlatform, InterruptLine, PlatformDescription, ResolveError};
 use ipc::{
     IntoWireValue,
     wire::{Cap, Str},
@@ -14,14 +13,30 @@ use kernel_objects::{
     Delivery, Error, IrqControl, IrqLine, MemoryRegion, ObjectKind, OwnedHandle, SessionTransport,
     kind,
 };
-use platform_abi::{MmioWindow, PlatformError, platform};
+use platform_abi::{
+    DEVICE_ID_MAX, DescriptionRegion, DeviceId, MmioWindow, PlatformError, platform,
+};
 use runtime::{Mutex, log_fmt};
-use syscall::{Rights, SyscallError};
+use syscall::{MemoryAccess, Rights, SyscallError};
+
+const RESOURCE_RIGHTS: Rights = Rights::from_bits_truncate(
+    Rights::READ.bits() | Rights::WRITE.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
+);
+
+const DESCRIPTION_RIGHTS: Rights = Rights::from_bits_truncate(
+    Rights::READ.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
+);
 
 pub(crate) struct SessionRecord {
     badge: u64,
+    description: Option<MemoryRegion>,
     lines: Vec<HeldLine>,
     regions: Vec<HeldRegion>,
+}
+
+pub(crate) struct HardwareDescription {
+    pub(crate) region: &'static MemoryRegion,
+    pub(crate) offset: u64,
 }
 
 struct HeldLine {
@@ -36,7 +51,8 @@ struct HeldRegion {
 
 pub(crate) struct Platform {
     sessions: &'static Mutex<Vec<SessionRecord>>,
-    description: DeviceTreePlatform<'static>,
+    resolver: DeviceTreePlatform<'static>,
+    description: HardwareDescription,
     lines: IrqControl,
     hardware: hardware::Client<SessionTransport>,
 }
@@ -44,11 +60,13 @@ pub(crate) struct Platform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
     NoSession,
+    InvalidDevice,
     Resolve(ResolveError),
     LineTaken,
     WindowTaken,
     WindowNotGranted,
     Mint,
+    Slice,
     Copy,
 }
 
@@ -56,6 +74,7 @@ impl SessionRecord {
     pub(crate) const fn new(badge: u64) -> Self {
         Self {
             badge,
+            description: None,
             lines: Vec::new(),
             regions: Vec::new(),
         }
@@ -65,12 +84,14 @@ impl SessionRecord {
 impl Platform {
     pub(crate) const fn new(
         sessions: &'static Mutex<Vec<SessionRecord>>,
-        description: DeviceTreePlatform<'static>,
+        resolver: DeviceTreePlatform<'static>,
+        description: HardwareDescription,
         lines: IrqControl,
         hardware: hardware::Client<SessionTransport>,
     ) -> Self {
         Self {
             sessions,
+            resolver,
             description,
             lines,
             hardware,
@@ -82,28 +103,51 @@ impl Platform {
         self.sessions.lock().retain(|record| record.badge != badge);
     }
 
-    fn line(
+    fn granted_description(
         &self,
         badge: u64,
-        compatible: &str,
-        instance: u16,
-        index: u16,
-    ) -> Result<IrqLine, Refusal> {
+    ) -> Result<DescriptionRegion<OwnedHandle<kind::MemoryRegion>>, Refusal> {
         let mut sessions = self.sessions.lock();
         let record = sessions
             .iter_mut()
             .find(|record| record.badge == badge)
             .ok_or(Refusal::NoSession)?;
-        let selector = DeviceSelector {
-            compatible,
-            instance,
+        let root = match &mut record.description {
+            Some(root) => root,
+            empty @ None => {
+                let size = self
+                    .description
+                    .region
+                    .inspect()
+                    .map_err(|_| Refusal::Slice)?
+                    .size_bytes;
+                let root = self
+                    .description
+                    .region
+                    .slice(0, size, MemoryAccess::READ)
+                    .map_err(|_| Refusal::Slice)?;
+                empty.insert(root)
+            }
         };
+        Ok(DescriptionRegion {
+            region: copy(root, DESCRIPTION_RIGHTS)?,
+            offset: self.description.offset,
+        })
+    }
+
+    fn line(&self, badge: u64, device: &str, resource: u16) -> Result<IrqLine, Refusal> {
+        let mut sessions = self.sessions.lock();
+        let record = sessions
+            .iter_mut()
+            .find(|record| record.badge == badge)
+            .ok_or(Refusal::NoSession)?;
+        let device = DeviceId::new(device).ok_or(Refusal::InvalidDevice)?;
         let interrupt = self
-            .description
-            .interrupt(selector, index)
+            .resolver
+            .interrupt(&device, resource)
             .map_err(Refusal::Resolve)?;
         if let Some(held) = record.lines.iter().find(|held| held.line == interrupt.line) {
-            return copy(&held.root);
+            return copy(&held.root, RESOURCE_RIGHTS);
         }
         // На линию, которую держит другая сессия, `IrqMint` отвечает `AlreadyBound`.
         let root = self
@@ -113,7 +157,7 @@ impl Platform {
                 Error::Syscall(SyscallError::AlreadyBound) => Refusal::LineTaken,
                 _ => Refusal::Mint,
             })?;
-        let granted = copy(&root)?;
+        let granted = copy(&root, RESOURCE_RIGHTS)?;
         record.lines.push(HeldLine {
             line: interrupt.line,
             root,
@@ -124,21 +168,17 @@ impl Platform {
     fn window(
         &self,
         badge: u64,
-        compatible: &str,
-        instance: u16,
-        index: u16,
+        device: &str,
+        resource: u16,
     ) -> Result<MmioWindow<OwnedHandle<kind::MemoryRegion>>, Refusal> {
         let mut sessions = self.sessions.lock();
         if !sessions.iter().any(|record| record.badge == badge) {
             return Err(Refusal::NoSession);
         }
-        let selector = DeviceSelector {
-            compatible,
-            instance,
-        };
+        let device = DeviceId::new(device).ok_or(Refusal::InvalidDevice)?;
         let mmio = self
-            .description
-            .mmio(selector, index)
+            .resolver
+            .mmio(&device, resource)
             .map_err(Refusal::Resolve)?;
         let found = self
             .hardware
@@ -157,34 +197,25 @@ impl Platform {
             .iter_mut()
             .find(|record| record.badge == badge)
             .ok_or(Refusal::NoSession)?;
-        if !record.regions.iter().any(|held| held.base == base) {
+        let region = if let Some(held) = record.regions.iter().find(|held| held.base == base) {
+            copy(&held.root, RESOURCE_RIGHTS)?
+        } else {
+            let region = copy(&found.window, RESOURCE_RIGHTS)?;
             record.regions.push(HeldRegion {
                 base,
                 root: found.window,
             });
-        }
-        let held = record
-            .regions
-            .iter()
-            .find(|held| held.base == base)
-            .ok_or(Refusal::Copy)?;
+            region
+        };
         Ok(MmioWindow {
-            region: copy(&held.root)?,
+            region,
             offset: found.offset,
+            size: mmio.size,
         })
     }
 
-    fn refuse(
-        compatible: &str,
-        operation: &str,
-        instance: u16,
-        index: u16,
-        refusal: Refusal,
-    ) -> PlatformError {
-        log_fmt(format_args!(
-            "{compatible} {instance} {operation} {index} refused: {}",
-            refusal.reason()
-        ));
+    fn refuse(request: fmt::Arguments<'_>, refusal: Refusal) -> PlatformError {
+        log_fmt(format_args!("{request} refused: {}", refusal.reason()));
         refusal.error()
     }
 }
@@ -193,30 +224,39 @@ impl platform::Service<Delivery> for Platform {
     fn irq(
         &mut self,
         frame: &Delivery,
-        compatible: Str<'_, 255>,
-        instance: u16,
-        index: u16,
+        device: Str<'_, DEVICE_ID_MAX>,
+        resource: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::IrqLine>, PlatformError>> {
-        self.line(frame.badge, compatible.as_str(), instance, index)
-            .map_err(|refusal| Self::refuse(compatible.as_str(), "irq", instance, index, refusal))
+        let device = device.as_str();
+        self.line(frame.badge, device, resource)
+            .map_err(|refusal| Self::refuse(format_args!("{device} irq {resource}"), refusal))
     }
 
     fn mmio(
         &mut self,
         frame: &Delivery,
-        compatible: Str<'_, 255>,
-        instance: u16,
-        index: u16,
+        device: Str<'_, DEVICE_ID_MAX>,
+        resource: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<MmioWindow, PlatformError>> {
-        self.window(frame.badge, compatible.as_str(), instance, index)
-            .map_err(|refusal| Self::refuse(compatible.as_str(), "mmio", instance, index, refusal))
+        let device = device.as_str();
+        self.window(frame.badge, device, resource)
+            .map_err(|refusal| Self::refuse(format_args!("{device} mmio {resource}"), refusal))
+    }
+
+    fn description(
+        &mut self,
+        frame: &Delivery,
+    ) -> impl IntoWireValue<Delivery, Read = Result<DescriptionRegion, PlatformError>> {
+        self.granted_description(frame.badge)
+            .map_err(|refusal| Self::refuse(format_args!("description"), refusal))
     }
 }
 
 impl Refusal {
     const fn error(self) -> PlatformError {
         match self {
-            Self::Resolve(
+            Self::InvalidDevice
+            | Self::Resolve(
                 ResolveError::DeviceNotFound
                 | ResolveError::NoInterrupts
                 | ResolveError::NoMmio
@@ -231,6 +271,7 @@ impl Refusal {
             )
             | Self::WindowNotGranted
             | Self::Mint
+            | Self::Slice
             | Self::Copy => PlatformError::Unavailable,
         }
     }
@@ -238,6 +279,7 @@ impl Refusal {
     const fn reason(self) -> &'static str {
         match self {
             Self::NoSession => "session not opened",
+            Self::InvalidDevice => "device id malformed",
             Self::Resolve(ResolveError::DeviceNotFound) => "device not described by the platform",
             Self::Resolve(ResolveError::NoInterrupts) => "device described without interrupts",
             Self::Resolve(ResolveError::NoMmio) => "device described without mmio windows",
@@ -249,15 +291,15 @@ impl Refusal {
             Self::WindowTaken => "mmio region held by another session",
             Self::WindowNotGranted => "mmio window not granted by the kernel",
             Self::Mint => "irq line not minted",
+            Self::Slice => "description region not derived",
             Self::Copy => "copy not created",
         }
     }
 }
 
-fn copy<K: ObjectKind + 'static>(root: &OwnedHandle<K>) -> Result<OwnedHandle<K>, Refusal> {
-    root.duplicate(
-        Rights::READ | Rights::WRITE | Rights::DUPLICATE | Rights::TRANSFER,
-        None,
-    )
-    .map_err(|_| Refusal::Copy)
+fn copy<K: ObjectKind + 'static>(
+    root: &OwnedHandle<K>,
+    rights: Rights,
+) -> Result<OwnedHandle<K>, Refusal> {
+    root.duplicate(rights, None).map_err(|_| Refusal::Copy)
 }

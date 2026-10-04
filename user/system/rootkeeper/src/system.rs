@@ -1,6 +1,6 @@
 //! Записи компонентов и обслуживание их требований родителем.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::{
     fmt::{Arguments, Write as _},
     ops::ControlFlow,
@@ -8,9 +8,10 @@ use core::{
 
 use bootstrap_abi::{ImageError, LOG_MESSAGE_MAX, bootstrap, hardware, image};
 use component_abi::{
-    AcceptError, ComponentManifest, LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX,
-    RequirementDeclaration, RequirementMode, SessionError, SessionRequest, SessionRequirement,
-    component_startup, decode_manifest,
+    AcceptError, AttributeSet, Attributes, ComponentManifest, Found, LOG_REQUIREMENT,
+    PROTOCOL_ID_MAX, ProtocolName, QueryAttributes, REQUIREMENT_NAME_MAX, RequirementDeclaration,
+    RequirementMode, SessionError, SessionRequest, SessionRequirement, component_startup,
+    decode_manifest, match_filters,
 };
 use ipc::{
     IntoWireValue, Listener as _, Protocol as _, RecvError,
@@ -20,7 +21,7 @@ use kernel_objects::{
     Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, kind,
 };
 use log_abi::{LogBuffer, log};
-use managed_component::{Children, Departure, GrantError, Outcome, Status};
+use managed_component::{Children, Departure, GrantError, Outcome, Purpose, Status};
 use runtime::{Mutex, PortTransport, Timeout};
 use syscall::{Handle, Rights};
 use userland::{DecodedProgram, ProgramView};
@@ -96,6 +97,7 @@ enum Holder {
     Record(u16),
     Importer(usize),
     Image(u64),
+    Search(u64),
 }
 
 struct ImporterBinding {
@@ -105,10 +107,23 @@ struct ImporterBinding {
     provider: Option<u16>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Export<'a> {
     provider: u16,
     protocol: &'a str,
+    filter: Attributes<'a>,
+}
+
+struct Search<'a> {
+    id: u64,
+    owner: u64,
+    requirement: String,
+    state: SearchState<'a>,
+}
+
+enum SearchState<'a> {
+    Enumeration(VecDeque<Export<'a>>),
+    Found(Export<'a>),
 }
 
 /// Родитель зарегистрированных компонентов. Поток обслуживает записи повтором [`turn`].
@@ -121,6 +136,8 @@ pub struct RootSystem<'a> {
     kernel: Handle<kind::Port>,
     restarts_used: Vec<u32>,
     importers: Vec<Vec<ImporterBinding>>,
+    searches: Vec<Search<'a>>,
+    next_search: u64,
     resource: Resource,
 }
 
@@ -159,6 +176,8 @@ impl<'a> RootSystem<'a> {
             kernel,
             restarts_used: alloc::vec![0],
             importers: Vec::new(),
+            searches: Vec::new(),
+            next_search: 0,
             resource,
         })
     }
@@ -181,7 +200,7 @@ impl<'a> RootSystem<'a> {
             })
             || manifest
                 .exports()
-                .any(|protocol| protocol.len() > PROTOCOL_ID_MAX)
+                .any(|export| export.protocol().len() > PROTOCOL_ID_MAX)
         {
             return Err(AddFailure::Declaration);
         }
@@ -209,7 +228,7 @@ impl<'a> RootSystem<'a> {
     }
 
     /// Создаёт клиентскую capability импортёра с требованиями `requirements`. Родитель отвечает
-    /// по ней только на запрос `session` требования из `requirements`. Поток, который зовёт
+    /// по ней на `session` и `all` требования из `requirements`. Поток, который зовёт
     /// [`turn`], не вызывает по ней.
     pub fn importer(
         &mut self,
@@ -242,10 +261,10 @@ impl<'a> RootSystem<'a> {
             .iter()
             .position(|binding| binding.declaration.name() == requirement)
             .ok_or(ImporterRefusal::Requirement(0))?;
-        if !declared.manifest.exports().any(|protocol| {
-            requirements
-                .get(binding)
-                .is_some_and(|requirement| protocol == requirement.declaration.protocol())
+        if !requirements.get(binding).is_some_and(|requirement| {
+            declared
+                .export(requirement.declaration.protocol())
+                .is_some()
         }) {
             return Err(ImporterRefusal::Requirement(binding));
         }
@@ -348,95 +367,152 @@ impl<'a> RootSystem<'a> {
         self.children.remove(child);
     }
 
-    fn record_export(
+    fn declared(
         &self,
-        record: u16,
-        requirement: &str,
+        holder: Option<Holder>,
+        name: &str,
         protocol: &str,
-        index: u16,
-    ) -> Result<Export<'a>, SessionError> {
-        let requirement = self
-            .records
-            .get(usize::from(record))
-            .and_then(|record| record.requirement(requirement))
-            .ok_or(SessionError::Refused)?;
-        if requirement.protocol() != protocol {
-            return Err(SessionError::Refused);
+    ) -> Result<(RequirementMode, Option<u16>), SessionError> {
+        match holder {
+            Some(Holder::Record(record)) => self
+                .records
+                .get(usize::from(record))
+                .and_then(|record| record.requirement(name))
+                .filter(|requirement| requirement.protocol() == protocol)
+                .map(|requirement| (requirement.mode(), None)),
+            Some(Holder::Importer(importer)) => self
+                .importers
+                .get(importer)
+                .and_then(|bindings| {
+                    bindings
+                        .iter()
+                        .find(|binding| binding.name == name && binding.protocol == protocol)
+                })
+                .map(|binding| (binding.mode, binding.provider)),
+            _ => None,
         }
-        self.resolve_export(protocol, requirement.mode(), index)
+        .ok_or(SessionError::Refused)
     }
 
-    fn resolve_export(
-        &self,
-        protocol: &str,
-        mode: RequirementMode,
-        index: u16,
-    ) -> Result<Export<'a>, SessionError> {
-        let provider = if mode == RequirementMode::All {
-            self.providers(protocol)
-                .nth(usize::from(index))
-                .ok_or(SessionError::Unbound)?
-        } else {
-            if index != 0 {
-                return Err(SessionError::Unbound);
-            }
-            let mut providers = self.providers(protocol).filter(|provider| {
-                *provider == BOOT_RECORD
-                    || !matches!(
-                        self.children.status(Holder::Record(*provider)),
-                        None | Some(Status::Removed)
-                    )
-            });
-            let provider = providers.next().ok_or(SessionError::Unbound)?;
-            if providers.next().is_some() {
-                return Err(SessionError::Refused);
-            }
-            provider
-        };
-        let protocol = self
-            .records
-            .get(usize::from(provider))
-            .and_then(|record| record.manifest.exports().find(|export| *export == protocol))
-            .ok_or(SessionError::Refused)?;
-        Ok(Export { provider, protocol })
-    }
-
-    fn providers<'s>(&'s self, protocol: &'s str) -> impl Iterator<Item = u16> + 's {
+    fn matches<'s>(
+        &'s self,
+        protocol: &'s str,
+        attributes: Attributes<'s>,
+    ) -> impl Iterator<Item = Export<'a>> + 's {
         self.records
             .iter()
             .enumerate()
-            .filter(move |(_, record)| record.manifest.exports().any(|export| export == protocol))
-            .filter_map(|(index, _)| u16::try_from(index).ok())
+            .filter_map(move |(index, record)| {
+                let provider = u16::try_from(index).ok()?;
+                let export = record.export(protocol)?;
+                let filter = match_filters(export.filters(), attributes)?;
+                self.available(provider).then_some(Export {
+                    provider,
+                    protocol: export.protocol(),
+                    filter,
+                })
+            })
     }
 
-    fn importer_export(
+    fn available(&self, provider: u16) -> bool {
+        provider == BOOT_RECORD
+            || !matches!(
+                self.children.status(Holder::Record(provider)),
+                None | Some(Status::Removed)
+            )
+    }
+
+    fn only_match(
         &self,
-        importer: usize,
-        requirement: &str,
         protocol: &str,
-        index: u16,
+        attributes: Attributes<'_>,
     ) -> Result<Export<'a>, SessionError> {
-        let binding = self
-            .importers
-            .get(importer)
-            .and_then(|requirements| {
-                requirements
-                    .iter()
-                    .find(|binding| binding.name == requirement && binding.protocol == protocol)
-            })
-            .ok_or(SessionError::Refused)?;
-        if let Some(provider) = binding.provider {
-            if index != 0 {
-                return Err(SessionError::Unbound);
-            }
-            let protocol = self
-                .records
-                .get(usize::from(provider))
-                .and_then(|record| record.manifest.exports().find(|export| *export == protocol))
-                .ok_or(SessionError::Refused)?;
-            return Ok(Export { provider, protocol });
+        let mut matches = self.matches(protocol, attributes);
+        let export = matches.next().ok_or(SessionError::Unbound)?;
+        if matches.next().is_some() {
+            return Err(SessionError::Refused);
         }
-        self.resolve_export(protocol, binding.mode, index)
+        Ok(export)
+    }
+
+    fn pinned(&self, provider: u16, protocol: &str) -> Result<Export<'a>, SessionError> {
+        self.records
+            .get(usize::from(provider))
+            .and_then(|record| record.export(protocol))
+            .map(|export| Export {
+                provider,
+                protocol: export.protocol(),
+                filter: Attributes::empty(),
+            })
+            .ok_or(SessionError::Refused)
+    }
+
+    fn open_export(
+        &mut self,
+        owner: u64,
+        requirement: &str,
+        export: Export<'a>,
+        reply: component_startup::session::Reply<Debt>,
+    ) {
+        if export.provider == BOOT_RECORD {
+            let answer = self.boot_export(owner, requirement, export.protocol);
+            let _ = reply.send(answer);
+            return;
+        }
+
+        if !self.available(export.provider) {
+            let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
+            return;
+        }
+
+        self.children.request(
+            Holder::Record(export.provider),
+            owner,
+            requirement,
+            export.protocol,
+            reply,
+        );
+    }
+
+    fn search(&self, holder: Option<Holder>) -> Option<usize> {
+        let Some(Holder::Search(id)) = holder else {
+            return None;
+        };
+        // Идентификаторы поисков строго возрастают, в том числе после удаления прежних поисков.
+        self.searches
+            .binary_search_by_key(&id, |search| search.id)
+            .ok()
+    }
+
+    fn issue_search(
+        &mut self,
+        owner: u64,
+        requirement: String,
+        state: SearchState<'a>,
+    ) -> Result<Port, SessionError> {
+        let id = self.next_search;
+        self.next_search = id.checked_add(1).ok_or(SessionError::NoSpace)?;
+        self.searches
+            .try_reserve(1)
+            .map_err(|_| SessionError::NoSpace)?;
+        let issued =
+            self.children
+                .issue(owner, &requirement, Purpose::Search, Holder::Search(id))?;
+        self.searches.push(Search {
+            id,
+            owner,
+            requirement,
+            state,
+        });
+        Ok(issued)
+    }
+
+    fn forget(&mut self, badge: u64, holder: Option<Holder>) {
+        if let Some(index) = self.search(holder) {
+            self.searches.remove(index);
+        } else {
+            self.searches.retain(|search| search.owner != badge);
+        }
     }
 
     fn log_session(
@@ -468,6 +544,10 @@ impl<'a> RootSystem<'a> {
         requirement: &str,
         protocol: &str,
     ) -> Result<Port, SessionError> {
+        if !matches!(self.children.caller(badge), Some(Holder::Record(_))) {
+            return Err(SessionError::Refused);
+        }
+
         let session = match protocol {
             hardware::Protocol::ID => self.children.grant(
                 badge,
@@ -475,10 +555,12 @@ impl<'a> RootSystem<'a> {
                 self.hardware.handle().borrow(),
                 Rights::WRITE | Rights::TRANSFER,
             ),
-            image::Protocol::ID => {
-                self.children
-                    .grant_importer(badge, requirement, Holder::Image(badge))
-            }
+            image::Protocol::ID => self.children.issue(
+                badge,
+                requirement,
+                Purpose::Requirement,
+                Holder::Image(badge),
+            ),
             _ => return Err(SessionError::Refused),
         };
         session.map_err(SessionError::from)
@@ -494,47 +576,42 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         &mut self,
         frame: &Delivery,
         requirement: SessionRequirement<'_>,
+        attributes: QueryAttributes<'_>,
         reply: component_startup::session::Reply<Debt>,
     ) {
         let badge = frame.badge;
         let name = requirement.name.as_str();
         let protocol = requirement.protocol.as_str();
-        let index = requirement.index;
-        let export = match self.children.caller(badge) {
-            Some(Holder::Record(record)) if name == LOG_REQUIREMENT => {
-                let answer = if index == 0 {
-                    self.log_session(record, badge, protocol)
-                } else {
-                    Err(SessionError::Unbound)
-                };
-                let _ = reply.send(answer);
-                return;
-            }
-            Some(Holder::Record(record)) => self.record_export(record, name, protocol, index),
-            Some(Holder::Importer(importer)) => {
-                self.importer_export(importer, name, protocol, index)
-            }
-            Some(Holder::Image(_)) | None => Err(SessionError::Refused),
+        let Some(attributes) = Attributes::decode(attributes.as_bytes()) else {
+            let _ = reply.send(Err::<Port, _>(SessionError::Refused));
+            return;
         };
-        let export = match export {
-            Ok(export) => export,
-            Err(error) => {
-                let _ = reply.send(Err::<Port, _>(error));
-                return;
-            }
-        };
-        if export.provider == BOOT_RECORD {
-            let answer = self.boot_export(badge, name, export.protocol);
+
+        let holder = self.children.caller(badge);
+        if let Some(Holder::Record(record)) = holder
+            && name == LOG_REQUIREMENT
+        {
+            let answer = if attributes.is_empty() {
+                self.log_session(record, badge, protocol)
+            } else {
+                Err(SessionError::Refused)
+            };
             let _ = reply.send(answer);
             return;
         }
 
-        let provider = Holder::Record(export.provider);
-        if matches!(self.children.status(provider), None | Some(Status::Removed)) {
-            let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
-            return;
+        let export = self
+            .declared(holder, name, protocol)
+            .and_then(|(_, pinned)| match pinned {
+                Some(provider) => self.pinned(provider, protocol),
+                None => self.only_match(protocol, attributes),
+            });
+        match export {
+            Ok(export) => self.open_export(badge, name, export, reply),
+            Err(error) => {
+                let _ = reply.send(Err::<Port, _>(error));
+            }
         }
-        self.children.request(provider, badge, requirement, reply);
     }
 
     fn accept(
@@ -549,16 +626,11 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
                 if self
                     .records
                     .get(usize::from(record))
-                    .is_some_and(|component| {
-                        component
-                            .manifest
-                            .exports()
-                            .any(|protocol| protocol == export)
-                    }) =>
+                    .is_some_and(|component| component.export(export).is_some()) =>
             {
                 Holder::Record(record)
             }
-            Some(Holder::Record(_) | Holder::Importer(_) | Holder::Image(_)) | None => {
+            _ => {
                 let _ = reply.send(Err::<
                     SessionRequest<component_startup::session::Reply<Debt>>,
                     _,
@@ -567,6 +639,109 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             }
         };
         self.children.accept(provider, frame.badge, export, reply);
+    }
+
+    fn all(
+        &mut self,
+        frame: &Delivery,
+        requirement: SessionRequirement<'_>,
+        attributes: QueryAttributes<'_>,
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
+        let name = requirement.name.as_str();
+        let protocol = requirement.protocol.as_str();
+        let attributes = Attributes::decode(attributes.as_bytes()).ok_or(SessionError::Refused)?;
+        let (mode, _) = self.declared(self.children.caller(frame.badge), name, protocol)?;
+        if mode != RequirementMode::All {
+            return Err(SessionError::Refused);
+        }
+
+        let mut snapshot = VecDeque::new();
+        for export in self.matches(protocol, attributes) {
+            snapshot.try_reserve(1).map_err(|_| SessionError::NoSpace)?;
+            snapshot.push_back(export);
+        }
+
+        self.issue_search(
+            frame.badge,
+            String::from(name),
+            SearchState::Enumeration(snapshot),
+        )
+    }
+
+    fn next(&mut self, frame: &Delivery, reply: component_startup::next::Reply<Debt>) {
+        let Some(index) = self.search(self.children.caller(frame.badge)) else {
+            let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
+            return;
+        };
+
+        let export = loop {
+            let Some(Search {
+                state: SearchState::Enumeration(snapshot),
+                ..
+            }) = self.searches.get_mut(index)
+            else {
+                let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
+                return;
+            };
+            let Some(export) = snapshot.pop_front() else {
+                *snapshot = VecDeque::new();
+                let _ = reply.send(Ok::<Option<Found<Port>>, SessionError>(None));
+                return;
+            };
+            if self.available(export.provider) {
+                break export;
+            }
+        };
+
+        let Some(search) = self.searches.get(index) else {
+            return;
+        };
+        let (owner, requirement) = (search.owner, search.requirement.clone());
+        let found = self
+            .issue_search(owner, requirement, SearchState::Found(export))
+            .and_then(|session| {
+                Ok(Found {
+                    session,
+                    protocol: ProtocolName::new(export.protocol).ok_or(SessionError::Refused)?,
+                    filter: AttributeSet::new(export.filter),
+                })
+            });
+
+        let delivered = match found {
+            Ok(found) => reply.send(Ok::<_, SessionError>(Some(found))).is_ok(),
+            Err(error) => {
+                let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
+                false
+            }
+        };
+
+        // Недоставленная выдача закрыта вместе с кадром, и позиция snapshot возвращается.
+        if !delivered
+            && let Some(Search {
+                state: SearchState::Enumeration(snapshot),
+                ..
+            }) = self.searches.get_mut(index)
+        {
+            snapshot.push_front(export);
+        }
+    }
+
+    fn open(&mut self, frame: &Delivery, reply: component_startup::open::Reply<Debt>) {
+        let Some(Search {
+            owner,
+            requirement,
+            state: SearchState::Found(export),
+            ..
+        }) = self
+            .search(self.children.caller(frame.badge))
+            .and_then(|index| self.searches.get(index))
+        else {
+            let _ = reply.send(Err::<Port, _>(SessionError::Refused));
+            return;
+        };
+
+        let (owner, requirement, export) = (*owner, requirement.clone(), *export);
+        self.open_export(owner, &requirement, export, reply);
     }
 }
 
@@ -621,9 +796,11 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
         }
         Err(RecvError::SenderGone(badge)) => {
             let mut guard = system.lock();
+            let holder = guard.children.caller(badge);
             if let Some(departure) = guard.children.depart(badge) {
                 guard.decide(departure);
             }
+            guard.forget(badge, holder);
         }
         Err(RecvError::Timeout | RecvError::Discarded) => {}
         Err(RecvError::Closed) => return ControlFlow::Break(()),

@@ -1,13 +1,13 @@
 use core::marker::PhantomData;
 
-use component_abi::{STARTUP_REQUEST_TIMEOUT, SessionError};
+use component_abi::{Attributes, STARTUP_REQUEST_TIMEOUT, component_startup};
 use kernel_objects::{Session, kind};
 use syscall::Handle;
 
 use crate::{
-    StartupError, StartupFailure,
-    declare::{request_session, start_parent},
-    request::session,
+    StartupError,
+    declare::{answered, request_session, start_parent},
+    request::{Found, all, next, open},
 };
 
 /// Провайдеры требования `all`. Стартовый handle принадлежит процессу до его завершения.
@@ -17,10 +17,11 @@ pub struct Providers<P> {
     protocol: PhantomData<P>,
 }
 
-/// Сессии провайдеров по порядку списка. Отказ провайдера выдаётся элементом перебора.
-pub struct ProviderSessions<'a, P> {
-    providers: &'a Providers<P>,
-    next: Option<u16>,
+/// Результаты поиска одного перечисления в порядке выдачи родителем. Отказ выдаётся
+/// последним элементом перебора.
+pub struct ProviderSessions {
+    enumeration: Option<Session<component_startup::Protocol>>,
+    requirement: &'static str,
 }
 
 impl<P: ipc::Protocol> Providers<P> {
@@ -34,101 +35,39 @@ impl<P: ipc::Protocol> Providers<P> {
         }
     }
 
-    /// Запрашивает сессию провайдера с индексом `index`. Каждый запрос ждёт ответ не дольше
-    /// `STARTUP_REQUEST_TIMEOUT` и повторяется при `IpcError::PeerClosed`.
-    pub fn session(&self, index: u16) -> Result<Session<P>, StartupError> {
+    /// Ищет экспорты протокола `P`, совпавшие с `attributes`. Набор фиксируется на момент
+    /// вызова, и новый вызов повторяет поиск.
+    pub fn all(&self, attributes: Attributes<'_>) -> Result<ProviderSessions, StartupError> {
         let parent = start_parent(self.parent).with_wait(STARTUP_REQUEST_TIMEOUT);
+        let enumeration = answered(
+            self.requirement,
+            all::<P>(&parent, self.requirement, attributes),
+        )?;
 
-        request_session(self.requirement, || {
-            session::<P>(&parent, self.requirement, index)
+        Ok(ProviderSessions {
+            enumeration: Some(enumeration),
+            requirement: self.requirement,
         })
     }
 
-    pub fn iter(&self) -> ProviderSessions<'_, P> {
-        ProviderSessions {
-            providers: self,
-            next: Some(0),
-        }
+    /// Открывает сессию экспорта результата `found`. Каждый запрос ждёт ответ не дольше
+    /// `STARTUP_REQUEST_TIMEOUT` и повторяется при `IpcError::PeerClosed`.
+    pub fn open(&self, found: &Found) -> Result<Session<P>, StartupError> {
+        request_session(self.requirement, || {
+            open::<P>(found, STARTUP_REQUEST_TIMEOUT)
+        })
     }
 }
 
-impl<'a, P: ipc::Protocol> IntoIterator for &'a Providers<P> {
-    type Item = Result<Session<P>, StartupError>;
-    type IntoIter = ProviderSessions<'a, P>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-impl<P: ipc::Protocol> Iterator for ProviderSessions<'_, P> {
-    type Item = Result<Session<P>, StartupError>;
+impl Iterator for ProviderSessions {
+    type Item = Result<Found, StartupError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        next_provider(&mut self.next, |index| self.providers.session(index))
-    }
-}
-
-fn next_provider<T>(
-    next: &mut Option<u16>,
-    request: impl FnOnce(u16) -> Result<T, StartupError>,
-) -> Option<Result<T, StartupError>> {
-    let index = (*next)?;
-    let result = request(index);
-
-    if matches!(
-        result,
-        Err(StartupError {
-            failure: StartupFailure::Session(SessionError::Unbound),
-            ..
-        })
-    ) {
-        *next = None;
-        return None;
-    }
-    *next = index.checked_add(1);
-
-    Some(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{SessionError, StartupError, StartupFailure, next_provider};
-
-    #[test]
-    fn errors_do_not_end_iteration_but_unbound_does() {
-        for failure in [
-            StartupFailure::Session(SessionError::Unavailable),
-            StartupFailure::Ipc(crate::IpcError::Timeout),
-        ] {
-            let mut next = Some(0);
-            let error = StartupError {
-                requirement: "clocks",
-                failure,
-            };
-
-            assert_eq!(
-                next_provider::<u16>(&mut next, |index| {
-                    assert_eq!(index, 0);
-                    Err(error)
-                }),
-                Some(Err(error))
-            );
-            assert_eq!(next_provider(&mut next, Ok), Some(Ok(1)));
-            assert_eq!(
-                next_provider::<u16>(&mut next, |index| {
-                    assert_eq!(index, 2);
-                    Err(StartupError {
-                        requirement: "clocks",
-                        failure: StartupFailure::Session(SessionError::Unbound),
-                    })
-                }),
-                None
-            );
-            assert_eq!(
-                next_provider::<u16>(&mut next, |_| panic!("finished iterator must not request")),
-                None
-            );
+        let answer = next(self.enumeration.as_ref()?, STARTUP_REQUEST_TIMEOUT);
+        let item = answered(self.requirement, answer).transpose();
+        if !matches!(item, Some(Ok(_))) {
+            self.enumeration = None;
         }
+        item
     }
 }

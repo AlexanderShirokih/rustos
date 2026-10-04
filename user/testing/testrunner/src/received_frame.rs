@@ -293,7 +293,6 @@ fn tampered_reply_worker(exchange: TamperedReply) -> u32 {
     0
 }
 
-/// Capability кадра принадлежит параметру обработчика, и завершение кадра её не трогает.
 #[kernel_test]
 fn a_frame_hands_its_capability_to_the_parameter() {
     let service = Port::create_service(None).expect("port create");
@@ -324,7 +323,6 @@ fn a_frame_hands_its_capability_to_the_parameter() {
     kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), 1);
 }
 
-/// Вложенный IPC перезаписывает буфер потока, а принятый набор не меняет.
 #[kernel_test]
 fn a_nested_call_does_not_change_the_received_set() {
     let service = Port::create_service(None).expect("port create");
@@ -373,8 +371,6 @@ fn a_nested_call_does_not_change_the_received_set() {
     vendor.join(JOIN_TIMEOUT).expect("vendor joins");
 }
 
-/// Кадр, завершённый без ответа, закрывает reply, и вызывающий получает отказ вместо
-/// парковки до конца процесса получателя.
 #[kernel_test]
 fn an_unanswered_frame_refuses_its_caller() {
     let service = Port::create_service(None).expect("port create");
@@ -394,7 +390,6 @@ fn an_unanswered_frame_refuses_its_caller() {
     kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_REFUSED);
 }
 
-/// Отвеченный кадр reply повторно не закрывает, и его слот занимает следующий объект.
 #[kernel_test]
 fn an_answered_frame_does_not_close_its_reply_twice() {
     let service = Port::create_service(None).expect("port create");
@@ -421,8 +416,6 @@ fn an_answered_frame_does_not_close_its_reply_twice() {
     kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
 }
 
-/// Приём, отказавший после переноса capability, оставляет её закрытой. Откат этого переноса
-/// держит ядро.
 #[kernel_test]
 fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
     let watched = Watched::create(FIRST_BADGE);
@@ -444,14 +437,11 @@ fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
         .write_handle(1, watched.deliver().into_issued())
         .expect("frame capability");
     frame.finish().expect("frame finished");
-    // Таблица фикстуры принимает capability кадра последним свободным слотом, и reply-объекту
-    // вызова места уже не остаётся.
     let _ = PortTransport::new(service.client.as_raw()).call(frame.outgoing(), CALL_TIMEOUT);
 
     watched.assert_closed();
 }
 
-/// Ошибка разбора ответа освобождает доставленную capability без участия клиента.
 #[kernel_test]
 fn a_client_decode_failure_closes_its_reply_capabilities() {
     let service = Port::create_service(None).expect("port create");
@@ -475,7 +465,6 @@ fn a_client_decode_failure_closes_its_reply_capabilities() {
     worker.join(JOIN_TIMEOUT).expect("reply worker joins");
 }
 
-/// Успешный скалярный ответ не оставляет capability, отсутствующую в его значении.
 #[kernel_test]
 fn a_scalar_reply_closes_extra_capabilities() {
     let service = Port::create_service(None).expect("port create");
@@ -499,7 +488,6 @@ fn a_scalar_reply_closes_extra_capabilities() {
     worker.join(JOIN_TIMEOUT).expect("reply worker joins");
 }
 
-/// Прочитанный ответ владеет capability и закрывает её вместе с собой.
 #[kernel_test]
 fn a_dropped_answer_closes_its_capability() {
     let service = Port::create_service(None).expect("port create");
@@ -523,8 +511,6 @@ fn a_dropped_answer_closes_its_capability() {
     worker.join(JOIN_TIMEOUT).expect("vendor joins");
 }
 
-/// Ответ, доставить который некому, закрывает выданную им capability. Получатель остаётся жив
-/// и обслуживает следующий корректный запрос.
 #[kernel_test]
 fn an_undelivered_answer_closes_the_capability_it_vended() {
     let service = Port::create_service(None).expect("port create");
@@ -724,8 +710,6 @@ fn a_dropped_owning_transport_refuses_its_caller() {
     )
     .expect("spawn worker");
 
-    // Порт теряет единственного получателя, и вызов, припаркованный либо следующий, получает
-    // отказ.
     drop(SessionTransport::new(service.server));
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");

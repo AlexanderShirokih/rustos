@@ -1,9 +1,9 @@
 //! Неявные импорты компонента. Родитель выдаёт их без объявления в манифесте.
 
 use component_abi::{
-    LOG_REQUIREMENT, STARTUP_REQUEST_TIMEOUT, SessionRequirement, component_startup,
+    Attributes, LOG_REQUIREMENT, STARTUP_REQUEST_TIMEOUT, SessionRequirement, component_startup,
 };
-use ipc::wire::Str;
+use ipc::wire::{Bytes, Str};
 use log_abi::log;
 use syscall::{Handle, kind};
 
@@ -25,9 +25,10 @@ fn import<P: ipc::Protocol>(
     let requirement = SessionRequirement {
         name: Str::new(name)?,
         protocol: Str::new(P::ID)?,
-        index: 0,
     };
+    let attributes = Bytes::new(Attributes::empty().as_bytes())?;
+
     let requests = component_startup::Client::new(PortTransport::new(parent))
         .with_wait(STARTUP_REQUEST_TIMEOUT);
-    requests.session(requirement).ok()?.ok()
+    requests.session(requirement, attributes).ok()?.ok()
 }

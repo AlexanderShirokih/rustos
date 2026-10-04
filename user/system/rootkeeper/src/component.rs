@@ -1,4 +1,6 @@
-use component_abi::{ComponentManifest, ManifestRequirement, RequirementDeclaration};
+use component_abi::{
+    ComponentManifest, ManifestExport, ManifestRequirement, RequirementDeclaration,
+};
 use syscall::ProcessName;
 use userland::DecodedProgram;
 
@@ -27,5 +29,11 @@ impl<'a> Record<'a> {
         self.manifest
             .requirements()
             .find(|requirement| requirement.name() == name)
+    }
+
+    pub(crate) fn export(&self, protocol: &str) -> Option<ManifestExport<'a>> {
+        self.manifest
+            .exports()
+            .find(|export| export.protocol() == protocol)
     }
 }

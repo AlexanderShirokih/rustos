@@ -112,7 +112,7 @@ impl<'a> RootSystem<'a> {
         if manifest.requirements().next().is_some()
             || manifest
                 .exports()
-                .any(|protocol| protocol.len() > PROTOCOL_ID_MAX)
+                .any(|export| export.protocol().len() > PROTOCOL_ID_MAX)
         {
             return Err(BootFailure::BadImage);
         }

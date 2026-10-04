@@ -1,6 +1,6 @@
 use alloc::string::String;
 
-use component_abi::{RequirementDeclaration, component_startup as startup_contract};
+use component_abi::{Attributes, RequirementDeclaration, component_startup as startup_contract};
 use component_startup::session;
 use filesystem_abi::{MountEnded, PATH_MAX, file_system, file_system_mount};
 use ipc::{
@@ -95,7 +95,7 @@ fn requested<P: ipc::Protocol>(
     requirement: &str,
     kernel: Handle<kind::Port>,
 ) -> Option<Session<P>> {
-    match session::<P>(parent, requirement, 0) {
+    match session::<P>(parent, requirement, Attributes::empty()) {
         Ok(Ok(session)) => Some(session),
         failure => {
             crate::system::log_line(

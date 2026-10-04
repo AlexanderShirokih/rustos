@@ -2,17 +2,13 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
-
 use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
 use filesystem_abi::file_system;
 use kernel_objects::Port;
-use runtime::process_exit;
-use syscall::{Handle, kind};
 
-const FAILED_EXIT_CODE: u64 = 1;
+mod fixture_start;
+
+use fixture_start::{Failed, fixture_start};
 
 component_manifest! {
     struct UnresponsiveFileSystemStartup {
@@ -21,19 +17,12 @@ component_manifest! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Ok(requirements) = UnresponsiveFileSystemStartup::request(parent) else {
-        process_exit(FAILED_EXIT_CODE)
-    };
-    let Ok(service) = Port::create() else {
-        process_exit(FAILED_EXIT_CODE)
-    };
-    let _ = serve_export::<file_system::Protocol>(&requirements.parent, whole_export(&service));
-    process_exit(FAILED_EXIT_CODE)
-}
+fixture_start!(run);
 
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(FAILED_EXIT_CODE)
+fn run(parent: &Port) -> Result<(), Failed> {
+    let requirements =
+        UnresponsiveFileSystemStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let service = Port::create().map_err(|_| Failed)?;
+    let _ = serve_export::<file_system::Protocol>(&requirements.parent, whole_export(&service));
+    Err(Failed)
 }

@@ -2,18 +2,21 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
 extern crate alloc;
 
-use core::{convert::Infallible, panic::PanicInfo};
+use core::convert::Infallible;
 
 use component_startup::{Requirements as _, component_manifest};
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system};
 use filesystem_server::{Error, Result as ServerResult, serve};
+use kernel_objects::Port;
 use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, USER_VA_END, kind};
+
+mod fixture_start;
+
+use fixture_start::{Failed, fixture_start};
 
 const LOG_TAG: &str = "crashfs";
 
@@ -142,14 +145,15 @@ fn kill_process_by_fault() -> ! {
     process_exit(FAILED_EXIT_CODE)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Err(error) = run(parent);
+fixture_start!(run);
+
+fn run(parent: &Port) -> Result<(), Failed> {
+    let Err(error) = serve_crashing(parent.as_raw());
     log_fmt(format_args!("stopped: {error}"));
-    process_exit(FAILED_EXIT_CODE)
+    Err(Failed)
 }
 
-fn run(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
+fn serve_crashing(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
     start_component(parent, LOG_TAG);
     let _requirements = CrashFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
     let backend = |_| {
@@ -158,10 +162,4 @@ fn run(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
         })
     };
     serve(parent, None, backend)
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(FAILED_EXIT_CODE)
 }

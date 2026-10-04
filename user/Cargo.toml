@@ -23,7 +23,6 @@ members = [
     "../lib/userland-loader",
 ]
 
-# Архитектурно зависимый крейт объявляет архитектуру ключом `arch` своего манифеста.
 [workspace.metadata.molecular]
 profile = "userland"
 
@@ -50,7 +49,6 @@ bootstrap-abi = { path = "../lib/bootstrap-abi" }
 collections = { path = "../lib/collections" }
 component-abi = { path = "../lib/component-abi" }
 device-resolver = { path = "../lib/device-resolver" }
-device-resolver-aarch64 = { path = "../lib/device-resolver-aarch64" }
 display-abi = { path = "../lib/display-abi" }
 fdt = { path = "../lib/fdt" }
 filesystem = { path = "../lib/filesystem" }

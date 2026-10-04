@@ -6,10 +6,10 @@ use userland_image::{BootPlan, decode_plan};
 
 use super::{
     PlanProgram, compile_plan,
-    limits::{CHILD_HANDLES, ROOTKEEPER_HANDLES, rootkeeper_handles},
+    limits::{CHILD_HANDLES, ROOTKEEPER_HANDLES, SEARCH_ROOTS, rootkeeper_handles},
     source::BOOT_PLAN_MANIFEST_VERSION,
 };
-use crate::manifest::{ManifestRequirement, ProgramManifest};
+use crate::manifest::{ManifestRequirement, ProgramExport, ProgramManifest};
 
 const ROUTER: &str = "namespace-router";
 const TWIN: &str = "namespace-router-twin";
@@ -145,7 +145,13 @@ fn session(name: &str, protocol: &str) -> ManifestRequirement {
 fn declaration(requirements: Vec<ManifestRequirement>, exports: &[&str]) -> ProgramManifest {
     ProgramManifest {
         requirements,
-        exports: exports.iter().map(|export| String::from(*export)).collect(),
+        exports: exports
+            .iter()
+            .map(|export| ProgramExport {
+                protocol: String::from(*export),
+                filters: Vec::new(),
+            })
+            .collect(),
     }
 }
 
@@ -334,7 +340,15 @@ fn plan_carries_the_restart_count_of_a_component() {
 
 #[test]
 fn the_rootkeeper_handle_estimate_counts_each_provider_and_grant() {
-    let root = declaration(vec![], &[CLOCK_PROTOCOL]).program_bytes();
+    let pair = |value: &str| (String::from("compatible"), String::from(value));
+    let root = ProgramManifest {
+        requirements: Vec::new(),
+        exports: vec![ProgramExport {
+            protocol: String::from(CLOCK_PROTOCOL),
+            filters: vec![vec![pair("a")], vec![pair("b")]],
+        }],
+    }
+    .program_bytes();
     let consumer = declaration(
         vec![
             requirement("clock", RequirementMode::One, CLOCK_PROTOCOL),
@@ -344,6 +358,7 @@ fn the_rootkeeper_handle_estimate_counts_each_provider_and_grant() {
         &[CLOCK_PROTOCOL],
     )
     .program_bytes();
+
     let root = component_abi::decode_manifest(userland::ProgramView::manifest(
         &userland::decode_program(&root).unwrap(),
     ))
@@ -352,17 +367,18 @@ fn the_rootkeeper_handle_estimate_counts_each_provider_and_grant() {
         &userland::decode_program(&consumer).unwrap(),
     ))
     .unwrap();
+
     assert_eq!(rootkeeper_handles(&[root]), ROOTKEEPER_HANDLES);
     assert_eq!(
         rootkeeper_handles(&[root, consumer]),
-        ROOTKEEPER_HANDLES + CHILD_HANDLES + 1 + 2 + 1 + 1 + 1 + 1
+        ROOTKEEPER_HANDLES + CHILD_HANDLES + 1 + SEARCH_ROOTS + 2 + 1 + 1 + 1 + 1
     );
 }
 
 #[test]
 fn plan_counts_boot_exports_before_accepting_all_requirements() {
     const IMPORTERS: usize = 10;
-    const REQUIREMENTS: usize = 100;
+    const REQUIREMENTS: usize = 50;
 
     let importer = || {
         declaration(
@@ -385,7 +401,7 @@ fn plan_counts_boot_exports_before_accepting_all_requirements() {
         image = image.with(&name, importer());
         components.push(Component::new(&name));
     }
-    let per_importer = CHILD_HANDLES + REQUIREMENTS + 1;
+    let per_importer = CHILD_HANDLES + REQUIREMENTS * (1 + SEARCH_ROOTS) + 1;
     let handles = ROOTKEEPER_HANDLES + IMPORTERS * per_importer;
     assert!(handles > HANDLE_TABLE_CAPACITY as usize);
     assert!(ROOTKEEPER_HANDLES + (IMPORTERS - 1) * per_importer <= HANDLE_TABLE_CAPACITY as usize);
@@ -409,7 +425,8 @@ fn plan_rejects_an_export_past_the_protocol_id_bound() {
     bytes[at] += 1;
     bytes.insert(at + 1, b'P');
     bytes[27..31].copy_from_slice(
-        &(16u32 + 1 + u32::try_from(protocol.len()).expect("protocol length fits")).to_le_bytes(),
+        &(16u32 + 1 + u32::try_from(protocol.len()).expect("protocol length fits") + 1)
+            .to_le_bytes(),
     );
     let image = Image::new();
     let mut programs = image.programs();

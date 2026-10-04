@@ -3,13 +3,12 @@
 use alloc::vec::Vec;
 
 use drivers_common::{
-    DeviceNode, NodeProperty,
     probe::{ProbeContext, ProbeError},
     services::mmio::MmioAddress,
 };
 use fdt::{
     devicetree::Node,
-    devicetreeext::{self, translate_window},
+    devicetreeext::{self, PropExt, translate_window},
 };
 
 use crate::{
@@ -54,15 +53,10 @@ impl ProbeContextExt for FdtProbeContext<'_> {
 
 /// Проверяет, содержит ли узел хотя бы одну из указанных строк совместимости.
 pub fn is_compatible(node: &FdtNode, candidates: &[&str]) -> bool {
-    let Some(prop) = node.prop("compatible") else {
-        return false;
-    };
-    let data = prop.raw();
-    candidates.iter().any(|candidate| {
-        data.split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .any(|bytes| core::str::from_utf8(bytes).ok() == Some(candidate))
-    })
+    node.inner()
+        .prop("compatible")
+        .and_then(PropExt::into_string_list_iter)
+        .is_some_and(|mut compatible| compatible.any(|string| candidates.contains(&string)))
 }
 
 /// Возвращает ошибку, если узел не содержит ни одной из указанных строк совместимости.

@@ -5,11 +5,11 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{num::NonZeroU64, ops::ControlFlow};
 
 use component_abi::{
-    AcceptError, LOG_REQUIREMENT, PROTOCOL_ID_MAX, SessionError, SessionRequest,
-    SessionRequirement, component_startup as startup_contract,
+    AcceptError, Found, LOG_REQUIREMENT, PROTOCOL_ID_MAX, QueryAttributes, SessionError,
+    SessionRequest, SessionRequirement, component_startup as startup_contract,
 };
 use ipc::{
-    Listener as _, Protocol as _, RecvError,
+    IntoWireValue, Listener as _, Protocol as _, RecvError,
     wire::{MESSAGE_INLINE_MAX, Str},
 };
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
@@ -335,6 +335,7 @@ impl startup_contract::Service<Delivery> for State {
         &mut self,
         frame: &Delivery,
         requirement: SessionRequirement<'_>,
+        _attributes: QueryAttributes<'_>,
         reply: startup_contract::session::Reply<Debt>,
     ) {
         let badge = frame.badge;
@@ -366,7 +367,8 @@ impl startup_contract::Service<Delivery> for State {
                     let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
                 } else {
                     self.requests += 1;
-                    self.children.request(provider, badge, requirement, reply);
+                    self.children
+                        .request(provider, badge, name, protocol, reply);
                 }
             }
             Some(Answer::Grant {
@@ -422,6 +424,23 @@ impl startup_contract::Service<Delivery> for State {
             }
         };
         self.children.accept(provider, frame.badge, export, reply);
+    }
+
+    fn all(
+        &mut self,
+        _frame: &Delivery,
+        _requirement: SessionRequirement<'_>,
+        _attributes: QueryAttributes<'_>,
+    ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Cap<kind::Port>, SessionError>> {
+        Err::<Port, _>(SessionError::Refused)
+    }
+
+    fn next(&mut self, _frame: &Delivery, reply: startup_contract::next::Reply<Debt>) {
+        let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
+    }
+
+    fn open(&mut self, _frame: &Delivery, reply: startup_contract::open::Reply<Debt>) {
+        let _ = reply.send(Err::<Port, _>(SessionError::Refused));
     }
 }
 

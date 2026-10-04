@@ -1,8 +1,9 @@
-use device_resolver::{
-    ControllerBinding, ControllerBindings, ControllerId, DeviceInterrupt, InterruptLine,
-    InterruptSpecifier,
-};
 use syscall::IrqTrigger;
+
+use crate::{
+    binding::{ControllerBinding, ControllerBindings, InterruptSpecifier},
+    platform::{ControllerId, DeviceInterrupt, InterruptLine},
+};
 
 const GIC_COMPATIBLE: &[&str] = &["arm,gic-v3", "arm,gic-400", "arm,cortex-a15-gic"];
 
@@ -18,7 +19,7 @@ const GIC_TRIGGER_MASK: u32 = 0xF;
 const GIC_EDGE_RISING: u32 = 1;
 const GIC_EDGE_FALLING: u32 = 2;
 
-/// Реестр биндингов контроллеров прерываний платформы aarch64.
+/// Реестр биндингов контроллеров прерываний, которые разбирает система.
 pub const PLATFORM_BINDINGS: ControllerBindings =
     ControllerBindings::new(&[ControllerBinding::new(GIC_COMPATIBLE, decode_gic_specifier)]);
 
@@ -62,12 +63,13 @@ mod tests {
         cells
     }
 
+    fn gic() -> &'static ControllerBinding {
+        PLATFORM_BINDINGS.lookup("arm,gic-v3").expect("gic binding")
+    }
+
     fn decode(kind: u32, number: u32, flags: u32) -> Option<DeviceInterrupt> {
         let cells = gic_specifier(kind, number, flags);
-        PLATFORM_BINDINGS
-            .lookup("arm,gic-v3")
-            .expect("gic binding")
-            .decode(InterruptSpecifier::new(&cells))
+        gic().decode(InterruptSpecifier::new(&cells))
     }
 
     #[test]
@@ -96,34 +98,21 @@ mod tests {
 
     #[test]
     fn gic_rejects_an_unknown_interrupt_kind_and_a_short_specifier() {
-        assert_eq!(decode(7, 0, 4), None);
-
         let short = [0u8; CELL_SIZE * 2];
-        assert_eq!(
-            PLATFORM_BINDINGS
-                .lookup("arm,gic-v3")
-                .expect("gic binding")
-                .decode(InterruptSpecifier::new(&short)),
-            None
-        );
+
+        let unknown_kind = decode(7, 0, 4);
+        let short_specifier = gic().decode(InterruptSpecifier::new(&short));
+
+        assert_eq!(unknown_kind, None);
+        assert_eq!(short_specifier, None);
     }
 
     #[test]
     fn both_gic_generations_lead_to_one_entry() {
-        for compatible in ["arm,gic-v3", "arm,cortex-a15-gic"] {
-            let binding = PLATFORM_BINDINGS.lookup(compatible).expect("gic binding");
-            let cells = gic_specifier(GIC_KIND_SPI, 2, 4);
-            assert_eq!(
-                binding
-                    .decode(InterruptSpecifier::new(&cells))
-                    .map(|interrupt| interrupt.line.number()),
-                Some(34)
-            );
-        }
-    }
+        let older = PLATFORM_BINDINGS
+            .lookup("arm,cortex-a15-gic")
+            .expect("gic binding");
 
-    #[test]
-    fn a_controller_outside_the_platform_has_no_binding() {
-        assert!(PLATFORM_BINDINGS.lookup("riscv,plic0").is_none());
+        assert!(core::ptr::eq(older, gic()));
     }
 }

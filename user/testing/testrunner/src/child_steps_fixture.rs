@@ -2,9 +2,7 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::{num::NonZeroU64, panic::PanicInfo, sync::atomic::AtomicU64};
+use core::{num::NonZeroU64, sync::atomic::AtomicU64};
 
 use component_abi::component_startup as startup_contract;
 use component_startup::{
@@ -16,12 +14,14 @@ use runtime::{PortTransport, Timeout, log_line, process_exit, start_component};
 use syscall::{Handle, Rights, kind};
 
 mod child_steps_protocol;
+mod fixture_start;
 mod probe_protocol;
 
 use child_steps_protocol::{
     Report, STEP_LINE, Step, accept_error_code, action, child_steps, ipc_error_code, outcome,
     session_error_of,
 };
+use fixture_start::{Failed, fixture_start};
 use probe_protocol::{Echo, probe};
 
 const LOG_TAG: &str = "steps";
@@ -42,24 +42,19 @@ struct Fixture {
     held: Option<SessionRequest>,
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    let Ok(requirements) = StepsStartup::request(parent) else {
-        process_exit(FAILED_EXIT_CODE)
-    };
+fixture_start!(run);
 
-    let Some(steps) = requirements.steps else {
-        process_exit(FAILED_EXIT_CODE)
-    };
+fn run(parent: &Port) -> Result<(), Failed> {
+    start_component(parent.as_raw(), LOG_TAG);
+    let requirements = StepsStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+
+    let steps = requirements.steps.ok_or(Failed)?;
     let logged = runtime::log::installed();
-    let Ok(export) = Port::create() else {
-        process_exit(FAILED_EXIT_CODE)
-    };
+    let export = Port::create().map_err(|_| Failed)?;
 
     let steps = steps.client();
     let mut fixture = Fixture {
-        parent,
+        parent: parent.as_raw(),
         export,
         next_badge: AtomicU64::new(0),
         held: None,
@@ -71,9 +66,7 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
             outcome: code,
             value,
         };
-        let Ok(step) = steps.next(report) else {
-            process_exit(FAILED_EXIT_CODE)
-        };
+        let step = steps.next(report).map_err(|_| Failed)?;
         last = fixture.run(step);
     }
 }
@@ -157,10 +150,5 @@ fn wait() -> ! {
     if let Ok(own) = Port::create() {
         let _ = own.recv(Timeout::INFINITE);
     }
-    process_exit(FAILED_EXIT_CODE)
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
     process_exit(FAILED_EXIT_CODE)
 }

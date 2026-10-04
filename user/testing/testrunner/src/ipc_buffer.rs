@@ -77,6 +77,5 @@ fn ipc_buffer_per_thread_distinct() {
 
     let sibling_va = SIBLING_VA.load(Relaxed);
     kernel_tests::kassert!(sibling_va > 0);
-    // Два потока одного процесса - разные VA per-thread буферов.
     kernel_tests::kassert!(sibling_va != main_va);
 }

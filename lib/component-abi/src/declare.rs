@@ -10,14 +10,16 @@
 #[macro_export]
 macro_rules! __component_manifest_record {
     (
-        exports = [$($export:path),*]
+        exports = [$($export:path $(=> [$($filter:tt)*])?),*]
         requirements { $($requirement:ident: $kind:ident $(($($parameter:tt)*))?),* }
     ) => {
         const _: () = {
             const REQUIREMENTS: &[$crate::RequirementDeclaration] = &[$(
                 $crate::__component_manifest_record!(@requirement $requirement $kind $(($($parameter)*))?)
             ),*];
-            const EXPORTS: &[&str] = &[$($crate::__component_manifest_record!(@export $export)),*];
+            const EXPORTS: &[$crate::ExportDeclaration] = &[$(
+                $crate::__component_manifest_record!(@export $export $(=> [$($filter)*])?)
+            ),*];
             const RECORD_LEN: usize = $crate::manifest_len(REQUIREMENTS, EXPORTS);
 
             #[cfg_attr(
@@ -29,7 +31,21 @@ macro_rules! __component_manifest_record {
         };
     };
     (@export $protocol:path) => {
-        <$protocol as $crate::__Protocol>::ID
+        $crate::ExportDeclaration::new(<$protocol as $crate::__Protocol>::ID)
+    };
+    (@export $protocol:path => [$({ $($key:tt = $value:literal),+ $(,)? }),* $(,)?]) => {
+        $crate::ExportDeclaration::filtered(<$protocol as $crate::__Protocol>::ID, &[$(&[$(
+            $crate::Attribute {
+                key: $crate::__component_manifest_record!(@key $key),
+                value: $value.as_bytes(),
+            }
+        ),+]),*])
+    };
+    (@key $key:ident) => {
+        stringify!($key).as_bytes()
+    };
+    (@key $key:literal) => {
+        $key.as_bytes()
     };
     (@requirement log $($declaration:tt)*) => {
         compile_error!("`log` is the name reserved for the log its parent serves")
@@ -48,7 +64,7 @@ mod tests {
         COMPONENT_MANIFEST_SECTION, RequirementMode, decode_manifest, encode_manifest, manifest_len,
     };
 
-    const NO_EXPORTS: &[&str] = &[];
+    const NO_EXPORTS: &[crate::ExportDeclaration] = &[];
 
     ipc::protocol! {
         mod file_system {
@@ -74,9 +90,12 @@ mod tests {
             "FileSystem",
         )];
 
-    const TYPED_EXPORTS: &[&str] = &[
+    const TYPED_EXPORTS: &[crate::ExportDeclaration] = &[
         crate::__component_manifest_record!(@export file_system::Protocol),
-        crate::__component_manifest_record!(@export file_system_mount::Protocol),
+        crate::__component_manifest_record!(@export file_system_mount::Protocol => [
+            { compatible = "a", "vendor,role" = "" },
+            { compatible = "b" },
+        ]),
     ];
     const EXPORTS_LEN: usize = manifest_len(&[], TYPED_EXPORTS);
 
@@ -88,7 +107,7 @@ mod tests {
     const REQUIREMENTS_LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
 
     crate::__component_manifest_record! {
-        exports = [file_system::Protocol]
+        exports = [file_system::Protocol => [{ compatible = "a" }], file_system_mount::Protocol]
         requirements { files: all(file_system::Protocol), admin: session(file_system_mount::Protocol) }
     }
 
@@ -112,11 +131,32 @@ mod tests {
         let bytes: [u8; EXPORTS_LEN] = encode_manifest(&[], TYPED_EXPORTS);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
+        let exports: std::vec::Vec<_> = manifest
+            .exports()
+            .map(|export| {
+                let filters: std::vec::Vec<std::vec::Vec<_>> = export
+                    .filters()
+                    .map(|filter| filter.iter().map(|pair| (pair.key, pair.value)).collect())
+                    .collect();
+                (export.protocol(), filters)
+            })
+            .collect();
+
+        let alternatives: std::vec::Vec<std::vec::Vec<(&[u8], &[u8])>> = std::vec![
+            std::vec![(b"compatible", b"a"), (b"vendor,role", b"")],
+            std::vec![(b"compatible", b"b")],
+        ];
         assert_eq!(
-            manifest.exports().collect::<std::vec::Vec<_>>(),
+            exports,
             [
-                <file_system::Protocol as ipc::Protocol>::ID,
-                <file_system_mount::Protocol as ipc::Protocol>::ID
+                (
+                    <file_system::Protocol as ipc::Protocol>::ID,
+                    std::vec::Vec::new()
+                ),
+                (
+                    <file_system_mount::Protocol as ipc::Protocol>::ID,
+                    alternatives
+                ),
             ]
         );
     }

@@ -136,16 +136,13 @@ fn send_recv_round_trip_sender_first() {
     EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
 
     let worker = spawn_worker(sender_worker);
-    // Ждём, пока worker объявит готовность (он блокируется в send сразу
-    // после). Корректность не зависит от порядка - recv смэтчит припаркованного
-    // отправителя либо сам припаркуется.
     while WORKER_READY.load(SeqCst) == 0 {
         core::hint::spin_loop();
     }
 
     let mut buf = [0u8; 8];
     let (len, reply) = ep.recv_bytes(&mut buf, Timeout::INFINITE).expect("recv");
-    kernel_tests::kassert!(reply.is_none()); // не call -> нет reply
+    kernel_tests::kassert!(reply.is_none());
     kernel_tests::kassert_eq!(len, 4);
     kernel_tests::kassert!(&buf[..4] == b"ping");
 
@@ -285,14 +282,12 @@ fn cap_transfer_through_port() {
     kernel_tests::kassert_eq!(len, 0);
     kernel_tests::kassert_eq!(ncaps, 1);
 
-    // Получили новый HandleId на ту же Signal.
     // SAFETY: собственный буфер.
     let received_raw = unsafe { read_cap(va, 0) };
     let received = NonZeroU32::new(received_raw)
         .map(Handle::<kind::Signal>::from_abi)
         .expect("received cap handle");
 
-    // Идентичность: бит, поднятый отправителем до переноса, виден здесь.
     let observed = signal_wait_one(received, SIGNALED, Timeout::POLL);
     let bit = i64::from(SIGNALED);
     kernel_tests::kassert!(observed & bit == bit);
@@ -329,8 +324,6 @@ fn badge_round_trip_two_clients() {
     let ep = Port::create().expect("port create");
     let ep_raw = ep.as_raw();
 
-    // Минтим две badged-копии (set-once: оригинал незаклеймён -> копии получают
-    // заданный badge). Права сужаем до WRITE - клиенту нужен только send.
     let copy_a = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_A).expect("mint badged copy A");
     let copy_b = handle_duplicate(ep_raw, RIGHTS_WRITE, BADGE_B).expect("mint badged copy B");
     EP_BADGED[0].store(u64::from(copy_a.as_raw().raw()), SeqCst);
@@ -347,18 +340,15 @@ fn badge_round_trip_two_clients() {
         core::hint::spin_loop();
     }
 
-    // Сервер принимает два сообщения и собирает наблюдённые значки. Порядок
-    // прихода не детерминирован - проверяем как множество.
     let va = ipc_va();
     let mut seen = [0u64; 2];
     for slot in &mut seen {
         let reply = ep.recv(Timeout::INFINITE).expect("recv");
-        kernel_tests::kassert!(reply.is_none()); // не call -> нет reply
+        kernel_tests::kassert!(reply.is_none());
         // SAFETY: собственный буфер сервера.
         *slot = unsafe { read_badge(va) };
     }
 
-    // Оба значка получены и различны, совпадают с выданными.
     let got_a = seen[0] == BADGE_A || seen[1] == BADGE_A;
     let got_b = seen[0] == BADGE_B || seen[1] == BADGE_B;
     kernel_tests::kassert!(got_a);
@@ -389,7 +379,6 @@ fn recv_poll_no_sender_should_wait() {
 #[kernel_test]
 fn recv_finite_timeout_no_sender_should_wait() {
     let ep = Port::create().expect("port create");
-    // 10 мс - заведомо истечёт, отправитель не появится.
     assert_timeout(ep.recv(Timeout::from_millis(10)).map(|_| ()));
 }
 

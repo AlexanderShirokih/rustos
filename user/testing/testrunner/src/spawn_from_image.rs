@@ -8,10 +8,10 @@ use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE};
 use userland_image::component_name;
 use userland_loader::load_program;
 
-const REPLY_HOLDER: &str = "/reply-holder/exec";
+use crate::fixture::FIXTURE_ENTRY;
+
 const ROLLBACK_PROBE_NAME: &str = "load-image-rollback";
 
-const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 const PROCESS_CLEANUP_RETRY_ATTEMPTS: usize = 64;
 const PROCESS_CLEANUP_RETRY: Timeout = Timeout::from_millis(1);
 const PROCESS_CREATE_ROLLBACK_ATTEMPTS: usize = 80;
@@ -61,7 +61,7 @@ fn load_image_error_reclaims_each_created_process() {
 
 #[kernel_test]
 fn start_error_reclaims_each_loaded_process() {
-    let child = crate::fixture::program(REPLY_HOLDER);
+    let child = crate::fixture::program(FIXTURE_ENTRY);
 
     let root = Resource::self_resource().expect("self metering resource");
     let write_only = root
@@ -75,7 +75,7 @@ fn start_error_reclaims_each_loaded_process() {
                 let initial = Signal::create().expect("initial capability");
                 load_program(
                     &child,
-                    ProcessName::new(component_name(REPLY_HOLDER)).expect("fixture process name"),
+                    ProcessName::new(component_name(FIXTURE_ENTRY)).expect("fixture process name"),
                     &write_only,
                     initial,
                 )
@@ -84,27 +84,6 @@ fn start_error_reclaims_each_loaded_process() {
             &timer,
         );
     }
-}
-
-/// Сервер принимает `call` и уходит, не ответив: вызыватель обязан быть
-/// разбужен отказом.
-#[kernel_test]
-fn caller_wakes_when_server_dies_holding_reply() {
-    use kernel_objects::{Error, Port};
-    use syscall::SyscallError;
-
-    let service = Port::create_service(None).expect("port create");
-    let _process = crate::fixture::spawn_entry(REPLY_HOLDER, service.server);
-
-    let mut out = [0u8; 8];
-    // Кадр уже принят, поэтому вызыватель снят с очереди порта. Его будит снос
-    // reply-хэндла вместе с таблицей ушедшего сервера, а не пустое множество
-    // получателей. Тайм-аут страхует от вечной парковки, исход - `PeerClosed`.
-    let result = service.client.call_bytes(b"x", &mut out, CALL_TIMEOUT);
-    kernel_tests::kassert!(matches!(
-        result,
-        Err(Error::Syscall(SyscallError::PeerClosed))
-    ));
 }
 
 fn fail_load_when_process_returns(

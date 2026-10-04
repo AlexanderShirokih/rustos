@@ -1,5 +1,5 @@
-//! Драйвер PL031 RTC: компонент композиции, получающий линию прерывания и окно
-//! регистров устройства по сессии `Platform`.
+//! Драйвер PL031 RTC: компонент композиции, который находит устройство в описании платформы и
+//! получает его линию прерывания и окно регистров по сессии `Platform`.
 
 #![no_std]
 #![no_main]
@@ -16,7 +16,7 @@ use component_startup::{Requirements as _, component_manifest, serve_export, who
 use io::mmio::{Mmio, Reg};
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqLine, MemoryRegion, MmioWindow, Port, SessionTransport};
-use platform_abi::platform;
+use platform_abi::{Description, DeviceId, platform};
 use rtc_abi::rtc;
 use runtime::{
     PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned, start_component,
@@ -28,6 +28,8 @@ mod error;
 use error::{Error, Result};
 
 const LOG_TAG: &str = "rtc";
+
+const COMPATIBLE: &str = "arm,pl031";
 
 const RTC_DATA: Reg<u32> = Reg::new(0x00);
 const RTC_MATCH: Reg<u32> = Reg::new(0x04);
@@ -110,12 +112,13 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     .map_err(|_| Error::Runtime)?;
 
     let platform = requirements.platform.ok_or(Error::Start)?.client();
-    let compatible = ipc::wire::Str::new("arm,pl031").ok_or(Error::Start)?;
-    let line = IrqLine::from(platform.irq(compatible, 0, 0)??);
-    let window = platform.mmio(compatible, 0, 0)??;
+    let device = find_device(&platform)?;
+    let line = IrqLine::from(platform.irq(device.as_wire(), 0)??);
+    let window = platform.mmio(device.as_wire(), 0)??;
     let window = MmioWindow {
         region: MemoryRegion::from(window.region),
         offset: window.offset,
+        size: window.size,
     };
     let mapping = window.map()?;
     let mut driver = Pl031 {
@@ -127,6 +130,27 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     log_line("started");
     serve(service, &mut driver);
     Err(Error::Ipc)
+}
+
+fn find_device(platform: &platform::Client<SessionTransport>) -> Result<DeviceId> {
+    let description = platform.description()??;
+    let region = MemoryRegion::from(description.region);
+    let mapping = region.map_full_read_only()?;
+    let tree = Description::new(mapping.as_bytes(), description.offset)?;
+
+    let mut refusal = None;
+    for device in tree.devices() {
+        match device {
+            Ok(device) if device.compatible().any(|name| name == COMPATIBLE) => {
+                return Ok(device.id().clone());
+            }
+            Ok(_) => {}
+            Err(error) => {
+                refusal.get_or_insert(error);
+            }
+        }
+    }
+    Err(refusal.map_or(Error::NoDevice, Error::Description))
 }
 
 fn serve(service: &Port, driver: &mut Pl031) {

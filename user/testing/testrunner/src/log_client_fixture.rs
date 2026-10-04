@@ -3,7 +3,7 @@
 #![allow(unsafe_code)]
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::{IssuedHandle, Port, kind};
+use kernel_objects::Port;
 use log_abi::log;
 use runtime::PortTransport;
 
@@ -15,8 +15,7 @@ use log_fixture_protocol::FIXTURE_LINE;
 
 fixture_start!(probe);
 
-fn probe(log: IssuedHandle<kind::Port>) -> Result<(), Failed> {
-    let log = Port::from(log);
+fn probe(log: &Port) -> Result<(), Failed> {
     let bootstrap = bootstrap::Client::new(PortTransport::new(log.borrow()));
     if let Ok(Ok(_)) = bootstrap.acquire_hardware() {
         return Err(Failed);

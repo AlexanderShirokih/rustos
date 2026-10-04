@@ -900,8 +900,6 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
         })
         .collect();
 
-    // Вытеснение происходит только на запросе сверх предела. Поэтому первый завершённый поток
-    // означает, что все запросы уже в очереди маршрутизатора.
     let evicted = (0..EVICTION_POLLS)
         .find_map(|_| {
             let ended = callers

@@ -5,18 +5,17 @@
 #![no_main]
 #![allow(unsafe_code)]
 
-runtime::process_heap!();
-
 extern crate alloc;
 
 mod display_fixture_protocol;
+mod fixture_start;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::panic::PanicInfo;
 
 use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
 use display_fixture_protocol::DIMENSION;
+use fixture_start::{Failed, fixture_start};
 use ipc::{
     IntoWireValue, Listener, RecvError,
     wire::{Cap, MESSAGE_INLINE_MAX},
@@ -26,7 +25,7 @@ use runtime::{
     MemoryAccess, PortTransport, Priority, Timeout, UserMemFlags, log_fmt, log_line, process_exit,
     spawn_owned, start_component,
 };
-use syscall::{Handle, Rights, kind};
+use syscall::{Rights, kind};
 
 const LOG_TAG: &str = "display";
 
@@ -162,15 +161,13 @@ impl display::Service<Delivery> for Screen {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    let Ok(requirements) = DisplayStartup::request(parent) else {
-        process_exit(FAILED_EXIT_CODE)
-    };
-    let (Ok(service), Some(mut screen)) = (Port::create(), Screen::new()) else {
-        process_exit(FAILED_EXIT_CODE)
-    };
+fixture_start!(run);
+
+fn run(parent: &Port) -> Result<(), Failed> {
+    start_component(parent.as_raw(), LOG_TAG);
+    let requirements = DisplayStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let service = Port::create().map_err(|_| Failed)?;
+    let mut screen = Screen::new().ok_or(Failed)?;
     let service: &'static Port = Box::leak(Box::new(service));
     let parent_port = requirements.parent;
     let export_thread = spawn_owned(
@@ -183,12 +180,12 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
         Priority::new(1),
     );
     if export_thread.is_err() {
-        process_exit(FAILED_EXIT_CODE)
+        return Err(Failed);
     }
 
     log_line("started");
     serve(service, &mut screen);
-    process_exit(FAILED_EXIT_CODE)
+    Err(Failed)
 }
 
 fn serve(service: &Port, screen: &mut Screen) {
@@ -204,9 +201,4 @@ fn serve(service: &Port, screen: &mut Screen) {
             Err(RecvError::Closed) => break,
         }
     }
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(FAILED_EXIT_CODE)
 }

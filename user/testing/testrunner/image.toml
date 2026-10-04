@@ -17,11 +17,6 @@ path = "/port-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "reply-holder"
-path = "/reply-holder"
-
-[[programs]]
-package = "testrunner"
 bin = "badge-client"
 path = "/badge-client"
 
@@ -72,11 +67,6 @@ path = "/log-duplicate-fixture"
 
 [[programs]]
 package = "testrunner"
-bin = "failing-fixture"
-path = "/failing-fixture"
-
-[[programs]]
-package = "testrunner"
 bin = "idle-export-fixture"
 path = "/idle-export-fixture"
 
@@ -84,6 +74,11 @@ path = "/idle-export-fixture"
 package = "testrunner"
 bin = "export-fixture"
 path = "/export-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "filtered-export-fixture"
+path = "/filtered-export-fixture"
 
 [[programs]]
 package = "testrunner"
@@ -141,6 +136,11 @@ bin = "display-fixture"
 path = "/display-fixture"
 
 [[programs]]
+package = "testrunner"
+bin = "multiplicity-fixture"
+path = "/multiplicity-fixture"
+
+[[programs]]
 package = "driver-pl031"
 path = "/driver-pl031"
 
@@ -175,8 +175,3 @@ source = "user/testing/testrunner/assets/area.txt"
 [[programs]]
 package = "std-selftest"
 path = "/std-selftest"
-
-[[programs]]
-package = "testrunner"
-bin = "multiplicity-fixture"
-path = "/multiplicity-fixture"

@@ -19,14 +19,6 @@ fuzz_target!(|data: &[u8]| {
     let Ok(tree) = DeviceTree::from_bytes(data) else {
         return;
     };
-    // Продакшн-вход - from_ptr с окном ровно в total_size; обрезаем до него,
-    // иначе смещения за концом дерева читаются, а на устройстве отсекаются.
-    let Some(exact) = data.get(..tree.size()) else {
-        return;
-    };
-    let Ok(tree) = DeviceTree::from_bytes(exact) else {
-        return;
-    };
 
     let _ = tree.size();
     for reservation in tree.memory_reservations().take(NODE_LIMIT) {

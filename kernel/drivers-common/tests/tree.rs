@@ -1,5 +1,4 @@
 #![allow(clippy::unwrap_used)]
-#![allow(clippy::indexing_slicing)]
 
 use drivers_common::tree::{DeviceNode, DeviceTreeSource, NodeProperty};
 
@@ -16,11 +15,6 @@ impl NodeProperty for TestProp<'_> {
 
     fn raw(&self) -> &[u8] {
         self.raw
-    }
-
-    fn as_cstr(&self) -> Option<&str> {
-        let len = self.raw.len().saturating_sub(1);
-        core::str::from_utf8(&self.raw[..len]).ok()
     }
 }
 
@@ -56,6 +50,10 @@ impl DeviceNode for TestNode<'_> {
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(n, raw)| TestProp { name: n, raw })
+    }
+
+    fn is_available(&self) -> bool {
+        true
     }
 
     fn children(&self) -> Self::ChildIter<'_> {
@@ -103,5 +101,6 @@ fn device_tree_source_provides_root_and_children() {
     let tree = TestTree { root };
 
     let uart = tree.root().unwrap().children().next().unwrap();
+
     assert_eq!(uart.name(), "serial@1000");
 }

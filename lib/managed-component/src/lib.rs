@@ -9,4 +9,4 @@ extern crate alloc;
 
 mod children;
 
-pub use children::{Children, Departure, GrantError, Outcome, Status};
+pub use children::{Children, Departure, GrantError, Outcome, Purpose, Status};

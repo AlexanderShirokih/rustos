@@ -8,18 +8,10 @@ use alloc::{
 use core::{iter::Chain, option};
 
 use crate::{
-    DeviceNode, NodeProperty,
+    DeviceNode,
     driver::{DriverDescriptor, DriverFactory},
     probe::{ProbeContext, ProbeError, ProbeResult},
 };
-
-fn is_node_enabled<N: DeviceNode>(node: &N) -> bool {
-    // DT spec: отсутствие `status` равнозначно рабочему узлу.
-    let Some(prop) = node.prop("status") else {
-        return true;
-    };
-    matches!(prop.as_cstr(), Some("okay" | "ok"))
-}
 
 /// Проверяет узел на совместимость с драйвером и строит его фабрику при совпадении.
 ///
@@ -97,7 +89,7 @@ impl EmbeddedDriversScanner {
             });
         }
 
-        if !is_node_enabled(&node) {
+        if !node.is_available() {
             return Ok(());
         }
 

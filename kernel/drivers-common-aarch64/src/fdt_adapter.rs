@@ -3,7 +3,10 @@ extern crate alloc;
 use core::mem::size_of;
 
 use drivers_common::{DeviceNode, DeviceTreeSource, NodeProperty};
-use fdt::devicetree::{DeviceTree, Node, NodeIter, NodeKey, Property};
+use fdt::{
+    devicetree::{DeviceTree, Node, NodeIter, NodeKey, Property},
+    devicetreeext::NodeExt,
+};
 
 use crate::tree_ext::{AddressSpace, CellsSize, NodeAddressExt};
 
@@ -70,10 +73,6 @@ impl NodeProperty for FdtProperty<'_> {
     fn raw(&self) -> &[u8] {
         self.inner.value()
     }
-
-    fn as_cstr(&self) -> Option<&str> {
-        self.inner.as_cstr()
-    }
 }
 
 impl<'dt> DeviceNode for FdtNode<'dt> {
@@ -97,6 +96,10 @@ impl<'dt> DeviceNode for FdtNode<'dt> {
 
     fn prop(&self, name: &str) -> Option<Self::Property<'_>> {
         self.inner.prop(name).map(|inner| FdtProperty { inner })
+    }
+
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
     }
 
     fn children(&self) -> Self::ChildIter<'_> {

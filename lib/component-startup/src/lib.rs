@@ -18,7 +18,8 @@ mod request;
 #[doc(hidden)]
 pub use component_abi;
 pub use component_abi::{
-    AcceptError, LOG_REQUIREMENT, STARTUP_REQUEST_TIMEOUT, SessionError, component_startup,
+    AcceptError, Attribute, Attributes, LOG_REQUIREMENT, STARTUP_REQUEST_TIMEOUT, SessionError,
+    component_startup,
 };
 pub use declare::{Requirements, StartupError, StartupFailure};
 #[doc(hidden)]
@@ -27,5 +28,5 @@ pub use export::{ExportError, MintedSession, mint_session, serve_export, whole_e
 pub use ipc::wire::IpcError;
 pub use kernel_objects::{OwnedHandle, Port, PortTransport, Session, kind};
 pub use providers::{ProviderSessions, Providers};
-pub use request::{SessionRequest, accept, session};
+pub use request::{Found, SessionRequest, accept, all, next, open, session};
 pub use syscall::{Handle, ObjectKind};

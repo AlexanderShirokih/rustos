@@ -17,7 +17,7 @@ impl<'a> Cursor<'a> {
         self.position = pos.min(self.buffer.len());
     }
 
-    pub fn position(&self) -> usize {
+    pub(crate) fn position(&self) -> usize {
         self.position
     }
 
@@ -33,32 +33,24 @@ impl<'a> Cursor<'a> {
         Some(u32::from_be_bytes(word))
     }
 
-    pub fn read_cstr_at(&self, offset: usize) -> &'a str {
-        let buffer = self.buffer;
-        let Some(tail) = buffer.get(offset..) else {
-            return "";
-        };
-        let len = tail
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(tail.len());
-        tail.get(..len)
-            .and_then(|text| core::str::from_utf8(text).ok())
-            .unwrap_or("")
+    pub(crate) fn read_bytes(&mut self, length: usize) -> Option<&'a [u8]> {
+        let start = self.position;
+        let end = start.checked_add(length)?;
+        let bytes = self.buffer.get(start..end)?;
+        self.position = end;
+        Some(bytes)
     }
 
-    pub fn read_cstr_here(&mut self) -> &'a str {
+    pub(crate) fn read_cstr_here(&mut self) -> Option<&'a str> {
         let start = self.position;
-        let Some(tail) = self.buffer.get(start..) else {
-            return "";
-        };
-        let len = tail
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(tail.len());
-        self.position = start + len + 1; // перескочить '\0'
-        tail.get(..len)
-            .and_then(|text| core::str::from_utf8(text).ok())
-            .unwrap_or("")
+        let text = cstr_at(self.buffer, start)?;
+        self.position = start + text.len() + 1;
+        Some(text)
     }
+}
+
+pub(crate) fn cstr_at(buffer: &[u8], offset: usize) -> Option<&str> {
+    let tail = buffer.get(offset..)?;
+    let len = tail.iter().position(|byte| *byte == 0)?;
+    core::str::from_utf8(tail.get(..len)?).ok()
 }

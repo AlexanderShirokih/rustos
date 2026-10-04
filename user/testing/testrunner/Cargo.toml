@@ -21,12 +21,6 @@ test = false
 bench = false
 
 [[bin]]
-name = "reply-holder"
-path = "src/reply_holder.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "badge-client"
 path = "src/badge_client.rs"
 test = false
@@ -105,12 +99,6 @@ test = false
 bench = false
 
 [[bin]]
-name = "failing-fixture"
-path = "src/failing_fixture.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "idle-export-fixture"
 path = "src/idle_export_fixture.rs"
 test = false
@@ -119,6 +107,12 @@ bench = false
 [[bin]]
 name = "export-fixture"
 path = "src/export_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "filtered-export-fixture"
+path = "src/filtered_export_fixture.rs"
 test = false
 bench = false
 
@@ -170,6 +164,12 @@ path = "src/display_fixture.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "multiplicity-fixture"
+path = "src/multiplicity_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
@@ -201,9 +201,3 @@ userland-build = { workspace = true }
 
 [lints]
 workspace = true
-
-[[bin]]
-name = "multiplicity-fixture"
-path = "src/multiplicity_fixture.rs"
-test = false
-bench = false

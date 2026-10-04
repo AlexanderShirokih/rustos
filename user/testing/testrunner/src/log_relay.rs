@@ -287,8 +287,6 @@ fn exhaust_handle_table() -> (Port, Vec<Port>) {
     (source, handles)
 }
 
-// Кадр лог-сессии доходит до стока под именем её значка, а локальный тег
-// клиента остаётся его суффиксом.
 #[kernel_test]
 fn relay_forwards_a_frame_under_the_trusted_source() {
     with_relay(|session| {
@@ -302,7 +300,6 @@ fn relay_forwards_a_frame_under_the_trusted_source() {
     });
 }
 
-// Пустой локальный тег оставляет источником одно имя значка.
 #[kernel_test]
 fn relay_forwards_an_untagged_frame_under_the_badge_name() {
     with_relay(|session| {
@@ -314,8 +311,6 @@ fn relay_forwards_an_untagged_frame_under_the_badge_name() {
     });
 }
 
-// Значок вне таблицы имён попадает в журнал числовой формой, а клиентский тег
-// остаётся суффиксом и не даёт выдать себя за чужую сессию.
 #[kernel_test]
 fn relay_names_an_unnamed_badge_numerically() {
     with_relay(|session| {
@@ -327,8 +322,6 @@ fn relay_names_an_unnamed_badge_numerically() {
     });
 }
 
-// Переводы строк, табуляция и terminal controls доходят до стока только
-// видимыми escape-последовательностями.
 #[kernel_test]
 fn relay_escapes_control_characters_in_the_message() {
     with_relay(|session| {
@@ -341,8 +334,6 @@ fn relay_escapes_control_characters_in_the_message() {
     });
 }
 
-// Клиентская часть source не меняет его скобочную структуру и не создаёт
-// физической строки.
 #[kernel_test]
 fn relay_escapes_control_characters_and_brackets_in_the_local_tag() {
     with_relay(|session| {
@@ -354,8 +345,6 @@ fn relay_escapes_control_characters_and_brackets_in_the_local_tag() {
     });
 }
 
-// Unicode-разделители строк и абзацев нормализуются независимо от свойства
-// `char::is_control`.
 #[kernel_test]
 fn relay_escapes_unicode_line_and_paragraph_separators() {
     with_relay(|session| {
@@ -368,8 +357,6 @@ fn relay_escapes_unicode_line_and_paragraph_separators() {
     });
 }
 
-// Unicode format controls не могут переставить доверенный source или текст
-// сообщения при отображении журнала.
 #[kernel_test]
 fn relay_escapes_unicode_format_controls() {
     with_relay(|session| {
@@ -384,8 +371,6 @@ fn relay_escapes_unicode_format_controls() {
     });
 }
 
-// Рост строки после escaping порождает несколько bounded-записей без потери
-// хвоста нормализованного сообщения.
 #[kernel_test]
 fn relay_splits_a_grown_message_without_losing_its_tail() {
     with_relay(|session| {
@@ -411,7 +396,6 @@ fn relay_splits_a_grown_message_without_losing_its_tail() {
     });
 }
 
-// Обычный печатный UTF-8 relay передаёт без изменений.
 #[kernel_test]
 fn relay_keeps_ordinary_utf8_unchanged() {
     with_relay(|session| {
@@ -424,8 +408,6 @@ fn relay_keeps_ordinary_utf8_unchanged() {
     });
 }
 
-// Враждебные tag/message не дают стоку строку без trusted badge-prefix и не
-// оставляют физических управляющих символов.
 #[kernel_test]
 fn relay_never_writes_an_unprefixed_physical_line() {
     with_relay(|session| {
@@ -439,7 +421,6 @@ fn relay_never_writes_an_unprefixed_physical_line() {
     });
 }
 
-// Пустой message сохраняет семантику одного входного кадра и одной записи.
 #[kernel_test]
 fn relay_forwards_an_empty_message_once() {
     with_relay(|session| {
@@ -452,7 +433,6 @@ fn relay_forwards_an_empty_message_once() {
     });
 }
 
-// Уход сессии relay не останавливает. Следующая сессия обслуживается.
 #[kernel_test]
 fn relay_serves_past_a_departed_session() {
     with_relay(|session| {
@@ -468,8 +448,6 @@ fn relay_serves_past_a_departed_session() {
     });
 }
 
-// Кадр вне контракта отвергается по одному. Следующий валидный кадр relay
-// пересылает.
 #[kernel_test]
 fn relay_rejects_one_bad_frame_and_serves_the_next() {
     with_relay(|session| {
@@ -482,8 +460,6 @@ fn relay_rejects_one_bad_frame_and_serves_the_next() {
     });
 }
 
-// Capability, приложенная к кадру лога, дальше стока не идёт: relay закрывает
-// её, и порт остаётся без получателей.
 #[kernel_test]
 fn relay_closes_capabilities_carried_by_a_log_frame() {
     with_relay(|session| {
@@ -492,12 +468,9 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
         let writer = carried
             .duplicate(Rights::WRITE | Rights::TRANSFER, None)
             .expect("writer side");
-        // Корневая капа - единственный получатель. Она передаётся кадром.
         kernel_tests::kassert_eq!(send_log_frame_with_cap(&logger, carried), 0);
         wait_for_records(1);
 
-        // Закрытие корневой капы отзывает выведенную из неё клиентскую, а
-        // сохранённая капа оставляет отправителя ждать до срока.
         kernel_tests::kassert_eq!(
             port_send(writer.as_raw(), SEND_TIMEOUT),
             SyscallError::Revoked.as_return_value()
@@ -505,8 +478,6 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
     });
 }
 
-// Нехватка слота под capability отклоняет один кадр на стороне relay. По
-// освободившимся слотам следующий обычный кадр доходит до стока.
 #[kernel_test]
 fn relay_serves_after_receiver_resource_exhaustion() {
     with_relay(|session| {
@@ -518,9 +489,6 @@ fn relay_serves_after_receiver_resource_exhaustion() {
             send_log_frame_with_cap(&logger, carried),
             SyscallError::OutOfHandles.as_return_value()
         );
-        // После проверенного отказа свободный слот один, а претендента два: транзитная
-        // капа стока в потоке relay и порт-таймер ожидания записей. Освобождение ещё
-        // двух слотов снимает гонку потоков за единственный, не трогая сам сценарий.
         for _ in 0..2 {
             drop(fillers.pop().expect("full table contains filler handles"));
         }
@@ -531,8 +499,6 @@ fn relay_serves_after_receiver_resource_exhaustion() {
     });
 }
 
-// Лог-капа не даёт полномочий bootstrap-контракта, и попытки их взять relay
-// отклоняет.
 #[kernel_test]
 fn log_session_denies_bootstrap_operations() {
     with_relay(|session| {
@@ -540,11 +506,9 @@ fn log_session_denies_bootstrap_operations() {
         fixture.join(JOIN_TIMEOUT).expect("fixture terminates");
         kernel_tests::kassert_eq!(fixture.exit_code().expect("exit code"), 0);
 
-        // Строка фикстуры прошла тем же кадром, каким не прошли acquire-вызовы.
         let records = wait_for_records(1);
         kernel_tests::kassert!(records[0].message == FIXTURE_LINE);
 
-        // Relay продолжает обслуживать порт после отвергнутых кадров.
         let next = session(NAMED_BADGE);
         write_log(&next, "local", "relay is alive");
         let records = wait_for_records(2);
@@ -552,8 +516,6 @@ fn log_session_denies_bootstrap_operations() {
     });
 }
 
-// Уходящие сессии не копят непрочтённых событий. Минт новых продолжает
-// проходить и после смены их числа, кратного ёмкости таблицы.
 #[kernel_test]
 fn relay_drains_departed_badges_so_new_sessions_mint() {
     with_relay(|session| {
@@ -564,8 +526,6 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
                 drop(session(NonZeroU64::MIN.saturating_add(badge)));
             }
             minted += CHURN_BATCH;
-            // Доставленный кадр означает, что relay разобрал накопленные уходы.
-            // База синхронизирующих значков не пересекается с меняющимися.
             let sync = session(SYNC_BADGE_BASE.saturating_add(minted));
             write_log(&sync, "churn", "session after churn");
             records += 1;
@@ -574,8 +534,6 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
     });
 }
 
-// Закрытие лог-порта владельцем завершает цикл relay штатно. Сторона приёма
-// отзывается каскадом от корневой капы.
 #[kernel_test]
 fn relay_stops_when_its_log_port_closes() {
     let relay =
@@ -583,8 +541,6 @@ fn relay_stops_when_its_log_port_closes() {
     relay.shutdown(JOIN_TIMEOUT).expect("test log relay stops");
 }
 
-// Первый отказ стока прекращает куски текущего кадра. Сам кадр учитывается
-// одним отказом, и следующий успешный кадр сбрасывает последовательность.
 #[kernel_test]
 fn relay_stops_a_frame_at_the_first_refused_chunk() {
     with_relay(|session| {
@@ -603,8 +559,6 @@ fn relay_stops_a_frame_at_the_first_refused_chunk() {
     });
 }
 
-// Предел подряд идущих отказов стока уводит relay из цикла, а прерванная
-// успехом череда отказов его не трогает.
 #[kernel_test]
 fn relay_stops_after_the_sink_refuses_in_a_row() {
     with_relay(|session| {

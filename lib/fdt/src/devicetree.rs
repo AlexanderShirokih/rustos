@@ -2,7 +2,10 @@
 
 use core::slice::from_raw_parts;
 
-use crate::cursor::Cursor;
+use crate::{
+    cursor::{Cursor, cstr_at},
+    devicetreeext::node_path,
+};
 
 /// Узел Device Tree.
 #[derive(Clone, Copy)]
@@ -11,9 +14,7 @@ pub struct Node<'a> {
 
     offset: usize,
 
-    header: &'a FdtHeader,
-
-    buffer: &'a [u8],
+    blocks: Blocks<'a>,
 }
 
 /// Уникальный ключ узла для сравнения и хранения.
@@ -29,7 +30,7 @@ impl<'a> Node<'a> {
     }
 
     pub fn properties(&self) -> PropertyIter<'a> {
-        let props_walker = DeviceTreeWalker::new(self.buffer, self.header, self.offset);
+        let props_walker = DeviceTreeWalker::new(self.blocks, self.offset);
 
         PropertyIter {
             walker: props_walker,
@@ -41,7 +42,7 @@ impl<'a> Node<'a> {
     }
 
     pub fn children(&self) -> NodeIter<'a> {
-        let node_walker = DeviceTreeWalker::new(self.buffer, self.header, self.offset);
+        let node_walker = DeviceTreeWalker::new(self.blocks, self.offset);
 
         NodeIter {
             walker: node_walker,
@@ -66,13 +67,11 @@ impl<'a> Property<'a> {
         self.value
     }
 
-    /// Возвращает значение как строку (без терминального нуля).
+    /// Возвращает байты значения до первого нуля как строку, как `of_property_read_string` в
+    /// Linux. Значение без нуля и не в UTF-8 до первого нуля даёт `None`.
     pub fn as_cstr(&self) -> Option<&'a str> {
-        let bytes = self.value;
-        // Хвостовой `\0` в строку не входит; пустое значение даёт пустую строку.
-        let text = bytes.split_last().map_or(&[][..], |(_, head)| head);
-
-        str::from_utf8(text).ok()
+        let end = self.value.iter().position(|&byte| byte == 0)?;
+        str::from_utf8(self.value.get(..end)?).ok()
     }
 
     pub fn try_as_u32(&self, offset: usize) -> Option<u32> {
@@ -105,27 +104,46 @@ impl<'a> Property<'a> {
     }
 }
 
-/// Flattened Device Tree (FDT).
+/// Flattened Device Tree (FDT) с блоком структуры, который конструктор проверил целиком.
 pub struct DeviceTree<'a> {
     buffer: &'a [u8],
 
     header: FdtHeader,
+
+    blocks: Blocks<'a>,
 }
 
 /// Ошибки разбора Device Tree.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum DtError {
     /// Неверная сигнатура (magic) в заголовке.
     InvalidMagic(u32),
 
-    /// total_size в заголовке меньше минимального заголовка (24 байта), больше
-    /// MAX_DTB_SIZE либо превышает длину переданного буфера.
+    /// total_size в заголовке меньше заголовка своей версии, больше MAX_DTB_SIZE либо
+    /// превышает длину переданного буфера.
     Incomplete {
         /// Ожидаемый размер из заголовка.
         total_size: usize,
-        /// Размер проверенного буфера: 24 байта заголовка для `from_ptr`, длина среза
+        /// Размер проверенного буфера: 40 байт заголовка для `from_ptr`, длина среза
         /// для `from_bytes`.
         actual: usize,
+    },
+
+    /// Версия формата ниже 2 либо blob не читается разборщиком версии 17, последней
+    /// поддерживаемой.
+    UnsupportedVersion {
+        /// Версия формата из заголовка.
+        version: u32,
+        /// Наименьшая версия, с которой blob совместим.
+        last_compatible: u32,
+    },
+
+    /// Блок структуры либо строк выходит за `total_size`, токен неизвестен, имя или
+    /// значение свойства выходит за свой блок, вложенность узлов не сбалансирована либо
+    /// нет завершающего токена.
+    Malformed {
+        /// Смещение от начала блоба, на котором проверка обнаружила повреждение.
+        offset: usize,
     },
 }
 
@@ -143,8 +161,8 @@ impl<'a> DeviceTree<'a> {
         let ptr_u8 = address as *const u8;
 
         // SAFETY: вызывающий гарантирует, что address указывает на валидный FDT-blob
-        // размером не менее 24 байт (6 x u32 заголовка).
-        let hdr_buf = unsafe { from_raw_parts(ptr_u8, size_of::<u32>() * 6) };
+        // размером не менее заголовка.
+        let hdr_buf = unsafe { from_raw_parts(ptr_u8, FdtHeader::LONGEST_HEADER_SIZE) };
 
         let mut cursor = Cursor::new(hdr_buf);
         let header = FdtHeader::read_checked(&mut cursor)?;
@@ -164,7 +182,7 @@ impl<'a> DeviceTree<'a> {
         // подряд идущих читаемых байт.
         let buffer = unsafe { from_raw_parts(ptr_u8, total_size) };
 
-        Ok(DeviceTree { buffer, header })
+        Self::checked(buffer, header)
     }
 
     /// Разбирает FDT-blob из `buffer`. Результат заимствует `buffer` на весь свой срок
@@ -182,7 +200,18 @@ impl<'a> DeviceTree<'a> {
             });
         }
 
-        Ok(DeviceTree { buffer, header })
+        Self::checked(buffer, header)
+    }
+
+    fn checked(buffer: &'a [u8], header: FdtHeader) -> Result<Self, DtError> {
+        let blocks = Blocks::of(buffer, &header)?;
+        DeviceTreeWalker::new(blocks, header.struct_off as usize).check()?;
+
+        Ok(DeviceTree {
+            buffer,
+            header,
+            blocks,
+        })
     }
 
     pub fn base_address(&self) -> usize {
@@ -207,7 +236,7 @@ impl<'a> DeviceTree<'a> {
         }
     }
 
-    /// Ищет узел по пути в списке структур либо по имени в разделе `aliases`.
+    /// Ищет узел по абсолютному пути, как [`node_path`], либо по имени в разделе `aliases`.
     /// Пример: алиасу `serial0` соответствует путь `/soc/serial@1000`.
     pub fn find(&'a self, path: &str) -> Option<Node<'a>> {
         // Пытаемся найти в списке узлов
@@ -230,19 +259,15 @@ impl<'a> DeviceTree<'a> {
     }
 
     fn find_node(&'a self, path: &str) -> Option<Node<'a>> {
-        // Быстрый путь. "/" -> корень
-        if path == "/" {
-            return self.root();
+        node_path(self, path).map(|found| found.node())
+    }
+
+    /// Все узлы дерева в порядке описания вместе с глубиной. Глубина корня - ноль.
+    pub fn walk(&'a self) -> TreeWalk<'a> {
+        TreeWalk {
+            walker: DeviceTreeWalker::new(self.blocks, self.header.struct_off as usize),
+            depth: 0,
         }
-
-        let components = path.split('/').filter(|s| !s.is_empty());
-        let mut node = self.root()?;
-
-        for name in components {
-            node = node.children().find(|child| child.name == name)?;
-        }
-
-        Some(node)
     }
 
     pub fn root(&'a self) -> Option<Node<'a>> {
@@ -250,8 +275,7 @@ impl<'a> DeviceTree<'a> {
     }
 
     fn root_nodes(&'a self) -> NodeIter<'a> {
-        let walker =
-            DeviceTreeWalker::new(self.buffer, &self.header, self.header.struct_off as usize);
+        let walker = DeviceTreeWalker::new(self.blocks, self.header.struct_off as usize);
         NodeIter { walker }
     }
 }
@@ -300,12 +324,27 @@ struct FdtHeader {
     strings_off: u32,
 
     mem_rsvmap_off: u32,
+
+    strings_size: Option<u32>,
+
+    struct_size: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct Blocks<'a> {
+    blob_through_structure: &'a [u8],
+
+    strings: &'a [u8],
 }
 
 impl FdtHeader {
     const MAGIC: u32 = 0xD00D_FEED;
 
-    const HEADER_MIN_SIZE: usize = size_of::<u32>() * 6;
+    const FIRST_VERSION: u32 = 2;
+
+    const LAST_VERSION: u32 = 17;
+
+    const LONGEST_HEADER_SIZE: usize = Self::size_of_version(Self::LAST_VERSION);
 
     fn read_checked(cur: &mut Cursor<'_>) -> Result<Self, DtError> {
         cur.set_position(0);
@@ -313,7 +352,7 @@ impl FdtHeader {
         let actual = cur.buffer.len();
         let mut read = || {
             cur.read_u32().ok_or(DtError::Incomplete {
-                total_size: Self::HEADER_MIN_SIZE,
+                total_size: Self::LONGEST_HEADER_SIZE,
                 actual,
             })
         };
@@ -323,22 +362,79 @@ impl FdtHeader {
             return Err(DtError::InvalidMagic(magic));
         }
 
-        // total_size из недоверенного blob ограничиваем диапазоном
-        // [HEADER_MIN_SIZE, MAX_DTB_SIZE].
         let total_size = read()? as usize;
-        if !(Self::HEADER_MIN_SIZE..=DeviceTree::MAX_DTB_SIZE).contains(&total_size) {
-            return Err(DtError::Incomplete { total_size, actual });
-        }
-
         let struct_off = read()?;
         let strings_off = read()?;
         let mem_rsvmap_off = read()?;
+        let version = read()?;
+        let last_compatible = read()?;
+        if version < Self::FIRST_VERSION || last_compatible > Self::LAST_VERSION {
+            return Err(DtError::UnsupportedVersion {
+                version,
+                last_compatible,
+            });
+        }
+
+        // total_size из недоверенного blob ограничиваем диапазоном
+        // [заголовок версии, MAX_DTB_SIZE].
+        if !(Self::size_of_version(version)..=DeviceTree::MAX_DTB_SIZE).contains(&total_size) {
+            return Err(DtError::Incomplete { total_size, actual });
+        }
+
+        let _boot_cpu = read()?;
+        let strings_size = (version >= 3).then(&mut read).transpose()?;
+        let struct_size = (version >= 17).then(&mut read).transpose()?;
 
         Ok(FdtHeader {
             total_size,
             struct_off,
             strings_off,
             mem_rsvmap_off,
+            strings_size,
+            struct_size,
+        })
+    }
+
+    const fn size_of_version(version: u32) -> usize {
+        let fields = match version {
+            ..3 => 8,
+            3..17 => 9,
+            17.. => 10,
+        };
+        size_of::<u32>() * fields
+    }
+}
+
+impl<'a> Blocks<'a> {
+    fn of(buffer: &'a [u8], header: &FdtHeader) -> Result<Self, DtError> {
+        let within = buffer.get(..header.total_size).ok_or(DtError::Incomplete {
+            total_size: header.total_size,
+            actual: buffer.len(),
+        })?;
+        let structure_start = header.struct_off as usize;
+        let blob_through_structure = header
+            .struct_size
+            .map_or(Some(header.total_size), |size| {
+                structure_start.checked_add(size as usize)
+            })
+            .and_then(|end| within.get(..end))
+            .ok_or(DtError::Malformed {
+                offset: structure_start,
+            })?;
+        let strings_start = header.strings_off as usize;
+        let strings = header
+            .strings_size
+            .map_or(Some(header.total_size), |size| {
+                strings_start.checked_add(size as usize)
+            })
+            .and_then(|end| within.get(strings_start..end))
+            .ok_or(DtError::Malformed {
+                offset: strings_start,
+            })?;
+
+        Ok(Self {
+            blob_through_structure,
+            strings,
         })
     }
 }
@@ -367,17 +463,10 @@ impl NodeToken {
 }
 
 enum AbstractNode<'a> {
-    BeginNode {
-        name: &'a str,
-        offset: usize,
-    },
+    BeginNode { name: &'a str, offset: usize },
     EndNode,
     End,
-    Property {
-        name: &'a str,
-        offset: usize,
-        length: usize,
-    },
+    Property(Property<'a>),
 }
 
 enum ValueNode<'a> {
@@ -387,29 +476,45 @@ enum ValueNode<'a> {
 
 struct DeviceTreeWalker<'a> {
     cursor: Cursor<'a>,
-    header: &'a FdtHeader,
+    blocks: Blocks<'a>,
     next_pos: usize,
     level: i32,
 }
 
 impl<'a> DeviceTreeWalker<'a> {
-    fn new(buf: &'a [u8], header: &'a FdtHeader, offset: usize) -> Self {
+    fn new(blocks: Blocks<'a>, offset: usize) -> Self {
         Self {
-            cursor: Cursor::new(buf),
-            header,
+            cursor: Cursor::new(blocks.blob_through_structure),
+            blocks,
             next_pos: offset,
             level: 0,
         }
     }
 
+    fn check(mut self) -> Result<(), DtError> {
+        let mut root_closed = false;
+        loop {
+            let malformed = DtError::Malformed {
+                offset: self.next_pos,
+            };
+            match self.step()? {
+                AbstractNode::BeginNode { .. } if root_closed => return Err(malformed),
+                AbstractNode::BeginNode { .. } => self.level += 1,
+                AbstractNode::EndNode if self.level == 0 => return Err(malformed),
+                AbstractNode::EndNode => {
+                    self.level -= 1;
+                    root_closed = self.level == 0;
+                }
+                AbstractNode::Property(_) if self.level > 0 => {}
+                AbstractNode::End if root_closed => return Ok(()),
+                AbstractNode::Property(_) | AbstractNode::End => return Err(malformed),
+            }
+        }
+    }
+
     fn next_value(&mut self) -> Option<ValueNode<'a>> {
         loop {
-            let node = self.read_abstract_node(self.next_pos)?;
-            self.cursor.align_up4();
-
-            self.next_pos = self.cursor.position();
-
-            match node {
+            match self.step().ok()? {
                 AbstractNode::BeginNode { name, offset } => {
                     if self.level > 0 {
                         self.level += 1;
@@ -417,7 +522,11 @@ impl<'a> DeviceTreeWalker<'a> {
                     }
 
                     self.level += 1;
-                    return Some(self.map_begin_node(name, offset));
+                    return Some(ValueNode::Node(Node {
+                        name,
+                        offset,
+                        blocks: self.blocks,
+                    }));
                 }
 
                 AbstractNode::EndNode => {
@@ -432,85 +541,71 @@ impl<'a> DeviceTreeWalker<'a> {
                     return None;
                 }
 
-                AbstractNode::Property {
-                    name,
-                    offset,
-                    length,
-                } => {
+                AbstractNode::Property(property) => {
                     if self.level == 0 {
-                        return Some(self.map_property(name, offset, length));
+                        return Some(ValueNode::Property(property));
                     }
                 }
             }
         }
     }
 
-    fn read_abstract_node(&mut self, offset: usize) -> Option<AbstractNode<'a>> {
+    fn step(&mut self) -> Result<AbstractNode<'a>, DtError> {
+        let node = self.read_abstract_node(self.next_pos)?;
+        self.cursor.align_up4();
+        self.next_pos = self.cursor.position();
+        Ok(node)
+    }
+
+    fn read_abstract_node(&mut self, offset: usize) -> Result<AbstractNode<'a>, DtError> {
         self.cursor.set_position(offset);
 
         loop {
-            let tok_u32 = self.cursor.read_u32()?;
-            let token = NodeToken::from_u32(tok_u32)?;
+            let malformed = DtError::Malformed {
+                offset: self.cursor.position(),
+            };
+            let token = self
+                .cursor
+                .read_u32()
+                .and_then(NodeToken::from_u32)
+                .ok_or(malformed)?;
 
             match token {
                 NodeToken::BeginNode => {
-                    let name = self.cursor.read_cstr_here();
-                    let off = {
-                        self.cursor.align_up4();
-                        self.cursor.position()
-                    };
-                    return Some(AbstractNode::BeginNode::<'a> { name, offset: off });
-                }
-
-                NodeToken::EndNode => {
-                    return Some(AbstractNode::EndNode);
-                }
-
-                NodeToken::End => {
-                    return Some(AbstractNode::End);
-                }
-
-                NodeToken::Property => {
-                    let length = self.cursor.read_u32()? as usize;
-                    let name_off = self.cursor.read_u32()? as usize;
-                    let value_offset = self.cursor.position();
-                    let name = self
-                        .cursor
-                        .read_cstr_at(self.header.strings_off as usize + name_off);
-
-                    self.cursor.set_position(value_offset + length);
-
-                    return Some(AbstractNode::Property::<'a> {
+                    let name = self.cursor.read_cstr_here().ok_or(malformed)?;
+                    self.cursor.align_up4();
+                    return Ok(AbstractNode::BeginNode {
                         name,
-                        offset: value_offset,
-                        length,
+                        offset: self.cursor.position(),
                     });
                 }
 
-                NodeToken::Nop => {
-                    // пропускаем и читаем следующий токен
+                NodeToken::EndNode => {
+                    return Ok(AbstractNode::EndNode);
                 }
+
+                NodeToken::End => {
+                    return Ok(AbstractNode::End);
+                }
+
+                NodeToken::Property => {
+                    return self
+                        .read_property()
+                        .map(AbstractNode::Property)
+                        .ok_or(malformed);
+                }
+
+                NodeToken::Nop => {}
             }
         }
     }
 
-    fn map_begin_node(&self, name: &'a str, offset: usize) -> ValueNode<'a> {
-        ValueNode::Node(Node::<'a> {
-            name,
-            offset,
-            header: self.header,
-            buffer: self.cursor.buffer,
-        })
-    }
-
-    fn map_property(&self, name: &'a str, offset: usize, length: usize) -> ValueNode<'a> {
-        let buf = self.cursor.buffer;
-        // Защита от завышенного `length`: ограничиваем срез
-        // фактическими границами буфера вместо паники на OOB.
-        let start = offset.min(buf.len());
-        let end = start.saturating_add(length).min(buf.len());
-        let value = buf.get(start..end).unwrap_or_default();
-        ValueNode::Property(Property { name, value })
+    fn read_property(&mut self) -> Option<Property<'a>> {
+        let length = self.cursor.read_u32()? as usize;
+        let name_offset = self.cursor.read_u32()? as usize;
+        let name = cstr_at(self.blocks.strings, name_offset)?;
+        let value = self.cursor.read_bytes(length)?;
+        Some(Property { name, value })
     }
 }
 
@@ -527,6 +622,36 @@ impl<'a> Iterator for NodeIter<'a> {
             match self.walker.next_value()? {
                 ValueNode::Node(n) => return Some(n),
                 ValueNode::Property(_) => {}
+            }
+        }
+    }
+}
+
+/// Итератор узлов дерева с глубиной, который строит [`DeviceTree::walk`].
+pub struct TreeWalk<'a> {
+    walker: DeviceTreeWalker<'a>,
+    depth: usize,
+}
+
+impl<'a> Iterator for TreeWalk<'a> {
+    type Item = (usize, Node<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.walker.step().ok()? {
+                AbstractNode::BeginNode { name, offset } => {
+                    let depth = self.depth;
+                    self.depth += 1;
+                    let node = Node {
+                        name,
+                        offset,
+                        blocks: self.walker.blocks,
+                    };
+                    return Some((depth, node));
+                }
+                AbstractNode::EndNode => self.depth = self.depth.checked_sub(1)?,
+                AbstractNode::Property(_) => {}
+                AbstractNode::End => return None,
             }
         }
     }

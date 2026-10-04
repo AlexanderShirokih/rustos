@@ -81,7 +81,6 @@ fn load_program_passes_bootstrap_handle() {
         SyscallError::BadHandle.as_return_value()
     );
     process.join(CHILD_WAIT_TIMEOUT).expect("child terminates");
-    // x0 нёс валидный child-table id -> HandleClose вернул 0.
     kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
 }
 

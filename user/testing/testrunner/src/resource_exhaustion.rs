@@ -82,15 +82,12 @@ fn fill(resource: &Resource, granted: &mut Vec<MemoryRegion>) -> Error {
 fn budget_exhaustion_is_refused_by_its_own_code() {
     let probe = SaturatedBudget::probe();
 
-    // Бюджет отдал объявленное и отказал именно исчерпанием ресурса: отказ по
-    // нехватке физической памяти пришёл бы другим кодом.
     kernel_tests::kassert_eq!(probe.granted_pages(), PROBE_BUDGET_PAGES);
     kernel_tests::kassert!(matches!(
         probe.refusal(),
         Error::Syscall(SyscallError::ResourceExhausted)
     ));
 
-    // Отказ повторяется тем же кодом и состояния ресурса не меняет.
     for _ in 0..4 {
         kernel_tests::kassert_eq!(
             probe.request(1).err(),
@@ -98,8 +95,6 @@ fn budget_exhaustion_is_refused_by_its_own_code() {
         );
     }
 
-    // Исчерпан производный бюджет, а не исходный. Тот же запрос по исходному
-    // ресурсу проходит, и процесс после отказа выполняется.
     let region = probe
         .origin()
         .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
@@ -113,8 +108,6 @@ fn a_released_budget_yields_the_same_pages_again() {
     let granted = probe.granted_pages();
     probe.release(granted);
 
-    // Второй круг по тому же ресурсу доходит до той же величины. Расхождение
-    // означало бы страницы, не вернувшиеся в бюджет освобождением региона.
     kernel_tests::kassert_eq!(probe.saturate(), granted);
 }
 
@@ -123,12 +116,10 @@ fn a_partial_release_returns_exactly_what_was_freed() {
     let mut probe = SaturatedBudget::probe();
     probe.release(PARTIAL_RELEASE_PAGES);
 
-    // Снятое вернулось целиком. Запрос ровно на него проходит одним регионом.
     let regained = probe
         .request(PARTIAL_RELEASE_PAGES)
         .expect("the released pages are back in the budget");
 
-    // И ничего сверх снятого: следующая страница снова за границей бюджета.
     kernel_tests::kassert_eq!(
         probe.request(1).err(),
         Some(Error::Syscall(SyscallError::ResourceExhausted))
@@ -158,7 +149,6 @@ fn a_full_handle_table_refuses_the_next_object() {
 
     kernel_tests::kassert_eq!(refusal, Some(Error::Syscall(SyscallError::OutOfHandles)));
 
-    // Процесс отказ пережил. Освобождённая таблица снова принимает объекты.
     let signal = Signal::create().expect("the table takes objects after the refusal");
     drop(signal);
 }
@@ -168,8 +158,6 @@ fn closing_a_handle_makes_room_after_the_refusal() {
     let (mut held, _) = fill_handle_table();
     held.pop().expect("the table took at least one object");
 
-    // Место, освобождённое одним закрытием, принимает ровно один объект. Второе
-    // создание снова упирается в заполненную таблицу.
     let taken = Signal::create();
     let over = Signal::create().err();
     let slot_taken = taken.is_ok();

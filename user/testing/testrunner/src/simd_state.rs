@@ -174,8 +174,6 @@ fn simd_worker(shared: &Shared) -> u32 {
     0
 }
 
-/// Каждый поток сохраняет свои v0-v31 и FPCR/FPSR через переключения контекста, а бригада
-/// соседей их не подменяет.
 #[kernel_test]
 fn simd_state_is_private_to_the_thread() {
     let shared = Arc::new(Shared {

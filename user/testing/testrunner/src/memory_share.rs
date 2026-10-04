@@ -34,8 +34,6 @@ fn memory_region_shared_with_child() {
 
     let fixture = Fixture::spawn();
 
-    // Потомку передаётся производная, а не корень. Корень остаётся у родителя и
-    // держит регион живым, пока потомок с ним работает.
     let lease = region
         .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
         .expect("duplicate region handle for child");
@@ -44,15 +42,12 @@ fn memory_region_shared_with_child() {
     let status = fixture.request_status(OP_MAP_CHECK, PATTERN, &[leased_raw.raw()]);
     kernel_tests::kassert_eq!(status, REPLY_OK);
 
-    // Перенос капы по порту - move: ядро забрало хэндл, наш `Drop` его закрывать
-    // не должен, а сам слот больше не валиден.
     let stale = Handle::<kind::Signal>::from_abi(lease.into_raw().as_nonzero());
     kernel_tests::kassert_eq!(
         signal_set(stale, SIGNALED, 0, WakeCount::None),
         SyscallError::BadHandle.as_return_value()
     );
 
-    // Обратное направление: инверсию писал потомок через свой маппинг.
     // SAFETY: см. выше.
     unsafe {
         kernel_tests::kassert_eq!(slot.read_volatile(), !PATTERN);

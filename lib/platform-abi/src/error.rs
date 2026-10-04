@@ -10,3 +10,15 @@ ipc::wire_enum! {
         Unavailable = 3,
     }
 }
+
+/// Отказ вида описания платформы.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescriptionError {
+    /// Описание выходит за регион, его заголовок неверен либо структура повреждена.
+    Malformed,
+    /// Значение свойства не соответствует запрошенному виду.
+    InvalidValue,
+    /// Путь доступного узла длиннее [`DEVICE_ID_MAX`](crate::DEVICE_ID_MAX) байт либо
+    /// [`BUS_PATH_MAX_NODES`](fdt::devicetreeext::BUS_PATH_MAX_NODES) узлов.
+    PathTooLong,
+}

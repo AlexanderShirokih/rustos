@@ -94,9 +94,10 @@ mod tests {
     #[test]
     fn crate_identifier_is_matched_as_a_whole_word() {
         let sources = vec!["use ipc_test::MockEnd;\nlet x = my_ipc + 1;\n".to_string()];
-        assert!(mentions_crate(&sources, "ipc-test"));
-        assert!(!mentions_crate(&sources, "ipc"));
-        assert!(!mentions_crate(&sources, "test"));
+
+        let mentioned = ["ipc-test", "ipc", "test"].map(|name| mentions_crate(&sources, name));
+
+        assert_eq!(mentioned, [true, false, false]);
     }
 
     #[test]
@@ -112,9 +113,10 @@ mod tests {
                     src_path: PathBuf::from("lib/test-harness-qemu/src/lib.rs"),
                 }],
             }],
-            workspace_metadata: None,
         };
+
         let names = lib_target_names(std::slice::from_ref(&meta));
+
         assert_eq!(
             names.get("test-harness-qemu").map(|name| name.as_str()),
             Some("kernel_tests")

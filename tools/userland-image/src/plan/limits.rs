@@ -11,6 +11,7 @@ const FRAME: usize = ROOTKEEPER_THREADS * (1 + IPC_BUFFER_MAX_CAPS);
 
 pub(super) const ROOTKEEPER_HANDLES: usize = BASE + LAUNCH + FRAME;
 pub(super) const CHILD_HANDLES: usize = 3;
+pub(super) const SEARCH_ROOTS: usize = 1;
 
 pub(super) fn validate_composition(
     names: &[&str],
@@ -24,11 +25,12 @@ pub(super) fn validate_composition(
 
 fn validate_component(name: &str, declared: &ComponentManifest<'_>) -> Result<()> {
     for export in declared.exports() {
+        let protocol = export.protocol();
         ensure!(
-            export.len() <= PROTOCOL_ID_MAX,
-            "boot plan component '{name}' exports protocol '{export}' of {} bytes; \
+            protocol.len() <= PROTOCOL_ID_MAX,
+            "boot plan component '{name}' exports protocol '{protocol}' of {} bytes; \
              a protocol id holds at most {PROTOCOL_ID_MAX}",
-            export.len()
+            protocol.len()
         );
     }
     Ok(())
@@ -39,8 +41,10 @@ pub(super) fn rootkeeper_handles(declarations: &[ComponentManifest<'_>]) -> usiz
     // `ComponentStartup` и журнала и поток relay. `LAUNCH` покрывает один запуск, `FRAME` -
     // принятый кадр на каждый принимающий поток. `CHILD_HANDLES` покрывает процесс, резерв и
     // источник журнала записи. Каждый провайдер требования занимает слот заявки либо копии
-    // выдачи записи 0, и регион образа по сессии `Image` - ещё один слот копии выдачи. Журнал
-    // занимает слот копии выдачи, экспорт - слот `accept`.
+    // выдачи записи 0, и регион образа по сессии `Image` - ещё один слот копии выдачи. Требование
+    // `all` держит ещё один корень выдачи сессий поиска. Провайдер считается по
+    // протоколу экспорта один раз при любом числе его фильтров. Журнал занимает слот копии
+    // выдачи, экспорт - слот `accept`.
     let per_component: usize = declarations
         .iter()
         .skip(1)
@@ -49,14 +53,17 @@ pub(super) fn rootkeeper_handles(declarations: &[ComponentManifest<'_>]) -> usiz
                 .requirements()
                 .map(|requirement| match requirement.mode() {
                     RequirementMode::One => 1,
-                    RequirementMode::All => declarations
-                        .iter()
-                        .filter(|provider| {
-                            provider
-                                .exports()
-                                .any(|export| export == requirement.protocol())
-                        })
-                        .count(),
+                    RequirementMode::All => {
+                        SEARCH_ROOTS
+                            + declarations
+                                .iter()
+                                .filter(|provider| {
+                                    provider
+                                        .exports()
+                                        .any(|export| export.protocol() == requirement.protocol())
+                                })
+                                .count()
+                    }
                 })
                 .sum();
             let image_region = usize::from(component.requirements().any(|requirement| {

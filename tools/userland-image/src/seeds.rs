@@ -1,11 +1,35 @@
 //! Валидные образы, которыми затравливается корпус fuzz-цели `userland_image_decode`.
 
 use anyhow::{Result, anyhow};
-use component_abi::encode_manifest;
+use component_abi::{Attribute, ExportDeclaration, encode_manifest, manifest_len};
 use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE, encode_program};
 use userland_image::{BOOT_PLAN_PATH, ComponentSpec, ImageRecord, encode, encode_plan};
 
 const BOOT_PATH: &str = "/boot/rootkeeper/exec";
+
+const EXPORTS: &[ExportDeclaration] = &[
+    ExportDeclaration::new("Hardware"),
+    ExportDeclaration::filtered(
+        "Display",
+        &[
+            &[Attribute {
+                key: b"compatible",
+                value: b"simple-framebuffer",
+            }],
+            &[
+                Attribute {
+                    key: b"compatible",
+                    value: b"virtio-gpu",
+                },
+                Attribute {
+                    key: b"role",
+                    value: b"",
+                },
+            ],
+        ],
+    ),
+];
+const MANIFEST_LEN: usize = manifest_len(&[], EXPORTS);
 
 /// Затравка корпуса: имя файла и байты валидного образа.
 pub struct ImageSeed {
@@ -90,7 +114,7 @@ fn boot_program() -> Result<Vec<u8>> {
     ];
 
     encode_program(&Program {
-        manifest: &encode_manifest::<16>(&[], &[]),
+        manifest: &encode_manifest::<MANIFEST_LEN>(&[], EXPORTS),
         entry_va: 0x4000_0000,
         stack_size: 4 * USERLAND_PAGE_SIZE,
         segments: &segments,
@@ -112,7 +136,17 @@ mod tests {
             let program =
                 decode_program(image.boot_entry().data()).expect("boot record carries a program");
             assert_eq!(program.segments().count(), 2);
-            component_abi::decode_manifest(program.manifest()).expect("seed manifest");
+
+            let manifest =
+                component_abi::decode_manifest(program.manifest()).expect("seed manifest");
+            assert_eq!(
+                manifest
+                    .exports()
+                    .map(|export| export.filters().count())
+                    .collect::<Vec<_>>(),
+                [0, 2]
+            );
+
             userland_image::decode_plan(image.entry(BOOT_PLAN_PATH).expect("seed plan").data())
                 .expect("plan decodes");
         }

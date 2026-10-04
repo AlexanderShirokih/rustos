@@ -1,6 +1,7 @@
 use core::{
     cmp::{max, min},
     num::NonZeroUsize,
+    str::Split,
 };
 
 use collections::Vec;
@@ -9,8 +10,7 @@ use crate::devicetree::{DeviceTree, Node, NodeIter, Property};
 
 const RANGES_FIELD_MAX_CELLS: usize = 2;
 
-/// Предельная длина пути от корня до шины, через которую [`device_windows`] выдаёт окна, в
-/// узлах.
+/// Предельная длина пути от корня до узла в узлах, считая корень и сам узел.
 pub const BUS_PATH_MAX_NODES: usize = 16;
 
 /// Содержит пару адрес (сдвиг) и размер
@@ -54,8 +54,8 @@ impl Default for CellsSize {
 }
 
 pub trait NodeExt {
-    /// Проверяет совместимость узла с указанным драйвером.
-    fn is_compatible(&self, name: &str) -> bool;
+    /// Узел доступен, если у него нет свойства `status` либо его значение `okay` или `ok`.
+    fn is_available(&self) -> bool;
 
     /// Возвращает размерность ячеек адреса и размера для этого узла.
     fn cells_size(&self) -> Option<CellsSize>;
@@ -76,9 +76,9 @@ pub trait NodeExt {
 }
 
 impl NodeExt for Node<'_> {
-    fn is_compatible(&self, name: &str) -> bool {
-        self.prop("compatible")
-            .is_some_and(|prop| prop.into_string_list_iter().any(|s| s == name))
+    fn is_available(&self) -> bool {
+        self.prop("status")
+            .is_none_or(|prop| matches!(prop.as_cstr(), Some("okay" | "ok")))
     }
 
     fn cells_size(&self) -> Option<CellsSize> {
@@ -142,6 +142,62 @@ pub enum SkippedWindow {
     /// Страницы окна недопустимы по [`is_window_admissible`] либо выходят за разрядность
     /// `usize`.
     Inadmissible,
+}
+
+/// Узел, который нашёл [`node_path`], и его предки от корня дерева.
+#[derive(Clone, Copy)]
+pub struct NodePath<'a> {
+    node: Node<'a>,
+    ancestors: [Node<'a>; BUS_PATH_MAX_NODES - 1],
+    len: usize,
+}
+
+impl<'a> NodePath<'a> {
+    /// Найденный узел.
+    pub fn node(&self) -> Node<'a> {
+        self.node
+    }
+
+    /// Предки найденного узла от корня, последним - его родитель.
+    pub fn ancestors(&self) -> &[Node<'a>] {
+        self.ancestors.get(..self.len).unwrap_or_default()
+    }
+}
+
+/// Находит узел по пути `path` и возвращает его вместе с предками.
+///
+/// Путь начинается с `/`, его компоненты сравниваются с именами узлов целиком, алиасы не
+/// разрешаются. Возвращает `None`, если в дереве нет узла и если путь длиннее
+/// [`BUS_PATH_MAX_NODES`] узлов.
+pub fn node_path<'a>(dt: &'a DeviceTree<'a>, path: &str) -> Option<NodePath<'a>> {
+    let root = dt.root()?;
+    let mut found = NodePath {
+        node: root,
+        ancestors: [root; BUS_PATH_MAX_NODES - 1],
+        len: 0,
+    };
+
+    let names = path.strip_prefix('/')?;
+    if names.is_empty() {
+        return Some(found);
+    }
+
+    for name in names.split('/') {
+        let child = found.node.children().find(|child| child.name() == name)?;
+        *found.ancestors.get_mut(found.len)? = found.node;
+        found.len += 1;
+        found.node = child;
+    }
+
+    Some(found)
+}
+
+/// Как [`node_path`], но возвращает `None` и тогда, когда узел либо его предок недоступен по
+/// [`NodeExt::is_available`].
+pub fn available_path<'a>(dt: &'a DeviceTree<'a>, path: &str) -> Option<NodePath<'a>> {
+    node_path(dt, path).filter(|found| {
+        found.node().is_available() && found.ancestors().iter().all(NodeExt::is_available)
+    })
 }
 
 /// Статический reg-диапазон дочернего узла `/reserved-memory`.
@@ -317,8 +373,9 @@ pub trait PropExt<'a> {
         cells_size: CellsSize,
     ) -> Option<Vec<AddressSpace, N>>;
 
-    /// Возвращает итератор по строкам (например, для `compatible`).
-    fn into_string_list_iter(self) -> impl Iterator<Item = &'a str> + 'a;
+    /// Возвращает строки значения (например, `compatible`). Значение без завершающего нуля и не
+    /// в UTF-8 даёт `None`.
+    fn into_string_list_iter(self) -> Option<StringList<'a>>;
 }
 
 impl Property<'_> {
@@ -353,11 +410,26 @@ impl<'a> PropExt<'a> for Property<'a> {
         Some(result)
     }
 
-    fn into_string_list_iter(self) -> impl Iterator<Item = &'a str> + 'a {
-        self.value()
-            .split(|&b| b == 0)
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| str::from_utf8(s).ok())
+    fn into_string_list_iter(self) -> Option<StringList<'a>> {
+        let text = str::from_utf8(self.value().strip_suffix(&[0])?).ok()?;
+        Some(StringList {
+            strings: text.split('\0'),
+        })
+    }
+}
+
+/// Непустые строки значения свойства в порядке значения. Список пропускает пустые строки между
+/// нулями, как сравнение `compatible` в Linux.
+#[derive(Clone)]
+pub struct StringList<'a> {
+    strings: Split<'a, char>,
+}
+
+impl<'a> Iterator for StringList<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.strings.find(|string| !string.is_empty())
     }
 }
 
