@@ -1,11 +1,11 @@
 //! Управление памятью AArch64.
 
-pub mod address_space_factory;
-pub mod asid;
-pub mod global_allocator;
-pub mod layout;
-pub mod memory_mapper;
-pub mod memory_setup;
-pub mod mmu;
-pub mod regs;
+pub(crate) mod address_space_factory;
+pub(crate) mod asid;
+pub(crate) mod global_allocator;
+pub(crate) mod layout;
+pub(crate) mod memory_mapper;
+pub(crate) mod memory_setup;
+pub(crate) mod mmu;
+pub(crate) mod regs;
 pub(crate) mod setup;

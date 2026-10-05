@@ -29,7 +29,7 @@ use memory::{
 
 use crate::memory::{
     asid::{self, unpack_asid},
-    regs::{common::EL1, tlb::TranslationLookasideBuffer},
+    regs::{common::EL1, dcache::DataCache, tlb::TranslationLookasideBuffer},
 };
 
 const OWNED_BY_FA_BIT: u64 = 1 << 55;
@@ -56,8 +56,7 @@ pub(crate) struct FrameTableAlloc<'a, FA: FrameAllocator> {
 }
 
 impl<'a, FA: FrameAllocator> FrameTableAlloc<'a, FA> {
-    /// Создаёт аллокатор с линейным маппингом: VA = PA + offset.
-    pub fn new(allocator: &'a FA, offset: usize) -> Self {
+    pub(crate) fn new(allocator: &'a FA, offset: usize) -> Self {
         Self {
             allocator,
             vaddr_offset: offset,
@@ -87,18 +86,13 @@ impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
     }
 }
 
-/// Какому адресному пространству принадлежит маппер.
-///
-/// Различение влияет на `nG` leaf-страниц (kernel - global, user - per-ASID)
-/// и на стратегию TLB-инвалидации в `remap`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum AddressSpaceKind {
+pub(crate) enum AddressSpaceKind {
     Kernel,
     User,
 }
 
-/// Маппер памяти для AArch64.
-pub struct Aarch64MemoryMapper<'a, FA, L>
+pub(crate) struct Aarch64MemoryMapper<'a, FA, L>
 where
     FA: FrameAllocator,
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
@@ -132,12 +126,7 @@ where
     FA: FrameAllocator,
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
-    /// Создаёт маппер с заданным offset для трансляции PA->VA таблиц
-    /// (`0` - identity mapping для boot до включения MMU).
-    ///
-    /// `kind` определяет роль AS: kernel-маппинги global, user-маппинги
-    /// получают `nG=1` и per-AS ASID-тег на пути `activate_handle`.
-    pub fn new_with_offset(
+    pub(crate) fn new_with_offset(
         frame_allocator: &'a FA,
         root_ptr: *mut PageTable<L0>,
         vaddr_offset: usize,
@@ -164,13 +153,13 @@ where
         base.ng(matches!(self.kind, AddressSpaceKind::User))
     }
 
-    /// Возвращает сырое значение leaf-дескриптора для `address`.
-    ///
-    /// `None` - если страница не замаплена либо лежит в block-mapping.
-    /// Платформенный API для диагностики и инспекции таблиц трансляции
-    /// (например, проверки состояния `nG`/`AP`/`AF` битов).
+    fn clean_for_instruction_fetch(&self, pa: PageAlignedAddress, size: usize) {
+        let start = pa.as_usize() + self.vaddr_offset;
+        DataCache::<EL1>::clean_range_to_coherency(start, start + size);
+    }
+
     #[allow(dead_code)]
-    pub fn query_leaf_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64> {
+    pub(crate) fn query_leaf_raw(&self, address: PageAlignedVirtualAddress) -> Option<u64> {
         self.mapper.with_lock(|mapper| {
             let (l3, idx) = mapper.walk_to_l3_leaf(address).ok()?;
             // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page.
@@ -178,7 +167,7 @@ where
         })
     }
 
-    pub fn map_exact_impl(
+    pub(crate) fn map_exact_impl(
         &self,
         source_address: PageAlignedVirtualAddress,
         target_address: PageAlignedAddress,
@@ -237,11 +226,7 @@ where
                 remaining -= l3_page;
             }
 
-            // SAFETY: `dsb ish` - inner-shareable барьер без операндов, не модифицирует
-            // регистры и не обращается к памяти напрямую (preserves_flags, nostack).
-            unsafe {
-                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-            }
+            publish_translation_tables();
 
             Ok(())
         })
@@ -415,25 +400,36 @@ where
             Ok(())
         })
     }
+}
 
-    // SAFETY: `kernel_ptr` - валидный VA в линейной higher-half-карте.
-    unsafe fn flush_icache_page(kernel_ptr: *mut u8) {
-        let page_size = PageAlignedAddress::ALIGNMENT;
-        // SAFETY: см. контракт caller-а.
-        unsafe {
-            let mut p = kernel_ptr;
-            let end = kernel_ptr.add(page_size);
-            while p < end {
-                core::arch::asm!(
-                    "ic ivau, {}",
-                    in(reg) p,
-                    options(nostack, preserves_flags),
-                );
-                // 64 байта - минимальный гарантированный размер I-cache line
-                // на aarch64.
-                p = p.add(64);
-            }
-        }
+fn publish_translation_tables() {
+    // Без `isb` обращение сразу после отображения может получить translation fault по
+    // новой странице.
+    // SAFETY: `dsb ish` и `isb` не имеют операндов и не модифицируют регистры.
+    unsafe {
+        core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
+    }
+}
+
+fn is_user_executable(flags: MemFlags) -> bool {
+    matches!(
+        flags,
+        MemFlags::Cached(p) if matches!(p.user.executable, memory::mem_flags::Executable::Allowed)
+    )
+}
+
+fn invalidate_instruction_cache() {
+    // На VIPT I-cache инвалидация по адресу линейной карты не снимает строк
+    // пользовательского VA, поэтому I-cache инвалидируется целиком.
+    // SAFETY: `ic ialluis`, `dsb ish` и `isb` не имеют операндов и не модифицируют
+    // регистры.
+    unsafe {
+        core::arch::asm!(
+            "ic ialluis",
+            "dsb ish",
+            "isb",
+            options(nostack, preserves_flags)
+        );
     }
 }
 
@@ -549,13 +545,7 @@ where
             return Ok(());
         }
 
-        let user_exec = matches!(
-            &flags,
-            MemFlags::Cached(p) if matches!(
-                p.user.executable,
-                memory::mem_flags::Executable::Allowed
-            )
-        );
+        let user_exec = is_user_executable(flags);
         let aarch64_flags = self.leaf_flags(Aarch64MemFlags::from_memflags(flags));
 
         self.mapper.with_lock(|mapper| {
@@ -604,18 +594,14 @@ where
                 }
 
                 if user_exec {
-                    // SAFETY: kernel_ptr - валидный VA в higher-half-карте.
-                    unsafe { Self::flush_icache_page(kernel_ptr) };
+                    self.clean_for_instruction_fetch(pa, page_size);
                 }
             }
 
+            publish_translation_tables();
+
             if user_exec {
-                // SAFETY: `dsb ish`/`isb` - inner-shareable барьер и pipeline-синхронизация,
-                // без операндов; не модифицируют регистры и не обращаются к памяти напрямую
-                // (preserves_flags, nostack).
-                unsafe {
-                    core::arch::asm!("dsb ish", "isb", options(nostack, preserves_flags));
-                }
+                invalidate_instruction_cache();
             }
 
             Ok(())
@@ -629,12 +615,22 @@ where
         size: usize,
         mem_flags: MemFlags,
     ) -> Result<(), MemoryMappingError> {
+        let user_exec = is_user_executable(mem_flags);
+
         self.map_exact_impl(
             source_address,
             target_address,
             size,
             Aarch64MemFlags::from_memflags(mem_flags),
-        )
+        )?;
+
+        // Код во фреймах записан через другое отображение, например загрузчиком в userspace.
+        if user_exec {
+            self.clean_for_instruction_fetch(target_address, size);
+            invalidate_instruction_cache();
+        }
+
+        Ok(())
     }
 
     fn unmap(

@@ -47,6 +47,7 @@ userland-image = { path = "../lib/userland-image" }
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 unsafe_code = "deny"
+unreachable_pub = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }
 
 [workspace.lints.clippy]

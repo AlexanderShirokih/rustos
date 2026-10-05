@@ -1,4 +1,4 @@
-use core::{mem, ptr::NonNull};
+use core::ptr::NonNull;
 
 use kbase::{CriticalSection as _, DaifCriticalSection};
 use memory::{memory_mapper::AddressSpaceHandle, physical_address::PhysicalAddress};
@@ -24,22 +24,8 @@ use crate::{
 type Tcr = TranslationControlRegister<EL1>;
 type Ttbr0 = TranslationTableBaseRegister<EL1, LowerHalf>;
 
-/// Callee-saved состояние потока согласно AAPCS64:
-/// - x19..x28 (10 GPR)
-/// - x29 (FP), x30 (LR)
-/// - SP
-/// - NZCV
-/// - DAIF (маска IRQ/preemption)
-/// - d8..d15 (нижние 64 бит callee-saved SIMD/FP регистров)
-///
-/// Структура `repr(C)`, поля упорядочены строго по offset-ам, на которые
-/// ссылается ассемблер в `switch.rs`. Любое изменение требует синхронизации.
-///
-/// `GpReg` - `#[repr(transparent)] u64` обёртка для семантической типизации
-/// регистров общего назначения (x19..x30). Asm читает их как `u64` через
-/// фиксированные offsets - layout не меняется.
 #[repr(C)]
-pub struct Aarch64Context {
+pub(crate) struct Aarch64Context {
     pub x19_x28: [GpReg; 10],
     pub fp: GpReg,
     pub lr: GpReg,
@@ -48,30 +34,6 @@ pub struct Aarch64Context {
     pub daif: u64,
     pub d8_d15: [u64; 8],
 }
-
-/// Offset до x19 = 0.
-pub const CTX_OFFSET_X19_X28: usize = 0;
-/// Offset до fp.
-pub const CTX_OFFSET_FP: usize = CTX_OFFSET_X19_X28 + 8 * 10;
-/// Offset до lr.
-pub const CTX_OFFSET_LR: usize = CTX_OFFSET_FP + 8;
-/// Offset до sp.
-pub const CTX_OFFSET_SP: usize = CTX_OFFSET_LR + 8;
-/// Offset до nzcv.
-pub const CTX_OFFSET_NZCV: usize = CTX_OFFSET_SP + 8;
-/// Offset до daif.
-pub const CTX_OFFSET_DAIF: usize = CTX_OFFSET_NZCV + 8;
-/// Offset до d8.
-pub const CTX_OFFSET_D8: usize = CTX_OFFSET_DAIF + 8;
-
-const _: () = assert!(CTX_OFFSET_X19_X28 == core::mem::offset_of!(Aarch64Context, x19_x28));
-const _: () = assert!(CTX_OFFSET_FP == core::mem::offset_of!(Aarch64Context, fp));
-const _: () = assert!(CTX_OFFSET_LR == core::mem::offset_of!(Aarch64Context, lr));
-const _: () = assert!(CTX_OFFSET_SP == core::mem::offset_of!(Aarch64Context, sp));
-const _: () = assert!(CTX_OFFSET_NZCV == core::mem::offset_of!(Aarch64Context, nzcv));
-const _: () = assert!(CTX_OFFSET_DAIF == core::mem::offset_of!(Aarch64Context, daif));
-const _: () = assert!(CTX_OFFSET_D8 == core::mem::offset_of!(Aarch64Context, d8_d15));
-const _: () = assert!(mem::size_of::<Aarch64Context>() == CTX_OFFSET_D8 + 8 * 8);
 
 impl ArchContext for Aarch64Context {
     type Cpu = Aarch64Cpu;

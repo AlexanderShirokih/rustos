@@ -1,70 +1,48 @@
-/// Exception Syndrome Register - содержит информацию о причине исключения.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Esr(u64);
+pub(crate) struct Esr(u64);
 
 impl Esr {
-    pub const fn raw(self) -> u64 {
+    pub(crate) const fn raw(self) -> u64 {
         self.0
     }
 
-    pub const fn exception_class(self) -> ExceptionClass {
+    pub(crate) const fn exception_class(self) -> ExceptionClass {
         let ec = ((self.0 >> 26) & 0x3F) as u8;
         ExceptionClass::from_raw(ec)
     }
 
-    pub const fn iss(self) -> u32 {
+    pub(crate) const fn iss(self) -> u32 {
         (self.0 & 0x1FF_FFFF) as u32
     }
 }
 
-/// Exception Class - тип синхронного исключения.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExceptionClass {
-    /// Unknown reason.
+pub(crate) enum ExceptionClass {
     Unknown,
-    /// Trapped WFI or WFE instruction execution.
     TrappedWfiWfe,
-    /// Illegal Execution state.
     IllegalExecutionState,
-    /// SVC instruction execution in AArch64 state.
     Svc,
-    /// Trapped MSR, MRS or System instruction execution.
     SystemInstruction,
-    /// Instruction Abort from a lower Exception level.
     InstructionAbortLower,
-    /// Instruction Abort taken without a change in Exception level.
     InstructionAbortSame,
-    /// PC alignment fault exception.
     PcAlignment,
-    /// Data Abort from a lower Exception level.
     DataAbortLower,
-    /// Data Abort taken without a change in Exception level.
     DataAbortSame,
-    /// SP alignment fault exception.
     SpAlignment,
-    /// Breakpoint exception from a lower Exception level.
     BreakpointLower,
-    /// Breakpoint exception taken without a change in Exception level.
     BreakpointSame,
-    /// Software Step exception from a lower Exception level.
     SoftwareStepLower,
-    /// Software Step exception taken without a change in Exception level.
     SoftwareStepSame,
-    /// Watchpoint exception from a lower Exception level.
     WatchpointLower,
-    /// Watchpoint exception taken without a change in Exception level.
     WatchpointSame,
-    /// BKPT instruction execution in AArch32 state.
     BkptAarch32,
-    /// BRK instruction execution in AArch64 state.
     BrkAarch64,
-    /// Other exception class not explicitly handled.
     Other(u8),
 }
 
 impl ExceptionClass {
-    pub const fn from_raw(ec: u8) -> Self {
+    pub(crate) const fn from_raw(ec: u8) -> Self {
         match ec {
             0x00 => Self::Unknown,
             0x01 => Self::TrappedWfiWfe,
@@ -89,7 +67,7 @@ impl ExceptionClass {
         }
     }
 
-    pub const fn description(self) -> &'static str {
+    pub(crate) const fn description(self) -> &'static str {
         match self {
             Self::Unknown => "Unknown reason",
             Self::TrappedWfiWfe => "Trapped WFI/WFE",

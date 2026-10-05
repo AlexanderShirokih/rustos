@@ -133,6 +133,13 @@ cargo xtask qemu-test [--timeout <сек>] [--spec <путь>]
 cargo xtask qemu-test --spec devices/spec/qemu-aarch64-test-gicv2.yaml
 ```
 
+Ожидаемую диагностику compile-тестов `trybuild` пересобирает перезапись. Она
+нужна после смены диагностики компилятора или проверяемого типа:
+
+```bash
+TRYBUILD=overwrite cargo test -p syscall --test compile_fail
+```
+
 ### Замеры
 
 `bench` собирает образ testrunner с профилем `bench` и выбирает только
@@ -313,8 +320,8 @@ cargo xtask style [--all | --staged | --since <rev>]
                   [--format text|json] [--rule <id>]
 ```
 
-Держит конвенции этого дерева, которые задаёт [`code-style.md`](code-style.md), —
-doc-дисциплину, язык строковых литералов, формулировки и типографику текста.
+Проверяет соглашения [`code-style.md`](code-style.md), doc-дисциплину,
+формулировки и типографику текста.
 Правила и уровни лежат в `style.toml`, а норму каждого сработавшего правила отчёт
 печатает под списком находок.
 

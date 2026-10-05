@@ -20,26 +20,26 @@ use memory::{
 };
 use syscall_kernel::{Origin, SyscallFrame, SyscallOp, SyscallRuntime};
 
-pub const USER_VM_ARENA_BASE: usize = 0x1000_0000;
-pub const USER_VM_ARENA_END: usize = 0x1100_0000;
+pub(crate) const USER_VM_ARENA_BASE: usize = 0x1000_0000;
+pub(crate) const USER_VM_ARENA_END: usize = 0x1100_0000;
 
 type UserVm = (
     Arc<dyn MemoryMapper + Send + Sync>,
     Arc<MutexCell<UserVmAllocator>>,
 );
 
-pub struct TableRuntime {
+pub(crate) struct TableRuntime {
     handle_table: Mutex<Option<Arc<MutexCell<HandleTable>>>>,
 }
 
 #[derive(Default)]
-pub struct StubSyscallRuntime {
+pub(crate) struct StubSyscallRuntime {
     user_vm: Mutex<Option<UserVm>>,
     ipc_buffer_va: Mutex<Option<u64>>,
     frame_allocator: Mutex<Option<&'static (dyn FrameAllocator + Send + Sync)>>,
 }
 
-pub struct TestFrame {
+pub(crate) struct TestFrame {
     op: u16,
     args: [u64; 6],
     ret: i64,
@@ -52,7 +52,7 @@ impl TableRuntime {
         }
     }
 
-    pub fn set_handle_table(&self, table: Arc<MutexCell<HandleTable>>) {
+    pub(crate) fn set_handle_table(&self, table: Arc<MutexCell<HandleTable>>) {
         *self.handle_table.lock().unwrap() = Some(table);
     }
 }
@@ -82,11 +82,11 @@ impl KernelRuntime for TableRuntime {
 }
 
 impl StubSyscallRuntime {
-    pub fn set_mapper(&self, mapper: Arc<dyn MemoryMapper + Send + Sync>) {
+    pub(crate) fn set_mapper(&self, mapper: Arc<dyn MemoryMapper + Send + Sync>) {
         self.set_user_vm(mapper, user_vm_allocator());
     }
 
-    pub fn set_user_vm(
+    pub(crate) fn set_user_vm(
         &self,
         mapper: Arc<dyn MemoryMapper + Send + Sync>,
         allocator: Arc<MutexCell<UserVmAllocator>>,
@@ -94,15 +94,18 @@ impl StubSyscallRuntime {
         *self.user_vm.lock().unwrap() = Some((mapper, allocator));
     }
 
-    pub fn clear_user_vm(&self) {
+    pub(crate) fn clear_user_vm(&self) {
         *self.user_vm.lock().unwrap() = None;
     }
 
-    pub fn set_ipc_buffer_va(&self, va: u64) {
+    pub(crate) fn set_ipc_buffer_va(&self, va: u64) {
         *self.ipc_buffer_va.lock().unwrap() = Some(va);
     }
 
-    pub fn set_frame_allocator(&self, allocator: &'static (dyn FrameAllocator + Send + Sync)) {
+    pub(crate) fn set_frame_allocator(
+        &self,
+        allocator: &'static (dyn FrameAllocator + Send + Sync),
+    ) {
         *self.frame_allocator.lock().unwrap() = Some(allocator);
     }
 }
@@ -175,7 +178,7 @@ impl SyscallFrame for TestFrame {
     }
 }
 
-pub fn install(syscall: Arc<dyn SyscallRuntime>) -> Arc<TableRuntime> {
+pub(crate) fn install(syscall: Arc<dyn SyscallRuntime>) -> Arc<TableRuntime> {
     let kernel = Arc::new(TableRuntime::new());
     let dyn_kernel: Arc<dyn KernelRuntime> = kernel.clone();
     install_runtime(dyn_kernel);
@@ -183,7 +186,7 @@ pub fn install(syscall: Arc<dyn SyscallRuntime>) -> Arc<TableRuntime> {
     kernel
 }
 
-pub fn runtimes() -> &'static (Arc<TableRuntime>, Arc<StubSyscallRuntime>) {
+pub(crate) fn runtimes() -> &'static (Arc<TableRuntime>, Arc<StubSyscallRuntime>) {
     static RUNTIMES: OnceLock<(Arc<TableRuntime>, Arc<StubSyscallRuntime>)> = OnceLock::new();
     RUNTIMES.get_or_init(|| {
         let stub = Arc::new(StubSyscallRuntime::default());
@@ -191,19 +194,19 @@ pub fn runtimes() -> &'static (Arc<TableRuntime>, Arc<StubSyscallRuntime>) {
     })
 }
 
-pub fn user_vm_allocator() -> Arc<MutexCell<UserVmAllocator>> {
+pub(crate) fn user_vm_allocator() -> Arc<MutexCell<UserVmAllocator>> {
     Arc::new(MutexCell::new(UserVmAllocator::new(
         PageAlignedVirtualAddress::from_usize(USER_VM_ARENA_BASE).unwrap(),
         VirtualAddress::new(USER_VM_ARENA_END),
     )))
 }
 
-pub fn test_lock() -> MutexGuard<'static, ()> {
+pub(crate) fn test_lock() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-pub fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, i64> {
+pub(crate) fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, i64> {
     let mut frame = TestFrame {
         op: op as u16,
         args,

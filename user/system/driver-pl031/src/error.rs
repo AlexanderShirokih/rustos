@@ -3,22 +3,16 @@ use ipc::wire::IpcError;
 use platform_abi::{DescriptionError, PlatformError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    /// Отказ userspace runtime.
+pub(crate) enum Error {
     Runtime,
-    /// Отказ приёма либо отправки кадра.
     Ipc,
-    /// Родитель отказал в требовании.
     Start,
-    /// `platform` отказал в линии либо окне.
     Platform(PlatformError),
-    /// Описание платформы либо его узел не разобран.
     Description(DescriptionError),
-    /// В описании платформы нет доступного PL031.
     NoDevice,
 }
 
-pub type Result<T> = core::result::Result<T, Error>;
+pub(crate) type Result<T> = core::result::Result<T, Error>;
 
 impl From<kernel_objects::Error> for Error {
     fn from(_error: kernel_objects::Error) -> Self {

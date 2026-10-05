@@ -22,11 +22,7 @@ const SYS_EXIT: u32 = 0x18;
 static PSCI_CONDUIT: Once<PsciConduit> = Once::new();
 static PSCI_SYSTEM_OFF_ISSUED: AtomicBool = AtomicBool::new(false);
 
-/// Регистрирует выключение машины в `kernelspace::power`.
-///
-/// Без фичи `power-semihosting` выключение требует узла `/psci` с известным `method`. Без такого
-/// узла регистрация не выполняется, и `system_off` остаётся в цикле ожидания.
-pub fn install(device_tree: &DeviceTree<'_>) {
+pub(crate) fn install(device_tree: &DeviceTree<'_>) {
     if cfg!(feature = "power-semihosting") {
         kernelspace::power::install(semihosting_exit);
         return;

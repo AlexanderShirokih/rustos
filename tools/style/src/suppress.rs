@@ -2,8 +2,7 @@ use ra_ap_syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
 use crate::{rules::declaration::doc_block, source::Source, span::Span};
 
-/// Зона действия одной директивы подавления.
-pub struct Zone {
+pub(crate) struct Zone {
     /// Правила, на которые директива распространяется.
     pub rules: Vec<String>,
     /// Диапазон, находки внутри которого директива снимает.
@@ -16,8 +15,7 @@ pub struct Zone {
     pub used: bool,
 }
 
-/// Директивы подавления файла.
-pub struct Suppressions {
+pub(crate) struct Suppressions {
     /// Зоны в порядке появления.
     pub zones: Vec<Zone>,
 }
@@ -26,8 +24,7 @@ const INLINE: &str = "style:allow";
 const WHOLE_FILE: &str = "style:allow-file";
 
 impl Suppressions {
-    /// Собирает директивы подавления по комментариям Rust-файла.
-    pub fn collect(source: &Source) -> Suppressions {
+    pub(crate) fn collect(source: &Source) -> Suppressions {
         if source.meta.path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
             return Suppressions { zones: Vec::new() };
         }
@@ -75,13 +72,11 @@ impl Suppressions {
         Suppressions { zones }
     }
 
-    /// Сообщает, лежит ли диапазон в зоне самоссылки любой директивы.
-    pub fn is_directive_text(&self, at: Span) -> bool {
+    pub(crate) fn is_directive_text(&self, at: Span) -> bool {
         self.zones.iter().any(|zone| zone.itself.contains(at))
     }
 
-    /// Снимает находку, отмечая применённую директиву.
-    pub fn covers(&mut self, rule: &str, at: Span) -> bool {
+    pub(crate) fn covers(&mut self, rule: &str, at: Span) -> bool {
         let mut hit = false;
         for zone in &mut self.zones {
             if zone.covers.contains(at) && zone.rules.iter().any(|want| want == rule) {
@@ -93,7 +88,7 @@ impl Suppressions {
     }
 }
 
-pub fn is_directive(text: &str) -> bool {
+pub(crate) fn is_directive(text: &str) -> bool {
     marker_of(text).is_some()
 }
 

@@ -3,11 +3,7 @@ use alloc::vec;
 use memory::PAGE_SIZE;
 use scheduler::{StackError, ThreadStack, ThreadStackAllocator};
 
-/// Allocator стека потока.
-///
-/// Защита от переполнения стека обеспечивается canary в начале стека
-/// (`STACK_CANARY`), который scheduler проверяет при каждом context-switch.
-pub struct Aarch64Stack;
+pub(crate) struct Aarch64Stack;
 
 impl ThreadStackAllocator for Aarch64Stack {
     fn allocate(pages: usize) -> Result<ThreadStack, StackError> {

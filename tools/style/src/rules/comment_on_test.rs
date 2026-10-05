@@ -6,8 +6,7 @@ use crate::{
     view::{SyntaxView, View},
 };
 
-/// Комментарий над тестовой функцией не длиннее порога regression guard.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "comment_on_test".to_owned(),

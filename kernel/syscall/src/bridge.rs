@@ -373,7 +373,7 @@ mod tests {
     }
 
     impl MockFrame {
-        pub fn user(op_raw: u16, args: [u64; 6]) -> Self {
+        pub(crate) fn user(op_raw: u16, args: [u64; 6]) -> Self {
             Self {
                 op_raw,
                 args,
@@ -383,7 +383,7 @@ mod tests {
             }
         }
 
-        pub fn kernel(op_raw: u16, args: [u64; 6]) -> Self {
+        pub(crate) fn kernel(op_raw: u16, args: [u64; 6]) -> Self {
             Self {
                 op_raw,
                 args,

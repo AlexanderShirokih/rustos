@@ -4,23 +4,21 @@ use std::sync::{Mutex, PoisonError};
 
 use io::writer::Writer;
 
-/// Writer-протоколист, который копит нормальный и панический каналы раздельно и
-/// фиксирует, какой стороной writer шла запись.
 #[derive(Default)]
-pub struct Recorder {
+pub(crate) struct Recorder {
     normal: Mutex<String>,
     panic: Mutex<String>,
 }
 
 impl Recorder {
-    pub fn normal_contents(&self) -> String {
+    pub(crate) fn normal_contents(&self) -> String {
         self.normal
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
-    pub fn panic_contents(&self) -> String {
+    pub(crate) fn panic_contents(&self) -> String {
         self.panic
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

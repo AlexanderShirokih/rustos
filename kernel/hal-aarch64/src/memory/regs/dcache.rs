@@ -4,19 +4,14 @@ use core::arch::asm;
 
 use crate::memory::regs::common::{EL1, ExceptionLevel};
 
-/// Кэш данных.
-pub struct DataCache<EL: ExceptionLevel> {
+pub(crate) struct DataCache<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 
 impl DataCache<EL1> {
-    /// Инвалидирует `[start, end)` до точки когерентности, отбрасывая и
-    /// грязные строки. Границы округляются наружу до строки кэша.
-    ///
-    /// Вызывается при выключенном MMU, где адрес операнда `dc` равен
-    /// физическому. Диапазон обязан принадлежать ядру. Содержимое грязных строк в этом
-    /// диапазоне теряется.
-    pub fn invalidate_range_to_coherency(start: usize, end: usize) {
+    // SAFETY: MMU выключен, и адрес операнда `dc` равен физическому. Диапазон принадлежит ядру, и
+    // содержимое его грязных строк отбрасывать допустимо.
+    pub(crate) unsafe fn invalidate_range_to_coherency(start: usize, end: usize) {
         if start >= end {
             return;
         }
@@ -36,11 +31,7 @@ impl DataCache<EL1> {
         unsafe { asm!("dsb sy", options(nostack, preserves_flags)) };
     }
 
-    /// Вытесняет `[start, end)` до точки когерентности, сохраняя содержимое.
-    ///
-    /// Делает записи видимыми тому, кто читает мимо кэша: стартующему CPU до
-    /// включения MMU. Границы округляются наружу до строки кэша.
-    pub fn clean_range_to_coherency(start: usize, end: usize) {
+    pub(crate) fn clean_range_to_coherency(start: usize, end: usize) {
         if start >= end {
             return;
         }

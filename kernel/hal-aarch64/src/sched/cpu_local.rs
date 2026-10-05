@@ -4,7 +4,7 @@ use scheduler::{ArchCpu, CpuId, CpuLocalError};
 
 use crate::{cpu, read_sysreg};
 
-pub struct Aarch64Cpu;
+pub(crate) struct Aarch64Cpu;
 
 impl ArchCpu for Aarch64Cpu {
     fn current_id() -> CpuId {

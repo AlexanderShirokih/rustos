@@ -100,7 +100,7 @@ pub fn install_runtime(runtime: Arc<dyn SyscallRuntime>) {
 }
 
 #[allow(clippy::expect_used)]
-pub fn runtime() -> &'static Arc<dyn SyscallRuntime> {
+pub(crate) fn runtime() -> &'static Arc<dyn SyscallRuntime> {
     // Runtime ставится один раз на раннем шаге загрузки, до первого системного вызова, и его
     // отсутствие здесь означает сломанный порядок загрузки.
     RUNTIME

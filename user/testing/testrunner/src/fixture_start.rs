@@ -6,8 +6,7 @@
 //! стартового handle тоже завершают процесс кодом 1. Когда фикстуру запускает rootkeeper, код 1
 //! означает отказ записи плана, и rootkeeper перезапускает запись, пока у неё есть перезапуски.
 
-/// Отказ шага фикстуры.
-pub struct Failed;
+pub(crate) struct Failed;
 
 macro_rules! fixture_start {
     ($run:path) => {

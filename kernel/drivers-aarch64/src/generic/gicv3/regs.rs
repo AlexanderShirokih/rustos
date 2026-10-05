@@ -61,10 +61,7 @@ const _: () = assert!(frame_owner(0x0403_0201_0000_0000).affinity.aff0 == 1);
 const _: () = assert!(!frame_owner(0x0403_0201_0000_0000).last);
 const _: () = assert!(frame_owner(GICR_TYPER_LAST).last);
 
-/// Расстояние между фреймами соседних Redistributor по умолчанию: два
-/// фрейма по 64 KB. Device tree вправе объявить другое через
-/// `redistributor-stride`.
-pub const GICR_DEFAULT_STRIDE: usize = 0x2_0000;
+pub(crate) const GICR_DEFAULT_STRIDE: usize = 0x2_0000;
 
 pub(super) const GICR_SGI_BASE_OFFSET: usize = 0x10000;
 

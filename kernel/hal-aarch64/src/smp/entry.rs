@@ -167,7 +167,9 @@ unsafe extern "C" fn jump_to_higher_half(_cpu_id: u64) -> ! {
 }
 
 extern "C" fn secondary_main(cpu_id: u64) -> ! {
-    Mmu::<EL1>::disable_lower_half();
+    // SAFETY: `jump_to_higher_half` перевёл PC и SP в higher half. DAIF замаскирован со входа в
+    // ядро и до этой точки не снимается.
+    unsafe { Mmu::<EL1>::disable_lower_half() };
 
     ExceptionVectors::instance().install();
 

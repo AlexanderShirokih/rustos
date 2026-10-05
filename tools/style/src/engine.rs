@@ -515,8 +515,7 @@ fn directive_findings(
     out
 }
 
-/// Правила самого движка: диагностика директив подавления, вне каталога и конфигурации.
-pub const ENGINE_RULES: [&str; 3] = [
+pub(crate) const ENGINE_RULES: [&str; 3] = [
     "missing_style_reason",
     "unknown_style_rule",
     "unused_style_allow",

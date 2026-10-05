@@ -5,8 +5,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 
-/// Имя снапшота в корне репозитория.
-pub const FILE_NAME: &str = "style-baseline.txt";
+pub(crate) const FILE_NAME: &str = "style-baseline.txt";
 
 /// Снапшот принятых нарушений.
 pub struct Baseline {

@@ -53,11 +53,7 @@ pub(super) struct BootHandoff {
     pub initrd_size: usize,
 }
 
-/// К этому моменту:
-/// - PC и SP - виртуальные адреса (TTBR1)
-/// - TTBR0 ещё активен (identity mapping)
-/// - GLOBAL_ALLOCATOR в PHASE_FROZEN
-pub fn primary_main(
+pub(crate) fn primary_main(
     dtb_phys: usize,
     higher_root_pa: usize,
     frame_allocator_phys: usize,

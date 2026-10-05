@@ -7,10 +7,11 @@ use syscall::{IrqTrigger, SyscallError};
 
 use super::{bridge::parse_handle_id, error::map_ipc_error};
 
-/// `IrqMint`: `arg0=irq_control_handle`, `arg1=irq` (номер линии, значение
-/// вне диапазона `u16` - `InvalidArgument`), `arg2=trigger` (код
-/// [`IrqTrigger`]). Возвращает handle на свежий `IrqLine`.
-pub fn sys_irq_mint(control_handle: u64, irq: u64, trigger: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_irq_mint(
+    control_handle: u64,
+    irq: u64,
+    trigger: u64,
+) -> Result<u64, SyscallError> {
     let id = parse_handle_id(control_handle)?;
     let irq = u16::try_from(irq).map_err(|_| SyscallError::InvalidArgument)?;
     let trigger = u32::try_from(trigger)
@@ -21,8 +22,7 @@ pub fn sys_irq_mint(control_handle: u64, irq: u64, trigger: u64) -> Result<u64, 
     Ok(u64::from(line.raw().get()))
 }
 
-/// `IrqAck`: `arg0=irq_line_handle`. Снимает latch и размаскирует линию.
-pub fn sys_irq_ack(line_handle: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_irq_ack(line_handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(line_handle)?;
     capability::irq_ack(id).map_err(map_ipc_error)?;
     Ok(0)

@@ -7,8 +7,7 @@ use crate::{
     text::{has_cyrillic, mask_backticks},
 };
 
-/// Точка с запятой не разделяет русский текст, описывающий объявление.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "semicolon_in_prose".to_owned(),

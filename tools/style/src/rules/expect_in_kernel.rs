@@ -11,8 +11,7 @@ use crate::{
 const TEST_SEGMENTS: [&str; 3] = ["tests", "kernel_tests", "benches"];
 const TEST_FILES: [&str; 2] = ["build.rs", "test_util.rs"];
 
-/// Код ядра не срывается в панику: `expect` на достижимом пути запрещён.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "expect_in_kernel".to_owned(),

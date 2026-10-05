@@ -8,8 +8,7 @@ use crate::{
     view::{SyntaxView, View},
 };
 
-/// Комментарий, прилипший к объявлению, стоит только над `pub`-элементом.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "comment_on_declaration".to_owned(),

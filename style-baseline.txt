@@ -111,7 +111,6 @@ tuple_in_public_signature|kernel/drivers-common/src/crlf.rs|Crlf<'a>::fill|88dfe
 tuple_in_public_signature|kernel/drivers-common/src/crlf.rs|Crlf<'a>::pack_u32_le|09f708a2
 tuple_in_public_signature|kernel/hal-aarch64-asid/src/lib.rs|GlobalAsidAllocator<CPUS>::acquire|9beb91a9
 tuple_in_public_signature|kernel/hal-aarch64-paging/src/mapper.rs|PageMapper<A>::walk_to_l3_leaf|0f351b96
-tuple_in_public_signature|kernel/hal-aarch64/src/memory/asid.rs|acquire|9beb91a9
 tuple_in_public_signature|kernel/scheduler/src/ready_queue.rs|ReadyQueue::pop_highest|aec14039
 tuple_in_public_signature|kernel/scheduler/src/scheduler.rs|Scheduler<A, T, Uninit>::bootstrap|54c5d830
 tuple_in_public_signature|kernel/scheduler/src/thread_table.rs|ThreadTable<A>::split_pair_mut|56a367de
@@ -120,4 +119,3 @@ tuple_in_public_signature|lib/kernel-objects/src/object/port.rs|OwnedHandle<kind
 tuple_in_public_signature|lib/syscall-user/src/svc.rs|memory_region_inspect|e79b63e0
 tuple_in_public_signature|lib/syscall-user/src/svc.rs|signal_wait_many|e79b63e0
 tuple_in_public_signature|lib/userland/src/model.rs|user_vm_window|a0da3b7c
-tuple_in_public_signature|tools/style/src/rules/attached.rs|body_of|9182441d

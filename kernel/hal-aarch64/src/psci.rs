@@ -4,16 +4,13 @@ use hal_common::{cpu::CpuAffinity, smp::PsciConduit};
 
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
 
-/// Функция PSCI с аргументами.
 #[derive(Clone, Copy)]
-pub enum PsciCall {
-    /// `CPU_ON` с идентификатором функции из device tree. `entry_point` - физический адрес.
+pub(crate) enum PsciCall {
     CpuOn {
         function: u32,
         target: CpuAffinity,
         entry_point: u64,
     },
-    /// `SYSTEM_OFF`.
     SystemOff,
 }
 
@@ -30,12 +27,8 @@ impl PsciCall {
     }
 }
 
-/// Вызывает функцию PSCI через `conduit` и возвращает значение x0.
-///
-/// # Safety
-///
-/// Вызов уходит на уровень выше EL1 и обязан быть корректным вызовом PSCI.
-pub unsafe fn psci_call(conduit: PsciConduit, call: PsciCall) -> u64 {
+// SAFETY: вызов уходит на уровень выше EL1 и обязан быть корректным вызовом PSCI.
+pub(crate) unsafe fn psci_call(conduit: PsciConduit, call: PsciCall) -> u64 {
     let [function, arg0, arg1, arg2] = call.registers();
     let result: u64;
 

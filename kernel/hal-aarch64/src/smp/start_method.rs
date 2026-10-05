@@ -14,25 +14,17 @@ use crate::{
     psci::{PsciCall, psci_call},
 };
 
-/// Ошибка старта CPU.
 #[derive(Debug, PartialEq, Eq)]
-pub enum StartError {
-    /// Device tree не описывает способ старта.
+pub(crate) enum StartError {
     MethodUnknown,
-    /// `CPU_ON` вернул код ошибки.
     PsciRejected(PsciFailure),
-    /// `CPU_ON` вернул значение вне диапазона кодов PSCI.
     PsciMalformed(u64),
-    /// Адрес из `cpu-release-addr` не отображён на запись.
     ReleaseAddressUnmapped(usize),
-    /// CPU не доложил о готовности за отведённое время.
     NotReady,
 }
 
 impl StartError {
-    /// Слот параметров остался за целевым CPU: его состояние неизвестно, и
-    /// публиковать в слоте следующий идентификатор нельзя.
-    pub fn leaves_slot_claimed(&self) -> bool {
+    pub(crate) fn leaves_slot_claimed(&self) -> bool {
         match self {
             // Команда старта не отдавалась: слот свободен.
             StartError::MethodUnknown | StartError::ReleaseAddressUnmapped(_) => false,
@@ -70,13 +62,9 @@ impl core::fmt::Display for StartError {
     }
 }
 
-/// Запускает CPU с заданным affinity, передавая ему точку входа.
-///
-/// # Safety
-///
-/// `entry_point` - физический адрес исполняемого кода, а сам CPU не исполняет
-/// код ядра в момент вызова.
-pub unsafe fn start(
+// SAFETY: `entry_point` - физический адрес исполняемого кода, а сам CPU не исполняет код ядра в
+// момент вызова.
+pub(crate) unsafe fn start(
     method: StartMethod,
     affinity: CpuAffinity,
     entry_point: usize,

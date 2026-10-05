@@ -33,34 +33,34 @@ thread_local! {
 }
 
 #[derive(Default)]
-pub struct MockContext;
+pub(crate) struct MockContext;
 
-pub struct MockCpu;
+pub(crate) struct MockCpu;
 
-pub struct MockStack;
+pub(crate) struct MockStack;
 
-pub struct MockTimer {
+pub(crate) struct MockTimer {
     now_ns: std::sync::atomic::AtomicU64,
     scheduled_ns: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone)]
-pub struct MockTimerSource(pub Arc<MockTimer>);
+pub(crate) struct MockTimerSource(pub Arc<MockTimer>);
 
 impl MockTimer {
-    pub fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             now_ns: std::sync::atomic::AtomicU64::new(0),
             scheduled_ns: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    pub fn advance_to(&self, now_ns: u64) {
+    pub(crate) fn advance_to(&self, now_ns: u64) {
         self.now_ns
             .store(now_ns, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn scheduled_deadline(&self) -> u64 {
+    pub(crate) fn scheduled_deadline(&self) -> u64 {
         self.scheduled_ns.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -154,34 +154,31 @@ impl ThreadStackAllocator for MockStack {
     }
 }
 
-pub fn reset_switches() {
+pub(crate) fn reset_switches() {
     SWITCH_COUNT.with(|c| c.set(0));
     PREEMPTION_ENABLED.with(|c| c.set(true));
     CPU_LOCAL_PTR.with(|c| c.set(0));
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow_mut().clear());
 }
 
-pub fn take_address_space_switches() -> Vec<Option<AddressSpaceHandle>> {
+pub(crate) fn take_address_space_switches() -> Vec<Option<AddressSpaceHandle>> {
     ADDRESS_SPACE_SWITCHES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
-/// Последний handle, переданный в `MockContext::switch_address_space`.
-/// Внешний `Option` - был ли вообще вызов. Внутренний - значение `next`,
-/// которое могло быть `None` для перехода на kernel-thread.
 #[allow(clippy::option_option)]
-pub fn last_address_space_root() -> Option<Option<AddressSpaceHandle>> {
+pub(crate) fn last_address_space_root() -> Option<Option<AddressSpaceHandle>> {
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow().last().copied())
 }
 
-pub fn switch_count() -> usize {
+pub(crate) fn switch_count() -> usize {
     SWITCH_COUNT.with(Cell::get)
 }
 
-pub fn preemption_enabled() -> bool {
+pub(crate) fn preemption_enabled() -> bool {
     PREEMPTION_ENABLED.with(Cell::get)
 }
 
-pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext> {
+pub(crate) fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext> {
     let process = ProcessId::new(NonZeroU32::new(1).expect("non-zero"));
     let stack = MockStack::allocate(1).expect("mock stack allocation");
     let arch = MockContext;

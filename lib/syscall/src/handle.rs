@@ -35,26 +35,8 @@ pub const WAIT_MANY_MAX_COUNT: usize = 256;
 /// assert_eq!(send(port).raw(), 7);
 /// ```
 ///
-/// Вид объекта одной операции не подставляется в операцию над другим видом:
-///
-/// ```compile_fail
-/// use syscall::{Handle, kind};
-///
-/// fn send(port: Handle<kind::Port>) -> Handle<kind::Port> {
-///     port
-/// }
-///
-/// let region = Handle::<kind::MemoryRegion>::from_abi(core::num::NonZeroU32::new(7).unwrap());
-/// let _ = send(region);
-/// ```
-///
-/// Параметр вида обязателен и не имеет значения по умолчанию.
-///
-/// ```compile_fail
-/// use syscall::Handle;
-///
-/// let _: Handle = Handle::from_abi(core::num::NonZeroU32::new(7).unwrap());
-/// ```
+/// Вид объекта одной операции не подставляется в операцию над другим видом. Параметр вида
+/// обязателен и не имеет значения по умолчанию.
 #[repr(transparent)]
 pub struct Handle<K: ObjectKind> {
     raw: NonZeroU32,
@@ -146,15 +128,7 @@ impl<K: ObjectKind> fmt::Debug for Handle<K> {
 /// assert_eq!(items.len(), 2);
 /// ```
 ///
-/// Порт ядро в этой операции не принимает:
-///
-/// ```compile_fail
-/// use syscall::{Handle, WaitItem, kind};
-/// use core::num::NonZeroU32;
-///
-/// let port = Handle::<kind::Port>::from_abi(NonZeroU32::new(3).unwrap());
-/// let _ = WaitItem::new(port, 1);
-/// ```
+/// Порт ядро в этой операции не принимает.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct WaitItem {

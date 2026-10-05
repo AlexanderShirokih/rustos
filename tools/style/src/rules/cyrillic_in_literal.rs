@@ -9,8 +9,7 @@ use crate::{
 const TEST_SEGMENTS: [&str; 3] = ["tests", "kernel_tests", "benches"];
 const TEST_FILES: [&str; 1] = ["test_util.rs"];
 
-/// Строковый литерал не содержит кириллицы, включая тела макро-вызовов.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "cyrillic_in_literal".to_owned(),

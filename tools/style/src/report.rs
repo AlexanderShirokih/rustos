@@ -83,16 +83,14 @@ impl Report {
     }
 }
 
-/// Строковое имя уровня.
-pub fn label(severity: Severity) -> &'static str {
+pub(crate) fn label(severity: Severity) -> &'static str {
     match severity {
         Severity::Warn => "warn",
         Severity::Deny => "deny",
     }
 }
 
-/// Упорядочивает отчёты: путь, строка, колонка, правило, отпечаток, номер повтора.
-pub fn sort(reports: &mut [Report]) {
+pub(crate) fn sort(reports: &mut [Report]) {
     reports.sort_by(|left, right| {
         left.path
             .cmp(&right.path)

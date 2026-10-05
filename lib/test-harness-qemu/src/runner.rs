@@ -3,11 +3,16 @@
 //! Контракт маркеров:
 //! - `[TEST-RUN: <count>]`, `[TEST-START: name]`, `[TEST-PASS: name]`,
 //!   `[TEST-DONE: <count>]` - успех;
+//! - `[TEST-SKIP: <reason>] at <file>:<line>` вместо `[TEST-PASS: name]` - пропуск теста,
+//!   начатого последним `[TEST-START]`;
 //! - `[TEST-FAIL: <reason>] at <file>:<line>` - провал.
 
 #![allow(unsafe_code)]
 
-use core::fmt::Write as _;
+use core::{
+    fmt::Write as _,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use io::writer::Writer;
 use spin::Once;
@@ -22,6 +27,7 @@ unsafe extern "C" {
 
 static WRITER: Once<&'static (dyn Writer + Send + Sync)> = Once::new();
 static EXIT: Once<fn(u32) -> !> = Once::new();
+static SKIPPED: AtomicBool = AtomicBool::new(false);
 
 pub fn install_writer(writer: &'static (dyn Writer + Send + Sync)) {
     WRITER.call_once(|| writer);
@@ -80,12 +86,22 @@ fn iter_cases() -> &'static [TestCase] {
     unsafe { core::slice::from_raw_parts(start, len) }
 }
 
+pub(crate) fn mark_skipped() {
+    SKIPPED.store(true, Ordering::Relaxed);
+}
+
 fn run_case(case: &TestCase) {
     with_writer(|w| {
         let mut fmt = FmtAdapter::new(w);
         let _ = writeln!(fmt, "[TEST-START: {}]", case.name);
     });
+
     (case.run)();
+
+    if SKIPPED.swap(false, Ordering::Relaxed) {
+        return;
+    }
+
     with_writer(|w| {
         let mut fmt = FmtAdapter::new(w);
         let _ = writeln!(fmt, "[TEST-PASS: {}]", case.name);

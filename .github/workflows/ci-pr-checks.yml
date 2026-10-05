@@ -88,10 +88,9 @@ jobs:
       timeout-minutes: 20
       run: cargo xtask doc
 
+  # Правила текста проверяют и документы, поэтому фильтр путей прогон не отменяет.
   style:
     name: style
-    needs: changes
-    if: ${{ needs.changes.outputs.code == 'true' }}
     uses: ./.github/workflows/ci-container-job.yml
     with:
       cache-scope: style

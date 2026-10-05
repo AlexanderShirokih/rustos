@@ -5,4 +5,4 @@ compile_error!("features `boot-linux-arm64` and `boot-uefi` are mutually exclusi
 compile_error!("one of `boot-linux-arm64` or `boot-uefi` must be enabled");
 
 #[cfg(feature = "boot-linux-arm64")]
-pub mod linux_arm64;
+pub(crate) mod linux_arm64;

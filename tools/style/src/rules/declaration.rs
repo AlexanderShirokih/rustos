@@ -5,7 +5,7 @@ use ra_ap_syntax::{
 
 use crate::{settings::Settings, span::Span, suppress::is_directive};
 
-pub const DECLARATIONS: &[SyntaxKind] = &[
+pub(crate) const DECLARATIONS: &[SyntaxKind] = &[
     SyntaxKind::CONST,
     SyntaxKind::ENUM,
     SyntaxKind::FN,
@@ -22,12 +22,12 @@ pub const DECLARATIONS: &[SyntaxKind] = &[
     SyntaxKind::VARIANT,
 ];
 
-pub struct CommentBlock {
+pub(crate) struct CommentBlock {
     pub span: Span,
     pub lines: usize,
 }
 
-pub fn doc_block(node: &SyntaxNode) -> Option<CommentBlock> {
+pub(crate) fn doc_block(node: &SyntaxNode) -> Option<CommentBlock> {
     let owner = ast::AnyHasDocComments::cast(node.clone())?;
     let mut comments: Vec<ast::Comment> = owner.doc_comments().collect();
     if let Some(inner) = owner.inner_attributes_node() {
@@ -36,11 +36,11 @@ pub fn doc_block(node: &SyntaxNode) -> Option<CommentBlock> {
     block(&comments)
 }
 
-pub fn plain_block(node: &SyntaxNode) -> Option<CommentBlock> {
+pub(crate) fn plain_block(node: &SyntaxNode) -> Option<CommentBlock> {
     block(&leading_plain_comments(node))
 }
 
-pub fn leading_block(node: &SyntaxNode) -> Option<CommentBlock> {
+pub(crate) fn leading_block(node: &SyntaxNode) -> Option<CommentBlock> {
     match (doc_block(node), plain_block(node)) {
         (Some(doc), Some(plain)) => Some(CommentBlock {
             span: Span::new(
@@ -53,7 +53,7 @@ pub fn leading_block(node: &SyntaxNode) -> Option<CommentBlock> {
     }
 }
 
-pub fn opens_safety_contract(node: &SyntaxNode) -> bool {
+pub(crate) fn opens_safety_contract(node: &SyntaxNode) -> bool {
     leading_plain_comments(node)
         .first()
         .is_some_and(|comment| body_of(comment).starts_with("SAFETY:"))
@@ -99,11 +99,11 @@ fn body_of(comment: &ast::Comment) -> &str {
     comment.text().trim_start_matches('/').trim_start()
 }
 
-pub fn carries_test_attribute(node: &SyntaxNode, settings: &Settings) -> bool {
+pub(crate) fn carries_test_attribute(node: &SyntaxNode, settings: &Settings) -> bool {
     attribute_names(node).any(|name| settings.test_attributes.contains(&name))
 }
 
-pub fn permits_doc(node: &SyntaxNode, settings: &Settings) -> bool {
+pub(crate) fn permits_doc(node: &SyntaxNode, settings: &Settings) -> bool {
     if bears_generated_surface(node, settings) {
         return true;
     }
@@ -126,7 +126,7 @@ pub fn permits_doc(node: &SyntaxNode, settings: &Settings) -> bool {
     is_plain_pub(node)
 }
 
-pub fn word(kind: SyntaxKind) -> &'static str {
+pub(crate) fn word(kind: SyntaxKind) -> &'static str {
     match kind {
         SyntaxKind::FN => "a function",
         SyntaxKind::STRUCT => "a struct",

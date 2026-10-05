@@ -208,6 +208,7 @@ struct TestMarkers {
     announced: Option<usize>,
     started: usize,
     passed: usize,
+    skipped: usize,
     failed: usize,
     done: Option<usize>,
     stress_seeds: usize,
@@ -228,6 +229,8 @@ impl TestMarkers {
             self.started += 1;
         } else if line.contains("[TEST-PASS: ") {
             self.passed += 1;
+        } else if line.contains("[TEST-SKIP: ") {
+            self.skipped += 1;
         } else if line.contains("[TEST-FAIL") {
             self.failed += 1;
         } else if line.contains("[TEST-DONE: ") {
@@ -280,12 +283,13 @@ impl TestMarkers {
                 self.done
             );
         }
-        if self.started != announced || self.passed != announced {
+        if self.started != announced || self.passed + self.skipped != announced {
             bail!(
-                "QEMU pass '{label}': of {announced} tests {} started and {} passed - \
-                 some tests were silently skipped",
+                "QEMU pass '{label}': of {announced} tests {} started, {} passed and {} \
+                 skipped - some tests ended without a verdict",
                 self.started,
-                self.passed
+                self.passed,
+                self.skipped
             );
         }
         if let Some(seeds) = expected_seeds {
@@ -310,7 +314,10 @@ impl TestMarkers {
                 );
             }
         }
-        println!("qemu-test pass '{label}': {announced} tests passed");
+        println!(
+            "qemu-test pass '{label}': {} tests passed, {} skipped",
+            self.passed, self.skipped
+        );
         Ok(())
     }
 }
@@ -363,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn a_silently_skipped_test_is_refused() {
+    fn a_test_that_never_started_is_refused() {
         let lines = [
             "[TEST-RUN: 2]",
             "[TEST-START: case_0]",
@@ -371,6 +378,17 @@ mod tests {
             "[TEST-DONE: 2]",
         ];
         assert!(observe_all(&lines).verify("kernel", None, None).is_err());
+    }
+
+    #[test]
+    fn a_skipped_test_completes_the_run() {
+        let mut lines = full_run(2);
+        lines[4] = "[I] [testrunner] [TEST-SKIP: no device] at simplefb.rs:1".to_string();
+
+        let markers = observe_all(&borrow(&lines));
+
+        assert_eq!(markers.skipped, 1);
+        assert!(markers.verify("userland", None, None).is_ok());
     }
 
     #[test]

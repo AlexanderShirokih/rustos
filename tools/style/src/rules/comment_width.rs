@@ -6,8 +6,7 @@ use crate::{
     view::{CommentView, LineView, View},
 };
 
-/// Строка комментария укладывается в предельную ширину строки кода.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "comment_width".to_owned(),

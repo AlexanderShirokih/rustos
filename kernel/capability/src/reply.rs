@@ -111,8 +111,7 @@ impl ReplySlot {
         self.inner.with_lock(|slot| *slot = Some(reply));
     }
 
-    /// Забирает Reply: слот отдаёт его ровно один раз.
-    pub fn take(&self) -> Option<Arc<Reply>> {
+    pub(crate) fn take(&self) -> Option<Arc<Reply>> {
         self.inner.with_lock(Option::take)
     }
 }

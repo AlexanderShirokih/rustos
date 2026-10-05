@@ -34,7 +34,7 @@ use runtime::{
     MemoryAccess, Mutex, PortTransport, Priority, Timeout, UserMemFlags, log_fmt, log_line,
     process_exit, spawn_owned, start_component,
 };
-use syscall::{Handle, Rights, kind};
+use syscall::{Handle, PAGE_SIZE, Rights, kind};
 
 const LOG_TAG: &str = "simplefb";
 
@@ -160,10 +160,12 @@ impl Screen {
             return Err(DisplayError::AlreadyAcquired);
         }
 
+        // Регион создаётся целыми страницами, а размер поверхности бывает не кратен странице.
         let size = self
             .framebuffer
             .dimension()
             .surface_size()
+            .and_then(|size| size.checked_next_multiple_of(PAGE_SIZE as u64))
             .ok_or(DisplayError::NoSpace)?;
         let region = Resource::self_resource()
             .and_then(|budget| budget.create_virtual(size, MemoryAccess::RW))

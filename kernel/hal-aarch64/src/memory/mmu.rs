@@ -14,20 +14,16 @@ use crate::memory::regs::{
     ttbr::{HigherHalf, LowerHalf, TranslationTableBaseRegister},
 };
 
-/// Конфигурация адресного пространства.
-pub struct AddressSpaceConfig<T: TtbrSel> {
+pub(crate) struct AddressSpaceConfig<T: TtbrSel> {
     base: PhysicalAddress,
     config: tcr::AddressTranslationConfig<T>,
 }
 
-/// Конфигурация для включения MMU.
-pub trait MmuConfig {
+pub(crate) trait MmuConfig {
     fn lower_half_config(&self, asid_width: AsidWidth) -> AddressSpaceConfig<LowerHalf>;
 
-    /// Физический адрес корня таблиц страниц для верхней половины адресного пространства.
     fn higher_half_config(&self, asid_width: AsidWidth) -> AddressSpaceConfig<HigherHalf>;
 
-    /// Конфигурация блока MMU
     fn mmu_config(&self) -> sctlr::SctlrBits {
         sctlr::SctlrBits::combine(&[
             sctlr::SctlrBit::Mmu,
@@ -37,14 +33,13 @@ pub trait MmuConfig {
     }
 }
 
-/// Стандартная конфигурация с двумя адресными пространствами.
-pub struct NormalDualSpaceConfig {
+pub(crate) struct NormalDualSpaceConfig {
     lower_root: PhysicalAddress,
     higher_root: PhysicalAddress,
 }
 
 impl NormalDualSpaceConfig {
-    pub const fn new(lower_root: PhysicalAddress, higher_root: PhysicalAddress) -> Self {
+    pub(crate) const fn new(lower_root: PhysicalAddress, higher_root: PhysicalAddress) -> Self {
         Self {
             lower_root,
             higher_root,
@@ -68,8 +63,7 @@ impl MmuConfig for NormalDualSpaceConfig {
     }
 }
 
-/// Операции с MMU.
-pub struct Mmu<EL: ExceptionLevel> {
+pub(crate) struct Mmu<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 
@@ -81,11 +75,8 @@ type Tlb = TranslationLookasideBuffer<EL1>;
 type Sctlr = SystemControlRegister<EL1>;
 
 impl Mmu<EL1> {
-    /// Отключает identity mapping: запрещает обход таблиц по TTBR0_EL1 и сбрасывает TLB.
-    /// Обращение к lower half после вызова даёт Translation Fault уровня 0.
-    ///
-    /// Вызывать только после перехода в higher half (виртуальный SP и PC) с замаскированными IRQ.
-    pub fn disable_lower_half() {
+    // SAFETY: PC и SP уже в higher half, иначе код и стек теряют трансляцию. IRQ замаскированы.
+    pub(crate) unsafe fn disable_lower_half() {
         Self::full_system_barrier();
         // SAFETY: IRQ замаскированы по контракту функции, и TCR_EL1 между чтением и записью
         // никто не пишет.
@@ -94,8 +85,7 @@ impl Mmu<EL1> {
         Self::full_system_barrier();
     }
 
-    /// Включает MMU и кэши.
-    pub fn enable<C: MmuConfig>(config: &C) {
+    pub(crate) fn enable<C: MmuConfig>(config: &C) {
         // 1) Барьер перед изменениями регистров + маскирование прерываний
         Self::full_system_barrier();
 

@@ -12,10 +12,9 @@ use crate::{
     consts::CNTKCTL_EL1_USER_COUNTER,
 };
 
-/// Точка входа ядра. Передаёт управление от загрузчика к `boot_main`.
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-pub extern "C" fn _start() {
+pub(crate) extern "C" fn _start() {
     naked_asm!(
         // Сохранение DTB (x0) в callee-saved регистре
         "mov    x19, x0",
@@ -145,8 +144,7 @@ pub extern "C" fn _start() {
     )
 }
 
-/// Обёртка для вызова из asm (не возвращает управление).
-pub fn boot_main_entry(dtb_phys: usize) -> ! {
+pub(crate) fn boot_main_entry(dtb_phys: usize) -> ! {
     let info = BootInfo::from_fdt(PhysicalAddress::new(dtb_phys));
     let _ = boot_main(&info);
     loop {

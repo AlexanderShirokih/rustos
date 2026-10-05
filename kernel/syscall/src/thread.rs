@@ -14,7 +14,7 @@ use super::{
     runtime::runtime as syscall_runtime,
 };
 
-pub fn sys_thread_create(
+pub(crate) fn sys_thread_create(
     process_handle: u64,
     entry_pc: u64,
     user_sp: u64,
@@ -55,22 +55,20 @@ pub fn sys_thread_create(
     ))
 }
 
-pub fn sys_thread_self() -> Result<u64, SyscallError> {
+pub(crate) fn sys_thread_self() -> Result<u64, SyscallError> {
     let thread = syscall_runtime()
         .current_thread_object()
         .ok_or(SyscallError::WrongType)?;
     install_object_handle(CapabilityTarget::Thread(thread))
 }
 
-/// Возвращает user-VA per-thread IPC-буфера. Kernel-поток или отсутствие
-/// буфера - `WrongType`.
-pub fn sys_ipc_buffer_addr() -> Result<u64, SyscallError> {
+pub(crate) fn sys_ipc_buffer_addr() -> Result<u64, SyscallError> {
     syscall_runtime()
         .current_ipc_buffer_va()
         .ok_or(SyscallError::WrongType)
 }
 
-pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let table = runtime()
         .current_handle_table()
@@ -82,7 +80,7 @@ pub fn sys_thread_exit_code(handle: u64) -> Result<u64, SyscallError> {
     Ok(u64::from(code.cast_unsigned()))
 }
 
-pub fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_thread_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let code = exit_code_from_arg(exit_code);
     let table = runtime()

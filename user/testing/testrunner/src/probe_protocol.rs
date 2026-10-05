@@ -22,7 +22,7 @@ ipc::protocol! {
     }
 }
 
-pub struct Echo;
+pub(crate) struct Echo;
 
 impl<F: ReceivedResources> probe::Service<F> for Echo {
     fn ping(&mut self, _frame: &F, value: u64) -> u64 {
@@ -30,7 +30,7 @@ impl<F: ReceivedResources> probe::Service<F> for Echo {
     }
 }
 
-pub fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> ! {
+pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> ! {
     let exporting = spawn_owned(
         move || {
             let parent = startup_contract::Client::new(PortTransport::new(parent));

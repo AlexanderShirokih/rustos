@@ -9,8 +9,7 @@ use crate::{
     view::{CommentView, LineView, View},
 };
 
-/// Исполняет правило, объявленное данными, над единицами текста файла.
-pub fn run(rule: &TextRule, source: &Source, out: &mut Vec<Finding>) {
+pub(crate) fn run(rule: &TextRule, source: &Source, out: &mut Vec<Finding>) {
     for unit in units(rule.target, source) {
         let subject = strip(&unit.text, &rule.strip);
         if !rule.require.iter().all(|need| need.is_match(&subject)) {

@@ -16,8 +16,7 @@ fn buffer() -> *mut IpcBuffer {
     ipc_buffer_ptr().expect("thread has an IPC buffer")
 }
 
-/// Кладёт `body` и `caps` в буфер текущего потока.
-pub fn write_frame(body: &[u8], caps: &[u32]) {
+pub(crate) fn write_frame(body: &[u8], caps: &[u32]) {
     let ptr = buffer();
     // SAFETY: ядро замаппило буфер user-RW на страницу; поток - единственный
     // его владелец, запись идёт в границах полей.
@@ -29,9 +28,7 @@ pub fn write_frame(body: &[u8], caps: &[u32]) {
     }
 }
 
-/// Читает из буфера текущего потока `min(len, out.len())` байт тела.
-/// Возвращает полную длину тела и число доставленных caps.
-pub fn read_frame(out: &mut [u8]) -> (usize, usize) {
+pub(crate) fn read_frame(out: &mut [u8]) -> (usize, usize) {
     let ptr = buffer();
     // SAFETY: см. [`write_frame`]; здесь только чтение полей.
     unsafe {
@@ -43,16 +40,13 @@ pub fn read_frame(out: &mut [u8]) -> (usize, usize) {
     }
 }
 
-/// Читает `caps[index]` из буфера текущего потока.
-pub fn read_cap(index: usize) -> u32 {
+pub(crate) fn read_cap(index: usize) -> u32 {
     let ptr = buffer();
     // SAFETY: см. [`write_frame`]; здесь только чтение полей.
     unsafe { (*ptr).caps[index] }
 }
 
-/// Забирает владельца `caps[index]` из буфера текущего потока и обнуляет ячейку. Нулевая
-/// ячейка даёт `None`.
-pub fn take_cap(index: usize) -> Option<IssuedHandle<kind::Any>> {
+pub(crate) fn take_cap(index: usize) -> Option<IssuedHandle<kind::Any>> {
     let ptr = buffer();
     // SAFETY: см. [`write_frame`]; запись идёт в границах поля `caps`.
     let raw = unsafe { mem::replace(&mut (*ptr).caps[index], 0) };

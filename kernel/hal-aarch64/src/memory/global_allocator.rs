@@ -21,9 +21,7 @@ const PHASE_BUMP: u8 = 1;
 const PHASE_HEAP: u8 = 2;
 const PHASE_FROZEN: u8 = 3;
 
-/// Двухфазный глобальный аллокатор ядра: bump-фаза без лока до включения
-/// MMU, heap-фаза под локом с маскированием прерываний после.
-pub struct GlobalKernelAllocator {
+pub(crate) struct GlobalKernelAllocator {
     phase: AtomicU8,
     bump: UnsafeCell<MaybeUninit<BumpAllocator>>,
     heap: MutexCell<MaybeUninit<HeapAllocator>>,
@@ -36,7 +34,7 @@ pub struct GlobalKernelAllocator {
 unsafe impl Sync for GlobalKernelAllocator {}
 
 impl GlobalKernelAllocator {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         GlobalKernelAllocator {
             phase: AtomicU8::new(PHASE_UNINIT),
             bump: UnsafeCell::new(MaybeUninit::uninit()),
@@ -44,8 +42,7 @@ impl GlobalKernelAllocator {
         }
     }
 
-    /// Переключает на bump-фазу.
-    pub fn set_bump(&self, bump_allocator: BumpAllocator) {
+    pub(crate) fn set_bump(&self, bump_allocator: BumpAllocator) {
         let bump_ptr = self.bump.get();
         // SAFETY: caller вызывает `set_bump` ровно один раз в фазе UNINIT, до публикации
         // аллокатора через `Release`-store, эксклюзивный доступ к `MaybeUninit` гарантирован.
@@ -55,16 +52,14 @@ impl GlobalKernelAllocator {
         self.phase.store(PHASE_BUMP, Ordering::Release);
     }
 
-    /// Переключает на heap-фазу.
-    pub fn set_heap(&self, heap_allocator: HeapAllocator) {
+    pub(crate) fn set_heap(&self, heap_allocator: HeapAllocator) {
         self.heap.with_lock(|slot| {
             slot.write(heap_allocator);
         });
         self.phase.store(PHASE_HEAP, Ordering::Release);
     }
 
-    /// Замораживает аллокатор. Аллокации после этого запрещены.
-    pub fn set_freeze(&self) {
+    pub(crate) fn set_freeze(&self) {
         self.phase.store(PHASE_FROZEN, Ordering::Release);
     }
 

@@ -5,11 +5,9 @@ use ra_ap_syntax::{
 
 use crate::{source::Source, span::Span};
 
-/// Обозначение объявления, накрывающего находку, для файла вне дерева разбора.
-pub const FILE_ROOT: &str = "<file-root>";
+pub(crate) const FILE_ROOT: &str = "<file-root>";
 
-/// Возвращает путь объявления, накрывающего диапазон.
-pub fn item_path(source: &Source, span: Span) -> String {
+pub(crate) fn item_path(source: &Source, span: Span) -> String {
     let root = &source.parsed().root;
     let end = span.end.min(crate::span::offset(source.text.len()));
     let start = span.start.min(end);

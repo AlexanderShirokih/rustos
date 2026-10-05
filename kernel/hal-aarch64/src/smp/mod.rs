@@ -21,8 +21,7 @@ use crate::{cpu, read_sysreg};
 
 const READY_TIMEOUT_MS: u64 = 500;
 
-/// Корни трансляции, которыми стартующий CPU включает MMU.
-pub struct TranslationRoots {
+pub(crate) struct TranslationRoots {
     /// Корень identity-отображения, который покрывает текущий PC в момент включения MMU.
     pub lower: PageAlignedAddress,
     /// Корень higher-half.
@@ -31,9 +30,7 @@ pub struct TranslationRoots {
 
 static DEVICE_TREE: Once<&'static DeviceTree<'static>> = Once::new();
 
-/// Запоминает параметры подъёма. Вызывается boot CPU в post-MMU фазе, до
-/// инициализации драйверов.
-pub fn prepare(device_tree: &'static DeviceTree<'static>, roots: &TranslationRoots) {
+pub(crate) fn prepare(device_tree: &'static DeviceTree<'static>, roots: &TranslationRoots) {
     handoff::publish_roots(
         roots.lower.as_usize() as u64,
         roots.higher.as_usize() as u64,
@@ -41,11 +38,7 @@ pub fn prepare(device_tree: &'static DeviceTree<'static>, roots: &TranslationRoo
     let _ = DEVICE_TREE.call_once(|| device_tree);
 }
 
-/// Поднимает все CPU из таблицы топологии, кроме текущего.
-///
-/// Вызывается boot CPU после инициализации контроллера прерываний. Стартующий CPU
-/// настраивает свой интерфейс контроллера, а тот требует уже настроенного distributor.
-pub fn start_secondaries() {
+pub(crate) fn start_secondaries() {
     let Some(device_tree) = DEVICE_TREE.get().copied() else {
         warn!("SMP: bring-up requested before the device tree was published");
         return;
@@ -106,9 +99,7 @@ pub fn start_secondaries() {
     info!("SMP: {} of {} CPU(s) online", online_cpus(), cpu::count());
 }
 
-/// Число CPU, работающих под управлением планировщика: вторичные, дошедшие до
-/// post-MMU кода, и boot CPU.
-pub fn online_cpus() -> usize {
+pub(crate) fn online_cpus() -> usize {
     handoff::ONLINE.count() + 1
 }
 

@@ -504,9 +504,8 @@ fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
                 .expect("acquire_surface call")
                 .expect("surface granted"),
         );
-        let size = dimension.surface_size().expect("surface size fits");
         let surface = region
-            .map(size, UserMemFlags::ReadWrite)
+            .map_full(UserMemFlags::ReadWrite)
             .expect("surface maps");
         let rectangle = Area {
             x: dimension.width / 4,
@@ -527,9 +526,12 @@ fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
         kernel_tests::kassert_eq!(shown, Ok(()));
         kernel_tests::kreport!("{} shows the gradient and the rectangle", device.as_str());
     }
-    kernel_tests::kreport!("simple-framebuffer devices: {}", devices.len());
     drop((provider, platform));
     finish(composition);
+
+    if devices.is_empty() {
+        kernel_tests::kskip!("no simple-framebuffer described");
+    }
 }
 
 #[kernel_test]
@@ -570,4 +572,8 @@ fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions(
     }
     drop((provider, platform));
     finish(composition);
+
+    if devices.is_empty() {
+        kernel_tests::kskip!("no simple-framebuffer described");
+    }
 }

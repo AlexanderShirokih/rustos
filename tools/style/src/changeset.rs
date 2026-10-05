@@ -18,15 +18,13 @@ pub enum Selection {
     Since(String),
 }
 
-/// Изменённые строки, переименования и источник содержимого файлов.
-pub struct Changeset {
+pub(crate) struct Changeset {
     selection: Selection,
     lines: BTreeMap<PathBuf, BTreeSet<u32>>,
 }
 
 impl Changeset {
-    /// Собирает множество изменений для выбранного режима.
-    pub fn collect(workspace: &Workspace, selection: Selection) -> Result<Changeset> {
+    pub(crate) fn collect(workspace: &Workspace, selection: Selection) -> Result<Changeset> {
         let mut lines: BTreeMap<PathBuf, BTreeSet<u32>> = BTreeMap::new();
         let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
 
@@ -51,18 +49,15 @@ impl Changeset {
         Ok(Changeset { selection, lines })
     }
 
-    /// Сообщает, ограничивает ли изменение множество проверяемых файлов.
-    pub fn is_filtering(&self) -> bool {
+    pub(crate) fn is_filtering(&self) -> bool {
         !matches!(self.selection, Selection::All)
     }
 
-    /// Пути, затронутые изменением.
-    pub fn paths(&self) -> Vec<PathBuf> {
+    pub(crate) fn paths(&self) -> Vec<PathBuf> {
         self.lines.keys().cloned().collect()
     }
 
-    /// Сообщает, пересекается ли диапазон строк с изменёнными строками файла.
-    pub fn touches(&self, path: &Path, first: u32, last: u32) -> bool {
+    pub(crate) fn touches(&self, path: &Path, first: u32, last: u32) -> bool {
         if !self.is_filtering() {
             return true;
         }
@@ -75,8 +70,7 @@ impl Changeset {
         changed.range(first..=last).next().is_some()
     }
 
-    /// Читает содержимое файла из источника, отвечающего режиму.
-    pub fn read(&self, workspace: &Workspace, path: &Path) -> Option<String> {
+    pub(crate) fn read(&self, workspace: &Workspace, path: &Path) -> Option<String> {
         if matches!(self.selection, Selection::Staged) {
             let spec = format!(":{}", path.to_string_lossy());
             return git(&workspace.root, &["show", &spec]).ok();

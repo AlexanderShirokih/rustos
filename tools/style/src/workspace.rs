@@ -8,16 +8,14 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::scope::{Domain, FileMeta};
 
-/// Дерево репозитория: корень, отображение путей в пакеты, перечисление файлов.
-pub struct Workspace {
+pub(crate) struct Workspace {
     /// Корень репозитория.
     pub root: PathBuf,
     packages: BTreeMap<PathBuf, String>,
 }
 
 impl Workspace {
-    /// Определяет корень репозитория и читает манифесты пакетов.
-    pub fn discover(from: &Path) -> Result<Workspace> {
+    pub(crate) fn discover(from: &Path) -> Result<Workspace> {
         let root = git(from, &["rev-parse", "--show-toplevel"])?;
         let root = PathBuf::from(root.trim());
         let listing = git(&root, &["ls-files", "-z", "--", "*Cargo.toml"])?;
@@ -48,8 +46,7 @@ impl Workspace {
         Ok(Workspace { root, packages })
     }
 
-    /// Перечисляет файлы репозитория, при необходимости включая неотслеживаемые.
-    pub fn files(&self, untracked: bool) -> Result<Vec<PathBuf>> {
+    pub(crate) fn files(&self, untracked: bool) -> Result<Vec<PathBuf>> {
         let args: &[&str] = if untracked {
             &["ls-files", "-z", "-c", "-o", "--exclude-standard"]
         } else {
@@ -66,8 +63,7 @@ impl Workspace {
         Ok(files)
     }
 
-    /// Собирает паспорт файла по его пути от корня репозитория.
-    pub fn meta(&self, path: &Path) -> FileMeta {
+    pub(crate) fn meta(&self, path: &Path) -> FileMeta {
         let package = self
             .packages
             .iter()
@@ -83,8 +79,7 @@ impl Workspace {
     }
 }
 
-/// Выполняет команду git в заданной директории и возвращает её вывод.
-pub fn git(directory: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(directory: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(directory)

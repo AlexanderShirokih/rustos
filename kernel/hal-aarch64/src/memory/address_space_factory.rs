@@ -22,16 +22,10 @@ use crate::memory::memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameT
 pub(crate) type FrameAllocatorImpl = PhysicalFrameAllocator<MutexCell<FrameBitmap>>;
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 
-/// Конкретный тип user-mapper-а, выдаваемый `Aarch64AddressSpaceFactory`
-/// в виде `Arc<dyn MemoryMapper + Send + Sync>`. Платформенный код делает
-/// downcast через `MemoryMapper::as_any` ради API, специфичных для AArch64
-/// (например, `query_leaf_raw`).
-pub type UserAarch64MemoryMapper =
+pub(crate) type UserAarch64MemoryMapper =
     Aarch64MemoryMapper<'static, FrameAllocatorImpl, MutexPageMapper<'static, FrameAllocatorImpl>>;
 
-/// Фабрика user-AS, привязанная к глобальному `FrameAllocator` и
-/// higher-half offset для трансляции PA таблиц в VA.
-pub struct Aarch64AddressSpaceFactory {
+pub(crate) struct Aarch64AddressSpaceFactory {
     frame_allocator: &'static FrameAllocatorImpl,
     higher_half_base: PageAlignedVirtualAddress,
 }
@@ -43,7 +37,7 @@ unsafe impl Send for Aarch64AddressSpaceFactory {}
 unsafe impl Sync for Aarch64AddressSpaceFactory {}
 
 impl Aarch64AddressSpaceFactory {
-    pub fn new(
+    pub(crate) fn new(
         frame_allocator: &'static FrameAllocatorImpl,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Self {

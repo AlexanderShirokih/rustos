@@ -397,6 +397,27 @@ fn description(
         .map(|description| (MemoryRegion::from(description.region), description.offset))
 }
 
+fn platform_describes(device: &str) -> bool {
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
+    let session = platform_session(&importer, PLATFORM_REQUIREMENT);
+
+    let described = {
+        let (region, offset) = description(&session).expect("description granted");
+        let mapping = region
+            .map_full_read_only()
+            .expect("description maps read-only");
+        Description::new(mapping.as_bytes(), offset)
+            .expect("description parses")
+            .find(device)
+            .is_some()
+    };
+
+    drop(session);
+    finish(composition);
+    described
+}
+
 fn region_base(region: &MemoryRegion) -> u64 {
     region.inspect().expect("region inspects").base
 }
@@ -880,6 +901,10 @@ fn a_launch_short_of_memory_removes_the_child_without_stopping_the_root() {
 
 #[kernel_test]
 fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
+    if !platform_describes(PL031) {
+        kernel_tests::kskip!("{} is not described", PL031);
+    }
+
     let composition = scenario(&[PLATFORM, RTC]);
     let importer = composition.importer(&[crate::composition::Import {
         declaration: RequirementDeclaration::all(RTC_REQUIREMENT, rtc::Protocol::ID),
@@ -901,6 +926,10 @@ fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
 
 #[kernel_test]
 fn a_restarted_child_takes_the_same_line_and_region_again() {
+    if !platform_describes(PL031) {
+        kernel_tests::kskip!("{} is not described", PL031);
+    }
+
     let composition = scenario(&[PLATFORM, IRQ]);
 
     let lines = await_component_lines(IRQ.name, 2);
@@ -930,6 +959,10 @@ fn a_device_outside_the_platform_description_is_not_described() {
 
 #[kernel_test]
 fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes() {
+    if !platform_describes(PL031) {
+        kernel_tests::kskip!("{} is not described", PL031);
+    }
+
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let first = platform_session(&importer, PLATFORM_REQUIREMENT);
@@ -957,6 +990,10 @@ fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes
 
 #[kernel_test]
 fn a_window_in_the_region_of_another_session_is_taken() {
+    if !platform_describes(FIRST_VIRTIO) {
+        kernel_tests::kskip!("{} is not described", FIRST_VIRTIO);
+    }
+
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let first = platform_session(&importer, PLATFORM_REQUIREMENT);
@@ -972,6 +1009,10 @@ fn a_window_in_the_region_of_another_session_is_taken() {
 
 #[kernel_test]
 fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets_and_sizes() {
+    if !platform_describes(FIRST_VIRTIO) {
+        kernel_tests::kskip!("{} is not described", FIRST_VIRTIO);
+    }
+
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
@@ -992,6 +1033,10 @@ fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets_and_size
 
 #[kernel_test]
 fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
+    if !platform_describes(SECOND_VIRTIO) {
+        kernel_tests::kskip!("{} is not described", SECOND_VIRTIO);
+    }
+
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
@@ -1018,6 +1063,10 @@ fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
 
 #[kernel_test]
 fn the_grants_of_a_platform_incarnation_are_revoked_when_it_ends() {
+    if !platform_describes(PL031) {
+        kernel_tests::kskip!("{} is not described", PL031);
+    }
+
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
@@ -1064,7 +1113,7 @@ fn sessions_read_one_description_through_read_only_copies() {
         (region_base(&region), offset)
     );
     kernel_tests::kassert_eq!(writable, Err(Error::Syscall(SyscallError::AccessDenied)));
-    kernel_tests::kassert!(tree.find(PL031).is_some());
+    kernel_tests::kassert!(tree.devices().next().is_some());
     drop((first, second));
     finish(composition);
 }

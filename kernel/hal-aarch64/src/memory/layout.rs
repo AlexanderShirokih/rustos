@@ -10,8 +10,7 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 
-/// Максимальное количество регионов памяти.
-pub const MAX_MEMORY_REGIONS: usize = 128;
+pub(crate) const MAX_MEMORY_REGIONS: usize = 128;
 
 /// Тег типа региона памяти
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,36 +27,32 @@ pub enum RegionTag {
     Other,
 }
 
-/// Регионов больше, чем вмещает [`MAX_MEMORY_REGIONS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TooManyMemoryRegions;
+pub(crate) struct TooManyMemoryRegions;
 
-/// Раскладка физической памяти ядра.
-pub struct MemoryLayout {
+pub(crate) struct MemoryLayout {
     regions: Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
 }
 
 impl MemoryLayout {
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             regions: Vec::new(),
         }
     }
 
-    /// Добавляет регион. `Err` - список регионов исчерпан.
-    pub fn add(
+    pub(crate) fn add(
         &mut self,
         region: MemoryRegion<PageAlignedAddress>,
     ) -> Result<(), TooManyMemoryRegions> {
         self.regions.push(region).ok_or(TooManyMemoryRegions)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &MemoryRegion<PageAlignedAddress>> {
         self.regions.iter()
     }
 
-    /// Вычисляет свободные области heap (heap минус зарезервированные регионы)
-    pub fn free_heap_regions(
+    pub(crate) fn free_heap_regions(
         &self,
     ) -> Result<StaticIntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>, ()> {
         let mut free_regions = StaticIntervalSet::<PageAlignedAddress, MAX_MEMORY_REGIONS>::new();
@@ -79,10 +74,7 @@ impl MemoryLayout {
         Ok(free_regions)
     }
 
-    /// Дописывает в `out` отображаемые не-heap регионы. Интервалы
-    /// [`RegionTag::Unmapped`] вычитаются из каждого региона, кроме
-    /// [`RegionTag::Kernel`]: образ ядра исполняется и из карт не убирается.
-    pub fn push_mapped_non_heap_regions(
+    pub(crate) fn push_mapped_non_heap_regions(
         &self,
         out: &mut Vec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
     ) -> Result<(), TooManyMemoryRegions> {
@@ -133,32 +125,23 @@ pub struct MemoryRegion<A: Address + Aligned> {
     pub flags: Aarch64MemFlags,
 }
 
-/// Диапазон секции ядра, заданный парой символов линкера.
-///
-/// Символ материализуется PC-relative, и его числовое значение принадлежит
-/// тому адресному пространству, где исполняется код: до включения MMU это
-/// физический адрес, после - виртуальный. Тип держит границы
-/// неинтерпретированными до тех пор, пока пространство не названо явно.
 #[derive(Clone, Copy)]
-pub struct LinkTimeRange {
+pub(crate) struct LinkTimeRange {
     start: usize,
     end: usize,
 }
 
 impl LinkTimeRange {
-    /// # Safety
-    ///
-    /// Вызывающий обязан находиться в pre-MMU фазе. Только там PC, а с ним и значение
-    /// символа, совпадает с физическим адресом секции.
-    pub unsafe fn physical(start: &u8, end: &u8) -> Self {
+    // SAFETY: вызывающий обязан находиться в pre-MMU фазе. Только там PC, а с ним и значение
+    // символа, совпадает с физическим адресом секции.
+    pub(crate) unsafe fn physical(start: &u8, end: &u8) -> Self {
         Self {
             start: core::ptr::from_ref::<u8>(start) as usize,
             end: core::ptr::from_ref::<u8>(end) as usize,
         }
     }
 
-    /// Строит регион физической памяти, округляя границы наружу до страницы.
-    pub fn into_region(
+    pub(crate) fn into_region(
         self,
         tag: RegionTag,
         flags: Aarch64MemFlags,

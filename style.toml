@@ -13,6 +13,9 @@ caps_emphasis = "deny"
 against_calque = "deny"
 non_ascii_punctuation = "deny"
 device_specific_name = "deny"
+causal_connective = "deny"
+subjunctive_mood = "deny"
+definition_by_negation = "deny"
 
 [[text]]
 id = "latin_apostrophe"

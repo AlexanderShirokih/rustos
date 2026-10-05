@@ -43,7 +43,7 @@ impl OutcomeSlot {
     pub(crate) const TIMEDOUT: u32 = 6;
     pub(crate) const SENDER_GONE: u32 = 7;
 
-    pub fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: AtomicU32::new(Self::PENDING),
             badge: AtomicU64::new(0),

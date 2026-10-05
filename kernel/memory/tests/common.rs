@@ -18,17 +18,20 @@ use memory::{
 const TEST_FRAME_SIZE: usize = PageAlignedAddress::ALIGNMENT;
 
 #[allow(dead_code)]
-pub fn frame_to_address(frame: usize) -> PageAlignedAddress {
+pub(crate) fn frame_to_address(frame: usize) -> PageAlignedAddress {
     PageAlignedAddress::from_usize(frame * TEST_FRAME_SIZE).expect("frame_to_address: not aligned")
 }
 
 #[allow(dead_code)]
-pub fn nz(value: usize) -> NonZeroUsize {
+pub(crate) fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("nz: zero")
 }
 
 #[allow(dead_code)]
-pub fn make_range(start_frame: usize, frame_count: usize) -> MemoryRange<PageAlignedAddress> {
+pub(crate) fn make_range(
+    start_frame: usize,
+    frame_count: usize,
+) -> MemoryRange<PageAlignedAddress> {
     assert!(frame_count > 0, "frame_count must be > 0");
     let start = frame_to_address(start_frame);
     let end = frame_to_address(start_frame + frame_count);
@@ -41,13 +44,9 @@ struct MockMemoryAccessProviderInner {
     data: spin::Mutex<Vec<u8>>,
 }
 
-/// Простая реализация `MemoryAccessProvider` для интеграционных тестов.
-///
-/// Хранит содержимое памяти в векторе и позволяет инспектировать его из тестов.
-/// Clone создаёт ещё одну ссылку на те же данные.
 #[derive(Clone)]
 #[allow(dead_code)]
-pub struct MockMemoryAccessProvider {
+pub(crate) struct MockMemoryAccessProvider {
     inner: Arc<MockMemoryAccessProviderInner>,
 }
 
@@ -70,7 +69,7 @@ impl core::fmt::Debug for MockMemoryAccessProvider {
 
 #[allow(dead_code)]
 impl MockMemoryAccessProvider {
-    pub fn new(frame_size: usize, total_frames: usize) -> Self {
+    pub(crate) fn new(frame_size: usize, total_frames: usize) -> Self {
         let len = frame_size
             .checked_mul(total_frames)
             .expect("frame_size * total_frames overflow");
@@ -84,18 +83,15 @@ impl MockMemoryAccessProvider {
         }
     }
 
-    /// Полный объём памяти в байтах.
-    pub fn total_bytes(&self) -> usize {
+    pub(crate) fn total_bytes(&self) -> usize {
         self.inner.len
     }
 
-    /// Количество фреймов.
-    pub fn total_frames(&self) -> usize {
+    pub(crate) fn total_frames(&self) -> usize {
         self.inner.len / self.inner.frame_size
     }
 
-    /// Снимок диапазона памяти (для проверок в тестах).
-    pub fn snapshot(&self, offset: usize, len: usize) -> Vec<u8> {
+    pub(crate) fn snapshot(&self, offset: usize, len: usize) -> Vec<u8> {
         assert!(offset + len <= self.inner.len, "snapshot out of bounds");
         let data = self.inner.data.lock();
         data[offset..offset + len].to_vec()

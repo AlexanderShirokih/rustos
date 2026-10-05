@@ -14,18 +14,15 @@ use memory::{
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
 
-pub type KernelMmioVaAllocator = MutexCell<RangeAllocator<()>>;
+pub(crate) type KernelMmioVaAllocator = MutexCell<RangeAllocator<()>>;
 
-pub struct MmioServiceImpl {
+pub(crate) struct MmioServiceImpl {
     memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
     va_allocator: Arc<KernelMmioVaAllocator>,
 }
 
 impl MmioServiceImpl {
-    /// Создаёт сервис над диапазоном `[arena_base, arena_base + arena_size)`
-    /// kernel-VA. Диапазон должен быть зарезервирован под MMIO-маппинги и
-    /// не пересекаться ни с линейной картой PA->VA, ни с heap-ареной.
-    pub fn new(
+    pub(crate) fn new(
         memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
         arena_base: PageAlignedVirtualAddress,
         arena_size: NonZeroUsize,

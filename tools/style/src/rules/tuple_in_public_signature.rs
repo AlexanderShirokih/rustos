@@ -13,8 +13,7 @@ const TEST_SEGMENTS: [&str; 3] = ["tests", "kernel_tests", "benches"];
 const TEST_FILES: [&str; 2] = ["build.rs", "test_util.rs"];
 const TEST_PACKAGES: [&str; 2] = ["ipc-test", "testrunner"];
 
-/// Публичная функция не принимает и не возвращает кортеж.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "tuple_in_public_signature".to_owned(),

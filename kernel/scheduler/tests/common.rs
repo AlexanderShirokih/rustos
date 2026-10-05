@@ -44,34 +44,34 @@ thread_local! {
 }
 
 #[derive(Default)]
-pub struct MockContext;
+pub(crate) struct MockContext;
 
-pub struct MockCpu;
+pub(crate) struct MockCpu;
 
-pub struct MockStack;
+pub(crate) struct MockStack;
 
-pub struct MockTimer {
+pub(crate) struct MockTimer {
     now_ns: std::sync::atomic::AtomicU64,
     scheduled_ns: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone)]
-pub struct MockTimerSource(pub Arc<MockTimer>);
+pub(crate) struct MockTimerSource(pub Arc<MockTimer>);
 
 impl MockTimer {
-    pub fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             now_ns: std::sync::atomic::AtomicU64::new(0),
             scheduled_ns: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    pub fn advance_to(&self, now_ns: u64) {
+    pub(crate) fn advance_to(&self, now_ns: u64) {
         self.now_ns
             .store(now_ns, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn scheduled_deadline(&self) -> u64 {
+    pub(crate) fn scheduled_deadline(&self) -> u64 {
         self.scheduled_ns.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -177,7 +177,7 @@ impl ThreadStackAllocator for MockStack {
     }
 }
 
-pub fn reset_switches() {
+pub(crate) fn reset_switches() {
     SWITCH_COUNT.with(|c| c.set(0));
     PREEMPTION_ENABLED.with(|c| c.set(true));
     CURRENT_CPU.with(|c| c.set(0));
@@ -186,43 +186,32 @@ pub fn reset_switches() {
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow_mut().clear());
 }
 
-/// Переводит host-тест на другой смоделированный CPU: меняются и
-/// [`ArchCpu::current_id`], и CPU-local указатель.
-pub fn set_current_cpu(id: CpuId) {
+pub(crate) fn set_current_cpu(id: CpuId) {
     CURRENT_CPU.with(|c| c.set(id.as_index()));
 }
 
-/// Извлекает накопленные цели `send_reschedule` и очищает буфер.
-pub fn take_reschedules() -> Vec<CpuId> {
+pub(crate) fn take_reschedules() -> Vec<CpuId> {
     RESCHEDULES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
-/// Извлекает накопленную последовательность вызовов
-/// `MockContext::switch_address_space` и очищает буфер.
-pub fn take_address_space_switches() -> Vec<Option<AddressSpaceHandle>> {
+pub(crate) fn take_address_space_switches() -> Vec<Option<AddressSpaceHandle>> {
     ADDRESS_SPACE_SWITCHES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
-/// Последний handle, переданный в `MockContext::switch_address_space`.
-///
-/// Внешний `Option` - был ли вообще вызов. Внутренний - значение `next`,
-/// которое могло быть `None` для перехода на kernel-thread.
 #[allow(clippy::option_option)]
-pub fn last_address_space_root() -> Option<Option<AddressSpaceHandle>> {
+pub(crate) fn last_address_space_root() -> Option<Option<AddressSpaceHandle>> {
     ADDRESS_SPACE_SWITCHES.with(|c| c.borrow().last().copied())
 }
 
-pub fn switch_count() -> usize {
+pub(crate) fn switch_count() -> usize {
     SWITCH_COUNT.with(Cell::get)
 }
 
-pub fn preemption_enabled() -> bool {
+pub(crate) fn preemption_enabled() -> bool {
     PREEMPTION_ENABLED.with(Cell::get)
 }
 
-/// Моделирует контекст аппаратного IRQ-обработчика. Вход маскирует
-/// preemption, выход (`eret`) восстанавливает состояние, которое было на входе.
-pub fn with_simulated_irq<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_simulated_irq<R>(f: impl FnOnce() -> R) -> R {
     let was_enabled = MockCpu::preemption_enabled();
     MockCpu::disable_preemption();
     let result = f();
@@ -232,7 +221,7 @@ pub fn with_simulated_irq<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
-pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext> {
+pub(crate) fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext> {
     let process = ProcessId::new(NonZeroU32::new(1).expect("non-zero"));
     let stack = MockStack::allocate(1).expect("mock stack allocation");
     let arch = MockContext;
@@ -240,21 +229,20 @@ pub fn make_thread(name: &'static str, priority: Priority) -> Thread<MockContext
     Thread::new(id, process, CpuId::ZERO, priority, arch, stack, name)
 }
 
-/// `FrameAllocator`, считающий deallocations. Выдаёт фреймы с 1000.
-pub struct CountingFrameAllocator {
+pub(crate) struct CountingFrameAllocator {
     next: AtomicUsize,
     deallocated: Mutex<Vec<Frame>>,
 }
 
 impl CountingFrameAllocator {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             next: AtomicUsize::new(1000),
             deallocated: Mutex::new(Vec::new()),
         }
     }
 
-    pub fn deallocated_count(&self) -> usize {
+    pub(crate) fn deallocated_count(&self) -> usize {
         self.deallocated.lock().unwrap().len()
     }
 }

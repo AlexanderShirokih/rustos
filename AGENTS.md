@@ -17,7 +17,7 @@
 | [`docs/environment.md`](docs/environment.md)   | Настройка окружения и зависимости                         |
 | [`docs/workspace.md`](docs/workspace.md)       | Устройство репозитория: домены, слои, таргеты, имена      |
 | [`docs/architecture.md`](docs/architecture.md) | Архитектура ядра: изоляция, полномочия, память, загрузка  |
-| [`docs/code-style.md`](docs/code-style.md)     | Стиль кода: структура файлов, комментарии, `no_std`       |
+| [`docs/code-style.md`](docs/code-style.md)     | Корень крейта, константы, язык вывода, `unsafe`, ошибки   |
 | [`docs/testing.md`](docs/testing.md)           | Тесты: размещение, уровни, прогоны под QEMU               |
 | [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                     |
 | [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала        |

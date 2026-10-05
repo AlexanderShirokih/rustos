@@ -40,9 +40,8 @@ const _: () = assert!(
     "exception_entry! reaches fpsr by a literal offset"
 );
 
-/// Контекст процессора, сохраняемый при входе в обработчик исключения.
 #[repr(C)]
-pub struct ExceptionFrame {
+pub(crate) struct ExceptionFrame {
     /// Регистры общего назначения x0-x30.
     pub regs: [GpReg; 31],
     /// Указатель стека на момент исключения (до выделения фрейма).
@@ -70,17 +69,12 @@ pub struct ExceptionFrame {
     pub fpsr: u64,
 }
 
-/// Тип исключения, определяемый вектором входа.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy)]
-pub enum ExceptionKind {
-    /// Синхронное исключение (data abort, instruction abort, SVC, BRK и т.д.).
+pub(crate) enum ExceptionKind {
     Sync = 0,
-    /// Аппаратное прерывание (IRQ).
     Irq = 1,
-    /// Fast Interrupt Request.
     Fiq = 2,
-    /// System Error (асинхронная аппаратная ошибка).
     SError = 3,
 }
 
@@ -154,14 +148,12 @@ global_asm!(
     serror_lower_el_a32   = sym serror_lower_el_a32,
 );
 
-/// Таблица векторов исключений AArch64.
-pub struct ExceptionVectors {
+pub(crate) struct ExceptionVectors {
     _table: [u8; 2048],
 }
 
 impl ExceptionVectors {
-    /// Возвращает ссылку на таблицу по адресу линейного higher-half-отображения `.text`.
-    pub fn instance() -> &'static Self {
+    pub(crate) fn instance() -> &'static Self {
         #[allow(improper_ctypes)]
         unsafe extern "C" {
             static exception_vectors: ExceptionVectors;
@@ -172,8 +164,7 @@ impl ExceptionVectors {
         unsafe { &exception_vectors }
     }
 
-    /// Записывает адрес таблицы в `VBAR_EL1`.
-    pub fn install(&self) {
+    pub(crate) fn install(&self) {
         // SAFETY: Прерывания замаскированы (DAIF). Адрес таблицы векторов
         // выровнен на 2KB (требование ARMv8) - обеспечивается `.balign 2048` в global_asm-блоке.
         unsafe {
@@ -201,12 +192,13 @@ fn sync_handler(frame: &mut ExceptionFrame) {
     if originates_from_el0(frame.spsr) {
         let process_name = capability::current_process_name();
         klog::error!(
-            "EL0 exception in '{}': {}, ESR={:#010x} ELR={:#018x} FAR={:#018x}",
+            "EL0 exception in '{}': {}, ESR={:#010x} ELR={:#018x} FAR={:#018x} SP_EL0={:#018x}",
             process_name.as_ref().map_or("?", |name| name.as_str()),
             frame.esr.exception_class().description(),
             frame.esr.raw(),
             frame.elr,
             frame.far,
+            frame.sp_el0,
         );
         capability::process_exit(USER_EXCEPTION_EXIT_CODE);
     }

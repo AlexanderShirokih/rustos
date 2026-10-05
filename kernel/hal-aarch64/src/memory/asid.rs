@@ -7,7 +7,7 @@
 
 use core::sync::atomic::AtomicU64;
 
-pub use hal_aarch64_asid::{GlobalAsidAllocator, unpack_asid};
+pub(crate) use hal_aarch64_asid::{GlobalAsidAllocator, unpack_asid};
 use scheduler::{ArchCpu, MAX_CPUS};
 
 use crate::{
@@ -22,13 +22,10 @@ fn flush_all_inner_shareable() {
 static ASID_ALLOCATOR: GlobalAsidAllocator<MAX_CPUS> =
     GlobalAsidAllocator::new(flush_all_inner_shareable);
 
-/// Настраивает глобальный аллокатор ASID шириной, объявленной железом.
-/// Вызывается на загрузке boot CPU, после включения MMU.
-pub fn init_global(width: hal_aarch64_asid::AsidWidth) {
+pub(crate) fn init_global(width: hal_aarch64_asid::AsidWidth) {
     ASID_ALLOCATOR.init(width);
 }
 
-/// Lazy acquire ASID для текущего CPU. Возвращает (asid, raw_tag).
-pub fn acquire(tag_slot: &AtomicU64) -> (u16, u64) {
+pub(crate) fn acquire(tag_slot: &AtomicU64) -> (u16, u64) {
     ASID_ALLOCATOR.acquire(tag_slot, Aarch64Cpu::current_id().raw())
 }

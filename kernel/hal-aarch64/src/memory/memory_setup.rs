@@ -35,10 +35,7 @@ use crate::{
     },
 };
 
-/// Аллокатор фреймов pre-MMU фазы. Спинлок здесь неприменим. Он построен на
-/// exclusive-инструкциях, а с выключенным MMU память имеет тип Device-nGnRnE. Исполнение в
-/// этой фазе однопоточно.
-pub type BootFrameAllocator = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
+pub(crate) type BootFrameAllocator = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 type NoLockPageMapper<'a, FA> = NoLockCell<PageMapper<FrameTableAlloc<'a, FA>>>;
@@ -55,57 +52,51 @@ pub(crate) fn frame_allocator() -> Option<&'static FrameAllocatorImpl> {
     FRAME_ALLOCATOR.get()
 }
 
-/// Ранняя фаза: bump-аллокатор создан, но не установлен.
-pub struct Early {
+pub(crate) struct Early {
     bump_allocator: BumpAllocator,
     free_regions: StaticIntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     layout: MemoryLayout,
 }
 
-/// Фаза после установки bump-аллокатора.
-pub struct Installed {
+pub(crate) struct Installed {
     free_regions: StaticIntervalSet<PageAlignedAddress, MAX_MEMORY_REGIONS>,
     layout: MemoryLayout,
 }
 
-pub struct MemoryManagerResult {
+pub(crate) struct MemoryManagerResult {
     pub memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
     pub address_space_factory: Box<dyn AddressSpaceFactory + Send + Sync>,
     pub frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
 }
 
-/// Корневые таблицы страниц.
-pub struct PageTableRoots {
+pub(crate) struct PageTableRoots {
     pub lower_pa: PageAlignedAddress,
     pub higher_pa: PageAlignedAddress,
     pub lower_ptr: *mut PageTable<L0>,
     pub higher_ptr: *mut PageTable<L0>,
 }
 
-/// Фаза после подготовки таблиц страниц.
-pub struct Prepared {
+pub(crate) struct Prepared {
     roots: PageTableRoots,
     frame_allocator: &'static BootFrameAllocator,
     all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
     bump: Interval<PageAlignedAddress>,
 }
 
-/// Фаза после включения MMU.
-pub struct Enabled {
+pub(crate) struct Enabled {
     /// Корневые таблицы.
     pub roots: PageTableRoots,
     /// Аллокатор фреймов (физический адрес, был Box::leak в bump-памяти).
     pub frame_allocator: &'static BootFrameAllocator,
 }
 
-/// Машина состояний настройки памяти.
-pub struct MemorySetup<Stage> {
+pub(crate) struct MemorySetup<Stage> {
     /// Текущее состояние.
     pub state: Stage,
 }
 
 impl MemorySetup<Early> {
-    pub fn create(layout: MemoryLayout) -> Result<MemorySetup<Early>, MemorySetupError> {
+    pub(crate) fn create(layout: MemoryLayout) -> Result<MemorySetup<Early>, MemorySetupError> {
         let free_regions = layout
             .free_heap_regions()
             .map_err(|()| MemorySetupError::OutOfMemory)?;
@@ -115,10 +106,13 @@ impl MemorySetup<Early> {
         // записи, чтобы оставленная загрузчиком грязная строка не вытеснилась
         // поверх неё позднее.
         for interval in free_regions.iter() {
-            DataCache::<EL1>::invalidate_range_to_coherency(
-                interval.start.as_usize(),
-                interval.end.as_usize(),
-            );
+            // SAFETY: MMU ещё выключен. Свободная RAM принадлежит ядру, и ядро в неё не писало.
+            unsafe {
+                DataCache::<EL1>::invalidate_range_to_coherency(
+                    interval.start.as_usize(),
+                    interval.end.as_usize(),
+                );
+            }
         }
 
         let largest =
@@ -135,8 +129,7 @@ impl MemorySetup<Early> {
         })
     }
 
-    /// Устанавливает bump-аллокатор и переходит в Installed.
-    pub fn install(self) -> MemorySetup<Installed> {
+    pub(crate) fn install(self) -> MemorySetup<Installed> {
         GLOBAL_ALLOCATOR.set_bump(self.state.bump_allocator);
 
         MemorySetup::<Installed> {
@@ -162,8 +155,7 @@ impl MemorySetup<Early> {
 }
 
 impl MemorySetup<Installed> {
-    /// Подготавливает таблицы страниц (frame allocator, корневые таблицы, регионы для маппинга).
-    pub fn prepare(self) -> Result<MemorySetup<Prepared>, MemorySetupError> {
+    pub(crate) fn prepare(self) -> Result<MemorySetup<Prepared>, MemorySetupError> {
         let Installed {
             layout,
             free_regions,
@@ -260,8 +252,7 @@ impl MemorySetup<Installed> {
 }
 
 impl MemorySetup<Prepared> {
-    /// Маппит все регионы и включает MMU.
-    pub fn enable(
+    pub(crate) fn enable(
         self,
         higher_half_base: PageAlignedVirtualAddress,
     ) -> Result<MemorySetup<Enabled>, MemorySetupError> {
@@ -301,16 +292,26 @@ impl MemorySetup<Prepared> {
         // Парный открывающий проход идёт в `MemorySetup::<Early>::create`, до
         // первой записи. Bump-арены нет среди `all_regions` под тегом
         // [`RegionTag::Heap`], поэтому она инвалидируется отдельно.
-        DataCache::<EL1>::invalidate_range_to_coherency(bump.start.as_usize(), bump.end.as_usize());
+        // SAFETY: MMU включается после этого вызова, и записи ядра идут мимо кэша. Bump-арена
+        // принадлежит ядру, её грязные строки оставлены загрузчиком.
+        unsafe {
+            DataCache::<EL1>::invalidate_range_to_coherency(
+                bump.start.as_usize(),
+                bump.end.as_usize(),
+            );
+        }
 
         for region in all_regions
             .iter()
             .filter(|region| region.tag == RegionTag::Heap)
         {
-            DataCache::<EL1>::invalidate_range_to_coherency(
-                region.start.as_usize(),
-                region.end.as_usize(),
-            );
+            // SAFETY: как для bump-арены выше: MMU выключен, Heap-регион принадлежит ядру.
+            unsafe {
+                DataCache::<EL1>::invalidate_range_to_coherency(
+                    region.start.as_usize(),
+                    region.end.as_usize(),
+                );
+            }
         }
     }
 
@@ -379,10 +380,7 @@ impl MemorySetup<Prepared> {
 }
 
 impl MemorySetup<Enabled> {
-    /// Переключает глобальный аллокатор на heap-фазу и возвращает маппер памяти.
-    ///
-    /// Вызывается post-MMU
-    pub fn switch_to_heap_allocator(
+    pub(crate) fn switch_to_heap_allocator(
         higher_root_pa: PageAlignedAddress,
         frame_allocator_phys: PhysicalAddress,
         higher_half_base: PageAlignedVirtualAddress,
@@ -420,7 +418,9 @@ impl MemorySetup<Enabled> {
             ),
         );
 
-        Mmu::<EL1>::disable_lower_half();
+        // SAFETY: `primary_main` получает управление после прыжка в higher half. DAIF замаскирован
+        // со входа в ядро и до этой точки не снимается.
+        unsafe { Mmu::<EL1>::disable_lower_half() };
 
         MemoryManagerResult {
             memory_mapper: kernel_mapper,
@@ -470,15 +470,11 @@ impl<Any> MemorySetup<Any> {
     }
 }
 
-/// Ошибка настройки памяти.
 #[derive(Debug)]
-pub enum MemorySetupError {
-    /// Недостаточно памяти.
+pub(crate) enum MemorySetupError {
     OutOfMemory,
-    /// Ошибка маппинга.
     #[allow(dead_code)]
     MappingFailed(memory::memory_mapper::MemoryMappingError),
-    /// Список регионов ОЗУ непригоден для аллокатора фреймов.
     #[allow(dead_code)]
     FrameAllocatorInit(memory::frame_allocator::FrameAllocatorInitError),
 }

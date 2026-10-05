@@ -32,7 +32,7 @@ use super::{
 
 const EXIT_CODE_START_ROLLBACK: i32 = -1;
 
-pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallError> {
     let len = usize::try_from(name_len).map_err(|_| SyscallError::InvalidArgument)?;
     if len == 0 || len > MAX_PROCESS_NAME_LEN {
         return Err(SyscallError::InvalidArgument);
@@ -68,8 +68,7 @@ pub fn sys_process_create(name_va: u64, name_len: u64) -> Result<u64, SyscallErr
     ))
 }
 
-/// Capability на собственный процесс вызывающего.
-pub fn sys_process_self() -> Result<u64, SyscallError> {
+pub(crate) fn sys_process_self() -> Result<u64, SyscallError> {
     let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
@@ -79,10 +78,7 @@ pub fn sys_process_self() -> Result<u64, SyscallError> {
     Ok(u64::from(handle_id.raw().get()))
 }
 
-/// Capability на метеринг-`Resource` текущего процесса. Права капы - те, с которыми ресурс
-/// передали при старте. Шире прав передавшего хэндла процессу не достаётся.
-/// `WrongType`, если процесс стартовал без метеринг-ресурса.
-pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
+pub(crate) fn sys_process_resource_self() -> Result<u64, SyscallError> {
     let process = syscall_runtime()
         .current_process_object()
         .ok_or(SyscallError::WrongType)?;
@@ -95,12 +91,7 @@ pub fn sys_process_resource_self() -> Result<u64, SyscallError> {
     Ok(u64::from(handle_id.raw().get()))
 }
 
-/// `resource_split(resource_handle, budget_pages) -> resource_handle`
-///
-/// Выделяет `budget_pages` страниц бюджета в производный `Resource` с тем же
-/// потолком доступа. Требует `Rights::WRITE` на списание с исходного ресурса и
-/// `Rights::DUPLICATE` на деривацию. Отзыв исходной капы отзывает и производную.
-pub fn sys_resource_split(resource_h: u64, budget_pages: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_resource_split(resource_h: u64, budget_pages: u64) -> Result<u64, SyscallError> {
     let resource_id = parse_handle_id(resource_h)?;
     if budget_pages == 0 {
         return Err(SyscallError::InvalidArgument);
@@ -122,7 +113,7 @@ pub fn sys_resource_split(resource_h: u64, budget_pages: u64) -> Result<u64, Sys
     Ok(u64::from(id.raw().get()))
 }
 
-pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let table = runtime()
         .current_handle_table()
@@ -134,7 +125,7 @@ pub fn sys_process_exit_code(handle: u64) -> Result<u64, SyscallError> {
     Ok(u64::from(code.cast_unsigned()))
 }
 
-pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, SyscallError> {
     let id = parse_handle_id(handle)?;
     let code = exit_code_from_arg(exit_code);
     let table = runtime()
@@ -158,9 +149,7 @@ pub fn sys_process_terminate(handle: u64, exit_code: u64) -> Result<u64, Syscall
     Ok(0)
 }
 
-/// `ProcessLoadImage` - устанавливает сегменты образа в child AS.
-/// Требует `Rights::WRITE` на process и корректной геометрии дескриптора.
-pub fn sys_process_load_image(
+pub(crate) fn sys_process_load_image(
     process_h: u64,
     desc_va: u64,
     desc_len: u64,
@@ -251,10 +240,7 @@ pub fn sys_process_load_image(
     Ok(0)
 }
 
-/// `ProcessStart` - стартует первый поток процесса.
-/// ABI: `bootstrap_handle` - raw HandleId стартового хэндла-канала. `priority` в битах [0..8),
-/// биты [8..) = 0.
-pub fn sys_process_start(
+pub(crate) fn sys_process_start(
     process_h: u64,
     entry_pc: u64,
     user_sp: u64,

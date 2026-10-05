@@ -5,16 +5,14 @@ use crate::{
     view::{CommentView, SyntaxView, View},
 };
 
-/// Строка текста, описывающего объявление.
-pub struct ProseLine {
+pub(crate) struct ProseLine {
     /// Диапазон токена комментария.
     pub span: Span,
     /// Текст токена вместе с маркером комментария.
     pub text: String,
 }
 
-/// Собирает текст объявлений файла, сгруппированный в блоки соседних строк.
-pub fn blocks(source: &Source) -> Vec<Vec<ProseLine>> {
+pub(crate) fn blocks(source: &Source) -> Vec<Vec<ProseLine>> {
     let Some(view) = CommentView::of(source) else {
         return Vec::new();
     };
@@ -43,8 +41,7 @@ pub fn blocks(source: &Source) -> Vec<Vec<ProseLine>> {
     out
 }
 
-/// Отделяет маркер комментария от тела, сохраняя отступ тела.
-pub fn body_of(text: &str) -> (usize, &str) {
+pub(crate) fn body_of(text: &str) -> (usize, &str) {
     let bare = text.trim_start_matches('/');
     let body = bare.strip_prefix('!').unwrap_or(bare);
     (text.len() - body.len(), body)

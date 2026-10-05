@@ -77,6 +77,7 @@ syn = { version = "2.0", features = ["full"] }
 ra_ap_syntax = "=0.0.344"
 regex = "1"
 tempfile = "3"
+trybuild = "1.0"
 
 # Внутренние крейты workspace
 ipc = { path = "lib/ipc" }
@@ -122,6 +123,7 @@ style-tool = { path = "tools/style" }
 unsafe_op_in_unsafe_fn = "deny"
 # Архитектурно-независимый код не должен использовать `unsafe`.
 unsafe_code = "deny"
+unreachable_pub = "warn"
 # Имя `molecular` в `target_os` задаёт спека таргета в `targets/`, встроенным rustc его не знает:
 # хостовая сборка иначе ругается на `target_os` из кода, общего с userspace.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("molecular"))'] }

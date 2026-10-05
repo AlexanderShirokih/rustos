@@ -6,8 +6,7 @@ use crate::{
     view::{SyntaxView, View},
 };
 
-/// Doc-комментарий стоит только над объявлением, объявленным `pub`.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "doc_on_declaration".to_owned(),

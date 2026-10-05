@@ -24,21 +24,13 @@ use crate::{
 // │ TTBR1   │ T1SZ    │ IRGN1   │ ORGN1   │ SH1     │ TG1           │
 // └─────────┴─────────┴─────────┴─────────┴─────────┴───────────────┘
 
-/// Селектор TTBR (lower/higher half).
-pub trait TtbrSel {
-    /// Сдвиг T0SZ/T1SZ.
+pub(crate) trait TtbrSel {
     const TNSZ_SHIFT: u64;
-    /// Сдвиг EPD (enable/disable).
     const EPD_SHIFT: u64;
-    /// Сдвиг IRGN (inner cacheability).
     const IRGN_SHIFT: u64;
-    /// Сдвиг ORGN (outer cacheability).
     const ORGN_SHIFT: u64;
-    /// Сдвиг SH (shareability).
     const SH_SHIFT: u64;
-    /// Сдвиг TG (granule size).
     const TG_SHIFT: u64;
-    /// Значение для 4K страниц.
     const TG_4K_VALUE: u64;
 }
 
@@ -64,49 +56,41 @@ impl TtbrSel for HigherHalf {
     const TG_4K_VALUE: u64 = 0b10;
 }
 
-/// Бит TCR.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct TCRBit(u64);
+pub(crate) struct TCRBit(u64);
 
 impl TCRBit {
-    /// 48-битное адресное пространство (T0SZ/T1SZ = 16)
-    pub const fn size_48bit<Sel: TtbrSel>() -> Self {
+    pub(crate) const fn size_48bit<Sel: TtbrSel>() -> Self {
         Self(16 << Sel::TNSZ_SHIFT)
     }
 
-    /// Write-Back Write-Allocate кэширование (IRGN)
-    pub const fn irgn_wb_wa<Sel: TtbrSel>() -> Self {
+    pub(crate) const fn irgn_wb_wa<Sel: TtbrSel>() -> Self {
         Self(0b01 << Sel::IRGN_SHIFT)
     }
 
-    /// Write-Back Write-Allocate кэширование (ORGN)
-    pub const fn orgn_wb_wa<Sel: TtbrSel>() -> Self {
+    pub(crate) const fn orgn_wb_wa<Sel: TtbrSel>() -> Self {
         Self(0b01 << Sel::ORGN_SHIFT)
     }
 
-    /// Inner Shareable
-    pub const fn sh_inner<Sel: TtbrSel>() -> Self {
+    pub(crate) const fn sh_inner<Sel: TtbrSel>() -> Self {
         Self(0b11 << Sel::SH_SHIFT)
     }
 
-    /// 4K страницы
-    pub const fn tg_4k<Sel: TtbrSel>() -> Self {
+    pub(crate) const fn tg_4k<Sel: TtbrSel>() -> Self {
         Self(Sel::TG_4K_VALUE << Sel::TG_SHIFT)
     }
 
-    pub const fn epd<Sel: TtbrSel>(enable: bool) -> Self {
+    pub(crate) const fn epd<Sel: TtbrSel>(enable: bool) -> Self {
         let bit = if enable { 0b0 } else { 0b1 << Sel::EPD_SHIFT };
 
         Self(bit)
     }
 
-    /// IPS = 40-bit PA (1TB), биты `TCR[34:32]` - для MMIO адресов > 4GB
-    pub const fn ips_40bit() -> Self {
+    pub(crate) const fn ips_40bit() -> Self {
         Self(0b010 << 32)
     }
 
-    /// Бит `TCR_EL1.AS` (bit 36): `0` - 8-bit ASID, `1` - 16-bit.
-    pub const fn asid_size(width: AsidWidth) -> Self {
+    pub(crate) const fn asid_size(width: AsidWidth) -> Self {
         match width {
             AsidWidth::Bits8 => Self(0),
             AsidWidth::Bits16 => Self(1 << 36),
@@ -118,13 +102,12 @@ impl TCRBit {
     }
 }
 
-/// Регистр TCR (Translation Control Register).
-pub struct TranslationControlRegister<EL: ExceptionLevel> {
+pub(crate) struct TranslationControlRegister<EL: ExceptionLevel> {
     _phantom: PhantomData<EL>,
 }
 
 impl TranslationControlRegister<EL1> {
-    pub fn set(
+    pub(crate) fn set(
         lower: AddressTranslationConfig<LowerHalf>,
         higher: AddressTranslationConfig<HigherHalf>,
     ) {
@@ -133,13 +116,9 @@ impl TranslationControlRegister<EL1> {
         unsafe { write_sysreg!(tcr_el1, lower.value | higher.value) };
     }
 
-    /// Запрещает обход таблиц по TTBR половины `T`. Промах TLB в этой половине даёт Translation
-    /// Fault уровня 0 без обращения к памяти.
-    ///
-    /// # Safety
-    ///
-    /// Другой код на этом CPU не пишет TCR_EL1 между чтением и записью, например IRQ замаскированы.
-    pub unsafe fn disable_walks<T: TtbrSel>() {
+    // SAFETY: другой код на этом CPU не пишет TCR_EL1 между чтением и записью, например IRQ
+    // замаскированы.
+    pub(crate) unsafe fn disable_walks<T: TtbrSel>() {
         let epd = TCRBit::epd::<T>(false).encode();
 
         // SAFETY: чтение и запись TCR_EL1 допустимы на EL1. Запись меняет только бит EPD
@@ -152,13 +131,9 @@ impl TranslationControlRegister<EL1> {
         }
     }
 
-    /// Разрешает обход таблиц по TTBR половины `T`.
-    ///
-    /// # Safety
-    ///
-    /// TTBR половины `T` содержит корень живых таблиц страниц. Другой код на этом CPU не пишет
-    /// TCR_EL1 между чтением и записью, например IRQ замаскированы.
-    pub unsafe fn enable_walks<T: TtbrSel>() {
+    // SAFETY: TTBR половины `T` содержит корень живых таблиц страниц. Другой код на этом CPU не
+    // пишет TCR_EL1 между чтением и записью, например IRQ замаскированы.
+    pub(crate) unsafe fn enable_walks<T: TtbrSel>() {
         let epd = TCRBit::epd::<T>(false).encode();
 
         // SAFETY: см. `disable_walks`; обход пойдёт по корню, который контракт функции требует
@@ -171,8 +146,7 @@ impl TranslationControlRegister<EL1> {
     }
 }
 
-/// Конфигурация трансляции адресов.
-pub struct AddressTranslationConfig<T: TtbrSel> {
+pub(crate) struct AddressTranslationConfig<T: TtbrSel> {
     value: u64,
     _phantom: PhantomData<T>,
 }
@@ -185,20 +159,14 @@ impl<T: TtbrSel> Clone for AddressTranslationConfig<T> {
 }
 
 impl<T: TtbrSel> AddressTranslationConfig<T> {
-    /// Объединяет биты TCR.
-    pub const fn combine(bits: &[TCRBit]) -> Self {
+    pub(crate) const fn combine(bits: &[TCRBit]) -> Self {
         Self {
             value: combine_bits!(bits),
             _phantom: PhantomData,
         }
     }
 
-    /// Создаёт стандартную конфигурацию.
-    ///
-    /// `asid_width` определяет глобальный бит `AS` (bit 36). Итоговое значение
-    /// уходит под побитовое OR с конфигом второй половины, и ширина
-    /// передаётся один раз - в любом из двух вызовов.
-    pub const fn create(enable: bool, asid_width: AsidWidth) -> Self {
+    pub(crate) const fn create(enable: bool, asid_width: AsidWidth) -> Self {
         Self::combine(&[
             TCRBit::size_48bit::<T>(),
             TCRBit::irgn_wb_wa::<T>(),

@@ -4,9 +4,6 @@
 // Модуль подключён к прогону и к фикстурам, и каждый бинарь пользуется своим подмножеством.
 #![allow(dead_code)]
 
-/// Провайдер отклонил сессию второго требования.
-pub const SECOND_SESSION_REFUSED_EXIT_CODE: u32 = 2;
-/// Запрос первого требования не прошёл по IPC.
-pub const FIRST_IPC_FAILED_EXIT_CODE: u32 = 3;
-/// Вспомогательный поток запаниковал.
-pub const PANIC_EXIT_CODE: u32 = 8;
+pub(crate) const SECOND_SESSION_REFUSED_EXIT_CODE: u32 = 2;
+pub(crate) const FIRST_IPC_FAILED_EXIT_CODE: u32 = 3;
+pub(crate) const PANIC_EXIT_CODE: u32 = 8;

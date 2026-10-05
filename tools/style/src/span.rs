@@ -1,5 +1,4 @@
-/// Переводит длину или смещение в тексте файла в тип смещения диапазона.
-pub fn offset(value: usize) -> u32 {
+pub(crate) fn offset(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 

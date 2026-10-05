@@ -8,14 +8,10 @@ use crate::{
     read_sysreg, write_sysreg,
 };
 
-/// Бит SCTLR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SctlrBit {
-    /// Включить MMU.
+pub(crate) enum SctlrBit {
     Mmu,
-    /// Включить D-cache.
     DCache,
-    /// Включить I-cache.
     ICache,
 }
 
@@ -29,24 +25,21 @@ impl SctlrBit {
     }
 }
 
-/// Скомбинированные биты SCTLR.
 #[derive(Debug, Clone, Copy)]
-pub struct SctlrBits(u64);
+pub(crate) struct SctlrBits(u64);
 
 impl SctlrBits {
-    /// Объединяет биты SCTLR.
-    pub const fn combine(bits: &[SctlrBit]) -> SctlrBits {
+    pub(crate) const fn combine(bits: &[SctlrBit]) -> SctlrBits {
         SctlrBits(combine_bits!(bits))
     }
 }
 
-/// Регистр SCTLR (System Control Register).
-pub struct SystemControlRegister<EL: ExceptionLevel> {
+pub(crate) struct SystemControlRegister<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 
 impl SystemControlRegister<EL1> {
-    pub fn set(mask: SctlrBits) {
+    pub(crate) fn set(mask: SctlrBits) {
         // SAFETY: Чтение и запись SCTLR_EL1 допустимы на EL1. Новое значение
         // формируется как OR текущего значения и маски - MMU-инварианты не нарушаются.
         unsafe {

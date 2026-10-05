@@ -18,8 +18,7 @@ pub trait RevocationHook: Send + Sync {
     fn revoke(&self);
 }
 
-/// Узел графа деривации.
-pub struct RevNode {
+pub(crate) struct RevNode {
     parent: Option<Weak<RevNode>>,
     children: MutexCell<Vec<Weak<RevNode>>>,
     hooks: MutexCell<Vec<Weak<dyn RevocationHook>>>,
@@ -27,7 +26,7 @@ pub struct RevNode {
 }
 
 impl RevNode {
-    pub fn new_root() -> Arc<Self> {
+    pub(crate) fn new_root() -> Arc<Self> {
         Arc::new(Self {
             parent: None,
             children: MutexCell::new(Vec::new()),
@@ -36,9 +35,7 @@ impl RevNode {
         })
     }
 
-    /// Дочерний узел, производный от `parent`.
-    /// Если `parent` уже отозван (`revoked` установлен), возвращает `None`.
-    pub fn new_child(parent: &Arc<RevNode>) -> Option<Arc<Self>> {
+    pub(crate) fn new_child(parent: &Arc<RevNode>) -> Option<Arc<Self>> {
         let child = Arc::new(Self {
             parent: Some(Arc::downgrade(parent)),
             children: MutexCell::new(Vec::new()),
@@ -56,12 +53,7 @@ impl RevNode {
         if inserted { Some(child) } else { None }
     }
 
-    /// Регистрирует `Weak` хука отзыва побочного эффекта. Сильную ссылку держит вызывающий, а
-    /// разрушенный хук отбрасывается при следующей регистрации.
-    ///
-    /// На уже отозванном узле хук вызывается синхронно, под всеми удерживаемыми в этот момент
-    /// локами.
-    pub fn register_hook(&self, hook: Weak<dyn RevocationHook>) {
+    pub(crate) fn register_hook(&self, hook: Weak<dyn RevocationHook>) {
         self.hooks.with_lock(|h| {
             if self.revoked.load(Ordering::SeqCst) {
                 if let Some(live) = hook.upgrade() {
@@ -74,9 +66,7 @@ impl RevNode {
         });
     }
 
-    /// `true`, пока не отозван сам узел и не отозван либо разрушен ни один его предок по цепочке.
-    /// Проверка идёт до корня и стоит одного прохода по цепочке.
-    pub fn is_alive(self: &Arc<Self>) -> bool {
+    pub(crate) fn is_alive(self: &Arc<Self>) -> bool {
         let mut current = self.clone();
         loop {
             if current.revoked.load(Ordering::SeqCst) {
@@ -94,11 +84,7 @@ impl RevNode {
     }
 }
 
-/// Каскадный отзыв поддерева. Вызывает хуки снятия побочных эффектов по всему поддереву.
-///
-/// Отзыв ставит на каждом пройденном узле пометку, и после него `RevNode::new_child` на этих
-/// узлах отвечает `None`. Повторный отзыв того же поддерева вызывает живые хуки ещё раз.
-pub fn revoke_subtree(node: &Arc<RevNode>) {
+pub(crate) fn revoke_subtree(node: &Arc<RevNode>) {
     let mut stack: Vec<Arc<RevNode>> = Vec::new();
     stack.push(node.clone());
     while let Some(current) = stack.pop() {

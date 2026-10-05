@@ -6,19 +6,12 @@ use super::common::{EL1, ExceptionLevel};
 
 const PAR_FAULT: u64 = 1;
 
-/// Запрос трансляции для уровня исключения `E`.
-pub struct AddressTranslation<EL: ExceptionLevel> {
+pub(crate) struct AddressTranslation<EL: ExceptionLevel> {
     _level: PhantomData<EL>,
 }
 
 impl AddressTranslation<EL1> {
-    /// `true`, если `address` транслируется на EL1 с правом записи.
-    ///
-    /// `AT S1E1W` прогоняет адрес через тот же stage 1, что и обычный доступ,
-    /// но к памяти не обращается и исключения на неотображённом адресе не
-    /// берёт: отказ виден в `PAR_EL1.F`. Это единственный способ спросить
-    /// "этот адрес отображён?", не рискуя самим обращением.
-    pub fn is_writable(address: usize) -> bool {
+    pub(crate) fn is_writable(address: usize) -> bool {
         let par: u64;
 
         // SAFETY: `at` не читает и не пишет память, а лишь заполняет `PAR_EL1`

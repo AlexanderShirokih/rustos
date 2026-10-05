@@ -13,8 +13,7 @@ use crate::{
 const PROC_MACRO_ATTRIBUTES: [&str; 3] =
     ["proc_macro", "proc_macro_attribute", "proc_macro_derive"];
 
-/// Корневой `lib.rs` только объявляет подмодули и реэкспортирует их содержимое.
-pub fn rule() -> Rule {
+pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "code_in_crate_root".to_owned(),

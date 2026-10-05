@@ -1,2 +1,2 @@
-pub mod entry;
-pub mod header;
+pub(crate) mod entry;
+pub(crate) mod header;

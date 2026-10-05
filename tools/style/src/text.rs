@@ -1,15 +1,12 @@
-/// Сообщает, содержит ли фрагмент кириллицу.
-pub fn has_cyrillic(text: &str) -> bool {
+pub(crate) fn has_cyrillic(text: &str) -> bool {
     text.chars().any(is_cyrillic)
 }
 
-/// Сообщает, принадлежит ли символ кириллическому блоку.
-pub fn is_cyrillic(ch: char) -> bool {
+pub(crate) fn is_cyrillic(ch: char) -> bool {
     matches!(ch, '\u{0400}'..='\u{04ff}')
 }
 
-/// Возвращает маску, отмечающую для каждого байта, лежит ли он внутри обратных кавычек.
-pub fn backtick_mask(text: &str) -> Vec<bool> {
+pub(crate) fn backtick_mask(text: &str) -> Vec<bool> {
     let mut mask = vec![false; text.len()];
     let mut open: Option<usize> = None;
     for (offset, ch) in text.char_indices() {
@@ -29,8 +26,7 @@ pub fn backtick_mask(text: &str) -> Vec<bool> {
     mask
 }
 
-/// Заменяет содержимое обратных кавычек пробелами, сохраняя байтовые смещения.
-pub fn mask_backticks(text: &str) -> String {
+pub(crate) fn mask_backticks(text: &str) -> String {
     let mask = backtick_mask(text);
     let mut out = String::with_capacity(text.len());
     for (offset, ch) in text.char_indices() {
@@ -45,13 +41,11 @@ pub fn mask_backticks(text: &str) -> String {
     out
 }
 
-/// Ширина строки в символах.
-pub fn width(line: &str) -> usize {
+pub(crate) fn width(line: &str) -> usize {
     line.chars().count()
 }
 
-/// Схлопывает пробельные последовательности, давая устойчивый к переносам ключ.
-pub fn normalize(text: &str) -> String {
+pub(crate) fn normalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut space = false;
     for ch in text.chars() {
@@ -68,8 +62,7 @@ pub fn normalize(text: &str) -> String {
     out
 }
 
-/// Короткий отпечаток текста, устойчивый к переносу и к соседним находкам.
-pub fn fingerprint(text: &str) -> String {
+pub(crate) fn fingerprint(text: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in normalize(text).bytes() {
         hash ^= u64::from(byte);

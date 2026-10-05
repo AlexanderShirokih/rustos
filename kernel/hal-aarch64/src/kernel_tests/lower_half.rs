@@ -84,7 +84,8 @@ fn lower_half_walks_follow_address_space_and_stay_off_after_disable() {
     Aarch64Context::switch_address_space(Some(handle));
     let remapped = translate_read(PROBE_VA);
 
-    Mmu::<EL1>::disable_lower_half();
+    // SAFETY: тест исполняется в higher half, IRQ замаскированы `irq_mask`.
+    unsafe { Mmu::<EL1>::disable_lower_half() };
     Ttbr0::set(handle.root);
     let after_disable = translate_read(PROBE_VA);
 

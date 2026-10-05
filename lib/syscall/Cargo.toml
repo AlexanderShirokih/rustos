@@ -11,5 +11,8 @@ rustc-dep-of-std = ["dep:core"]
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 
+[dev-dependencies]
+trybuild = { workspace = true }
+
 [lints]
 workspace = true

@@ -64,18 +64,18 @@ fn contents(path: &str) -> Vec<u8> {
     body
 }
 
-pub fn a_path_before_the_root_is_not_connected() {
+pub(crate) fn a_path_before_the_root_is_not_connected() {
     assert_eq!(
         kind_of(File::open("/tmp/std-selftest-before-root")),
         Some(ErrorKind::NotConnected)
     );
 }
 
-pub fn the_root_is_installed(root: Port) {
+pub(crate) fn the_root_is_installed(root: Port) {
     molecular::install_filesystem_root(into_std_handle(root)).expect("the first root is installed");
 }
 
-pub fn a_second_root_is_handed_back() {
+pub(crate) fn a_second_root_is_handed_back() {
     let spare = into_std_handle(Port::create().expect("the port is created"));
     let raw = spare.as_raw();
 
@@ -85,7 +85,7 @@ pub fn a_second_root_is_handed_back() {
     assert_eq!(returned.as_raw(), raw);
 }
 
-pub fn open_options_follow_their_flags() {
+pub(crate) fn open_options_follow_their_flags() {
     const CREATED: &str = "/tmp/std-selftest-created";
 
     drop(written(CREATED, b"abcdef"));
@@ -143,7 +143,7 @@ pub fn open_options_follow_their_flags() {
     }
 }
 
-pub fn reads_writes_and_seeks_share_one_position() {
+pub(crate) fn reads_writes_and_seeks_share_one_position() {
     const BODY: &str = "/tmp/std-selftest-body";
 
     let file = written(BODY, b"0123456789");
@@ -192,7 +192,7 @@ pub fn reads_writes_and_seeks_share_one_position() {
     shared.flush().expect("flush");
 }
 
-pub fn an_append_lands_at_the_end_in_one_piece() {
+pub(crate) fn an_append_lands_at_the_end_in_one_piece() {
     const APPENDED: &str = "/tmp/std-selftest-appended";
 
     let other = written(APPENDED, b"head");
@@ -220,7 +220,7 @@ pub fn an_append_lands_at_the_end_in_one_piece() {
     assert!(body.ends_with(b"x-other!"));
 }
 
-pub fn a_clone_shares_the_position() {
+pub(crate) fn a_clone_shares_the_position() {
     let file = written("/tmp/std-selftest-cloned", b"abcdef");
     let clone = file.try_clone().expect("clone");
 
@@ -234,7 +234,7 @@ pub fn a_clone_shares_the_position() {
     assert_eq!((&file).stream_position().expect("tell"), 6);
 }
 
-pub fn two_files_in_two_threads_stay_apart() {
+pub(crate) fn two_files_in_two_threads_stay_apart() {
     let workers: Vec<_> = ["/tmp/std-selftest-thread-a", "/tmp/std-selftest-thread-b"]
         .into_iter()
         .map(|path| {
@@ -255,7 +255,7 @@ pub fn two_files_in_two_threads_stay_apart() {
     }
 }
 
-pub fn metadata_holds_only_the_kind_and_the_size() {
+pub(crate) fn metadata_holds_only_the_kind_and_the_size() {
     let file = written("/tmp/std-selftest-metadata", b"four");
     let metadata = file.metadata().expect("metadata");
 
@@ -280,7 +280,7 @@ pub fn metadata_holds_only_the_kind_and_the_size() {
     assert!(metadata.is_dir() && !metadata.is_file() && !metadata.is_symlink());
 }
 
-pub fn the_image_reads_and_refuses_writes() {
+pub(crate) fn the_image_reads_and_refuses_writes() {
     let mut body = String::new();
     File::open(IMAGE_FILE)
         .and_then(|mut file| file.read_to_string(&mut body))
@@ -293,14 +293,14 @@ pub fn the_image_reads_and_refuses_writes() {
     );
 }
 
-pub fn file_system_errors_keep_their_meaning() {
+pub(crate) fn file_system_errors_keep_their_meaning() {
     for (error, kind) in FILE_SYSTEM_ERRORS {
         let path = format!("/failing/{error:?}/file");
         assert_eq!(kind_of(File::open(&path)), Some(kind), "{error:?}");
     }
 }
 
-pub fn unsupported_file_operations_say_so() {
+pub(crate) fn unsupported_file_operations_say_so() {
     let file = written("/tmp/std-selftest-unsupported", b"");
 
     for refused in [
@@ -322,7 +322,7 @@ pub fn unsupported_file_operations_say_so() {
     }
 }
 
-pub fn malformed_paths_are_refused() {
+pub(crate) fn malformed_paths_are_refused() {
     let long_path = format!("/tmp/{}", "p/".repeat(PATH_MAX / 2));
     let long_name = format!("/tmp/{}", "n".repeat(NAME_MAX + 1));
 
@@ -347,7 +347,7 @@ pub fn malformed_paths_are_refused() {
     );
 }
 
-pub fn a_listing_outlives_other_calls() {
+pub(crate) fn a_listing_outlives_other_calls() {
     const DIRECTORY: &str = "/tmp/std-selftest-listing";
 
     fs::create_dir(DIRECTORY).expect("the directory is created");
@@ -383,14 +383,14 @@ pub fn a_listing_outlives_other_calls() {
     );
 }
 
-pub fn a_dropped_listing_closes_its_session() {
+pub(crate) fn a_dropped_listing_closes_its_session() {
     for _ in 0..LISTINGS {
         let mut listing = fs::read_dir(IMAGE_DIRECTORY).expect("the directory lists");
         assert!(listing.next().is_some());
     }
 }
 
-pub fn create_dir_refuses_an_existing_directory() {
+pub(crate) fn create_dir_refuses_an_existing_directory() {
     const NESTED: &str = "/tmp/std-selftest-tree/one/two";
 
     assert_eq!(kind_of(fs::create_dir(NESTED)), Some(ErrorKind::NotFound));
@@ -404,7 +404,7 @@ pub fn create_dir_refuses_an_existing_directory() {
     assert!(fs::metadata(NESTED).expect("metadata").is_dir());
 }
 
-pub fn rename_stays_within_one_mount() {
+pub(crate) fn rename_stays_within_one_mount() {
     const FROM: &str = "/tmp/std-selftest-rename-from";
     const TO: &str = "/tmp/std-selftest-rename-to";
 
@@ -420,7 +420,7 @@ pub fn rename_stays_within_one_mount() {
     assert_eq!(contents(TO), b"moved");
 }
 
-pub fn removal_checks_the_node_kind() {
+pub(crate) fn removal_checks_the_node_kind() {
     const DIRECTORY: &str = "/tmp/std-selftest-remove";
     const FILE: &str = "/tmp/std-selftest-remove/file";
 
@@ -446,7 +446,7 @@ pub fn removal_checks_the_node_kind() {
     assert_eq!(kind_of(fs::metadata(DIRECTORY)), Some(ErrorKind::NotFound));
 }
 
-pub fn remove_dir_all_takes_the_subtree() {
+pub(crate) fn remove_dir_all_takes_the_subtree() {
     const TREE: &str = "/tmp/std-selftest-subtree";
 
     fs::create_dir_all(format!("{TREE}/a/b")).expect("the tree is created");
@@ -458,7 +458,7 @@ pub fn remove_dir_all_takes_the_subtree() {
     assert_eq!(kind_of(fs::metadata(TREE)), Some(ErrorKind::NotFound));
 }
 
-pub fn copy_moves_the_bytes() {
+pub(crate) fn copy_moves_the_bytes() {
     const SOURCE: &str = "/tmp/std-selftest-copy-source";
     const COPY: &str = "/tmp/std-selftest-copy";
 
@@ -479,7 +479,7 @@ pub fn copy_moves_the_bytes() {
     assert_eq!(contents(COPY), IMAGE_FILE_BODY.as_bytes());
 }
 
-pub fn exists_hides_only_not_found() {
+pub(crate) fn exists_hides_only_not_found() {
     assert!(fs::exists(IMAGE_FILE).expect("an existing file"));
     assert!(!fs::exists("/tmp/std-selftest-absent").expect("an absent file"));
     assert_eq!(
@@ -488,7 +488,7 @@ pub fn exists_hides_only_not_found() {
     );
 }
 
-pub fn canonicalize_normalizes_lexically() {
+pub(crate) fn canonicalize_normalizes_lexically() {
     assert_eq!(
         fs::canonicalize("/boot//./testrunner/../testrunner/sample").expect("a canonical path"),
         Path::new(IMAGE_FILE)
@@ -508,7 +508,7 @@ pub fn canonicalize_normalizes_lexically() {
 }
 
 #[expect(deprecated)]
-pub fn unsupported_path_operations_say_so() {
+pub(crate) fn unsupported_path_operations_say_so() {
     const TARGET: &str = "/tmp/std-selftest-link-target";
     const LINK: &str = "/tmp/std-selftest-link";
 

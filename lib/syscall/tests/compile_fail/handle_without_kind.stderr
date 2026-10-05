@@ -1,0 +1,15 @@
+error[E0107]: missing generics for struct `Handle`
+ --> tests/compile_fail/handle_without_kind.rs:6:12
+  |
+6 |     let _: Handle = Handle::from_abi(NonZeroU32::new(7).unwrap());
+  |            ^^^^^^ expected 1 generic argument
+  |
+note: struct defined here, with 1 generic parameter: `K`
+ --> src/handle.rs
+  |
+  | pub struct Handle<K: ObjectKind> {
+  |            ^^^^^^ -
+help: add missing generic argument
+  |
+6 |     let _: Handle<K> = Handle::from_abi(NonZeroU32::new(7).unwrap());
+  |                  +++

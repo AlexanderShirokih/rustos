@@ -137,11 +137,7 @@ fn access_mask_for(flags: UserMemFlags) -> AccessMask {
     }
 }
 
-/// `memory_create_virtual(resource_handle, size_bytes, access_mask, region_flags) -> region_handle`
-///
-/// Требует `Rights::WRITE` на ресурс. Бюджет возвращается при дропе региона. С битом
-/// `MEMORY_REGION_CONTIGUOUS` в `region_flags` вызов выделяет фреймы одним смежным участком.
-pub fn sys_memory_create_virtual(
+pub(crate) fn sys_memory_create_virtual(
     resource_h: u64,
     size_bytes: u64,
     access_raw: u64,
@@ -187,15 +183,7 @@ pub fn sys_memory_create_virtual(
     Ok(u64::from(id.raw().get()))
 }
 
-/// `memory_slice(region_handle, offset, size_bytes, access_mask, region_flags) -> region_handle`
-///
-/// Деривация узкого под-региона `[offset, offset+size)`. Требует
-/// `Rights::DUPLICATE` на исходном регионе. Запрошенный доступ не шире гранта
-/// (права хендла, суженные access-маской региона). С битом `MEMORY_REGION_WRITE_COMBINING`
-/// в `region_flags` вызов создаёт срез профиля `WriteCombining`. Нарезка ничего не
-/// аллоцирует - бюджет не списывается, обязательства возврата под-регион не содержит.
-/// Под-регион - производная капа источника. Отзыв источника отзывает и её.
-pub fn sys_memory_slice(
+pub(crate) fn sys_memory_slice(
     region_h: u64,
     offset_raw: u64,
     size_bytes: u64,
@@ -226,11 +214,7 @@ pub fn sys_memory_slice(
     Ok(u64::from(id.raw().get()))
 }
 
-/// `memory_allocate(resource_handle, size, flags) -> va`
-///
-/// Анонимный маппинг без handle. Бюджет возвращается при `memory_free`/смерти AS. Бит
-/// `MEMORY_ALLOCATE_GUARD_PAGE` в `flags` оставляет под маппингом неотображённую страницу.
-pub fn sys_memory_allocate(
+pub(crate) fn sys_memory_allocate(
     resource_h: u64,
     size_bytes: u64,
     flags_raw: u64,
@@ -307,8 +291,7 @@ pub fn sys_memory_allocate(
     Ok(base.as_usize() as u64)
 }
 
-/// `memory_map(region_handle, size, flags) -> va`
-pub fn sys_memory_map(
+pub(crate) fn sys_memory_map(
     handle_raw: u64,
     size_bytes: u64,
     flags_raw: u64,
@@ -421,12 +404,11 @@ fn register_mapping_revocation(
     Ok(())
 }
 
-/// `memory_remap(va, size, flags) -> ()`
-///
-/// Меняет флаги уже зарегистрированного маппинга. Регион не меняется,
-/// апгрейд ограничен `grant`, сохранённым при `MemoryMap`/`MemoryAllocate`.
-/// Сам handle на этапе remap не проверяется - только VA.
-pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_memory_remap(
+    va_raw: u64,
+    size_bytes: u64,
+    flags_raw: u64,
+) -> Result<u64, SyscallError> {
     let size = parse_size(size_bytes)?;
     let va_usize = usize::try_from(va_raw).map_err(|_| SyscallError::InvalidArgument)?;
     let flags = parse_flags(flags_raw)?;
@@ -478,11 +460,7 @@ pub fn sys_memory_remap(va_raw: u64, size_bytes: u64, flags_raw: u64) -> Result<
     Ok(0)
 }
 
-/// `memory_free(va, size) -> ()`
-///
-/// Снимает маппинг и убирает запись из аллокатора. `Arc<MemoryRegion>` в
-/// теге дропается. Если последний - `Drop` региона возвращает фреймы в FA.
-pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError> {
     let size = parse_size(size_bytes)?;
     let va_usize = usize::try_from(va_raw).map_err(|_| SyscallError::InvalidArgument)?;
     let base =
@@ -502,14 +480,7 @@ pub fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError
     Ok(0)
 }
 
-/// `memory_region_inspect(region_handle)`
-///
-/// Primary возврат - `size_bytes`. Secondary - `base_pa | (profile_raw << 5) |
-/// (kind_tag << 3) | access_bits`. `base_pa` page-aligned, и его младшие 12 бит
-/// свободны под `profile_raw` (биты 5..7), `kind_tag` (биты 3..5) и
-/// `access_bits` (биты 0..3). У непрерывного `Virtual`-региона `base_pa` равен адресу
-/// первой страницы, у прочих `Virtual`-регионов `base_pa` равен `0`.
-pub fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
+pub(crate) fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
     let result = (|| -> Result<(u64, u64), SyscallError> {
         let id = parse_handle_id(frame.arg(0))?;
         let region = lookup_memory(id, Rights::READ)?;

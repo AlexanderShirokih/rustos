@@ -10,14 +10,12 @@ use crate::{
     write_sysreg,
 };
 
-/// Регистр MAIR (Memory Attribute Indirection Register).
-pub struct MemoryAttributeIndirectionRegister<EL: ExceptionLevel> {
+pub(crate) struct MemoryAttributeIndirectionRegister<EL: ExceptionLevel> {
     _phantom: core::marker::PhantomData<EL>,
 }
 
 impl MemoryAttributeIndirectionRegister<EL1> {
-    /// Программирует все объявленные слоты атрибутов памяти.
-    pub fn set() {
+    pub(crate) fn set() {
         // SAFETY: Запись в MAIR_EL1 допустима на EL1 до включения MMU.
         // Значение собрано из типобезопасной таблицы слотов `MemoryAttribute`.
         unsafe { write_sysreg!(mair_el1, MemoryAttribute::mair_value()) };
