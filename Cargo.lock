@@ -572,6 +572,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio"
+version = "0.1.0"
+
+[[package]]
+name = "virtio-mmio-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

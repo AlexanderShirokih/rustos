@@ -14,6 +14,7 @@ members = [
     "system/namespace-router",
     "system/platform",
     "system/rootkeeper",
+    "system/virtio-mmio",
     "testing/std-selftest",
     "testing/testrunner",
     "../lib/component-startup",
@@ -67,6 +68,8 @@ test-harness-qemu = { path = "../lib/test-harness-qemu" }
 userland = { path = "../lib/userland" }
 userland-build = { path = "../lib/userland-build" }
 userland-image = { path = "../lib/userland-image" }
+virtio = { path = "../lib/virtio" }
+virtio-mmio-abi = { path = "../lib/virtio-mmio-abi" }
 
 # Таблица повторяет корневую дословно, комментарии к отдельным правилам лежат там же.
 [workspace.lints.rust]

@@ -141,12 +141,21 @@ bin = "multiplicity-fixture"
 path = "/multiplicity-fixture"
 
 [[programs]]
+package = "testrunner"
+bin = "virtio-slot-fixture"
+path = "/virtio-slot-fixture"
+
+[[programs]]
 package = "driver-pl031"
 path = "/driver-pl031"
 
 [[programs]]
 package = "driver-simplefb"
 path = "/driver-simplefb"
+
+[[programs]]
+package = "virtio-mmio"
+path = "/virtio-mmio"
 
 [[programs]]
 package = "platform"

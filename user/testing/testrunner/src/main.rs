@@ -90,6 +90,7 @@ mod thread_pointer;
 mod thread_stack;
 mod thread_stack_protocol;
 mod thread_yield;
+mod virtio_mmio;
 mod vm;
 mod watched_capability;
 

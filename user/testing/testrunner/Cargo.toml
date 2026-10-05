@@ -170,6 +170,12 @@ path = "src/multiplicity_fixture.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "virtio-slot-fixture"
+path = "src/virtio_slot_fixture.rs"
+test = false
+bench = false
+
 [dependencies]
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
@@ -196,6 +202,8 @@ rtc-abi = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }
 userland-loader = { workspace = true }
+virtio = { workspace = true }
+virtio-mmio-abi = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

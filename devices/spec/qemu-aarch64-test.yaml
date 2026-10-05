@@ -9,7 +9,7 @@ boot:
 features: [power-semihosting]
 
 run:
-  - "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 512M -nographic -no-reboot -nic none -semihosting -kernel target/build/kernel.bin -initrd target/build/userland.img"
+  - "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 512M -nographic -no-reboot -nic none -device virtio-gpu-device -global virtio-mmio.force-legacy=false -semihosting -kernel target/build/kernel.bin -initrd target/build/userland.img"
 
 debug:
-  - "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 512M -nographic -no-reboot -nic none -semihosting -kernel target/build/kernel.bin -initrd target/build/userland.img -S -gdb tcp::1234"
+  - "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 512M -nographic -no-reboot -nic none -device virtio-gpu-device -global virtio-mmio.force-legacy=false -semihosting -kernel target/build/kernel.bin -initrd target/build/userland.img -S -gdb tcp::1234"

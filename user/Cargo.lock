@@ -458,6 +458,8 @@ dependencies = [
  "userland-build",
  "userland-image",
  "userland-loader",
+ "virtio",
+ "virtio-mmio-abi",
 ]
 
 [[package]]
@@ -492,4 +494,31 @@ dependencies = [
  "runtime",
  "syscall",
  "userland",
+]
+
+[[package]]
+name = "virtio"
+version = "0.1.0"
+
+[[package]]
+name = "virtio-mmio"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "ipc",
+ "kernel-objects",
+ "platform-abi",
+ "runtime",
+ "syscall",
+ "userland-build",
+ "virtio",
+ "virtio-mmio-abi",
+]
+
+[[package]]
+name = "virtio-mmio-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
 ]

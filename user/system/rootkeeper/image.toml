@@ -21,6 +21,10 @@ package = "driver-simplefb"
 path = "/driver-simplefb"
 
 [[programs]]
+package = "virtio-mmio"
+path = "/virtio-mmio"
+
+[[programs]]
 package = "namespace-router"
 path = "/namespace-router"
 
