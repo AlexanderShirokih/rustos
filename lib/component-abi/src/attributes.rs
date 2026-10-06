@@ -1,5 +1,4 @@
-//! Кодирует атрибуты запроса и фильтры экспортов как наборы пар ключ-значение.
-//! Запись содержит число пар `u8`, затем ключ и значение каждой пары с длинами `u8`.
+//! Наборы пар ключ-значение: атрибуты запроса и фильтры экспортов.
 
 use core::fmt;
 
@@ -9,11 +8,15 @@ use ipc::{
     wire::{IpcError, MessageBuf},
 };
 
-use crate::manifest::{len_byte, write_bytes};
+use crate::manifest::Writer;
 
+/// Наибольшее число пар в наборе.
 pub const ATTRIBUTE_COUNT_MAX: usize = 8;
+/// Наибольшая длина ключа в байтах.
 pub const ATTRIBUTE_KEY_MAX_BYTES: usize = 64;
+/// Наибольшая длина значения в байтах.
 pub const ATTRIBUTE_VALUE_MAX_BYTES: usize = 255;
+/// Наибольшая длина закодированного набора в байтах.
 pub const ATTRIBUTES_MAX_BYTES: usize =
     1 + ATTRIBUTE_COUNT_MAX * (2 + ATTRIBUTE_KEY_MAX_BYTES + ATTRIBUTE_VALUE_MAX_BYTES);
 
@@ -22,6 +25,7 @@ const _: () = assert!(
     "attribute set length fits u16"
 );
 
+/// Пара ключ-значение набора.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Attribute<'a> {
     pub key: &'a [u8],
@@ -100,6 +104,14 @@ impl<'a> Attributes<'a> {
         AttributePairs {
             bytes: self.bytes.get(1..).unwrap_or_default(),
         }
+    }
+
+    /// Значение пары с ключом `key`.
+    #[must_use]
+    pub fn value(self, key: &[u8]) -> Option<&'a [u8]> {
+        self.iter()
+            .find(|pair| pair.key == key)
+            .map(|pair| pair.value)
     }
 }
 
@@ -189,27 +201,26 @@ impl WireTyped for AttributeSet {
 
 #[must_use]
 pub const fn attributes_len(pairs: &[Attribute<'_>]) -> usize {
-    let mut len = 1;
-    let mut pending = pairs;
-    while let [pair, rest @ ..] = pending {
-        len += 2 + pair.key.len() + pair.value.len();
-        pending = rest;
-    }
-    len
+    let mut counter = Writer::counter();
+    write_attributes(&mut counter, pairs);
+    counter.len
 }
 
 /// Кодирует пары в буфер длиной `attributes_len`. Длины и число пар должны быть допустимы.
 pub const fn encode_attributes_into(bytes: &mut [u8], pairs: &[Attribute<'_>]) {
     assert!(
-        pairs.len() <= ATTRIBUTE_COUNT_MAX,
-        "attribute count fits the limit"
-    );
-    assert!(
         bytes.len() == attributes_len(pairs),
         "attribute buffer has the declared length"
     );
+    write_attributes(&mut Writer::new(bytes), pairs);
+}
 
-    let mut rest = write_bytes(bytes, &[len_byte(pairs.len())]);
+pub(crate) const fn write_attributes(out: &mut Writer<'_>, pairs: &[Attribute<'_>]) {
+    assert!(
+        pairs.len() <= ATTRIBUTE_COUNT_MAX,
+        "attribute count fits the limit"
+    );
+    out.put_len(pairs.len());
 
     let mut pending = pairs;
     while let [pair, tail @ ..] = pending {
@@ -222,10 +233,10 @@ pub const fn encode_attributes_into(bytes: &mut [u8], pairs: &[Attribute<'_>]) {
             "attribute value fits the limit"
         );
 
-        rest = write_bytes(rest, &[len_byte(pair.key.len())]);
-        rest = write_bytes(rest, pair.key);
-        rest = write_bytes(rest, &[len_byte(pair.value.len())]);
-        rest = write_bytes(rest, pair.value);
+        out.put_len(pair.key.len());
+        out.put(pair.key);
+        out.put_len(pair.value.len());
+        out.put(pair.value);
         pending = tail;
     }
 }

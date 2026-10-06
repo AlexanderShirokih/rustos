@@ -82,6 +82,16 @@ path = "/filtered-export-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "featured-export-fixture"
+path = "/featured-export-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "feature-publisher-fixture"
+path = "/feature-publisher-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "helper-panic-fixture"
 path = "/helper-panic-fixture"
 

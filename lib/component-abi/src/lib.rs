@@ -28,8 +28,8 @@ pub use attributes::{
 pub use ipc::Protocol as __Protocol;
 pub use manifest::{
     COMPONENT_MANIFEST_SECTION, ComponentManifest, ExportDeclaration, ManifestDecodeError,
-    ManifestExport, ManifestExports, ManifestFilters, ManifestRequirement, ManifestRequirements,
-    RequirementDeclaration, RequirementMode, decode_manifest, encode_manifest,
-    encode_manifest_into, manifest_len,
+    ManifestExport, ManifestExports, ManifestFeatures, ManifestFilters, ManifestRequirement,
+    ManifestRequirements, RequirementDeclaration, RequirementMode, decode_manifest,
+    encode_manifest, encode_manifest_into, manifest_len,
 };
 pub use startup::*;

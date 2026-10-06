@@ -9,7 +9,7 @@ use component_abi::{
     SessionError, SessionRequirement, attributes_len, component_startup as startup_contract,
     encode_attributes_into,
 };
-use component_startup::{Attributes, Found, accept, session};
+use component_startup::{Attributes, Found, RequestError, accept, session};
 use filesystem_abi::{
     AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, file_system_mount, namespace,
 };
@@ -24,13 +24,13 @@ use log_relay::SourceNames as _;
 use platform_abi::{Description, MmioWindow, PlatformError, platform};
 use rootkeeper::{
     BootFailure, Stopped,
-    relay::{ComponentNames, log_badge},
+    relay::{ComponentNames, LogSessions as _, LogSources, log_badge},
 };
 use rtc_abi::rtc;
 use runtime::{JoinHandle, PortTransport, Priority, Timeout, spawn_owned};
-use syscall::{ProcessName, Rights, SyscallError};
+use syscall::{Handle, ProcessName, Rights, SyscallError, kind};
 use userland::USERLAND_PROGRAM_MAGIC;
-use userland_image::{ComponentSpec, PlanDecodeError};
+use userland_image::{ComponentSpec, ExportIndex, PlanDecodeError};
 
 use crate::{
     composition::{
@@ -39,8 +39,8 @@ use crate::{
     },
     filesystem::{IMAGE_FILE, connect, open, path},
     log_relay::{
-        await_component_lines, await_component_sources, component_scenario_session,
-        start_component_relay, stop_component_relay,
+        ScenarioLogSessions, await_component_lines, await_component_sources, start_component_relay,
+        stop_component_relay,
     },
     probe_protocol::probe,
 };
@@ -59,6 +59,7 @@ const SPARE_VIEW: &str = "spare";
 const TMP_VIEW: &str = "tmp";
 const OTHER_VIEW: &str = "other";
 const HARDWARE_REQUIREMENT: &str = "hardware";
+const FEATURED_REQUIREMENT: &str = "featured";
 
 const HELD_PATH: &str = "/held";
 const WRITTEN_PATH: &str = "/written";
@@ -81,6 +82,7 @@ const RTC_REPLY_TIMEOUT: Timeout = Timeout::from_secs(15);
 const POLL_INTERVAL: Timeout = Timeout::from_millis(10);
 const RESOLVE_TIMEOUT: Timeout = Timeout::from_secs(5);
 const FREED_PREFIX_TIMEOUT: Timeout = Timeout::from_millis(100);
+const FEATURE_WAIT_TIMEOUT: Timeout = Timeout::from_millis(500);
 
 const POLL_ATTEMPTS: usize = 300;
 const SEARCH_CYCLES: usize = 300;
@@ -162,13 +164,7 @@ pub(crate) const PLATFORM: ComponentSpec<'static> = ComponentSpec {
     restarts: 1,
 };
 
-const RTC: ComponentSpec<'static> = ComponentSpec {
-    executable: "/driver-pl031",
-    name: "driver-pl031",
-    mountpoint: None,
-    memory_limit: MIB,
-    restarts: 0,
-};
+const RTC: &str = "driver-pl031";
 
 const IRQ: ComponentSpec<'static> = ComponentSpec {
     mountpoint: None,
@@ -219,6 +215,14 @@ const CRASH_FS: ComponentSpec<'static> = ComponentSpec {
     ..RAM_FS
 };
 
+const FEATURED: ComponentSpec<'static> =
+    fixture("/featured-export-fixture", "featured-export-fixture");
+
+const PUBLISHER: ComponentSpec<'static> =
+    fixture("/feature-publisher-fixture", "feature-publisher-fixture");
+
+const FEATURED_QUERY: &[Attribute<'static>] = &[pair("kind", "featured")];
+
 const SCOPE_CONSUMER: ComponentSpec<'static> = ComponentSpec {
     mountpoint: None,
     ..fixture("/scope-consumer-fixture", "scope-consumer-fixture")
@@ -246,13 +250,58 @@ const fn probe_of(name: &'static str) -> crate::composition::Import {
 }
 
 pub(crate) fn scenario(components: &[ComponentSpec<'_>]) -> Composition {
-    started(&[&[PARENT], components].concat())
+    started(&[&[PARENT], components].concat(), ExportIndex::EMPTY).0
 }
 
-fn started(records: &[ComponentSpec<'_>]) -> Composition {
+pub(crate) fn with_drivers() -> Composition {
+    started(&[PARENT, PLATFORM], image_index()).0
+}
+
+pub(crate) fn indexed(components: &[ComponentSpec<'_>]) -> (Composition, ComponentNames) {
+    started(&[&[PARENT], components].concat(), image_index())
+}
+
+fn image_index() -> ExportIndex<'static> {
+    ExportIndex::new(image().entries().expect("image entries"), BOOT_PLAN_ENTRY)
+}
+
+fn started(
+    records: &[ComponentSpec<'_>],
+    index: ExportIndex<'static>,
+) -> (Composition, ComponentNames) {
     let plan = encoded(records);
-    start_component_relay(ComponentNames::of(&plan));
-    Composition::start(plan, component_scenario_session)
+    let names = ComponentNames::of(&plan);
+    start_component_relay(names.clone());
+    let composition = Composition::start(
+        plan,
+        index,
+        LogSources::new(names.clone(), ScenarioLogSessions),
+    );
+    (composition, names)
+}
+
+pub(crate) fn registered(
+    composition: &Composition,
+    names: &ComponentNames,
+    spec: ComponentSpec<'static>,
+) -> Result<u16, rootkeeper::AddFailure> {
+    let entry = image()
+        .entries()
+        .expect("image entries")
+        .entry(&format!("{}/exec", spec.executable))
+        .expect("fixture program");
+    let program = userland::decode_program(entry.data()).expect("fixture program decodes");
+    let badge = names.add(spec.name).expect("log source added");
+    composition.try_add(
+        rootkeeper::Component {
+            name: ProcessName::new(spec.name).expect("fixture process name"),
+            executable: spec.executable,
+            program,
+            memory_limit: spec.memory_limit,
+            restarts: spec.restarts,
+        },
+        ScenarioLogSessions.session(badge).expect("log session"),
+    )
 }
 
 pub(crate) fn finish(composition: Composition) {
@@ -269,7 +318,7 @@ fn ping(importer: &Importer, requirement: &str) -> Result<u64, IpcError> {
 }
 
 fn ping_found(found: &Found) -> Result<u64, IpcError> {
-    component_startup::open::<probe::Protocol>(found, COMPONENT_REPLY_TIMEOUT)?
+    component_startup::open::<probe::Protocol>(found, COMPONENT_REPLY_TIMEOUT)
         .map_err(|_| IpcError::PeerClosed)?
         .client()
         .with_wait(COMPONENT_REPLY_TIMEOUT)
@@ -299,7 +348,6 @@ fn await_found(importer: &Importer, requirement: &str, count: usize) -> Vec<Foun
 fn enumerated(importer: &Importer, requirement: &str) -> Session<startup_contract::Protocol> {
     importer
         .enumeration::<probe::Protocol>(requirement, Attributes::empty())
-        .expect("all call")
         .expect("enumeration granted")
 }
 
@@ -310,7 +358,7 @@ const fn pair(key: &'static str, value: &'static str) -> Attribute<'static> {
     }
 }
 
-fn query(pairs: &[Attribute<'_>]) -> Vec<u8> {
+pub(crate) fn query(pairs: &[Attribute<'_>]) -> Vec<u8> {
     let mut bytes = alloc::vec![0; attributes_len(pairs)];
     encode_attributes_into(&mut bytes, pairs);
     bytes
@@ -330,21 +378,91 @@ fn text(attributes: Attributes<'_>) -> String {
         .join(",")
 }
 
-fn filters_found(importer: &Importer, pairs: &[Attribute<'_>]) -> Vec<String> {
+fn probes_found(importer: &Importer, pairs: &[Attribute<'_>]) -> Vec<Found> {
     let bytes = query(pairs);
     importer
         .found_with::<probe::Protocol>(PROBE, Attributes::decode(&bytes).expect("query decodes"))
+}
+
+fn filters_found(importer: &Importer, pairs: &[Attribute<'_>]) -> Vec<String> {
+    probes_found(importer, pairs)
         .iter()
         .map(|found| text(found.filter.as_attributes()))
         .collect()
+}
+
+fn patched(data: &[u8], patch: impl FnOnce(&mut [u8])) -> userland::DecodedProgram<'static> {
+    let program = userland::decode_program(data).expect("program decodes");
+    let manifest = userland::ProgramView::manifest(&program);
+    let start = manifest.as_ptr().addr() - data.as_ptr().addr();
+    let end = start + manifest.len();
+
+    let mut bytes = data.to_vec();
+    patch(&mut bytes[start..end]);
+    userland::decode_program(Vec::leak(bytes)).expect("program boundaries remain valid")
 }
 
 fn requested<P: Protocol>(
     importer: &Importer,
     requirement: &str,
     wait: Timeout,
-) -> Result<Result<(), SessionError>, IpcError> {
-    request::<P>(importer.handle(), requirement, wait).map(|answer| answer.map(drop))
+) -> Result<(), RequestError> {
+    request::<P>(importer.handle(), requirement, wait).map(drop)
+}
+
+const fn rtc_of(name: &'static str) -> crate::composition::Import {
+    crate::composition::Import {
+        declaration: RequirementDeclaration::all(name, rtc::Protocol::ID),
+        namespace_root: None,
+    }
+}
+
+fn rtc_session(importer: &Importer) -> Result<rtc::Client<SessionTransport>, RequestError> {
+    request::<rtc::Protocol>(importer.handle(), RTC_REQUIREMENT, RTC_REPLY_TIMEOUT)
+        .map(|session| session.client().with_wait(RTC_REPLY_TIMEOUT))
+}
+
+fn binding_lines(count: usize) -> Vec<String> {
+    let mut lines = await_component_lines(RTC, count);
+    // Поток экспорта драйвера может записать привязку раньше строки запуска.
+    lines.retain(|line| line != "started");
+    lines
+}
+
+const fn featured_of(name: &'static str) -> crate::composition::Import {
+    crate::composition::Import {
+        declaration: RequirementDeclaration::session(name, probe::Protocol::ID),
+        namespace_root: None,
+    }
+}
+
+fn featured_session(importer: Handle<kind::Port>, wait: Timeout) -> Result<u64, RequestError> {
+    let bytes = query(FEATURED_QUERY);
+    let session = session::<probe::Protocol>(
+        importer,
+        FEATURED_REQUIREMENT,
+        Attributes::decode(&bytes).expect("query decodes"),
+        wait,
+    )?;
+
+    Ok(session
+        .client()
+        .with_wait(COMPONENT_REPLY_TIMEOUT)
+        .ping(PING)?)
+}
+
+fn await_featured(importer: &Importer, count: usize) -> usize {
+    let mut found = probes_found(importer, FEATURED_QUERY).len();
+    for _ in 0..POLL_ATTEMPTS {
+        if found == count {
+            break;
+        }
+
+        pause(POLL_INTERVAL);
+        found = probes_found(importer, FEATURED_QUERY).len();
+    }
+
+    found
 }
 
 pub(crate) const fn platform_of(name: &'static str) -> crate::composition::Import {
@@ -435,9 +553,9 @@ pub(crate) fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
 fn held_request(found: Found, wait: Timeout) -> JoinHandle {
     spawn_owned(
         move || match component_startup::open::<probe::Protocol>(&found, wait) {
-            Ok(Ok(_)) => GRANTED,
-            Ok(Err(SessionError::Unavailable)) => UNAVAILABLE,
-            Err(IpcError::Timeout) => TIMED_OUT,
+            Ok(_) => GRANTED,
+            Err(RequestError::Parent(SessionError::Unavailable)) => UNAVAILABLE,
+            Err(RequestError::Ipc(IpcError::Timeout)) => TIMED_OUT,
             _ => OTHER,
         },
         REQUEST_STACK_SIZE,
@@ -585,41 +703,57 @@ fn a_program_entry_read_as_a_plan_names_the_boot_failure() {
 fn a_requirement_outside_the_record_of_the_caller_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(lines.iter().any(|line| line == "outside Ok(Err(Refused))"));
+    kernel_tests::kassert!(
+        lines
+            .iter()
+            .any(|line| line == "outside Err(Parent(Refused))")
+    );
 }
 
 #[kernel_test]
 fn a_session_requirement_of_another_protocol_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(lines.iter().any(|line| line == "protocol Ok(Err(Refused))"));
+    kernel_tests::kassert!(
+        lines
+            .iter()
+            .any(|line| line == "protocol Err(Parent(Refused))")
+    );
 }
 
 #[kernel_test]
 fn an_accept_of_an_export_outside_the_record_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(lines.iter().any(|line| line == "accept Ok(Err(Refused))"));
+    kernel_tests::kassert!(
+        lines
+            .iter()
+            .any(|line| line == "accept Err(Parent(Refused))")
+    );
 }
 
 #[kernel_test]
 fn a_log_requirement_of_another_protocol_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(lines.iter().any(|line| line == "log Ok(Err(Refused))"));
+    kernel_tests::kassert!(lines.iter().any(|line| line == "log Err(Parent(Refused))"));
 }
 
 #[kernel_test]
 fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
-    let composition = started(&[ComponentSpec {
-        executable: "/export-fixture",
-        ..PARENT
-    }]);
+    let composition = started(
+        &[ComponentSpec {
+            executable: "/export-fixture",
+            ..PARENT
+        }],
+        ExportIndex::EMPTY,
+    )
+    .0;
     let importer = composition.importer(&[probe_of(PROBE)]);
 
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
 
-    kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Refused)));
+    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
     finish(composition);
 }
 
@@ -630,13 +764,18 @@ fn an_importer_cannot_take_the_requests_of_a_child_export() {
     let parent = startup_contract::Client::new(PortTransport::new(importer.handle()))
         .with_wait(PARENT_REFUSAL_TIMEOUT);
 
-    let taken = accept::<probe::Protocol>(&parent).map(|answer| answer.map(drop));
-    let log = session::<log::Protocol>(&parent, LOG_REQUIREMENT, Attributes::empty())
-        .map(|answer| answer.map(drop));
+    let taken = accept::<probe::Protocol>(&parent).map(drop);
+    let log = session::<log::Protocol>(
+        importer.handle(),
+        LOG_REQUIREMENT,
+        Attributes::empty(),
+        PARENT_REFUSAL_TIMEOUT,
+    )
+    .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(taken, Ok(Err(AcceptError::Refused)));
-    kernel_tests::kassert_eq!(log, Ok(Err(SessionError::Refused)));
+    kernel_tests::kassert_eq!(taken, Err(RequestError::Parent(AcceptError::Refused)));
+    kernel_tests::kassert_eq!(log, Err(RequestError::Parent(SessionError::Refused)));
     kernel_tests::kassert_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -650,7 +789,7 @@ fn an_importer_stays_waiting_while_its_provider_lives_without_accept() {
     let waited = requested::<probe::Protocol>(&importer, PROBE, IDLE_PROVIDER_REQUEST_TIMEOUT);
 
     kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(waited, Err(IpcError::Timeout));
+    kernel_tests::kassert_eq!(waited, Err(RequestError::Ipc(IpcError::Timeout)));
     finish(composition);
 }
 
@@ -699,13 +838,13 @@ fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
 
     composition.terminate(IDLE_EXPORT.name, TERMINATE_EXIT_CODE);
     let held_answer = answered(&held);
-    let again = component_startup::open::<probe::Protocol>(&again, COMPONENT_REPLY_TIMEOUT)
-        .map(|answer| answer.map(drop));
+    let again =
+        component_startup::open::<probe::Protocol>(&again, COMPONENT_REPLY_TIMEOUT).map(drop);
     let pinged = ping(&importer, PROBE);
 
     kernel_tests::kassert_eq!(started, ["started"]);
     kernel_tests::kassert_eq!(held_answer, UNAVAILABLE);
-    kernel_tests::kassert_eq!(again, Ok(Err(SessionError::Unavailable)));
+    kernel_tests::kassert_eq!(again, Err(RequestError::Parent(SessionError::Unavailable)));
     kernel_tests::kassert_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -721,14 +860,14 @@ fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
     let found = first_found::<probe::Protocol>(&importer, PROBE);
 
     composition.terminate(EXPORT.name, 0);
-    let answer = component_startup::open::<probe::Protocol>(&found, COMPONENT_REPLY_TIMEOUT)
-        .map(|answer| answer.map(drop));
+    let answer =
+        component_startup::open::<probe::Protocol>(&found, COMPONENT_REPLY_TIMEOUT).map(drop);
     let again = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let lines = await_component_lines(EXPORT.name, 2);
 
     kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Unavailable)));
-    kernel_tests::kassert_eq!(again, Ok(Err(SessionError::Unbound)));
+    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Unavailable)));
+    kernel_tests::kassert_eq!(again, Err(RequestError::Parent(SessionError::Unbound)));
     kernel_tests::kassert_eq!(lines, ["started"]);
     finish(composition);
 }
@@ -830,13 +969,16 @@ fn a_component_out_of_restarts_does_not_stop_the_root() {
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
     let restarted = await_component_lines(ROUTER_NAME, 2);
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
-    let refused = component_startup::open::<namespace::Protocol>(&router, COMPONENT_REPLY_TIMEOUT)
-        .map(|answer| answer.map(drop));
+    let refused =
+        component_startup::open::<namespace::Protocol>(&router, COMPONENT_REPLY_TIMEOUT).map(drop);
     let pinged = ping(&importer, PROBE);
 
     kernel_tests::kassert_eq!(started, ["started"]);
     kernel_tests::kassert_eq!(restarted.len(), 2);
-    kernel_tests::kassert_eq!(refused, Ok(Err(SessionError::Unavailable)));
+    kernel_tests::kassert_eq!(
+        refused,
+        Err(RequestError::Parent(SessionError::Unavailable))
+    );
     kernel_tests::kassert_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -847,15 +989,14 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
 
     let found = importer.found::<probe::Protocol>(PROBE);
     let served = found.get(1).map(|found| {
-        component_startup::open::<probe::Protocol>(found, SERVED_CHILD_REPLY_TIMEOUT)
-            .map(|answer| answer.map(drop))
+        component_startup::open::<probe::Protocol>(found, SERVED_CHILD_REPLY_TIMEOUT).map(drop)
     });
     let removed = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/")
         .unlink(path(HELD_PATH), NodeKind::File)
         .expect("unlink call");
     let pinged = ping_found(&first_found::<probe::Protocol>(&importer, HELD));
 
-    kernel_tests::kassert_eq!(served, Some(Ok(Ok(()))));
+    kernel_tests::kassert_eq!(served, Some(Ok(())));
     kernel_tests::kassert!(removed.is_ok());
     kernel_tests::kassert_eq!(pinged, Ok(PING));
     finish(composition);
@@ -869,10 +1010,10 @@ fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
         &first_found::<probe::Protocol>(&importer, HELD),
         BUDGET_RETURN_TIMEOUT,
     )
-    .map(|answer| answer.map(drop));
+    .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(held, Ok(Err(SessionError::Unavailable)));
+    kernel_tests::kassert_eq!(held, Err(RequestError::Parent(SessionError::Unavailable)));
     kernel_tests::kassert_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -905,22 +1046,112 @@ fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
         kernel_tests::kskip!("{} is not described", PL031);
     }
 
-    let composition = scenario(&[PLATFORM, RTC]);
-    let importer = composition.importer(&[crate::composition::Import {
-        declaration: RequirementDeclaration::all(RTC_REQUIREMENT, rtc::Protocol::ID),
-
-        namespace_root: None,
-    }]);
-    let clock = importer
-        .session::<rtc::Protocol>(RTC_REQUIREMENT)
-        .client()
-        .with_wait(RTC_REPLY_TIMEOUT);
+    let composition = with_drivers();
+    let importer = composition.importer(&[rtc_of(RTC_REQUIREMENT)]);
+    let clock = rtc_session(&importer).expect("rtc session");
 
     let now = clock.now().expect("rtc answers the time");
     let ticked = clock.tick().expect("rtc alarm fires");
+    drop(clock);
+    let renewed = rtc_session(&importer).expect("rtc session after the last one closed");
+    let again = renewed.now();
+    drop(renewed);
+    let lines = binding_lines(2);
 
     kernel_tests::kassert!(ticked >= now);
-    drop(clock);
+    kernel_tests::kassert!(again.is_ok());
+    kernel_tests::kassert_eq!(lines, ["/pl031@9010000 bound"]);
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_session_waits_for_a_feature_and_opens_after_its_publication() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
+    let handle = importer.handle();
+    let request = spawn_owned(
+        move || match featured_session(handle, Timeout::INFINITE) {
+            Ok(PING) => GRANTED,
+            _ => OTHER,
+        },
+        REQUEST_STACK_SIZE,
+        Priority::new(1),
+    )
+    .expect("request thread starts");
+
+    let waiting = request.wait(REQUEST_DELIVERY_PAUSE).is_err();
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+    let answer = answered(&request);
+    let published = await_component_lines(PUBLISHER.name, 1);
+
+    kernel_tests::kassert!(waiting);
+    kernel_tests::kassert_eq!(answer, GRANTED);
+    kernel_tests::kassert_eq!(published, ["published Ok(Ok(())) Ok(Ok(()))"]);
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_session_waiting_for_a_feature_times_out_and_its_retry_waits_again() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
+
+    let first = featured_session(importer.handle(), FEATURE_WAIT_TIMEOUT);
+    let retry = featured_session(importer.handle(), FEATURE_WAIT_TIMEOUT);
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+    let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
+
+    kernel_tests::kassert_eq!(first, Err(RequestError::Ipc(IpcError::Timeout)));
+    kernel_tests::kassert_eq!(retry, Err(RequestError::Ipc(IpcError::Timeout)));
+    kernel_tests::kassert_eq!(opened, Ok(PING));
+    finish(composition);
+}
+
+#[kernel_test]
+fn an_enumeration_finds_a_featured_export_only_while_its_publisher_lives() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+
+    let hidden = probes_found(&importer, FEATURED_QUERY).len();
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+    let published = await_featured(&importer, 1);
+    composition.terminate(PUBLISHER.name, TERMINATE_EXIT_CODE);
+    let left = await_featured(&importer, 0);
+
+    kernel_tests::kassert_eq!(hidden, 0);
+    kernel_tests::kassert_eq!(published, 1);
+    kernel_tests::kassert_eq!(left, 0);
+    finish(composition);
+}
+
+#[kernel_test]
+fn registration_refuses_a_plan_record_with_a_feature() {
+    let (composition, names) = started(&[PARENT], ExportIndex::EMPTY);
+
+    let added = registered(&composition, &names, FEATURED);
+
+    kernel_tests::kassert!(matches!(added, Err(rootkeeper::AddFailure::Declaration)));
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+
+    let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
+    let lines = await_component_lines(FEATURED.name, 4);
+
+    kernel_tests::kassert_eq!(opened, Ok(PING));
+    kernel_tests::kassert_eq!(
+        lines,
+        [
+            "hardware Ok(())",
+            "image Ok(())",
+            "features Err(Session(Refused))",
+            "started"
+        ]
+    );
     finish(composition);
 }
 
@@ -1380,29 +1611,10 @@ fn a_started_consumer_discovers_a_provider_added_at_runtime() {
     let consumer = ComponentSpec {
         ..fixture("/multiplicity-fixture", "multiplicity")
     };
-    let plan = encoded(&[PARENT, consumer]);
-    let names = ComponentNames::of(&plan);
-    start_component_relay(names.clone());
-    let composition = Composition::start(plan, component_scenario_session);
+    let (composition, names) = started(&[PARENT, consumer], ExportIndex::EMPTY);
     let started = await_component_lines(consumer.name, 5);
-    let entry = image()
-        .entries()
-        .expect("image entries")
-        .entry(EXPORT_ENTRY)
-        .expect("export program");
-    let program = userland::decode_program(entry.data()).expect("decoded program");
-    let badge = names.add(EXPORT.name).expect("log source added");
-    let log = component_scenario_session(badge).expect("log session");
 
-    composition.add(
-        rootkeeper::Component {
-            name: ProcessName::new(EXPORT.name).expect("fixture process name"),
-            program,
-            memory_limit: EXPORT.memory_limit,
-            restarts: 0,
-        },
-        log,
-    );
+    registered(&composition, &names, EXPORT).expect("runtime component added");
     let lines = await_component_lines(consumer.name, 6);
 
     kernel_tests::kassert_eq!(
@@ -1434,7 +1646,11 @@ fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
     let plan = encoded(&[PARENT, EXPORT]);
     let names = ComponentNames::of(&plan);
     start_component_relay(names.clone());
-    let composition = Composition::start(plan, component_scenario_session);
+    let composition = Composition::start(
+        plan,
+        ExportIndex::EMPTY,
+        LogSources::new(names.clone(), ScenarioLogSessions),
+    );
     let importer = composition.importer(&[probe_of(PROBE)]);
     let entry = image()
         .entries()
@@ -1445,19 +1661,16 @@ fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
     let badge = names.add("registered").expect("log source");
     let component = |program| rootkeeper::Component {
         name: ProcessName::new("registered").expect("process name"),
+        executable: EXPORT.executable,
         program,
         memory_limit: EXPORT.memory_limit,
         restarts: 0,
     };
-    let mut bytes = entry.data().to_vec();
-    let manifest_at = 31 + usize::from(u16::from_le_bytes([bytes[25], bytes[26]])) * 40;
-    bytes[manifest_at] ^= 1;
-    let damaged =
-        userland::decode_program(Vec::leak(bytes)).expect("program boundaries remain valid");
+    let damaged = patched(entry.data(), |manifest| manifest[0] ^= 1);
 
     let failure = composition.try_add(
         component(damaged),
-        component_scenario_session(badge).expect("log"),
+        ScenarioLogSessions.session(badge).expect("log"),
     );
     let pinged = ping(&importer, PROBE);
     let before = enumerated(&importer, PROBE);
@@ -1465,7 +1678,7 @@ fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
     let record = composition
         .try_add(
             component(program),
-            component_scenario_session(badge).expect("log"),
+            ScenarioLogSessions.session(badge).expect("log"),
         )
         .expect("same name can register after refusal");
     let found = importer.found::<probe::Protocol>(PROBE);
@@ -1520,10 +1733,10 @@ fn an_enumeration_by_a_session_requirement_is_refused() {
 
     let answer = importer
         .enumeration::<probe::Protocol>(PROBE, Attributes::empty())
-        .map(|answer| answer.map(drop));
+        .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Refused)));
+    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
     kernel_tests::kassert_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -1536,8 +1749,21 @@ fn a_session_with_two_matching_exports_is_refused() {
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let found_count = importer.found::<probe::Protocol>(PROBE).len();
 
-    kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Refused)));
+    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
     kernel_tests::kassert_eq!(found_count, 2);
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_session_matching_a_record_and_an_image_program_is_refused() {
+    let (composition, _) = indexed(&[EXPORT]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+
+    let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
+    let found_count = importer.found::<probe::Protocol>(PROBE).len();
+
+    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    kernel_tests::kassert!(found_count > 1);
     finish(composition);
 }
 
@@ -1547,15 +1773,14 @@ fn a_found_export_opens_only_as_its_protocol() {
     let importer = composition.importer(&[probe_of(PROBE)]);
     let found = first_found::<probe::Protocol>(&importer, PROBE);
 
-    let other = component_startup::open::<rtc::Protocol>(&found, STARTUP_REQUEST_TIMEOUT)
-        .map(|answer| answer.map(drop));
+    let other = component_startup::open::<rtc::Protocol>(&found, STARTUP_REQUEST_TIMEOUT).map(drop);
     let all = importer
         .enumeration::<rtc::Protocol>(PROBE, Attributes::empty())
-        .map(|answer| answer.map(drop));
+        .map(drop);
     let pinged = ping_found(&found);
 
-    kernel_tests::kassert_eq!(other, Ok(Err(SessionError::Refused)));
-    kernel_tests::kassert_eq!(all, Ok(Err(SessionError::Refused)));
+    kernel_tests::kassert_eq!(other, Err(RequestError::Parent(SessionError::Refused)));
+    kernel_tests::kassert_eq!(all, Err(RequestError::Parent(SessionError::Refused)));
     kernel_tests::kassert_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -1585,35 +1810,29 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
     let importer = composition.importer(&[probe_of(PROBE)]);
 
     let unfiltered = filters_found(&importer, &[]);
-    let first_matching = filters_found(&importer, &[pair("compatible", "a"), pair("role", "c")]);
-    let unmatched = filters_found(&importer, &[pair("compatible", "b")]);
+    let first_matching = filters_found(&importer, &[pair("kind", "a"), pair("role", "c")]);
+    let unmatched = filters_found(&importer, &[pair("kind", "b")]);
     let with_extra = filters_found(
         &importer,
-        &[
-            pair("compatible", "b"),
-            pair("role", "c"),
-            pair("extra", "d"),
-        ],
+        &[pair("kind", "b"), pair("role", "c"), pair("extra", "d")],
     );
     let role_only = filters_found(&importer, &[pair("role", "c")]);
     let bytes = query(&[pair("role", "c")]);
-    let parent = startup_contract::Client::new(PortTransport::new(importer.handle()))
-        .with_wait(COMPONENT_REPLY_TIMEOUT);
     let filtered = session::<probe::Protocol>(
-        &parent,
+        importer.handle(),
         PROBE,
         Attributes::decode(&bytes).expect("query decodes"),
+        COMPONENT_REPLY_TIMEOUT,
     )
-    .expect("session call")
     .expect("one export matches")
     .client()
     .with_wait(COMPONENT_REPLY_TIMEOUT)
     .ping(PING);
 
     kernel_tests::kassert_eq!(unfiltered, [""]);
-    kernel_tests::kassert_eq!(first_matching, ["compatible=a"]);
+    kernel_tests::kassert_eq!(first_matching, ["kind=a"]);
     kernel_tests::kassert!(unmatched.is_empty());
-    kernel_tests::kassert_eq!(with_extra, ["compatible=b,role=c"]);
+    kernel_tests::kassert_eq!(with_extra, ["kind=b,role=c"]);
     kernel_tests::kassert_eq!(role_only, ["role=c"]);
     kernel_tests::kassert_eq!(filtered, Ok(PING));
     finish(composition);
@@ -1650,15 +1869,17 @@ fn an_importer_finds_a_root_export_but_cannot_open_it() {
 
     let found = importer.found::<hardware::Protocol>(HARDWARE_REQUIREMENT);
     let opened = found.first().map(|found| {
-        component_startup::open::<hardware::Protocol>(found, STARTUP_REQUEST_TIMEOUT)
-            .map(|answer| answer.map(drop))
+        component_startup::open::<hardware::Protocol>(found, STARTUP_REQUEST_TIMEOUT).map(drop)
     });
     let direct =
         requested::<hardware::Protocol>(&importer, HARDWARE_REQUIREMENT, COMPONENT_REPLY_TIMEOUT);
 
     kernel_tests::kassert_eq!(found.len(), 1);
-    kernel_tests::kassert_eq!(opened, Some(Ok(Err(SessionError::Refused))));
-    kernel_tests::kassert_eq!(direct, Ok(Err(SessionError::Refused)));
+    kernel_tests::kassert_eq!(
+        opened,
+        Some(Err(RequestError::Parent(SessionError::Refused)))
+    );
+    kernel_tests::kassert_eq!(direct, Err(RequestError::Parent(SessionError::Refused)));
     finish(composition);
 }
 
@@ -1669,12 +1890,12 @@ fn a_finished_enumeration_keeps_the_results_it_gave() {
     let enumeration = enumerated(&importer, PROBE);
 
     let found = drained(&enumeration);
-    let after = component_startup::next(&enumeration, STARTUP_REQUEST_TIMEOUT)
-        .map(|answer| answer.map(|next| next.is_none()));
+    let after =
+        component_startup::next(&enumeration, STARTUP_REQUEST_TIMEOUT).map(|next| next.is_none());
     drop(enumeration);
     let pinged = found.iter().all(|found| ping_found(found) == Ok(PING));
 
-    kernel_tests::kassert_eq!(after, Ok(Ok(true)));
+    kernel_tests::kassert_eq!(after, Ok(true));
     kernel_tests::kassert_eq!(found.len(), 2);
     kernel_tests::kassert!(pinged);
     finish(composition);
@@ -1742,7 +1963,6 @@ fn repeated_searches_release_their_grants() {
     let pinged = (0..SEARCH_CYCLES).all(|_| {
         let enumeration = enumerated(&importer, PROBE);
         let found = component_startup::next(&enumeration, STARTUP_REQUEST_TIMEOUT)
-            .expect("next call")
             .expect("next answered")
             .expect("a provider is found");
         ping_found(&found) == Ok(PING)

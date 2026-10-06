@@ -10,9 +10,7 @@ use kernel_objects::Port;
 use runtime::{PortTransport, Priority, Timeout, process_exit, spawn_owned};
 use syscall::{Handle, kind};
 
-const EXPORT_STOPPED_EXIT_CODE: u64 = 1;
-
-const EXPORT_STACK_SIZE: u64 = 0x4000;
+const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
 
 ipc::protocol! {
     pub mod probe {
@@ -35,13 +33,13 @@ pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> 
         move || {
             let parent = startup_contract::Client::new(PortTransport::new(parent));
             let _ = serve_export::<probe::Protocol>(&parent, whole_export(export));
-            process_exit(EXPORT_STOPPED_EXIT_CODE)
+            process_exit(1)
         },
-        EXPORT_STACK_SIZE,
+        EXPORT_THREAD_STACK_SIZE,
         Priority::new(1),
     );
     if exporting.is_err() {
-        process_exit(EXPORT_STOPPED_EXIT_CODE)
+        process_exit(1)
     }
 
     let transport = PortTransport::new(export.as_raw());
@@ -52,7 +50,7 @@ pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> 
                 let _ = probe::dispatch(&mut Echo, frame);
             }
             Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => process_exit(EXPORT_STOPPED_EXIT_CODE),
+            Err(RecvError::Closed) => process_exit(1),
         }
     }
 }

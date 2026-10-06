@@ -1,8 +1,8 @@
 //! Кодек `userland.img`: таблица записей с путями и байтами, план начальной композиции.
 //!
-//! [`decode`] разбирает образ, [`decode_plan`] - план. Разбор заимствует исходные байты
-//! без аллокации. Потребитель записи сам определяет и разбирает формат её содержимого.
-//! Фича `alloc` открывает кодировщики `encode` и `encode_plan`.
+//! [`decode`] разбирает образ, [`decode_plan`] - план, [`ExportIndex`] - индекс экспортов
+//! программ. Разбор заимствует исходные байты без аллокации. Потребитель записи сам определяет
+//! и разбирает формат её содержимого. Фича `alloc` открывает кодировщики `encode` и `encode_plan`.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(clippy::cast_possible_truncation))]
@@ -12,6 +12,7 @@ extern crate alloc;
 
 #[cfg(any(test, feature = "alloc"))]
 mod builder;
+mod exports;
 mod image;
 mod path;
 mod plan;
@@ -20,6 +21,9 @@ mod plan_builder;
 
 #[cfg(any(test, feature = "alloc"))]
 pub use builder::{ImageEncodeError, ImageRecord, encode};
+#[cfg(any(test, feature = "alloc"))]
+pub use exports::export_entry_path;
+pub use exports::{EXPORTS_DIRECTORY, ExportIndex, IndexedExport};
 pub use image::{
     DecodedEntries, DecodedEntry, DecodedImage, ImageDecodeError, USERLAND_IMAGE_MAGIC,
     USERLAND_IMAGE_VERSION, decode,

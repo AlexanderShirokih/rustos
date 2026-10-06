@@ -5,7 +5,8 @@ use syscall::{HANDLE_TABLE_CAPACITY, MAX_PROCESS_NAME_LEN};
 use userland_image::{BootPlan, decode_plan};
 
 use super::{
-    PlanProgram, compile_plan,
+    PlanProgram, compile_plan, export_index,
+    index::IndexEntry,
     limits::{CHILD_HANDLES, ROOTKEEPER_HANDLES, SEARCH_ROOTS, rootkeeper_handles},
     source::BOOT_PLAN_MANIFEST_VERSION,
 };
@@ -152,6 +153,7 @@ fn declaration(requirements: Vec<ManifestRequirement>, exports: &[&str]) -> Prog
                 filters: Vec::new(),
             })
             .collect(),
+        features: Vec::new(),
     }
 }
 
@@ -347,6 +349,7 @@ fn the_rootkeeper_handle_estimate_counts_each_provider_and_grant() {
             protocol: String::from(CLOCK_PROTOCOL),
             filters: vec![vec![pair("a")], vec![pair("b")]],
         }],
+        features: Vec::new(),
     }
     .program_bytes();
     let consumer = declaration(
@@ -822,4 +825,132 @@ fn plan_rejects_the_removed_generic_scope_configuration() {
         plan(&[image_filesystem()])
     );
     assert!(rejected(&source).starts_with("Failed to parse boot plan TOML"));
+}
+
+impl Image {
+    fn index(&self, source: &str) -> anyhow::Result<Vec<IndexEntry<'_>>> {
+        let programs = self.programs();
+        let bytes = compile_plan(source, &programs)?;
+        export_index(&decoded(&bytes), &programs)
+    }
+}
+
+fn entry(protocol: &'static str, name: &str, program: &'static str) -> IndexEntry<'static> {
+    IndexEntry {
+        protocol,
+        name: String::from(name),
+        program,
+    }
+}
+
+#[test]
+fn the_export_index_holds_each_export_of_each_program() {
+    let image = Image::new();
+    let index = image
+        .index(&plan(&[ram_filesystem()]))
+        .expect("index must build");
+
+    assert_eq!(
+        index,
+        [
+            entry(HARDWARE_PROTOCOL, ROOTKEEPER, "/boot/rootkeeper"),
+            entry(IMAGE_PROTOCOL, ROOTKEEPER, "/boot/rootkeeper"),
+            entry(NAMESPACE_PROTOCOL, ROUTER, "/boot/namespace-router"),
+            entry(FILE_SYSTEM_MOUNT_PROTOCOL, ROUTER, "/boot/namespace-router"),
+            entry(FILE_SYSTEM_PROTOCOL, IMAGE_FS, "/boot/filesystem-imagefs"),
+            entry(FILE_SYSTEM_PROTOCOL, RAM_FS, "/boot/filesystem-ramfs"),
+        ]
+    );
+}
+
+#[test]
+fn the_export_index_qualifies_a_bin_target_that_two_packages_declare() {
+    let clock = || declaration(Vec::new(), &[CLOCK_PROTOCOL]);
+    let image = Image::new()
+        .with_package("foo", HELPER, "/boot/foo-helper", clock())
+        .with_package("bar", HELPER, "/boot/bar-helper", clock());
+    let index = image
+        .index(&plan(&[Component::new("foo::helper")]))
+        .expect("index must build");
+
+    let clocks: Vec<_> = index
+        .iter()
+        .filter(|entry| entry.protocol == CLOCK_PROTOCOL)
+        .collect();
+    assert_eq!(
+        clocks,
+        [
+            &entry(CLOCK_PROTOCOL, "foo::helper", "/boot/foo-helper"),
+            &entry(CLOCK_PROTOCOL, "bar::helper", "/boot/bar-helper"),
+        ]
+    );
+}
+
+#[test]
+fn the_export_index_rejects_a_protocol_that_cannot_name_a_directory() {
+    for protocol in ["Clock/Alarm", ".", ".."] {
+        let error = Image::new()
+            .with(HELPER, declaration(Vec::new(), &[protocol]))
+            .index(&plan(&[router()]))
+            .expect_err("protocol must be a path component");
+
+        assert_eq!(
+            reason(&error),
+            format!(
+                "program '/boot/helper' exports protocol '{protocol}' that cannot name \
+                 an export index directory"
+            )
+        );
+    }
+}
+
+#[test]
+fn plan_rejects_a_component_with_a_feature() {
+    let featured = ProgramManifest {
+        features: vec![String::from("arm,pl031")],
+        ..declaration(Vec::new(), &[CLOCK_PROTOCOL])
+    };
+    let error = Image::new()
+        .with(HELPER, featured)
+        .index(&plan(&[Component::new(HELPER)]))
+        .expect_err("a plan record takes no feature");
+
+    assert_eq!(
+        reason(&error),
+        "boot plan component 'helper' requires feature 'arm,pl031'; \
+         a program with a feature starts from the export index"
+    );
+}
+
+#[test]
+fn the_export_index_rejects_a_name_of_another_program_instance() {
+    let error = Image::new()
+        .with(HELPER, declaration(Vec::new(), &[CLOCK_PROTOCOL]))
+        .index(&plan(&[router().name(HELPER)]))
+        .expect_err("index name must not repeat an instance of another program");
+
+    assert_eq!(
+        reason(&error),
+        "export index name 'helper' of program '/boot/helper' is the name of a boot plan \
+         instance of program '/boot/namespace-router'"
+    );
+}
+
+#[test]
+fn the_export_index_rejects_a_name_longer_than_a_process_name() {
+    let package = "p".repeat(MAX_PROCESS_NAME_LEN);
+    let clock = || declaration(Vec::new(), &[CLOCK_PROTOCOL]);
+    let error = Image::new()
+        .with_package(&package, HELPER, "/boot/long-helper", clock())
+        .with_package("bar", HELPER, "/boot/bar-helper", clock())
+        .index(&plan(&[router()]))
+        .expect_err("index name must fit a process name");
+
+    assert_eq!(
+        reason(&error),
+        format!(
+            "export index name '{package}::helper' of program '/boot/long-helper' is longer \
+             than {MAX_PROCESS_NAME_LEN} bytes, which a process name holds"
+        )
+    );
 }

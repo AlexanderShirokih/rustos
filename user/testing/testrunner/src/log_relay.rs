@@ -20,6 +20,7 @@ use kernel_objects::{Port, Session};
 use kernel_tests::kernel_test;
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
+use rootkeeper::relay::LogSessions;
 use runtime::{PortTransport, Timeout, port_send};
 use spin::Mutex;
 use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
@@ -90,16 +91,28 @@ static ACTIVE: Mutex<Option<LogRelayThread>> = Mutex::new(None);
 
 static SINK_REFUSES: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn component_log_session(badge: NonZeroU64) -> Option<Session<log::Protocol>> {
-    let mut shared = SHARED.lock();
-    let relay = shared.get_or_insert_with(|| {
-        LogRelayThread::start(
-            SharedSourceNames,
-            KernelLogSink::new(crate::bootstrap_handle()),
-        )
-        .expect("shared log relay starts")
-    });
-    relay.session(badge).ok()
+pub(crate) struct SharedLogSessions;
+
+pub(crate) struct ScenarioLogSessions;
+
+impl LogSessions for SharedLogSessions {
+    fn session(&self, badge: NonZeroU64) -> Option<Session<log::Protocol>> {
+        let mut shared = SHARED.lock();
+        let relay = shared.get_or_insert_with(|| {
+            LogRelayThread::start(
+                SharedSourceNames,
+                KernelLogSink::new(crate::bootstrap_handle()),
+            )
+            .expect("shared log relay starts")
+        });
+        relay.session(badge).ok()
+    }
+}
+
+impl LogSessions for ScenarioLogSessions {
+    fn session(&self, badge: NonZeroU64) -> Option<Session<log::Protocol>> {
+        ACTIVE.lock().as_ref()?.session(badge).ok()
+    }
 }
 
 pub(crate) fn shutdown_relays() {
@@ -141,10 +154,6 @@ pub(crate) fn start_component_relay(names: impl SourceNames + 'static) {
     SINK_REFUSES.store(false, SeqCst);
     *ACTIVE.lock() =
         Some(LogRelayThread::start(names, RecordingSink).expect("component log relay starts"));
-}
-
-pub(crate) fn component_scenario_session(badge: NonZeroU64) -> Option<Session<log::Protocol>> {
-    ACTIVE.lock().as_ref()?.session(badge).ok()
 }
 
 pub(crate) fn await_component_sources(names: &[&str]) -> Vec<String> {

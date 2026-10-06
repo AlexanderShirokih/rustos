@@ -47,7 +47,6 @@ name = "display-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
- "platform-abi",
  "syscall",
 ]
 

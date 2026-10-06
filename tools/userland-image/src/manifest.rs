@@ -4,6 +4,8 @@ use component_abi::RequirementMode;
 pub(crate) struct ProgramManifest {
     pub requirements: Vec<ManifestRequirement>,
     pub exports: Vec<ProgramExport>,
+    /// Признаки машины, без которых экспорты программы скрыты.
+    pub features: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,8 +70,9 @@ impl ProgramManifest {
             })
             .collect();
 
-        let mut manifest = vec![0; manifest_len(&requirements, &exports)];
-        encode_manifest_into(&mut manifest, &requirements, &exports);
+        let features: Vec<&str> = self.features.iter().map(String::as_str).collect();
+        let mut manifest = vec![0; manifest_len(&requirements, &exports, &features)];
+        encode_manifest_into(&mut manifest, &requirements, &exports, &features);
 
         encode_program(&Program {
             manifest: &manifest,

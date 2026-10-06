@@ -44,7 +44,7 @@ pub fn serve<B>(
 where
     B: FileSystemBackend + Send + 'static,
 {
-    const EXPORT_STACK_SIZE: u64 = 0x8000;
+    const EXPORT_THREAD_STACK_SIZE: u64 = 0x8000;
 
     let bytes = match backing.as_ref() {
         Some(backing) => {
@@ -72,7 +72,7 @@ where
             });
             process_exit(1)
         },
-        EXPORT_STACK_SIZE,
+        EXPORT_THREAD_STACK_SIZE,
         Priority::new(1),
     )?;
     log_line("started");

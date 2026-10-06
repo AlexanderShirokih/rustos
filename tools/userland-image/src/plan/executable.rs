@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{PlanProgram, source::ComponentEntry};
 
-const IDENTITY_SEPARATOR: &str = "::";
+pub(super) const IDENTITY_SEPARATOR: &str = "::";
 
 pub(super) fn boot_program<'a>(programs: &[PlanProgram<'a>]) -> Result<PlanProgram<'a>> {
     let boot: Vec<PlanProgram<'a>> = programs

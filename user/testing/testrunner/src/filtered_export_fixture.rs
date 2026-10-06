@@ -21,8 +21,8 @@ const LOG_TAG: &str = "filtered-export";
 component_manifest! {
     struct FilteredExportStartup {
         exports: [probe::Protocol => [
-            { compatible = "a" },
-            { compatible = "b", role = "c" },
+            { kind = "a" },
+            { kind = "b", role = "c" },
             { role = "c" },
         ]],
     }

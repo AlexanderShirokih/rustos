@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use bootstrap_abi::image;
 use component_abi::{ComponentManifest, PROTOCOL_ID_MAX, RequirementMode};
 use ipc::Protocol as _;
@@ -33,6 +33,14 @@ fn validate_component(name: &str, declared: &ComponentManifest<'_>) -> Result<()
             protocol.len()
         );
     }
+
+    if let Some(feature) = declared.features().next() {
+        bail!(
+            "boot plan component '{name}' requires feature '{feature}'; \
+             a program with a feature starts from the export index"
+        );
+    }
+
     Ok(())
 }
 

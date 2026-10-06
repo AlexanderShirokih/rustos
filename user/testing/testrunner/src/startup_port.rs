@@ -5,7 +5,7 @@ use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 
 use component_abi::SessionError;
-use component_startup::STARTUP_REQUEST_TIMEOUT;
+use component_startup::{RequestError, STARTUP_REQUEST_TIMEOUT};
 use ipc::{
     Listener as _, Protocol as _, RecvError,
     wire::{IpcError, MESSAGE_INLINE_MAX},
@@ -196,21 +196,21 @@ const fn departed(child: u16, outcome: Outcome) -> Departure<u16> {
     Departure { child, outcome }
 }
 
-fn asked(result: &Result<Result<Session<probe::Protocol>, SessionError>, IpcError>) -> u32 {
+fn asked(result: &Result<Session<probe::Protocol>, RequestError>) -> u32 {
     let code = match result {
-        Ok(Ok(_)) => u64::from(GRANTED),
-        Ok(Err(refusal)) => 100 + session_error_code(*refusal),
-        Err(error) => 200 + ipc_error_code(*error),
+        Ok(_) => u64::from(GRANTED),
+        Err(RequestError::Parent(refusal)) => 100 + session_error_code(*refusal),
+        Err(RequestError::Ipc(error)) => 200 + ipc_error_code(*error),
     };
     u32::try_from(code).expect("request code fits u32")
 }
 
 fn refused(refusal: SessionError) -> u32 {
-    asked(&Ok(Err(refusal)))
+    asked(&Err(RequestError::Parent(refusal)))
 }
 
 fn failed(error: IpcError) -> u32 {
-    asked(&Err(error))
+    asked(&Err(RequestError::Ipc(error)))
 }
 
 fn ask(importer: &Port, requirement: &'static str) -> JoinHandle {

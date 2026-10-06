@@ -6,16 +6,19 @@ use core::{
     ops::ControlFlow,
 };
 
-use bootstrap_abi::{ImageError, LOG_MESSAGE_MAX, bootstrap, hardware, image};
+use bootstrap_abi::{
+    FEATURE_MAX_BYTES, FeaturesError, ImageError, LOG_MESSAGE_MAX, bootstrap, features, hardware,
+    image,
+};
 use component_abi::{
     AcceptError, AttributeSet, Attributes, ComponentManifest, Found, LOG_REQUIREMENT,
-    PROTOCOL_ID_MAX, ProtocolName, QueryAttributes, REQUIREMENT_NAME_MAX, RequirementDeclaration,
-    RequirementMode, SessionError, SessionRequest, SessionRequirement, component_startup,
-    decode_manifest, match_filters,
+    ManifestExport, PROTOCOL_ID_MAX, ProtocolName, QueryAttributes, REQUIREMENT_NAME_MAX,
+    RequirementDeclaration, RequirementMode, SessionError, SessionRequest, SessionRequirement,
+    component_startup, decode_manifest, match_filters,
 };
 use ipc::{
     IntoWireValue, Listener as _, Protocol as _, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX, Str},
+    wire::{Cap, FIELD_DATA_MAX, MESSAGE_INLINE_MAX, Str},
 };
 use kernel_objects::{
     Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, kind,
@@ -23,16 +26,26 @@ use kernel_objects::{
 use log_abi::{LogBuffer, log};
 use managed_component::{Children, Departure, GrantError, Outcome, Purpose, Status};
 use runtime::{Mutex, PortTransport, Timeout};
-use syscall::{Handle, Rights};
+use syscall::{Handle, ProcessName, Rights};
 use userland::{DecodedProgram, ProgramView};
+use userland_image::{ExportIndex, IndexedExport, PlanComponent};
 
-use crate::component::{Component, ImporterRequirement, Record};
+use crate::{
+    component::{Component, ImporterRequirement, Origin, Record},
+    relay::LogSources,
+};
 
 const LOG_TAG: &str = "rootkeeper";
 
 const BOOT_RECORD: u16 = 0;
 
 const IMAGE_REGION_GRANT: &str = "image region";
+
+const IMPLICIT_MEMORY_LIMIT: u64 = 16 * 1024 * 1024;
+
+const IMPLICIT_RESTARTS: u32 = 0;
+
+const FEATURES_MAX: usize = 256;
 
 /// Срок возврата бюджета перед перезапуском записи.
 pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -74,13 +87,14 @@ pub enum ImporterRefusal {
     Importer(Error),
 }
 
+/// Отказ [`RootSystem::add`].
 #[derive(Debug)]
 pub enum AddFailure {
     /// Имя записи уже зарегистрировано.
     Name,
     /// Число записей превышает диапазон номера компонента.
     Capacity,
-    /// Описание требований, экспортов или бюджета недопустимо.
+    /// Описание требований, экспортов или бюджета недопустимо либо программа требует признак.
     Declaration,
     /// Резерв бюджета записи не создан.
     Resource(Error),
@@ -97,6 +111,7 @@ enum Holder {
     Record(u16),
     Importer(usize),
     Image(u64),
+    Features(u64),
     Search(u64),
 }
 
@@ -109,9 +124,32 @@ struct ImporterBinding {
 
 #[derive(Clone, Copy)]
 struct Export<'a> {
-    provider: u16,
+    provider: Provider<'a>,
     protocol: &'a str,
     filter: Attributes<'a>,
+}
+
+struct Feature {
+    name: String,
+    publisher: u64,
+}
+
+struct Waiting {
+    owner: u64,
+    requirement: String,
+    protocol: String,
+    attributes: AttributeSet,
+    reply: component_startup::session::Reply<Debt>,
+}
+
+#[derive(Clone, Copy)]
+enum Provider<'a> {
+    Record(u16),
+    Program {
+        name: &'a str,
+        executable: &'a str,
+        program: DecodedProgram<'a>,
+    },
 }
 
 struct Search<'a> {
@@ -131,6 +169,8 @@ pub struct RootSystem<'a> {
     children: Children<'a, Holder, DecodedProgram<'a>>,
     records: Vec<Record<'a>>,
     logs: Vec<Session<log::Protocol>>,
+    pub(crate) log_sources: LogSources,
+    index: ExportIndex<'a>,
     hardware: Session<hardware::Protocol>,
     image: &'a SystemImage,
     kernel: Handle<kind::Port>,
@@ -138,6 +178,8 @@ pub struct RootSystem<'a> {
     importers: Vec<Vec<ImporterBinding>>,
     searches: Vec<Search<'a>>,
     next_search: u64,
+    features: Vec<Feature>,
+    waiting: Vec<Waiting>,
     resource: Resource,
 }
 
@@ -151,8 +193,10 @@ impl<'a> RootSystem<'a> {
     pub(crate) fn new(
         image: &'a SystemImage,
         kernel: Handle<kind::Port>,
-        name: &'a str,
+        boot: PlanComponent<'a>,
         manifest: ComponentManifest<'a>,
+        index: ExportIndex<'a>,
+        log_sources: LogSources,
     ) -> Result<Self, BudgetFailure> {
         let resource = Resource::self_resource().map_err(|_| BudgetFailure::Root)?;
         let children = Children::new().map_err(|_| BudgetFailure::StartupPort)?;
@@ -166,11 +210,15 @@ impl<'a> RootSystem<'a> {
         Ok(Self {
             children,
             records: alloc::vec![Record {
-                name,
+                name: String::from(boot.name()),
+                executable: boot.executable(),
+                origin: Origin::Plan,
                 manifest,
                 restarts: 0,
             }],
             logs: Vec::new(),
+            log_sources,
+            index,
             hardware,
             image,
             kernel,
@@ -178,22 +226,38 @@ impl<'a> RootSystem<'a> {
             importers: Vec::new(),
             searches: Vec::new(),
             next_search: 0,
+            features: Vec::new(),
+            waiting: Vec::new(),
             resource,
         })
     }
 
-    /// Добавляет запись, которую запускает следующий оборот. Номера прежних записей сохраняются.
+    /// Добавляет запись и возвращает её номер. Программа с признаками отвергается с
+    /// [`AddFailure::Declaration`].
     pub fn add(
         &mut self,
         component: Component<'a>,
         log: Session<log::Protocol>,
     ) -> Result<u16, AddFailure> {
-        if self.record_named(component.name.as_str()).is_some() {
+        self.insert(component, Origin::Plan, log)
+    }
+
+    fn insert(
+        &mut self,
+        component: Component<'a>,
+        origin: Origin,
+        log: Session<log::Protocol>,
+    ) -> Result<u16, AddFailure> {
+        let name = String::from(component.name.as_str());
+
+        if self.record_named(&name).is_some() {
             return Err(AddFailure::Name);
         }
         let manifest =
             decode_manifest(component.program.manifest()).map_err(|_| AddFailure::Declaration)?;
+
         if component.memory_limit == 0
+            || (origin == Origin::Plan && manifest.features().next().is_some())
             || manifest.requirements().any(|requirement| {
                 requirement.name().len() > REQUIREMENT_NAME_MAX
                     || requirement.protocol().len() > PROTOCOL_ID_MAX
@@ -218,7 +282,9 @@ impl<'a> RootSystem<'a> {
             .map_err(AddFailure::Resource)?;
 
         self.records.push(Record {
-            name: component.name.as_str(),
+            name,
+            executable: component.executable,
+            origin,
             manifest,
             restarts: component.restarts,
         });
@@ -295,6 +361,44 @@ impl<'a> RootSystem<'a> {
             .and_then(|(index, component)| Some((u16::try_from(index).ok()?, component)))
     }
 
+    fn record_of(&self, executable: &str) -> Option<u16> {
+        let record = self
+            .records
+            .iter()
+            .position(|record| record.executable == executable)?;
+        u16::try_from(record).ok()
+    }
+
+    fn add_implicit(
+        &mut self,
+        name: &'a str,
+        executable: &'a str,
+        program: DecodedProgram<'a>,
+    ) -> Result<u16, SessionError> {
+        let record = u16::try_from(self.records.len()).map_err(|_| SessionError::NoSpace)?;
+        let process = ProcessName::new(name).ok_or(SessionError::Refused)?;
+        let log = self
+            .log_sources
+            .register(record, name)
+            .ok_or(SessionError::NoSpace)?;
+        let component = Component {
+            name: process,
+            executable,
+            program,
+            memory_limit: IMPLICIT_MEMORY_LIMIT,
+            restarts: IMPLICIT_RESTARTS,
+        };
+        self.insert(component, Origin::Index, log)
+            .map_err(|failure| {
+                self.log_sources.retract(record);
+                self.log(format_args!("{name} not added: {failure:?}"));
+                match failure {
+                    AddFailure::Resource(_) | AddFailure::Capacity => SessionError::NoSpace,
+                    AddFailure::Name | AddFailure::Declaration => SessionError::Refused,
+                }
+            })
+    }
+
     fn importer_binding(
         requirement: &RequirementDeclaration,
         bound: &[ImporterBinding],
@@ -332,7 +436,7 @@ impl<'a> RootSystem<'a> {
         let Some(component) = self.records.get(usize::from(record)) else {
             return;
         };
-        let name = component.name;
+        let name = component.name.as_str();
         let restarts = component.restarts;
         let retry = match departure.outcome {
             Outcome::Exit(code) => {
@@ -394,24 +498,106 @@ impl<'a> RootSystem<'a> {
         .ok_or(SessionError::Refused)
     }
 
-    fn matches<'s>(
-        &'s self,
-        protocol: &'s str,
-        attributes: Attributes<'s>,
-    ) -> impl Iterator<Item = Export<'a>> + 's {
-        self.records
-            .iter()
-            .enumerate()
-            .filter_map(move |(index, record)| {
-                let provider = u16::try_from(index).ok()?;
-                let export = record.export(protocol)?;
-                let filter = match_filters(export.filters(), attributes)?;
-                self.available(provider).then_some(Export {
-                    provider,
-                    protocol: export.protocol(),
-                    filter,
-                })
-            })
+    fn matches(
+        &self,
+        protocol: &str,
+        attributes: Attributes<'_>,
+        hidden: &mut bool,
+        found: &mut dyn FnMut(Export<'a>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        for (index, record) in self.records.iter().enumerate() {
+            let Ok(provider) = u16::try_from(index) else {
+                break;
+            };
+
+            if let Some(export) = record.export(protocol)
+                && self.available(provider)
+            {
+                let visible = self.published(&record.manifest);
+                Self::candidate(
+                    Provider::Record(provider),
+                    export,
+                    attributes,
+                    visible,
+                    hidden,
+                    found,
+                )?;
+            }
+        }
+
+        for indexed in self.index.providers(protocol) {
+            if let Some((provider, manifest, export)) = self.indexed(indexed, protocol) {
+                let visible = self.published(&manifest);
+                Self::candidate(provider, export, attributes, visible, hidden, found)?;
+            }
+        }
+
+        ControlFlow::Continue(())
+    }
+
+    fn candidate(
+        provider: Provider<'a>,
+        export: ManifestExport<'a>,
+        attributes: Attributes<'_>,
+        visible: bool,
+        hidden: &mut bool,
+        found: &mut dyn FnMut(Export<'a>) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        let Some(filter) = match_filters(export.filters(), attributes) else {
+            return ControlFlow::Continue(());
+        };
+
+        if !visible {
+            *hidden = true;
+            return ControlFlow::Continue(());
+        }
+
+        found(Export {
+            provider,
+            protocol: export.protocol(),
+            filter,
+        })
+    }
+
+    fn published(&self, manifest: &ComponentManifest<'_>) -> bool {
+        manifest.features().all(|required| {
+            self.features
+                .iter()
+                .any(|feature| feature.name.as_str() == required)
+        })
+    }
+
+    fn indexed(
+        &self,
+        indexed: IndexedExport<'a>,
+        protocol: &str,
+    ) -> Option<(Provider<'a>, ComponentManifest<'a>, ManifestExport<'a>)> {
+        let name = indexed.name();
+        let Some(executable) = indexed.program() else {
+            self.log(format_args!("export index entry {name} not decoded"));
+            return None;
+        };
+
+        if self.record_of(executable).is_some() {
+            return None;
+        }
+        let manifest = self
+            .image
+            .program(executable)
+            .and_then(|program| Some((program, decode_manifest(program.manifest()).ok()?)));
+        let Some((program, manifest)) = manifest else {
+            self.log(format_args!("export index entry {name} not decoded"));
+            return None;
+        };
+        let export = manifest
+            .exports()
+            .find(|export| export.protocol() == protocol)?;
+        let provider = Provider::Program {
+            name,
+            executable,
+            program,
+        };
+        Some((provider, manifest, export))
     }
 
     fn available(&self, provider: u16) -> bool {
@@ -422,29 +608,40 @@ impl<'a> RootSystem<'a> {
             )
     }
 
+    fn reachable(&self, export: &Export<'a>) -> bool {
+        match export.provider {
+            Provider::Record(record) => self.available(record),
+            Provider::Program { executable, .. } => self
+                .record_of(executable)
+                .is_none_or(|record| self.available(record)),
+        }
+    }
+
     fn only_match(
         &self,
         protocol: &str,
         attributes: Attributes<'_>,
-    ) -> Result<Export<'a>, SessionError> {
-        let mut matches = self.matches(protocol, attributes);
-        let export = matches.next().ok_or(SessionError::Unbound)?;
-        if matches.next().is_some() {
-            return Err(SessionError::Refused);
+    ) -> Result<Option<Export<'a>>, SessionError> {
+        let mut hidden = false;
+
+        match only(|found| self.matches(protocol, attributes, &mut hidden, found)) {
+            Err(SessionError::Unbound) if hidden => Ok(None),
+            result => result.map(Some),
         }
-        Ok(export)
     }
 
     fn pinned(&self, provider: u16, protocol: &str) -> Result<Export<'a>, SessionError> {
-        self.records
+        let export = self
+            .records
             .get(usize::from(provider))
             .and_then(|record| record.export(protocol))
-            .map(|export| Export {
-                provider,
-                protocol: export.protocol(),
-                filter: Attributes::empty(),
-            })
-            .ok_or(SessionError::Refused)
+            .ok_or(SessionError::Refused)?;
+
+        Ok(Export {
+            provider: Provider::Record(provider),
+            protocol: export.protocol(),
+            filter: Attributes::empty(),
+        })
     }
 
     fn open_export(
@@ -454,24 +651,94 @@ impl<'a> RootSystem<'a> {
         export: Export<'a>,
         reply: component_startup::session::Reply<Debt>,
     ) {
-        if export.provider == BOOT_RECORD {
+        let provider = match export.provider {
+            Provider::Record(record) => record,
+            Provider::Program {
+                name,
+                executable,
+                program,
+            } => match self.record_of(executable) {
+                Some(record) => record,
+                None => match self.add_implicit(name, executable, program) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        let _ = reply.send(Err::<Port, _>(error));
+                        return;
+                    }
+                },
+            },
+        };
+
+        if provider == BOOT_RECORD {
             let answer = self.boot_export(owner, requirement, export.protocol);
             let _ = reply.send(answer);
             return;
         }
 
-        if !self.available(export.provider) {
+        if !self.available(provider) {
             let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
             return;
         }
 
         self.children.request(
-            Holder::Record(export.provider),
+            Holder::Record(provider),
             owner,
             requirement,
             export.protocol,
             reply,
         );
+    }
+
+    fn wait(
+        &mut self,
+        owner: u64,
+        requirement: &str,
+        protocol: &str,
+        attributes: Attributes<'_>,
+        reply: component_startup::session::Reply<Debt>,
+    ) {
+        if self.waiting.try_reserve(1).is_err() {
+            let _ = reply.send(Err::<Port, _>(SessionError::NoSpace));
+            return;
+        }
+
+        self.waiting.push(Waiting {
+            owner,
+            requirement: String::from(requirement),
+            protocol: String::from(protocol),
+            attributes: AttributeSet::new(attributes),
+            reply,
+        });
+    }
+
+    fn rematch(&mut self) {
+        for waiting in core::mem::take(&mut self.waiting) {
+            let attributes = waiting.attributes.as_attributes();
+
+            match self.only_match(&waiting.protocol, attributes) {
+                Ok(Some(export)) => {
+                    self.open_export(waiting.owner, &waiting.requirement, export, waiting.reply);
+                }
+                Ok(None) => self.waiting.push(waiting),
+                Err(error) => {
+                    let _ = waiting.reply.send(Err::<Port, _>(error));
+                }
+            }
+        }
+    }
+
+    fn replace_waiting(&mut self, owner: u64, requirement: &str) {
+        if let Some(index) = self
+            .waiting
+            .iter()
+            .position(|waiting| waiting.owner == owner && waiting.requirement == requirement)
+        {
+            let _ = self
+                .waiting
+                .remove(index)
+                .reply
+                .send(Err::<Port, _>(SessionError::NoSpace));
+        }
     }
 
     fn search(&self, holder: Option<Holder>) -> Option<usize> {
@@ -513,6 +780,9 @@ impl<'a> RootSystem<'a> {
         } else {
             self.searches.retain(|search| search.owner != badge);
         }
+
+        self.waiting.retain(|waiting| waiting.owner != badge);
+        self.features.retain(|feature| feature.publisher != badge);
     }
 
     fn log_session(
@@ -544,9 +814,9 @@ impl<'a> RootSystem<'a> {
         requirement: &str,
         protocol: &str,
     ) -> Result<Port, SessionError> {
-        if !matches!(self.children.caller(badge), Some(Holder::Record(_))) {
+        let Some(Holder::Record(record)) = self.children.caller(badge) else {
             return Err(SessionError::Refused);
-        }
+        };
 
         let session = match protocol {
             hardware::Protocol::ID => self.children.grant(
@@ -561,9 +831,21 @@ impl<'a> RootSystem<'a> {
                 Purpose::Requirement,
                 Holder::Image(badge),
             ),
+            features::Protocol::ID if self.planned(record) => self.children.issue(
+                badge,
+                requirement,
+                Purpose::Requirement,
+                Holder::Features(badge),
+            ),
             _ => return Err(SessionError::Refused),
         };
         session.map_err(SessionError::from)
+    }
+
+    fn planned(&self, record: u16) -> bool {
+        self.records
+            .get(usize::from(record))
+            .is_some_and(|record| record.origin == Origin::Plan)
     }
 
     fn log(&self, line: Arguments<'_>) {
@@ -600,14 +882,16 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             return;
         }
 
+        self.replace_waiting(badge, name);
         let export = self
             .declared(holder, name, protocol)
             .and_then(|(_, pinned)| match pinned {
-                Some(provider) => self.pinned(provider, protocol),
+                Some(provider) => self.pinned(provider, protocol).map(Some),
                 None => self.only_match(protocol, attributes),
             });
         match export {
-            Ok(export) => self.open_export(badge, name, export, reply),
+            Ok(Some(export)) => self.open_export(badge, name, export, reply),
+            Ok(None) => self.wait(badge, name, protocol, attributes, reply),
             Err(error) => {
                 let _ = reply.send(Err::<Port, _>(error));
             }
@@ -656,9 +940,17 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         }
 
         let mut snapshot = VecDeque::new();
-        for export in self.matches(protocol, attributes) {
-            snapshot.try_reserve(1).map_err(|_| SessionError::NoSpace)?;
+        let listed = self.matches(protocol, attributes, &mut false, &mut |export| {
+            if snapshot.try_reserve(1).is_err() {
+                return ControlFlow::Break(());
+            }
+
             snapshot.push_back(export);
+            ControlFlow::Continue(())
+        });
+
+        if listed.is_break() {
+            return Err(SessionError::NoSpace);
         }
 
         self.issue_search(
@@ -688,7 +980,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
                 let _ = reply.send(Ok::<Option<Found<Port>>, SessionError>(None));
                 return;
             };
-            if self.available(export.provider) {
+            if self.reachable(&export) {
                 break export;
             }
         };
@@ -745,6 +1037,43 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
     }
 }
 
+impl features::Service<Delivery> for RootSystem<'_> {
+    fn publish(
+        &mut self,
+        frame: &Delivery,
+        feature: Str<'_, { FIELD_DATA_MAX }>,
+    ) -> Result<(), FeaturesError> {
+        let Some(Holder::Features(publisher)) = self.children.caller(frame.badge) else {
+            return Err(FeaturesError::Invalid);
+        };
+
+        let feature = feature.as_str();
+
+        if feature.is_empty() || feature.len() > FEATURE_MAX_BYTES {
+            return Err(FeaturesError::Invalid);
+        }
+
+        if self
+            .features
+            .iter()
+            .any(|known| known.publisher == publisher && known.name == feature)
+        {
+            return Ok(());
+        }
+
+        if self.features.len() >= FEATURES_MAX || self.features.try_reserve(1).is_err() {
+            return Err(FeaturesError::NoSpace);
+        }
+
+        self.features.push(Feature {
+            name: String::from(feature),
+            publisher,
+        });
+        self.rematch();
+        Ok(())
+    }
+}
+
 impl image::Service<Delivery> for RootSystem<'_> {
     fn region(
         &mut self,
@@ -791,6 +1120,7 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
             // выбирается по значку до разбора.
             let _ = match guard.children.caller(incoming.resources.badge) {
                 Some(Holder::Image(_)) => image::dispatch(&mut *guard, incoming),
+                Some(Holder::Features(_)) => features::dispatch(&mut *guard, incoming),
                 _ => component_startup::dispatch(&mut *guard, incoming),
             };
         }
@@ -806,6 +1136,22 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
         Err(RecvError::Closed) => return ControlFlow::Break(()),
     }
     ControlFlow::Continue(())
+}
+
+fn only<'a>(
+    each: impl FnOnce(&mut dyn FnMut(Export<'a>) -> ControlFlow<()>) -> ControlFlow<()>,
+) -> Result<Export<'a>, SessionError> {
+    let mut only = None;
+    let ambiguous = each(&mut |export| match only.replace(export) {
+        Some(_) => ControlFlow::Break(()),
+        None => ControlFlow::Continue(()),
+    });
+
+    if ambiguous.is_break() {
+        return Err(SessionError::Refused);
+    }
+
+    only.ok_or(SessionError::Unbound)
 }
 
 pub(crate) fn log_line(kernel: Handle<kind::Port>, line: Arguments<'_>) {

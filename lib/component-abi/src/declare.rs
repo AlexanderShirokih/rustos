@@ -11,23 +11,25 @@
 macro_rules! __component_manifest_record {
     (
         exports = [$($export:path $(=> [$($filter:tt)*])?),*]
-        requirements { $($requirement:ident: $kind:ident $(($($parameter:tt)*))?),* }
+        requirements { $($requirement:ident: $kind:ident($protocol:path)),* }
+        features [$($feature:literal),*]
     ) => {
         const _: () = {
             const REQUIREMENTS: &[$crate::RequirementDeclaration] = &[$(
-                $crate::__component_manifest_record!(@requirement $requirement $kind $(($($parameter)*))?)
+                $crate::__component_manifest_record!(@requirement $requirement $kind($protocol))
             ),*];
             const EXPORTS: &[$crate::ExportDeclaration] = &[$(
                 $crate::__component_manifest_record!(@export $export $(=> [$($filter)*])?)
             ),*];
-            const RECORD_LEN: usize = $crate::manifest_len(REQUIREMENTS, EXPORTS);
+            const FEATURES: &[&str] = &[$($feature),*];
+            const RECORD_LEN: usize = $crate::manifest_len(REQUIREMENTS, EXPORTS, FEATURES);
 
             #[cfg_attr(
                 target_os = "molecular",
                 unsafe(link_section = ".component.manifest")
             )]
             #[used]
-            static MANIFEST: [u8; RECORD_LEN] = $crate::encode_manifest(REQUIREMENTS, EXPORTS);
+            static MANIFEST: [u8; RECORD_LEN] = $crate::encode_manifest(REQUIREMENTS, EXPORTS, FEATURES);
         };
     };
     (@export $protocol:path) => {
@@ -82,7 +84,7 @@ mod tests {
         &[crate::__component_manifest_record!(
             @requirement files session(file_system::Protocol)
         )];
-    const TYPED_LEN: usize = manifest_len(TYPED_REQUIREMENTS, NO_EXPORTS);
+    const TYPED_LEN: usize = manifest_len(TYPED_REQUIREMENTS, NO_EXPORTS, &[]);
 
     const LITERAL_REQUIREMENTS: &[crate::RequirementDeclaration] =
         &[crate::RequirementDeclaration::session(
@@ -97,24 +99,25 @@ mod tests {
             { compatible = "b" },
         ]),
     ];
-    const EXPORTS_LEN: usize = manifest_len(&[], TYPED_EXPORTS);
+    const EXPORTS_LEN: usize = manifest_len(&[], TYPED_EXPORTS, &[]);
 
     const REQUIREMENTS: &[crate::RequirementDeclaration] = &[
         crate::__component_manifest_record!(@requirement admin session(file_system_mount::Protocol)),
         crate::__component_manifest_record!(@requirement files session(file_system::Protocol)),
         crate::__component_manifest_record!(@requirement mounts all(file_system::Protocol)),
     ];
-    const REQUIREMENTS_LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
+    const REQUIREMENTS_LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS, &[]);
 
     crate::__component_manifest_record! {
         exports = [file_system::Protocol => [{ compatible = "a" }], file_system_mount::Protocol]
         requirements { files: all(file_system::Protocol), admin: session(file_system_mount::Protocol) }
+        features []
     }
 
     #[test]
     fn a_session_requirement_carries_the_id_of_its_protocol() {
-        let typed: [u8; TYPED_LEN] = encode_manifest(TYPED_REQUIREMENTS, NO_EXPORTS);
-        let literal: [u8; TYPED_LEN] = encode_manifest(LITERAL_REQUIREMENTS, NO_EXPORTS);
+        let typed: [u8; TYPED_LEN] = encode_manifest(TYPED_REQUIREMENTS, NO_EXPORTS, &[]);
+        let literal: [u8; TYPED_LEN] = encode_manifest(LITERAL_REQUIREMENTS, NO_EXPORTS, &[]);
 
         assert_eq!(typed, literal);
         let manifest = decode_manifest(&typed).expect("record decodes");
@@ -128,7 +131,7 @@ mod tests {
 
     #[test]
     fn a_declaration_names_an_export_by_the_id_of_its_protocol() {
-        let bytes: [u8; EXPORTS_LEN] = encode_manifest(&[], TYPED_EXPORTS);
+        let bytes: [u8; EXPORTS_LEN] = encode_manifest(&[], TYPED_EXPORTS, &[]);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let exports: std::vec::Vec<_> = manifest
@@ -163,7 +166,7 @@ mod tests {
 
     #[test]
     fn a_declaration_names_every_requirement_by_its_field_in_the_order_of_the_declaration() {
-        let bytes: [u8; REQUIREMENTS_LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS);
+        let bytes: [u8; REQUIREMENTS_LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS, &[]);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         let requirements: std::vec::Vec<_> = manifest

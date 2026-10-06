@@ -4,7 +4,7 @@
 
 use bootstrap_abi::image;
 use component_startup::{
-    Attributes, Requirements as _, SessionError, all, component_manifest,
+    Attributes, RequestError, Requirements as _, SessionError, all, component_manifest,
     session as request_session, start_parent,
 };
 use kernel_objects::{Port, Signal};
@@ -67,7 +67,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
 
     let requests = start_parent(parent.as_raw()).with_wait(SESSION_PING_TIMEOUT);
     match all::<probe::Protocol>(&requests, "one", Attributes::empty()) {
-        Ok(Err(SessionError::Refused)) => log_line("all refused"),
+        Err(RequestError::Parent(SessionError::Refused)) => log_line("all refused"),
         _ => return Err(Failed),
     }
 
@@ -99,10 +99,14 @@ fn run(parent: &Port) -> Result<(), Failed> {
                         return Err(Failed);
                     }
 
-                    let one =
-                        request_session::<probe::Protocol>(&requests, "one", Attributes::empty())
-                            .map_err(|_| Failed)?
-                            .map_err(|_| Failed)?;
+                    let one = request_session::<probe::Protocol>(
+                        parent.as_raw(),
+                        "one",
+                        Attributes::empty(),
+                        SESSION_PING_TIMEOUT,
+                    )
+                    .map_err(|_| Failed)?;
+
                     if one.client().with_wait(SESSION_PING_TIMEOUT).ping(8) != Ok(8) {
                         return Err(Failed);
                     }

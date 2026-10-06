@@ -1,9 +1,10 @@
-//! Компонент `platform`: разбирает описание платформы и выдаёт драйверам описание, линии
-//! прерываний и окна регистров устройств по сессиям `Platform`.
+//! Компонент `platform`: разбирает описание платформы, публикует каждую различную совместимость
+//! доступных устройств как признак машины и выдаёт драйверам описание, линии прерываний и окна
+//! регистров устройств по сессиям `Platform`.
 //!
-//! Полномочия на устройства компонент получает сессией `Hardware` у родителя. Выданные описание,
-//! линии и регионы принадлежат сессии, которая их взяла, и отзываются с её концом либо с концом
-//! процесса `platform`.
+//! Компонент требует сессию `Hardware` с полномочиями на устройства и сессию `Features` для
+//! публикации признаков. Выданные описание, линии и регионы принадлежат сессии, которая их взяла,
+//! и отзываются с её концом либо с концом процесса `platform`.
 
 #![no_std]
 #![no_main]
@@ -16,15 +17,18 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use core::{panic::PanicInfo, sync::atomic::AtomicU64};
 
-use bootstrap_abi::hardware;
+use bootstrap_abi::{features, hardware};
 use component_startup::{
     MintedSession, Requirements as _, SessionError, component_manifest, mint_session, serve_export,
 };
 use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
 use fdt::devicetree::DeviceTree;
-use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{IrqControl, MemoryRegion, Port};
-use platform_abi::platform;
+use ipc::{
+    Listener, RecvError,
+    wire::{MESSAGE_INLINE_MAX, Str},
+};
+use kernel_objects::{IrqControl, MemoryRegion, Port, SessionTransport};
+use platform_abi::{Description, platform};
 use runtime::{
     Mutex, PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned,
     start_component,
@@ -37,13 +41,16 @@ use sessions::{HardwareDescription, Platform, SessionRecord};
 
 const LOG_TAG: &str = "platform";
 
-const EXPORT_STACK_SIZE: u64 = 0x4000;
+const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
 
 const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct PlatformStartup {
-        requirements: { hardware: session(hardware::Protocol) },
+        requirements: {
+            hardware: session(hardware::Protocol),
+            features: session(features::Protocol),
+        },
         exports: [platform::Protocol],
     }
 }
@@ -93,10 +100,18 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
             log_fmt(format_args!("export stopped: {failure:?}"));
             process_exit(FAILED_EXIT_CODE)
         },
-        EXPORT_STACK_SIZE,
+        EXPORT_THREAD_STACK_SIZE,
         Priority::new(1),
     )
     .ok()?;
+
+    match requirements.features {
+        Some(features) => publish(
+            &features.client(),
+            &Description::new(mapping.as_bytes(), u64::from(fdt.offset)).ok()?,
+        ),
+        None => log_line("features session not granted"),
+    }
 
     Some((
         &shared.service,
@@ -111,6 +126,32 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
             hardware,
         ),
     ))
+}
+
+fn publish(features: &features::Client<SessionTransport>, description: &Description<'_>) {
+    let mut published: Vec<&str> = Vec::new();
+    for device in description.devices().filter_map(Result::ok) {
+        for compatible in device.compatible() {
+            if published.contains(&compatible) {
+                continue;
+            }
+
+            let Some(feature) = Str::new(compatible) else {
+                log_fmt(format_args!("feature {compatible} not published: too long"));
+                continue;
+            };
+
+            match features.publish(feature) {
+                Ok(Ok(())) => published.push(compatible),
+
+                failure => {
+                    log_fmt(format_args!(
+                        "feature {compatible} not published: {failure:?}"
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn open(shared: &Shared) -> Result<Port, SessionError> {

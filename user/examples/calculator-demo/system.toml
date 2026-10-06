@@ -6,12 +6,6 @@ memory_limit = "1M"
 restarts = 2
 
 [[components]]
-executable = "driver-pl031"
-memory_limit = "1M"
-restarts = 2
-scope = { platform = "arm,pl031" }
-
-[[components]]
 executable = "calculator"
 memory_limit = "1M"
 restarts = 2

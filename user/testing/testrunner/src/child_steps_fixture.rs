@@ -6,7 +6,7 @@ use core::{num::NonZeroU64, sync::atomic::AtomicU64};
 
 use component_abi::component_startup as startup_contract;
 use component_startup::{
-    Requirements as _, SessionRequest, accept, component_manifest, mint_session,
+    RequestError, Requirements as _, SessionRequest, accept, component_manifest, mint_session,
 };
 use ipc::{Listener as _, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::Port;
@@ -112,12 +112,14 @@ impl Fixture {
     fn accept(&mut self, wait: Timeout) -> (u32, u64) {
         let parent = startup_contract::Client::new(PortTransport::new(self.parent)).with_wait(wait);
         match accept::<probe::Protocol>(&parent) {
-            Ok(Ok(request)) => {
+            Ok(request) => {
                 self.held = Some(request);
                 (outcome::ACCEPTED, 0)
             }
-            Ok(Err(refusal)) => (outcome::ACCEPT_REFUSED, accept_error_code(refusal)),
-            Err(error) => (outcome::IPC_FAILED, ipc_error_code(error)),
+            Err(RequestError::Parent(refusal)) => {
+                (outcome::ACCEPT_REFUSED, accept_error_code(refusal))
+            }
+            Err(RequestError::Ipc(error)) => (outcome::IPC_FAILED, ipc_error_code(error)),
         }
     }
 

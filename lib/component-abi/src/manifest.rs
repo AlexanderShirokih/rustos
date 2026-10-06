@@ -2,13 +2,14 @@
 //!
 //! [`manifest_len`] считает длину записи, [`encode_manifest`] собирает её в const-контексте
 //! под `static` программы, [`decode_manifest`] разбирает байты секции в
-//! [`ComponentManifest`] с требованиями, протоколами экспортов и их фильтрами.
+//! [`ComponentManifest`] с требованиями, протоколами экспортов, их фильтрами и признаками.
 //!
 //! Запись экспорта содержит длину протокола `u8`, байты протокола, число фильтров `u8` и фильтры
 //! в кодировке [`Attributes`]. Записи экспортов предшествуют требованиям в порядке объявления.
+//! Признаки - строки с длиной `u8` - следуют за требованиями.
 
 use crate::{
-    attributes::{Attribute, Attributes, attributes_len, encode_attributes_into},
+    attributes::{Attribute, Attributes, write_attributes},
     startup::{LOG_REQUIREMENT, PROTOCOL_ID_MAX, REQUIREMENT_NAME_MAX},
 };
 
@@ -22,7 +23,8 @@ const COMPONENT_REQUIREMENT_HEADER_SIZE: usize = 1;
 const OFFSET_VERSION: usize = 8;
 const OFFSET_REQUIREMENT_COUNT: usize = 10;
 const OFFSET_EXPORT_COUNT: usize = 12;
-const OFFSET_RESERVED: usize = 13;
+const OFFSET_FEATURE_COUNT: usize = 13;
+const OFFSET_RESERVED: usize = 14;
 
 /// Кратность сессий протокола требования.
 #[repr(u8)]
@@ -87,6 +89,16 @@ pub struct ComponentManifest<'a> {
     requirement_count: u16,
     exports: &'a [u8],
     export_count: u8,
+    features: &'a [u8],
+    feature_count: u8,
+}
+
+/// Признаки машины, которые требует манифест, в порядке объявления.
+#[derive(Debug, Clone)]
+pub struct ManifestFeatures<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+    remaining: u8,
 }
 
 /// Требования манифеста в порядке объявления.
@@ -233,6 +245,16 @@ impl<'a> ComponentManifest<'a> {
             remaining: self.export_count,
         }
     }
+
+    /// Признаки машины, без публикации которых экспорты компонента скрыты от поиска.
+    #[must_use]
+    pub const fn features(&self) -> ManifestFeatures<'a> {
+        ManifestFeatures {
+            bytes: self.features,
+            cursor: 0,
+            remaining: self.feature_count,
+        }
+    }
 }
 
 impl<'a> Iterator for ManifestRequirements<'a> {
@@ -264,6 +286,21 @@ impl<'a> Iterator for ManifestExports<'a> {
     }
 }
 
+impl<'a> Iterator for ManifestFeatures<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let (feature, end) = parse_name(self.bytes, self.cursor, "feature").ok()?;
+        self.remaining -= 1;
+        self.cursor = end;
+        Some(feature)
+    }
+}
+
 impl<'a> Iterator for ManifestFilters<'a> {
     type Item = Attributes<'a>;
 
@@ -279,93 +316,136 @@ impl<'a> Iterator for ManifestFilters<'a> {
     }
 }
 
-/// Длина записи манифеста с заголовком, экспортами и требованиями.
+/// Длина записи манифеста.
 #[must_use]
 pub const fn manifest_len(
     requirements: &[RequirementDeclaration],
     exports: &[ExportDeclaration],
+    features: &[&str],
 ) -> usize {
-    let mut len = COMPONENT_MANIFEST_HEADER_SIZE;
-    let mut declared = exports;
-    while let [export, tail @ ..] = declared {
-        len += 1 + export.protocol.len() + 1;
-        let mut filters = export.filters;
-        while let [filter, rest @ ..] = filters {
-            len += attributes_len(filter);
-            filters = rest;
-        }
-        declared = tail;
-    }
-
-    let mut pending = requirements;
-    while let [requirement, tail @ ..] = pending {
-        len += COMPONENT_REQUIREMENT_HEADER_SIZE
-            + 1
-            + requirement.name.len()
-            + 1
-            + requirement.protocol.len();
-        pending = tail;
-    }
-    len
+    let mut counter = Writer::counter();
+    write_manifest(&mut counter, requirements, exports, features);
+    counter.len
 }
 
-/// Кодирует запись манифеста целиком. `LEN` равна [`manifest_len`]. Экспорты и требования
-/// записываются в порядке объявления.
+/// Кодирует полную запись манифеста. `LEN` равна [`manifest_len`].
 #[must_use]
 pub const fn encode_manifest<const LEN: usize>(
     requirements: &[RequirementDeclaration],
     exports: &[ExportDeclaration],
+    features: &[&str],
 ) -> [u8; LEN] {
     let mut bytes = [0; LEN];
-    encode_manifest_into(&mut bytes, requirements, exports);
+    encode_manifest_into(&mut bytes, requirements, exports, features);
     bytes
 }
 
-/// Кодирует манифест в буфер длиной [`manifest_len`]. Те же ограничения, что у [`encode_manifest`].
+/// Кодирует манифест в буфер длиной [`manifest_len`].
 pub const fn encode_manifest_into(
     bytes: &mut [u8],
     requirements: &[RequirementDeclaration],
     exports: &[ExportDeclaration],
+    features: &[&str],
 ) {
     assert!(
-        bytes.len() == manifest_len(requirements, exports),
-        "record length covers the header, every export and every requirement"
+        bytes.len() == manifest_len(requirements, exports, features),
+        "buffer has the manifest length"
     );
+    write_manifest(&mut Writer::new(bytes), requirements, exports, features);
+}
 
-    let (header_bytes, mut rest) = bytes.split_at_mut(COMPONENT_MANIFEST_HEADER_SIZE);
+pub(crate) struct Writer<'a> {
+    bytes: Option<&'a mut [u8]>,
+    pub(crate) len: usize,
+}
 
-    let mut export_count: u8 = 0;
+impl<'a> Writer<'a> {
+    pub(crate) const fn counter() -> Self {
+        Self {
+            bytes: None,
+            len: 0,
+        }
+    }
+
+    pub(crate) const fn new(bytes: &'a mut [u8]) -> Self {
+        Self {
+            bytes: Some(bytes),
+            len: 0,
+        }
+    }
+
+    pub(crate) const fn put(&mut self, data: &[u8]) {
+        if let Some(bytes) = self.bytes.take() {
+            // Длину буфера проверяет вызывающий по результату счётчика.
+            let (written, rest) = bytes.split_at_mut(data.len());
+            written.copy_from_slice(data);
+            self.bytes = Some(rest);
+        }
+
+        self.len += data.len();
+    }
+
+    pub(crate) const fn put_len(&mut self, len: usize) {
+        assert!(len <= u8::MAX as usize, "field length fits a byte");
+        #[allow(clippy::cast_possible_truncation)]
+        self.put(&[len as u8]);
+    }
+
+    const fn put_name(&mut self, name: &str) {
+        assert!(!name.is_empty(), "name is non-empty");
+        self.put_len(name.len());
+        self.put(name.as_bytes());
+    }
+}
+
+const fn write_manifest(
+    out: &mut Writer<'_>,
+    requirements: &[RequirementDeclaration],
+    exports: &[ExportDeclaration],
+    features: &[&str],
+) {
+    assert!(
+        requirements.len() <= u16::MAX as usize,
+        "requirement count fits the record"
+    );
+    assert!(
+        exports.len() <= u8::MAX as usize,
+        "export count fits the record"
+    );
+    assert!(
+        features.len() <= u8::MAX as usize,
+        "feature count fits the record"
+    );
+    #[allow(clippy::cast_possible_truncation)]
+    let requirement_count = requirements.len() as u16;
+
+    out.put(&COMPONENT_MANIFEST_MAGIC);
+    out.put(&COMPONENT_MANIFEST_VERSION.to_le_bytes());
+    out.put(&requirement_count.to_le_bytes());
+    out.put_len(exports.len());
+    out.put_len(features.len());
+    out.put(&[0; COMPONENT_MANIFEST_HEADER_SIZE - OFFSET_RESERVED]);
+
     let mut declared = exports;
     while let [export, tail @ ..] = declared {
-        assert!(export_count < u8::MAX, "export count fits the record");
         assert!(
             export.protocol.len() <= PROTOCOL_ID_MAX,
             "export protocol fits PROTOCOL_ID_MAX"
         );
-
-        rest = write_name(rest, export.protocol);
-        rest = write_bytes(rest, &[len_byte(export.filters.len())]);
+        out.put_name(export.protocol);
+        out.put_len(export.filters.len());
 
         let mut filters = export.filters;
         while let [filter, others @ ..] = filters {
             assert!(!filter.is_empty(), "a declared filter holds a pair");
-            let (written, tail) = rest.split_at_mut(attributes_len(filter));
-            encode_attributes_into(written, filter);
-            rest = tail;
+            write_attributes(out, filter);
             filters = others;
         }
-
-        export_count += 1;
         declared = tail;
     }
 
-    let mut requirement_count: u16 = 0;
     let mut pending = requirements;
     while let [declaration, tail @ ..] = pending {
-        assert!(
-            requirement_count < u16::MAX,
-            "requirement count fits the record"
-        );
         assert!(
             declaration.name.len() <= REQUIREMENT_NAME_MAX,
             "requirement name fits REQUIREMENT_NAME_MAX"
@@ -374,49 +454,22 @@ pub const fn encode_manifest_into(
             declaration.protocol.len() <= PROTOCOL_ID_MAX,
             "requirement protocol fits PROTOCOL_ID_MAX"
         );
-        rest = write_bytes(rest, &[declaration.mode as u8]);
-        rest = write_name(rest, declaration.name);
-        rest = write_name(rest, declaration.protocol);
-        requirement_count += 1;
+        out.put(&[declaration.mode as u8]);
+        out.put_name(declaration.name);
+        out.put_name(declaration.protocol);
         pending = tail;
     }
 
-    let mut header = [0; COMPONENT_MANIFEST_HEADER_SIZE];
-    let (magic, _) = header.split_at_mut(COMPONENT_MANIFEST_MAGIC.len());
-    magic.copy_from_slice(&COMPONENT_MANIFEST_MAGIC);
-    let version = COMPONENT_MANIFEST_VERSION.to_le_bytes();
-    header[OFFSET_VERSION] = version[0];
-    header[OFFSET_VERSION + 1] = version[1];
-    let count = requirement_count.to_le_bytes();
-    header[OFFSET_REQUIREMENT_COUNT] = count[0];
-    header[OFFSET_REQUIREMENT_COUNT + 1] = count[1];
-    header[OFFSET_EXPORT_COUNT] = export_count;
-    header_bytes.copy_from_slice(&header);
-}
-
-#[allow(clippy::cast_possible_truncation)]
-pub(crate) const fn len_byte(len: usize) -> u8 {
-    assert!(len <= u8::MAX as usize, "field length fits a byte");
-    len as u8
-}
-
-const fn write_name<'a>(bytes: &'a mut [u8], name: &str) -> &'a mut [u8] {
-    let text = name.as_bytes();
-    assert!(!text.is_empty(), "name is non-empty");
-    let rest = write_bytes(bytes, &[len_byte(text.len())]);
-    write_bytes(rest, text)
-}
-
-pub(crate) const fn write_bytes<'a>(bytes: &'a mut [u8], text: &[u8]) -> &'a mut [u8] {
-    // Длину буфера задают `manifest_len` и `attributes_len`, и остаток покрывает `text`.
-    let (written, rest) = bytes.split_at_mut(text.len());
-    written.copy_from_slice(text);
-    rest
+    let mut required = features;
+    while let [feature, tail @ ..] = required {
+        out.put_name(feature);
+        required = tail;
+    }
 }
 
 /// Разбирает запись манифеста. Буфер разбирается целиком. Хвост сверх записи отвергается.
-/// Требование с именем [`LOG_REQUIREMENT`], повтор имени требования и повтор экспорта
-/// отвергаются.
+/// Требование с именем [`LOG_REQUIREMENT`], повтор имени требования, повтор экспорта и повтор
+/// признака отвергаются.
 pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDecodeError> {
     if bytes.len() < COMPONENT_MANIFEST_HEADER_SIZE {
         return Err(ManifestDecodeError::Truncated {
@@ -450,9 +503,17 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
         exports_end = parse_export(bytes, exports_end)?.1;
     }
 
-    let mut cursor = exports_end;
+    let mut requirements_end = exports_end;
     for _ in 0..requirement_count {
-        cursor = parse_requirement(bytes, cursor)?.end;
+        requirements_end = parse_requirement(bytes, requirements_end)?.end;
+    }
+
+    let feature_count = *bytes
+        .get(OFFSET_FEATURE_COUNT)
+        .ok_or(ManifestDecodeError::InvalidLayout("feature count"))?;
+    let mut cursor = requirements_end;
+    for _ in 0..feature_count {
+        cursor = parse_name(bytes, cursor, "feature")?.1;
     }
     if cursor != bytes.len() {
         return Err(ManifestDecodeError::Truncated {
@@ -463,13 +524,17 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
 
     let manifest = ComponentManifest {
         requirements: bytes
-            .get(exports_end..cursor)
+            .get(exports_end..requirements_end)
             .ok_or(ManifestDecodeError::InvalidLayout("requirements"))?,
         requirement_count,
         exports: bytes
             .get(COMPONENT_MANIFEST_HEADER_SIZE..exports_end)
             .ok_or(ManifestDecodeError::InvalidLayout("exports"))?,
         export_count,
+        features: bytes
+            .get(requirements_end..cursor)
+            .ok_or(ManifestDecodeError::InvalidLayout("features"))?,
+        feature_count,
     };
     // Экспорты отличаются только протоколом.
     for (index, export) in manifest.exports().enumerate() {
@@ -495,6 +560,17 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<ComponentManifest<'_>, ManifestDe
             return Err(ManifestDecodeError::InvalidLayout("requirement name"));
         }
     }
+
+    for (index, feature) in manifest.features().enumerate() {
+        if manifest
+            .features()
+            .take(index)
+            .any(|earlier| earlier == feature)
+        {
+            return Err(ManifestDecodeError::InvalidLayout("feature"));
+        }
+    }
+
     Ok(manifest)
 }
 
@@ -623,7 +699,7 @@ mod tests {
         ExportDeclaration::filtered("Display", &[COMPATIBLE_A, COMPATIBLE_B_ROLE]),
         ExportDeclaration::new("Namespace"),
     ];
-    const FILTERED_LEN: usize = manifest_len(&[], FILTERED_EXPORTS);
+    const FILTERED_LEN: usize = manifest_len(&[], FILTERED_EXPORTS, &[]);
 
     fn protocols<'a>(manifest: &ComponentManifest<'a>) -> Vec<&'a str> {
         manifest.exports().map(|export| export.protocol()).collect()
@@ -631,21 +707,22 @@ mod tests {
 
     const SESSION_REQUIREMENTS: &[RequirementDeclaration] =
         &[RequirementDeclaration::session("files", "FileSystem")];
-    const SESSION_LEN: usize = manifest_len(SESSION_REQUIREMENTS, NO_EXPORTS);
+    const SESSION_LEN: usize = manifest_len(SESSION_REQUIREMENTS, NO_EXPORTS, &[]);
 
     fn session_record() -> [u8; SESSION_LEN] {
-        encode_manifest(SESSION_REQUIREMENTS, NO_EXPORTS)
+        encode_manifest(SESSION_REQUIREMENTS, NO_EXPORTS, &[])
     }
 
     #[test]
-    fn a_record_carries_every_requirement_and_export_in_the_order_of_the_declaration() {
+    fn a_record_carries_every_requirement_export_and_feature_in_the_order_of_the_declaration() {
         const REQUIREMENTS: &[RequirementDeclaration] = &[
             RequirementDeclaration::session("image", "Image"),
             RequirementDeclaration::session("files", "FileSystem"),
             RequirementDeclaration::all("displays", "Display"),
         ];
-        const LEN: usize = manifest_len(REQUIREMENTS, TWO_EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, TWO_EXPORTS);
+        const FEATURES: &[&str] = &["virtio,mmio", "arm,pl031"];
+        const LEN: usize = manifest_len(REQUIREMENTS, TWO_EXPORTS, FEATURES);
+        let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, TWO_EXPORTS, FEATURES);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         assert_eq!(protocols(&manifest), ["Namespace", "FileSystemMount"]);
@@ -667,11 +744,12 @@ mod tests {
                 ("displays", RequirementMode::All, "Display"),
             ]
         );
+        assert!(manifest.features().eq(FEATURES.iter().copied()));
     }
 
     #[test]
     fn filters_of_an_export_decode_in_the_order_of_the_declaration() {
-        let bytes: [u8; FILTERED_LEN] = encode_manifest(&[], FILTERED_EXPORTS);
+        let bytes: [u8; FILTERED_LEN] = encode_manifest(&[], FILTERED_EXPORTS, &[]);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
 
@@ -697,8 +775,8 @@ mod tests {
 
     #[test]
     fn an_export_is_its_protocol_and_its_filter_count() {
-        const LEN: usize = manifest_len(&[], TWO_EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(&[], TWO_EXPORTS);
+        const LEN: usize = manifest_len(&[], TWO_EXPORTS, &[]);
+        let bytes: [u8; LEN] = encode_manifest(&[], TWO_EXPORTS, &[]);
 
         assert_eq!(
             &bytes[COMPONENT_MANIFEST_HEADER_SIZE..],
@@ -708,7 +786,7 @@ mod tests {
 
     #[test]
     fn an_empty_filter_in_a_record_is_refused() {
-        let mut bytes: [u8; FILTERED_LEN] = encode_manifest(&[], FILTERED_EXPORTS);
+        let mut bytes: [u8; FILTERED_LEN] = encode_manifest(&[], FILTERED_EXPORTS, &[]);
         let first_filter = COMPONENT_MANIFEST_HEADER_SIZE + 1 + "Display".len() + 1;
         bytes[first_filter] = 0;
 
@@ -732,8 +810,8 @@ mod tests {
         ];
         const EXPORTS: &[ExportDeclaration] =
             &[ExportDeclaration::filtered("Display", &[REPEATED])];
-        const LEN: usize = manifest_len(&[], EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(&[], EXPORTS);
+        const LEN: usize = manifest_len(&[], EXPORTS, &[]);
+        let bytes: [u8; LEN] = encode_manifest(&[], EXPORTS, &[]);
 
         assert_eq!(
             decode_manifest(&bytes),
@@ -744,14 +822,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "a declared filter holds a pair")]
     fn encoding_an_empty_filter_panics() {
-        const EXPORTS: &[ExportDeclaration] = &[ExportDeclaration::filtered("Display", &[&[]])];
-        const LEN: usize = manifest_len(&[], EXPORTS);
-        let _: [u8; LEN] = encode_manifest(&[], EXPORTS);
+        let _ = manifest_len(&[], &[ExportDeclaration::filtered("Display", &[&[]])], &[]);
     }
 
     #[test]
     fn a_truncated_filter_is_refused() {
-        let bytes: [u8; FILTERED_LEN] = encode_manifest(&[], FILTERED_EXPORTS);
+        let bytes: [u8; FILTERED_LEN] = encode_manifest(&[], FILTERED_EXPORTS, &[]);
 
         for length in COMPONENT_MANIFEST_HEADER_SIZE..bytes.len() {
             assert!(
@@ -773,8 +849,8 @@ mod tests {
 
     #[test]
     fn an_export_count_past_the_listed_names_is_refused() {
-        const LEN: usize = manifest_len(&[], TWO_EXPORTS);
-        let mut bytes: [u8; LEN] = encode_manifest(&[], TWO_EXPORTS);
+        const LEN: usize = manifest_len(&[], TWO_EXPORTS, &[]);
+        let mut bytes: [u8; LEN] = encode_manifest(&[], TWO_EXPORTS, &[]);
         bytes[OFFSET_EXPORT_COUNT] = 9;
 
         assert!(matches!(
@@ -789,8 +865,8 @@ mod tests {
             ExportDeclaration::new("Namespace"),
             ExportDeclaration::filtered("Namespace", &[COMPATIBLE_A]),
         ];
-        const LEN: usize = manifest_len(&[], EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(&[], EXPORTS);
+        const LEN: usize = manifest_len(&[], EXPORTS, &[]);
+        let bytes: [u8; LEN] = encode_manifest(&[], EXPORTS, &[]);
 
         assert_eq!(
             decode_manifest(&bytes),
@@ -799,9 +875,21 @@ mod tests {
     }
 
     #[test]
+    fn a_feature_repeated_in_a_record_is_refused() {
+        const FEATURES: &[&str] = &["arm,pl031", "arm,pl031"];
+        const LEN: usize = manifest_len(&[], NO_EXPORTS, FEATURES);
+        let bytes: [u8; LEN] = encode_manifest(&[], NO_EXPORTS, FEATURES);
+
+        assert_eq!(
+            decode_manifest(&bytes),
+            Err(ManifestDecodeError::InvalidLayout("feature"))
+        );
+    }
+
+    #[test]
     fn an_empty_export_name_is_refused() {
-        const LEN: usize = manifest_len(&[], TWO_EXPORTS);
-        let mut bytes: [u8; LEN] = encode_manifest(&[], TWO_EXPORTS);
+        const LEN: usize = manifest_len(&[], TWO_EXPORTS, &[]);
+        let mut bytes: [u8; LEN] = encode_manifest(&[], TWO_EXPORTS, &[]);
         bytes[COMPONENT_MANIFEST_HEADER_SIZE] = 0;
 
         assert_eq!(
@@ -816,8 +904,8 @@ mod tests {
             RequirementDeclaration::session("files", "FileSystem"),
             RequirementDeclaration::all("files", "FileSystem"),
         ];
-        const LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS);
+        const LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS, &[]);
+        let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS, &[]);
 
         assert_eq!(
             decode_manifest(&bytes),
@@ -829,8 +917,8 @@ mod tests {
     fn a_manifest_declaring_the_log_requirement_is_refused() {
         const REQUIREMENTS: &[RequirementDeclaration] =
             &[RequirementDeclaration::session(LOG_REQUIREMENT, "Log")];
-        const LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS);
+        const LEN: usize = manifest_len(REQUIREMENTS, NO_EXPORTS, &[]);
+        let bytes: [u8; LEN] = encode_manifest(REQUIREMENTS, NO_EXPORTS, &[]);
 
         assert_eq!(
             decode_manifest(&bytes),
@@ -841,9 +929,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "export count fits the record")]
     fn encoding_more_exports_than_a_byte_counts_panics() {
-        const EXPORTS: &[ExportDeclaration] = &[ExportDeclaration::new("A"); 256];
-        const LEN: usize = manifest_len(&[], EXPORTS);
-        let _: [u8; LEN] = encode_manifest(&[], EXPORTS);
+        let _ = manifest_len(&[], &[ExportDeclaration::new("A"); 256], &[]);
     }
 
     #[test]
@@ -871,8 +957,8 @@ mod tests {
 
     #[test]
     fn a_record_without_requirements_decodes() {
-        const LEN: usize = manifest_len(&[], NO_EXPORTS);
-        let bytes: [u8; LEN] = encode_manifest(&[], NO_EXPORTS);
+        const LEN: usize = manifest_len(&[], NO_EXPORTS, &[]);
+        let bytes: [u8; LEN] = encode_manifest(&[], NO_EXPORTS, &[]);
 
         let manifest = decode_manifest(&bytes).expect("record decodes");
         assert_eq!(manifest.requirements().count(), 0);

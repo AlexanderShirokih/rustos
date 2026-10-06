@@ -1,6 +1,6 @@
 use alloc::string::String;
 
-use component_abi::{Attributes, RequirementDeclaration, component_startup as startup_contract};
+use component_abi::{Attributes, RequirementDeclaration};
 use component_startup::session;
 use filesystem_abi::{MountEnded, PATH_MAX, file_system, file_system_mount};
 use ipc::{
@@ -8,7 +8,7 @@ use ipc::{
     wire::{IpcError, Str},
 };
 use kernel_objects::{Port, Session};
-use runtime::{PortTransport, Priority, Timeout, spawn_owned};
+use runtime::{Priority, Timeout, spawn_owned};
 use syscall::{Handle, kind};
 use userland_image::BootPlan;
 
@@ -58,14 +58,14 @@ pub(crate) fn start(
 }
 
 fn mount(importer: &Port, path: &str, kernel: Handle<kind::Port>) -> u32 {
-    let parent =
-        startup_contract::Client::new(PortTransport::new(importer)).with_wait(Timeout::INFINITE);
+    let parent = importer.as_raw();
     loop {
-        let Some(filesystem) = requested::<file_system::Protocol>(&parent, "filesystem", kernel)
+        let Some(filesystem) = requested::<file_system::Protocol>(parent, "filesystem", kernel)
         else {
             return 1;
         };
-        let Some(mount) = requested::<file_system_mount::Protocol>(&parent, "mount", kernel) else {
+
+        let Some(mount) = requested::<file_system_mount::Protocol>(parent, "mount", kernel) else {
             return 1;
         };
         let Some(path) = Str::<PATH_MAX>::new(path) else {
@@ -91,12 +91,12 @@ fn mount(importer: &Port, path: &str, kernel: Handle<kind::Port>) -> u32 {
 }
 
 fn requested<P: ipc::Protocol>(
-    parent: &startup_contract::Client<PortTransport>,
+    parent: Handle<kind::Port>,
     requirement: &str,
     kernel: Handle<kind::Port>,
 ) -> Option<Session<P>> {
-    match session::<P>(parent, requirement, Attributes::empty()) {
-        Ok(Ok(session)) => Some(session),
+    match session::<P>(parent, requirement, Attributes::empty(), Timeout::INFINITE) {
+        Ok(session) => Some(session),
         failure => {
             crate::system::log_line(
                 kernel,

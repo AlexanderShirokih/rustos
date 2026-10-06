@@ -35,16 +35,31 @@ fn run(parent: &Port) -> Result<(), Failed> {
     let _probe = requirements.probe.ok_or(Failed)?;
 
     let client = startup_contract::Client::new(PortTransport::new(parent)).with_wait(CALL_TIMEOUT);
-    let outside = session::<probe::Protocol>(&client, OUTSIDE_REQUIREMENT, Attributes::empty())
-        .map(|answer| answer.map(drop));
+    let outside = session::<probe::Protocol>(
+        parent.as_raw(),
+        OUTSIDE_REQUIREMENT,
+        Attributes::empty(),
+        CALL_TIMEOUT,
+    )
+    .map(drop);
     log_fmt(format_args!("outside {outside:?}"));
-    let protocol = session::<rtc::Protocol>(&client, PROBE_REQUIREMENT, Attributes::empty())
-        .map(|answer| answer.map(drop));
+    let protocol = session::<rtc::Protocol>(
+        parent.as_raw(),
+        PROBE_REQUIREMENT,
+        Attributes::empty(),
+        CALL_TIMEOUT,
+    )
+    .map(drop);
     log_fmt(format_args!("protocol {protocol:?}"));
-    let log_protocol = session::<rtc::Protocol>(&client, LOG_REQUIREMENT, Attributes::empty())
-        .map(|answer| answer.map(drop));
+    let log_protocol = session::<rtc::Protocol>(
+        parent.as_raw(),
+        LOG_REQUIREMENT,
+        Attributes::empty(),
+        CALL_TIMEOUT,
+    )
+    .map(drop);
     log_fmt(format_args!("log {log_protocol:?}"));
-    let export = accept::<rtc::Protocol>(&client).map(|answer| answer.map(drop));
+    let export = accept::<rtc::Protocol>(&client).map(drop);
     log_fmt(format_args!("accept {export:?}"));
     Ok(())
 }

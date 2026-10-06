@@ -33,7 +33,7 @@ use router::{Router, mount_gone, open_mount, open_view, view_gone};
 const LOG_TAG: &str = "router";
 
 const MOUNT_STACK_SIZE: u64 = 0x10000;
-const EXPORT_STACK_SIZE: u64 = 0x4000;
+const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
 
 component_manifest! {
     struct RouterStartup {
@@ -73,12 +73,12 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     )?;
     let _ = spawn_owned(
         move || export::<namespace::Protocol>(&views_parent, views, open_view),
-        EXPORT_STACK_SIZE,
+        EXPORT_THREAD_STACK_SIZE,
         Priority::new(1),
     )?;
     let _ = spawn_owned(
         move || export::<file_system_mount::Protocol>(&mount_parent, mounts, open_mount),
-        EXPORT_STACK_SIZE,
+        EXPORT_THREAD_STACK_SIZE,
         Priority::new(1),
     )?;
     log_line("started");

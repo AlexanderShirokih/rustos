@@ -1,6 +1,9 @@
 //! Контракт `Display` на сервере `display-fixture`.
 
-use component_abi::RequirementDeclaration;
+use alloc::vec::Vec;
+
+use component_abi::{Attribute, RequirementDeclaration};
+use component_startup::{Attributes, Found};
 use display_abi::{Area, DisplayError, display};
 use ipc::Protocol;
 use kernel_objects::{MemoryRegion, SessionTransport};
@@ -11,7 +14,8 @@ use userland_image::ComponentSpec;
 use crate::{
     composition::Importer,
     display_fixture_protocol::DIMENSION,
-    rootkeeper_system::{await_revoked, finish, fixture, scenario},
+    log_relay::await_component_lines,
+    rootkeeper_system::{await_revoked, finish, fixture, indexed, query, registered, scenario},
 };
 
 const SCREEN: &str = "screen";
@@ -25,6 +29,11 @@ const WHOLE_SCREEN: Area = Area {
     height: DIMENSION.height,
 };
 
+const FIXTURE_QUERY: &[Attribute<'static>] = &[Attribute {
+    key: b"kind",
+    value: b"fixture",
+}];
+
 const DISPLAY: ComponentSpec<'static> = ComponentSpec {
     ..fixture("/display-fixture", "display-fixture")
 };
@@ -35,11 +44,29 @@ const SCREEN_REQUIREMENTS: &[crate::composition::Import] = &[crate::composition:
     namespace_root: None,
 }];
 
+const SCREENS: &[crate::composition::Import] = &[crate::composition::Import {
+    declaration: RequirementDeclaration::all(SCREEN, display::Protocol::ID),
+
+    namespace_root: None,
+}];
+
 fn session(importer: &Importer) -> display::Client<SessionTransport> {
+    let bytes = query(FIXTURE_QUERY);
+    component_startup::session::<display::Protocol>(
+        importer.handle(),
+        SCREEN,
+        Attributes::decode(&bytes).expect("query decodes"),
+        DISPLAY_REPLY_TIMEOUT,
+    )
+    .expect("session granted")
+    .client()
+    .with_wait(DISPLAY_REPLY_TIMEOUT)
+}
+
+fn found(importer: &Importer) -> Vec<Found> {
+    let bytes = query(FIXTURE_QUERY);
     importer
-        .session::<display::Protocol>(SCREEN)
-        .client()
-        .with_wait(DISPLAY_REPLY_TIMEOUT)
+        .found_with::<display::Protocol>(SCREEN, Attributes::decode(&bytes).expect("query decodes"))
 }
 
 fn surface(session: &display::Client<SessionTransport>) -> Result<MemoryRegion, DisplayError> {
@@ -157,5 +184,71 @@ fn a_surface_over_the_budget_is_granted_after_the_holder_session_closes() {
     drop(held);
     kernel_tests::kassert!(surface(&second).is_ok());
     drop(second);
+    finish(composition);
+}
+
+#[kernel_test]
+fn a_session_starts_an_image_program_under_its_index_name() {
+    let (composition, _) = indexed(&[]);
+    let importer = composition.importer(SCREENS);
+    let screen = session(&importer);
+
+    let dimension = screen.dimension().expect("dimension call");
+    let lines = await_component_lines(DISPLAY.name, 1);
+
+    kernel_tests::kassert_eq!(dimension, DIMENSION);
+    kernel_tests::kassert_eq!(lines, ["started"]);
+    drop(screen);
+    finish(composition);
+}
+
+#[kernel_test]
+fn an_enumeration_finds_an_image_program_without_starting_it() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(SCREENS);
+
+    let found = found(&importer).len();
+    let record = registered(&composition, &names, DISPLAY);
+
+    kernel_tests::kassert_eq!(found, 1);
+    kernel_tests::kassert!(matches!(record, Ok(1)));
+    finish(composition);
+}
+
+#[kernel_test]
+fn an_open_after_the_session_reaches_the_started_image_program() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(SCREENS);
+    let found = found(&importer);
+    let screen = session(&importer);
+
+    let opened = found.first().map(|found| {
+        component_startup::open::<display::Protocol>(found, DISPLAY_REPLY_TIMEOUT).map(drop)
+    });
+    let record = registered(
+        &composition,
+        &names,
+        ComponentSpec {
+            name: "second-display",
+            ..DISPLAY
+        },
+    );
+
+    kernel_tests::kassert_eq!(opened, Some(Ok(())));
+    kernel_tests::kassert!(matches!(record, Ok(2)));
+    drop(screen);
+    finish(composition);
+}
+
+#[kernel_test]
+fn an_image_program_with_a_plan_record_is_found_once() {
+    let (composition, _) = indexed(&[DISPLAY]);
+    let importer = composition.importer(SCREENS);
+
+    let found = found(&importer).len();
+    let dimension = session(&importer).dimension().expect("dimension call");
+
+    kernel_tests::kassert_eq!(found, 1);
+    kernel_tests::kassert_eq!(dimension, DIMENSION);
     finish(composition);
 }

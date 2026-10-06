@@ -10,7 +10,7 @@ use ipc::wire::IpcError;
 use kernel_objects::{Error, Port, PortTransport};
 use syscall::Rights;
 
-use crate::request::accept;
+use crate::request::{RequestError, accept};
 
 /// Отказ, которым кончается цикл [`serve_export`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,12 +34,12 @@ pub fn serve_export<P: ipc::Protocol>(
 ) -> ExportError {
     loop {
         match accept::<P>(parent) {
-            Ok(Ok(request)) => {
+            Ok(request) => {
                 let session = open();
                 let _ = request.reply.send(session);
             }
-            Ok(Err(error)) => return ExportError::Accept(error),
-            Err(error) => return ExportError::Ipc(error),
+            Err(RequestError::Parent(error)) => return ExportError::Accept(error),
+            Err(RequestError::Ipc(error)) => return ExportError::Ipc(error),
         }
     }
 }

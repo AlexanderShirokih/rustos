@@ -6,7 +6,6 @@ publish.workspace = true
 
 [dependencies]
 ipc = { workspace = true }
-platform-abi = { workspace = true }
 syscall = { workspace = true }
 
 [lints]

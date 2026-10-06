@@ -186,7 +186,7 @@ mod tests {
             })
             .collect();
         let bytes = encode_program(&Program {
-            manifest: &encode_manifest::<16>(&[], &[]),
+            manifest: &encode_manifest::<16>(&[], &[], &[]),
             entry_va,
             stack_size: 0x4000,
             segments: &views,

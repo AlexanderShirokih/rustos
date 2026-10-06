@@ -1,4 +1,3 @@
-use platform_abi::DEVICE_ID_MAX;
 use syscall::kind;
 
 use crate::{
@@ -26,22 +25,5 @@ ipc::protocol! {
         /// Возвращает `NoSurface`, если у сессии нет поверхности, и `OutOfBounds` для `area`,
         /// которую отвергает [`DisplayDimension::check_area`]. При отказе экран не меняется.
         call fn present(area: Area) -> Result<(), DisplayError>;
-    }
-}
-
-ipc::protocol! {
-    /// Открытие сессий [`display`] к экранам драйвера.
-    pub mod display_provider {
-        name = "DisplayProvider";
-
-        /// Открывает сессию [`display`] к экрану `device`. `device` - путь
-        /// [`DeviceId`](platform_abi::DeviceId) устройства в описании платформы.
-        ///
-        /// Если описание не содержит устройства `device` или драйвер его не поддерживает,
-        /// возвращает `Refused`. Если драйверу не хватает ресурсов на сессию, возвращает
-        /// `NoSpace`.
-        call fn open(
-            device: ipc::wire::Str<{ DEVICE_ID_MAX }>,
-        ) -> own Result<ipc::wire::Session<crate::display::Protocol>, DisplayError>;
     }
 }

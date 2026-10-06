@@ -20,7 +20,7 @@ use self::{
     files::collect_files,
     image::assemble_userland_image,
     program::resolve_programs,
-    records::compile_plan_record,
+    records::compile_plan_records,
     source::load_manifest,
     workspace::{load_workspace_metadata, userland_workspace},
 };
@@ -79,7 +79,7 @@ pub fn build_userland(
         })
         .collect();
     if let Some(plan) = &manifest.plan {
-        files.push(compile_plan_record(project_root, plan, &built_programs)?);
+        files.extend(compile_plan_records(project_root, plan, &built_programs)?);
     }
 
     let blob = assemble_userland_image(&built_entries, &files)?;

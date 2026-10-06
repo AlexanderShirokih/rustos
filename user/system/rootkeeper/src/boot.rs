@@ -1,22 +1,20 @@
 use alloc::format;
-use core::num::NonZeroU64;
 
 use bootstrap_abi::bootstrap;
 use component_abi::{PROTOCOL_ID_MAX, decode_manifest};
-use kernel_objects::{MemoryRegion, Session, kind};
-use log_abi::log;
+use kernel_objects::{MemoryRegion, kind};
 use log_relay::{KernelLogSink, LogRelayThread};
 use runtime::{Mutex, PortTransport, Timeout};
 use syscall::{Handle, ProcessName};
-use userland::ProgramView;
+use userland::{DecodedProgram, ProgramView};
 use userland_image::{
-    BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, PlanDecodeError, decode,
-    decode_plan,
+    BOOT_PLAN_PATH, BootPlan, COMPONENT_PROGRAM_NAME, DecodedImage, ExportIndex, PlanDecodeError,
+    decode, decode_plan,
 };
 
 use crate::{
     AddFailure, BudgetFailure, Component, RootSystem, Stopped, SystemImage,
-    relay::{ComponentNames, log_badge},
+    relay::{ComponentNames, LogSources},
     system::log_line,
     turn,
 };
@@ -91,22 +89,28 @@ impl SystemImage {
             .ok_or(BootFailure::PlanMissing)?;
         decode_plan(record.data()).map_err(BootFailure::Plan)
     }
+
+    pub(crate) fn program(&self, executable: &str) -> Option<DecodedProgram<'_>> {
+        let path = format!("{executable}/{COMPONENT_PROGRAM_NAME}");
+        let entry = self.entries().ok()?.entry(&path)?;
+        userland::decode_program(entry.data()).ok()
+    }
 }
 
 impl<'a> RootSystem<'a> {
     /// Добавляет начальные компоненты через API родителя. План нужен только этому адаптеру.
+    /// Программы индекса `index` становятся провайдерами по заявке, журналы записей выдаёт
+    /// `logs`.
     pub fn bring_up(
         image: &'a SystemImage,
         plan: BootPlan<'a>,
+        index: ExportIndex<'a>,
         kernel: Handle<kind::Port>,
-        log_sessions: impl Fn(NonZeroU64) -> Option<Session<log::Protocol>>,
+        logs: LogSources,
     ) -> Result<Self, BootFailure> {
         let boot = plan.component(0).ok_or(BootFailure::PlanMissing)?;
-        let entries = image.entries()?;
-        let path = format!("{}/{COMPONENT_PROGRAM_NAME}", boot.executable());
-        let program = entries
-            .entry(&path)
-            .and_then(|entry| userland::decode_program(entry.data()).ok())
+        let program = image
+            .program(boot.executable())
             .ok_or(BootFailure::ProgramMissing)?;
         let manifest = decode_manifest(program.manifest()).map_err(|_| BootFailure::BadImage)?;
         if manifest.requirements().next().is_some()
@@ -117,28 +121,35 @@ impl<'a> RootSystem<'a> {
             return Err(BootFailure::BadImage);
         }
         let mut system =
-            Self::new(image, kernel, boot.name(), manifest).map_err(BootFailure::Budget)?;
+            Self::new(image, kernel, boot, manifest, index, logs).map_err(BootFailure::Budget)?;
 
-        for (index, component) in plan.components().enumerate().skip(1) {
-            let record = u16::try_from(index).map_err(|_| BootFailure::ProgramMissing)?;
-            let path = format!("{}/{COMPONENT_PROGRAM_NAME}", component.executable());
-            let program = entries
-                .entry(&path)
-                .and_then(|entry| userland::decode_program(entry.data()).ok())
+        for (record, component) in plan.components().enumerate().skip(1) {
+            let record = u16::try_from(record).map_err(|_| BootFailure::ProgramMissing)?;
+            let program = image
+                .program(component.executable())
                 .ok_or(BootFailure::ProgramMissing)?;
-            let log = log_sessions(log_badge(record))
+            let log = system
+                .log_sources
+                .session(record)
                 .ok_or(BootFailure::Budget(BudgetFailure::LogSession))?;
 
             system
                 .add(
                     Component {
                         name: ProcessName::new(component.name()).ok_or(BootFailure::BadImage)?,
+                        executable: component.executable(),
                         program,
                         memory_limit: component.memory_limit(),
                         restarts: component.restarts(),
                     },
                     log,
                 )
+                .inspect_err(|failure| {
+                    log_line(
+                        kernel,
+                        format_args!("{} not added: {failure:?}", component.name()),
+                    );
+                })
                 .map_err(|failure| match failure {
                     AddFailure::Resource(_) => BootFailure::Budget(BudgetFailure::Reserve),
                     AddFailure::Name | AddFailure::Capacity | AddFailure::Declaration => {
@@ -162,13 +173,17 @@ pub fn run(kernel: Handle<kind::Port>) -> Stopped {
         Ok(plan) => plan,
         Err(failure) => return refuse_boot(kernel, failure),
     };
-    let Ok(relay) = LogRelayThread::start(ComponentNames::of(&plan), KernelLogSink::new(kernel))
-    else {
+    let index = match image.entries() {
+        Ok(entries) => ExportIndex::new(entries, BOOT_PLAN_PATH),
+        Err(failure) => return refuse_boot(kernel, failure),
+    };
+    let names = ComponentNames::of(&plan);
+    let Ok(relay) = LogRelayThread::start(names.clone(), KernelLogSink::new(kernel)) else {
         log_line(kernel, format_args!("log relay not started"));
         return Stopped::Startup;
     };
-    let system = match RootSystem::bring_up(&image, plan, kernel, |badge| relay.session(badge).ok())
-    {
+    let logs = LogSources::new(names, relay);
+    let system = match RootSystem::bring_up(&image, plan, index, kernel, logs) {
         Ok(system) => Mutex::new(system),
         Err(failure) => return refuse_boot(kernel, failure),
     };

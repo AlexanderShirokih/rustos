@@ -183,7 +183,7 @@ fn read_and_extract_entry(
 
 fn extract_manifest(file: &object::File<'_>, entry: &str) -> Result<Vec<u8>> {
     let Some(section) = file.section_by_name(COMPONENT_MANIFEST_SECTION) else {
-        return Ok(encode_manifest::<16>(&[], &[]).to_vec());
+        return Ok(encode_manifest::<16>(&[], &[], &[]).to_vec());
     };
     let SectionFlags::Elf { sh_flags } = section.flags() else {
         bail!("userland entry '{entry}' must expose ELF component manifest section flags");
@@ -356,8 +356,8 @@ mod tests {
                 value: b"simple-framebuffer",
             }]],
         )];
-        const LEN: usize = manifest_len(REQUIREMENTS, EXPORTS);
-        let manifest = encode_manifest::<LEN>(REQUIREMENTS, EXPORTS);
+        const LEN: usize = manifest_len(REQUIREMENTS, EXPORTS, &[]);
+        let manifest = encode_manifest::<LEN>(REQUIREMENTS, EXPORTS, &[]);
 
         for declaration in [None, Some(manifest.as_slice())] {
             let mut file = tempfile::NamedTempFile::new().expect("ELF file");
@@ -373,7 +373,7 @@ mod tests {
             let entry = read_and_extract_entry(file.path(), &program, Architecture::Aarch64)
                 .expect("extract ELF");
             let decoded = decode_program(&entry.bytes).expect("program");
-            let expected = encode_manifest::<16>(&[], &[]);
+            let expected = encode_manifest::<16>(&[], &[], &[]);
             assert_eq!(decoded.manifest(), declaration.unwrap_or(&expected));
             assert_eq!(decoded.segments().next().expect("segment").bytes, b"CODE");
             if declaration.is_some() {
@@ -393,7 +393,10 @@ mod tests {
     fn invalid_or_loaded_manifest_section_is_rejected() {
         for (manifest, flags) in [
             (b"invalid".as_slice(), 0),
-            (&encode_manifest::<16>(&[], &[]), u64::from(elf::SHF_ALLOC)),
+            (
+                &encode_manifest::<16>(&[], &[], &[]),
+                u64::from(elf::SHF_ALLOC),
+            ),
         ] {
             let bytes = elf_with_manifest(Some(manifest), flags);
             let file = object::File::parse(bytes.as_slice()).expect("ELF");

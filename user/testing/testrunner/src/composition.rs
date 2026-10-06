@@ -3,16 +3,15 @@
 
 use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use core::{
-    num::NonZeroU64,
     ops::ControlFlow,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use component_abi::{
-    Attributes, RequirementDeclaration, STARTUP_REQUEST_TIMEOUT, SessionError,
+    Attributes, RequirementDeclaration, STARTUP_REQUEST_TIMEOUT,
     component_startup as startup_contract,
 };
-use component_startup::Found;
+use component_startup::{Found, RequestError};
 use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
 use ipc::{
     Protocol,
@@ -20,11 +19,11 @@ use ipc::{
 };
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
-use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SystemImage, turn};
+use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SystemImage, relay::LogSources, turn};
 use runtime::{JoinHandle, Mutex, PortTransport, Priority, Timeout, spawn_owned};
 use spin::Once;
 use syscall::{Handle, SIGNALED, SyscallError, kind};
-use userland_image::{BootPlan, ComponentSpec, decode_plan, encode_plan};
+use userland_image::{BootPlan, ComponentSpec, ExportIndex, decode_plan, encode_plan};
 
 pub(crate) const BOOT_PLAN_ENTRY: &str = "/testrunner/plan";
 
@@ -102,10 +101,12 @@ pub(crate) fn pause(timeout: Timeout) {
 impl Composition {
     pub(crate) fn start(
         plan: BootPlan<'static>,
-        logs: impl Fn(NonZeroU64) -> Option<Session<log::Protocol>>,
+        index: ExportIndex<'static>,
+        logs: LogSources,
     ) -> Self {
         await_budget(&plan);
-        let system = RootSystem::bring_up(image(), plan, crate::bootstrap_handle(), logs)
+
+        let system = RootSystem::bring_up(image(), plan, index, crate::bootstrap_handle(), logs)
             .expect("composition started");
         let system = Arc::new(Mutex::new(system));
         let turned = Arc::clone(&system);
@@ -142,15 +143,6 @@ impl Composition {
             port,
             namespace_roots,
         }
-    }
-
-    pub(crate) fn add(
-        &self,
-        component: rootkeeper::Component<'static>,
-        log: Session<log::Protocol>,
-    ) {
-        self.try_add(component, log)
-            .expect("runtime component added");
     }
 
     pub(crate) fn try_add(
@@ -199,9 +191,8 @@ impl Drop for TurnThread {
 
 impl Importer {
     pub(crate) fn session<P: Protocol>(&self, requirement: &str) -> Session<P> {
-        let session = request::<P>(self.handle(), requirement, IMPORTER_WAIT)
-            .expect("session call")
-            .expect("session granted");
+        let session =
+            request::<P>(self.handle(), requirement, IMPORTER_WAIT).expect("session granted");
         if P::ID == namespace::Protocol::ID
             && let Some(root) = self.namespace_roots.get(requirement)
         {
@@ -227,7 +218,6 @@ impl Importer {
         drained(
             &self
                 .enumeration::<P>(requirement, attributes)
-                .expect("all call")
                 .expect("enumeration granted"),
         )
     }
@@ -236,7 +226,7 @@ impl Importer {
         &self,
         requirement: &str,
         attributes: Attributes<'_>,
-    ) -> Result<Result<Session<startup_contract::Protocol>, SessionError>, IpcError> {
+    ) -> Result<Session<startup_contract::Protocol>, RequestError> {
         let parent = startup_contract::Client::new(PortTransport::new(self.handle()))
             .with_wait(IMPORTER_WAIT);
         component_startup::all::<P>(&parent, requirement, attributes)
@@ -329,16 +319,14 @@ pub(crate) fn request<P: Protocol>(
     importer: Handle<kind::Port>,
     requirement: &str,
     wait: Timeout,
-) -> Result<Result<Session<P>, SessionError>, IpcError> {
-    let parent = startup_contract::Client::new(PortTransport::new(importer)).with_wait(wait);
-    component_startup::session::<P>(&parent, requirement, Attributes::empty())
+) -> Result<Session<P>, RequestError> {
+    component_startup::session::<P>(importer, requirement, Attributes::empty(), wait)
 }
 
 pub(crate) fn drained(enumeration: &Session<startup_contract::Protocol>) -> Vec<Found> {
     let mut found = Vec::new();
-    while let Some(result) = component_startup::next(enumeration, STARTUP_REQUEST_TIMEOUT)
-        .expect("next call")
-        .expect("next answered")
+    while let Some(result) =
+        component_startup::next(enumeration, STARTUP_REQUEST_TIMEOUT).expect("next answered")
     {
         found.push(result);
     }

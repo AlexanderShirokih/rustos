@@ -15,6 +15,7 @@ use ipc::{
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
 use log_abi::log;
 use managed_component::{Children, Departure, GrantError, Status};
+use rootkeeper::relay::LogSessions as _;
 use runtime::{Instant, Mutex, PortTransport, Timeout};
 use syscall::{Handle, ProcessName, Rights};
 use userland::DecodedProgram;
@@ -22,7 +23,7 @@ use userland::DecodedProgram;
 use crate::{
     composition::{TurnThread, pause},
     fixture::{process_bytes, program},
-    log_relay::component_log_session,
+    log_relay::SharedLogSessions,
 };
 
 type Debt = IssuedHandle<kind::Reply>;
@@ -108,7 +109,9 @@ impl Answer {
 impl Child {
     pub(crate) fn new(path: &str, name: &'static str) -> Self {
         let program = program(path);
-        let log = component_log_session(CHILD_LOG_BADGE).map_or(Answer::Refuse, Answer::log);
+        let log = SharedLogSessions
+            .session(CHILD_LOG_BADGE)
+            .map_or(Answer::Refuse, Answer::log);
         Self {
             budget: process_bytes(&program) + CHILD_SLACK,
             program,

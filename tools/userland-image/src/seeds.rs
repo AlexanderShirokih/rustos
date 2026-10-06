@@ -13,12 +13,12 @@ const EXPORTS: &[ExportDeclaration] = &[
         "Display",
         &[
             &[Attribute {
-                key: b"compatible",
+                key: b"kind",
                 value: b"simple-framebuffer",
             }],
             &[
                 Attribute {
-                    key: b"compatible",
+                    key: b"kind",
                     value: b"virtio-gpu",
                 },
                 Attribute {
@@ -29,7 +29,7 @@ const EXPORTS: &[ExportDeclaration] = &[
         ],
     ),
 ];
-const MANIFEST_LEN: usize = manifest_len(&[], EXPORTS);
+const MANIFEST_LEN: usize = manifest_len(&[], EXPORTS, &[]);
 
 /// Затравка корпуса: имя файла и байты валидного образа.
 pub struct ImageSeed {
@@ -114,7 +114,7 @@ fn boot_program() -> Result<Vec<u8>> {
     ];
 
     encode_program(&Program {
-        manifest: &encode_manifest::<MANIFEST_LEN>(&[], EXPORTS),
+        manifest: &encode_manifest::<MANIFEST_LEN>(&[], EXPORTS, &[]),
         entry_va: 0x4000_0000,
         stack_size: 4 * USERLAND_PAGE_SIZE,
         segments: &segments,

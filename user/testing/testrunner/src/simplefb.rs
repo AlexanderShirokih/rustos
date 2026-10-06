@@ -1,28 +1,26 @@
-//! Геометрия и перенос пикселей `driver-simplefb` на обычных буферах, его провайдер
-//! `DisplayProvider` под `platform` и вывод на описанные платформой буферы кадра.
+//! Геометрия и перенос пикселей `driver-simplefb` на обычных буферах и вывод на описанные
+//! платформой буферы кадра через экспорт `Display` на каждый экран.
 
 use alloc::vec::Vec;
 
-use component_abi::{Attribute, RequirementDeclaration, attributes_len, encode_attributes_into};
-use component_startup::Attributes;
-use display_abi::{
-    Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display, display_provider,
-};
+use component_abi::RequirementDeclaration;
+use component_startup::Found;
+use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 use fdt_test::Token;
-use ipc::{Protocol, wire::Str};
+use ipc::Protocol;
 use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
 use kernel_tests::kernel_test;
-use platform_abi::{Description, DeviceId, platform};
+use platform_abi::{Description, DeviceId};
 use runtime::{Timeout, UserMemFlags};
 use userland::USERLAND_PAGE_SIZE;
-use userland_image::ComponentSpec;
 
-use crate::rootkeeper_system::{
-    PL031, PLATFORM, PLATFORM_REQUIREMENT, finish, platform_of, platform_session, scenario,
+use crate::{
+    composition::Importer,
+    rootkeeper_system::{finish, with_drivers},
 };
 
-const PROVIDER_REQUIREMENT: &str = "displays";
+const DISPLAY_REQUIREMENT: &str = "displays";
 
 const SIMPLEFB_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -31,39 +29,22 @@ const UNTOUCHED_SCREEN_BYTE: u8 = 0xAA;
 const OPAQUE_ALPHA: u8 = 0xFF;
 
 const A8R8G8B8_PIXEL_BYTES: usize = 4;
-
 const R8G8B8_PIXEL_BYTES: usize = 3;
 
 const SURFACE_FULL_RED_HALF_BLUE: u32 = 0x00FF_0080;
 
 const SURFACE_CHANNEL_MAX: u64 = 0xFF;
-
 const SURFACE_RED_SHIFT: u32 = 16;
-
 const SURFACE_GREEN_SHIFT: u32 = 8;
 
 const RECTANGLE_COLOR: u32 = 0x00FF_00FF;
 
 const SIMPLEFB_MEMORY: u64 = 16 * 1024 * 1024;
 
-const SIMPLEFB: ComponentSpec<'static> = ComponentSpec {
-    executable: "/driver-simplefb",
-    name: "driver-simplefb",
-    mountpoint: None,
-    memory_limit: SIMPLEFB_MEMORY,
-    restarts: 0,
-};
-
-const PROVIDER_REQUIREMENTS: &[crate::composition::Import] = &[
-    platform_of(PLATFORM_REQUIREMENT),
-    crate::composition::Import {
-        declaration: RequirementDeclaration::all(
-            PROVIDER_REQUIREMENT,
-            display_provider::Protocol::ID,
-        ),
-        namespace_root: None,
-    },
-];
+const DISPLAY_IMPORTS: &[crate::composition::Import] = &[crate::composition::Import {
+    declaration: RequirementDeclaration::all(DISPLAY_REQUIREMENT, display::Protocol::ID),
+    namespace_root: None,
+}];
 
 const TREE: &[Token<'static>] = &fdt_test::tree! {
     phone@1000 {
@@ -179,64 +160,15 @@ fn present(
     )
 }
 
-fn query(pairs: &[Attribute<'_>]) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; attributes_len(pairs)];
-    encode_attributes_into(&mut bytes, pairs);
-    bytes
+fn screens(importer: &Importer) -> Vec<Found> {
+    importer.found::<display::Protocol>(DISPLAY_REQUIREMENT)
 }
 
-fn compatible(value: &'static str) -> Vec<u8> {
-    query(&[Attribute {
-        key: b"compatible",
-        value: value.as_bytes(),
-    }])
-}
-
-fn provider(importer: &crate::composition::Importer) -> display_provider::Client<SessionTransport> {
-    let bytes = compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE);
-    let found = importer.found_with::<display_provider::Protocol>(
-        PROVIDER_REQUIREMENT,
-        Attributes::decode(&bytes).expect("query decodes"),
-    );
-    let found = found.first().expect("provider found");
-    component_startup::open::<display_provider::Protocol>(found, SIMPLEFB_REPLY_TIMEOUT)
-        .expect("open call")
-        .expect("provider session")
+fn opened(screen: &Found) -> display::Client<SessionTransport> {
+    component_startup::open::<display::Protocol>(screen, SIMPLEFB_REPLY_TIMEOUT)
+        .expect("framebuffer opens")
         .client()
         .with_wait(SIMPLEFB_REPLY_TIMEOUT)
-}
-
-fn opened(
-    provider: &display_provider::Client<SessionTransport>,
-    device: &str,
-) -> Result<display::Client<SessionTransport>, DisplayError> {
-    provider
-        .open(Str::new(device).expect("device fits"))
-        .expect("open call")
-        .map(|session| {
-            kernel_objects::Session::from_session(session)
-                .client()
-                .with_wait(SIMPLEFB_REPLY_TIMEOUT)
-        })
-}
-
-fn framebuffers(platform: &platform::Client<SessionTransport>) -> Vec<DeviceId> {
-    let description = platform
-        .description()
-        .expect("description call")
-        .expect("description granted");
-    let region = MemoryRegion::from(description.region);
-    let mapping = region.map_full_read_only().expect("description maps");
-    let tree = Description::new(mapping.as_bytes(), description.offset).expect("tree parses");
-    tree.devices()
-        .filter_map(Result::ok)
-        .filter(|device| {
-            device
-                .compatible()
-                .any(|name| name == SIMPLE_FRAMEBUFFER_COMPATIBLE)
-        })
-        .map(|device| device.id().clone())
-        .collect()
 }
 
 fn fill(
@@ -453,50 +385,13 @@ fn present_of_an_area_past_the_screen_is_out_of_bounds_before_any_copy() {
 }
 
 #[kernel_test]
-fn the_display_provider_is_found_by_the_framebuffer_compatible() {
-    let composition = scenario(&[PLATFORM, SIMPLEFB]);
-    let importer = composition.importer(PROVIDER_REQUIREMENTS);
-    let framebuffer = compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE);
-    let serial = compatible("arm,pl011");
-
-    let matching = importer.found_with::<display_provider::Protocol>(
-        PROVIDER_REQUIREMENT,
-        Attributes::decode(&framebuffer).expect("query decodes"),
-    );
-    let other = importer.found_with::<display_provider::Protocol>(
-        PROVIDER_REQUIREMENT,
-        Attributes::decode(&serial).expect("query decodes"),
-    );
-
-    kernel_tests::kassert_eq!(matching.len(), 1);
-    kernel_tests::kassert!(other.is_empty());
-    finish(composition);
-}
-
-#[kernel_test]
-fn opening_a_device_other_than_a_framebuffer_is_refused() {
-    let composition = scenario(&[PLATFORM, SIMPLEFB]);
-    let importer = composition.importer(PROVIDER_REQUIREMENTS);
-    let provider = provider(&importer);
-
-    kernel_tests::kassert_eq!(
-        opened(&provider, PL031).map(drop),
-        Err(DisplayError::Refused)
-    );
-    drop(provider);
-    finish(composition);
-}
-
-#[kernel_test]
 fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
-    let composition = scenario(&[PLATFORM, SIMPLEFB]);
-    let importer = composition.importer(PROVIDER_REQUIREMENTS);
-    let platform = platform_session(&importer, PLATFORM_REQUIREMENT);
-    let provider = provider(&importer);
-    let devices = framebuffers(&platform);
+    let composition = with_drivers();
+    let importer = composition.importer(DISPLAY_IMPORTS);
+    let framebuffers = screens(&importer);
 
-    for device in &devices {
-        let screen = opened(&provider, device.as_str()).expect("framebuffer opens");
+    for found in &framebuffers {
+        let screen = opened(found);
         let dimension = screen.dimension().expect("dimension call");
         let region = MemoryRegion::from(
             screen
@@ -524,29 +419,26 @@ fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
 
         kernel_tests::kassert_eq!(gradient, Ok(()));
         kernel_tests::kassert_eq!(shown, Ok(()));
-        kernel_tests::kreport!("{} shows the gradient and the rectangle", device.as_str());
+        kernel_tests::kreport!("the framebuffer shows the gradient and the rectangle");
     }
-    drop((provider, platform));
     finish(composition);
 
-    if devices.is_empty() {
+    if framebuffers.is_empty() {
         kernel_tests::kskip!("no simple-framebuffer described");
     }
 }
 
 #[kernel_test]
 fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions() {
-    let composition = scenario(&[PLATFORM, SIMPLEFB]);
-    let importer = composition.importer(PROVIDER_REQUIREMENTS);
-    let platform = platform_session(&importer, PLATFORM_REQUIREMENT);
-    let provider = provider(&importer);
-    let devices = framebuffers(&platform);
+    let composition = with_drivers();
+    let importer = composition.importer(DISPLAY_IMPORTS);
+    let framebuffers = screens(&importer);
 
-    for device in &devices {
+    for found in &framebuffers {
         let mut screens = Vec::new();
         // Каждая поверхность занимает не меньше страницы бюджета драйвера.
         let refusal = (0..=SIMPLEFB_MEMORY / USERLAND_PAGE_SIZE).find_map(|_| {
-            let screen = opened(&provider, device.as_str()).expect("framebuffer opens");
+            let screen = opened(found);
             let before = screen.present(whole(screen.dimension().expect("dimension call")));
             kernel_tests::kassert_eq!(before, Ok(Err(DisplayError::NoSurface)));
             match screen.acquire_surface().expect("acquire_surface call") {
@@ -559,7 +451,7 @@ fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions(
         });
         let held = screens.len();
         drop(screens);
-        let reopened = opened(&provider, device.as_str()).expect("framebuffer reopens");
+        let reopened = opened(found);
         let regained = reopened
             .acquire_surface()
             .expect("acquire_surface call")
@@ -568,12 +460,11 @@ fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions(
         kernel_tests::kassert_eq!(refusal, Some(DisplayError::NoSpace));
         kernel_tests::kassert!(held >= 1);
         kernel_tests::kassert_eq!(regained, Ok(()));
-        kernel_tests::kreport!("{} held {} surfaces", device.as_str(), held);
+        kernel_tests::kreport!("the framebuffer held {} surfaces", held);
     }
-    drop((provider, platform));
     finish(composition);
 
-    if devices.is_empty() {
+    if framebuffers.is_empty() {
         kernel_tests::kskip!("no simple-framebuffer described");
     }
 }

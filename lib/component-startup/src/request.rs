@@ -6,6 +6,7 @@ use ipc::{
     wire::{Bytes, IpcError, Str},
 };
 use kernel_objects::{IssuedHandle, Port, PortTransport, Session, kind};
+use syscall::Handle;
 
 /// Заявка импортёра на сессию экспорта. Разрушение
 /// заявки без ответа даёт импортёру `IpcError::PeerClosed`.
@@ -15,18 +16,41 @@ pub type SessionRequest =
 /// Результат поиска. Его сессия родителя принимает `open`.
 pub type Found = component_abi::Found<Session<component_startup::Protocol>>;
 
-/// Запрашивает сессию единственного экспорта протокола `P`, совпавшего с `attributes`, по
-/// требованию `requirement`. Внешний `Err` - отказ запроса, внутренний - отказ родителя. Имя
-/// длиннее [`REQUIREMENT_NAME_MAX`](component_abi::REQUIREMENT_NAME_MAX) даёт
-/// `IpcError::InvalidValue`.
+/// Отказ запроса по стартовой сессии.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestError<E = SessionError> {
+    /// Отказ родителя.
+    Parent(E),
+    /// Отказ транспорта либо истечение срока ответа.
+    Ipc(IpcError),
+}
+
+impl<E> From<IpcError> for RequestError<E> {
+    fn from(error: IpcError) -> Self {
+        Self::Ipc(error)
+    }
+}
+
+/// Запрашивает по стартовой сессии `parent` сессию единственного экспорта протокола `P`,
+/// совпавшего с `attributes`, по требованию `requirement`, ожидая ответ не дольше `wait`. Срок
+/// покрывает ожидание публикации признака, `accept` провайдера и его ответ.
+///
+/// Отказы:
+/// - `Ipc(IpcError::InvalidValue)` - имя длиннее
+///   [`REQUIREMENT_NAME_MAX`](component_abi::REQUIREMENT_NAME_MAX);
+/// - `Ipc(IpcError::Timeout)` - срок истёк, заявка остаётся у родителя до повтора требования;
+/// - `Parent` - отказ родителя.
 pub fn session<P: ipc::Protocol>(
-    parent: &component_startup::Client<PortTransport>,
+    parent: Handle<kind::Port>,
     requirement: &str,
     attributes: Attributes<'_>,
-) -> Result<Result<Session<P>, SessionError>, IpcError> {
-    Ok(parent
+    wait: Timeout,
+) -> Result<Session<P>, RequestError> {
+    component_startup::Client::new(PortTransport::new(parent))
+        .with_wait(wait)
         .session(query::<P>(requirement)?, wire(attributes)?)?
-        .map(|port| Session::from_handle(Port::from(port))))
+        .map(|port| Session::from_handle(Port::from(port)))
+        .map_err(RequestError::Parent)
 }
 
 /// Запрашивает перечисление экспортов протокола `P`, совпавших с `attributes`, по требованию
@@ -35,10 +59,11 @@ pub fn all<P: ipc::Protocol>(
     parent: &component_startup::Client<PortTransport>,
     requirement: &str,
     attributes: Attributes<'_>,
-) -> Result<Result<Session<component_startup::Protocol>, SessionError>, IpcError> {
-    Ok(parent
+) -> Result<Session<component_startup::Protocol>, RequestError> {
+    parent
         .all(query::<P>(requirement)?, wire(attributes)?)?
-        .map(|port| Session::from_handle(Port::from(port))))
+        .map(|port| Session::from_handle(Port::from(port)))
+        .map_err(RequestError::Parent)
 }
 
 /// Забирает следующий результат перечисления `enumeration`, ожидая ответ не дольше `wait`.
@@ -46,43 +71,40 @@ pub fn all<P: ipc::Protocol>(
 pub fn next(
     enumeration: &Session<component_startup::Protocol>,
     wait: Timeout,
-) -> Result<Result<Option<Found>, SessionError>, IpcError> {
+) -> Result<Option<Found>, RequestError> {
     let enumeration =
         component_startup::Client::new(PortTransport::new(enumeration.handle())).with_wait(wait);
 
-    Ok(enumeration.next()?.map(|found| {
-        found.map(|found| component_abi::Found {
-            session: Session::from_handle(Port::from(found.session)),
-            protocol: found.protocol,
-            filter: found.filter,
-        })
+    let found = enumeration.next()?.map_err(RequestError::Parent)?;
+    Ok(found.map(|found| component_abi::Found {
+        session: Session::from_handle(Port::from(found.session)),
+        protocol: found.protocol,
+        filter: found.filter,
     }))
 }
 
 /// Открывает сессию экспорта протокола `P` по результату поиска `found`, ожидая ответ не дольше
-/// `wait`. Результат другого протокола получает `SessionError::Refused` без обращения к родителю.
-pub fn open<P: ipc::Protocol>(
-    found: &Found,
-    wait: Timeout,
-) -> Result<Result<Session<P>, SessionError>, IpcError> {
+/// `wait`. Результат другого протокола получает `Parent(SessionError::Refused)` без обращения к
+/// родителю.
+pub fn open<P: ipc::Protocol>(found: &Found, wait: Timeout) -> Result<Session<P>, RequestError> {
     if found.protocol.as_str() != P::ID {
-        return Ok(Err(SessionError::Refused));
+        return Err(RequestError::Parent(SessionError::Refused));
     }
 
-    Ok(
-        component_startup::Client::new(PortTransport::new(found.session.handle()))
-            .with_wait(wait)
-            .open()?
-            .map(|port| Session::from_handle(Port::from(port))),
-    )
+    component_startup::Client::new(PortTransport::new(found.session.handle()))
+        .with_wait(wait)
+        .open()?
+        .map(|port| Session::from_handle(Port::from(port)))
+        .map_err(RequestError::Parent)
 }
 
-/// Забирает у родителя следующую заявку импортёра на экспорт протокола `P`. Внешний `Err` -
-/// отказ запроса, внутренний - отказ родителя.
+/// Забирает у родителя следующую заявку импортёра на экспорт протокола `P`.
 pub fn accept<P: ipc::Protocol>(
     parent: &component_startup::Client<PortTransport>,
-) -> Result<Result<SessionRequest, AcceptError>, IpcError> {
-    parent.accept(Str::new(P::ID).ok_or(IpcError::InvalidValue)?)
+) -> Result<SessionRequest, RequestError<AcceptError>> {
+    parent
+        .accept(Str::new(P::ID).ok_or(IpcError::InvalidValue)?)?
+        .map_err(RequestError::Parent)
 }
 
 fn query<P: ipc::Protocol>(requirement: &str) -> Result<SessionRequirement<'_>, IpcError> {

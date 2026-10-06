@@ -16,15 +16,17 @@ use kernel_objects::{
     Delivery, MemoryRegion, OwnedHandle, Port, Resource, Session, SessionTransport, Signal,
 };
 use kernel_tests::kernel_test;
+use rootkeeper::relay::{ComponentNames, LogSources};
 use runtime::{PortTransport, Priority, Timeout, UserMemFlags, port_send, spawn_owned};
 use spin::Once;
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
+use userland_image::ExportIndex;
 
 use crate::{
     composition::{BOOT_PLAN_ENTRY, Composition, Importer, Mounted, admin, image, pause, view},
     fixture::{JOIN_TIMEOUT, spawn_entry},
-    log_relay::component_log_session,
+    log_relay::SharedLogSessions,
 };
 
 const FILE_SYSTEM_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -114,7 +116,11 @@ fn start_namespace() -> Namespace {
     let plan = image()
         .plan(BOOT_PLAN_ENTRY)
         .expect("compiled boot plan decodes");
-    let composition = Composition::start(plan, component_log_session);
+    let composition = Composition::start(
+        plan,
+        ExportIndex::EMPTY,
+        LogSources::new(ComponentNames::of(&plan), SharedLogSessions),
+    );
     let importer = composition.importer(NAMESPACE_REQUIREMENTS);
     for (requirement, text) in [(ROOT_VIEW, IMAGE_MOUNT), (RAM_VIEW, Path::ROOT.as_str())] {
         drop(resolved(&importer, requirement, text));

@@ -1,4 +1,5 @@
 mod executable;
+mod index;
 mod limits;
 mod names;
 mod source;
@@ -14,6 +15,7 @@ use ipc::Protocol as _;
 use userland::{ProgramView, decode_program};
 use userland_image::{ComponentSpec, component_name, encode_plan};
 
+pub(crate) use self::index::export_index;
 use self::{
     executable::{boot_program, resolve_executables},
     limits::{validate_composition, validate_rootkeeper_limits},

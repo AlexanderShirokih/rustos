@@ -117,6 +117,18 @@ test = false
 bench = false
 
 [[bin]]
+name = "featured-export-fixture"
+path = "src/featured_export_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "feature-publisher-fixture"
+path = "src/feature_publisher_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "helper-panic-fixture"
 path = "src/helper_panic_fixture.rs"
 test = false

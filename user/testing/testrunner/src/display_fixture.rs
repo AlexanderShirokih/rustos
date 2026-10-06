@@ -31,13 +31,13 @@ const LOG_TAG: &str = "display";
 
 const FAILED_EXIT_CODE: u64 = 1;
 
-const EXPORT_STACK_SIZE: u64 = 0x4000;
+const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
 
 const ROW_MAX_BYTES: usize = DIMENSION.width as usize * SURFACE_PIXEL_BYTES as usize;
 
 component_manifest! {
     struct DisplayStartup {
-        exports: [display::Protocol],
+        exports: [display::Protocol => [{ kind = "fixture" }]],
     }
 }
 
@@ -176,7 +176,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
             log_fmt(format_args!("export stopped: {failure:?}"));
             process_exit(FAILED_EXIT_CODE)
         },
-        EXPORT_STACK_SIZE,
+        EXPORT_THREAD_STACK_SIZE,
         Priority::new(1),
     );
     if export_thread.is_err() {
