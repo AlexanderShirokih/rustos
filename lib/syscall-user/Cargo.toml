@@ -2,6 +2,7 @@
 # может только на крейты, способные попасть в граф `std`, - сейчас это `lib/syscall` и
 # `lib/ipc`.
 [package]
+license.workspace = true
 name = "syscall-user"
 version.workspace = true
 edition.workspace = true

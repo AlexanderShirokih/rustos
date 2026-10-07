@@ -2,49 +2,43 @@
 
 ## Rust toolchain
 
-Toolchain зафиксирован в `rust-toolchain.toml` до конкретной даты nightly; `rustup` подхватывает его автоматически при запуске `cargo`.
+Toolchain, компоненты и bare-таргет зафиксированы в
+[rust-toolchain.toml](../rust-toolchain.toml).
+`rustup` выбирает их при запуске Cargo из репозитория.
 
-Компоненты: `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt`,
-`rust-analyzer`. Через `rustup` ставится только `aarch64-unknown-none`, под
-которым идёт ядро. Таргет программ userspace задан спекой в `targets/`, и `core`
-со `std` собираются для него из исходников компонента `rust-src`
+Системный таргет RustOS задан в `targets/`.
+`core` и `std` для него собираются из исходников `rust-src`
 ([workspace.md](workspace.md#таргеты-сборки)).
 
 ## Host-зависимости
 
-| Инструмент            | Когда нужен                                      |
-|-----------------------|--------------------------------------------------|
-| `cargo-binutils`      | `cargo objcopy` внутри `xtask build`             |
-| `qemu-system-arm`     | запуск QEMU и `xtask qemu-test`                  |
-| `gcc` / `libc6-dev`   | линкер для host-сборок и build-скриптов          |
-| `mkbootimg`           | сборка `android_boot_v1` / `android_boot_v2`     |
-| `similarity-rs`       | `xtask similarity` в составе `xtask check`       |
+| Инструмент | Назначение |
+|------------|------------|
+| `cargo-binutils` | Извлечение бинарного образа через `cargo objcopy` |
+| `qemu-system-aarch64` | Запуск и тесты QEMU |
+| C/C++ toolchain | Линковка host-программ, сборка зависимостей и fuzz-целей |
+| `mkbootimg` | Сборка Android boot image |
+| `similarity-rs` | Проверка дублирования |
+| `cargo-fuzz` | Сборка и запуск fuzz-целей |
 
-Минимальная установка для QEMU-разработки:
+Для QEMU-разработки на Debian:
 
 ```bash
-rustup component add llvm-tools-preview
 cargo install cargo-binutils
-sudo apt-get install -y gcc libc6-dev qemu-system-arm
+sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm
 ```
 
-Для Android boot image дополнительно нужен `mkbootimg` из Android platform-tools.
+`mkbootimg` должен быть доступен в `PATH` при сборке Android-образа.
+Нужную версию `similarity-rs` задаёт
+[similarity.toml](../similarity.toml); команда
+`cargo xtask similarity` печатает строку установки при отсутствии анализатора.
 
-Для проверки на дублирование кода можно установить `similarity-rs`. Нужную
-версию держит `similarity.toml`, а готовую строку установки печатает сама
-команда:
-
-```bash
-cargo xtask similarity
-```
-
-CI использует Docker-образ, описанный в `Dockerfile`.
+Окружение CI описано в [Dockerfile](../Dockerfile).
 
 ## rust-analyzer
 
-Дерево разбито на workspace по профилям сборки
-([workspace.md](workspace.md#профили-сборки)), а rust-analyzer открывает один.
-Остальные подключаются настройкой `linkedProjects`:
+Для навигации по всему репозиторию rust-analyzer подключает workspace
+профилей сборки через `linkedProjects`:
 
 ```json
 {
@@ -58,3 +52,6 @@ CI использует Docker-образ, описанный в `Dockerfile`.
   ]
 }
 ```
+
+Манифесты и назначение профилей перечислены в
+[workspace.md](workspace.md#профили-сборки).

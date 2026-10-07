@@ -1,0 +1,18 @@
+Лицензирование RustOS Mobile
+
+Copyright (c) 2025-2026 Alexandr Shirokikh
+
+Исходный код проекта лицензируется по компонентам:
+
+- kernel/: GNU General Public License, только версия 3 (GPL-3.0-only).
+- user/system/: GNU General Public License, только версия 3 (GPL-3.0-only).
+- user/testing/testrunner/: GNU General Public License, только версия 3
+  (GPL-3.0-only).
+- Остальные исходные файлы проекта: MIT License.
+
+Полные тексты находятся в LICENSES/GPL-3.0-only.txt и LICENSES/MIT.txt.
+Cargo-манифесты объявляют лицензию каждого пакета.
+
+Каждая лицензия применяется к указанным компонентам.
+
+Сторонний код и зависимости сохраняют собственные лицензии и уведомления.

@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "component-abi"
 version.workspace = true
 edition.workspace = true

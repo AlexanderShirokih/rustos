@@ -57,6 +57,7 @@ bare = "aarch64-unknown-none"
 system = "targets/aarch64-unknown-molecular.json"
 
 [workspace.package]
+license = "MIT"
 version = "0.1.0"
 edition = "2024"
 publish = false

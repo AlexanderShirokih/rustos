@@ -564,11 +564,15 @@ fn held_request(found: Found, wait: Timeout) -> JoinHandle {
     .expect("request thread starts")
 }
 
-fn answered(request: &JoinHandle) -> u32 {
+fn answered(request: JoinHandle) -> u32 {
     request
         .wait(HELD_REQUEST_TIMEOUT)
         .expect("request thread ends");
-    request.exit_code().expect("request thread exit code")
+    let code = request.exit_code().expect("request thread exit code");
+    request
+        .join(Timeout::POLL)
+        .expect("request thread is joined");
+    code
 }
 
 fn budget_scenario() -> (Composition, Importer) {
@@ -837,7 +841,7 @@ fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
     pause(REQUEST_DELIVERY_PAUSE);
 
     composition.terminate(IDLE_EXPORT.name, TERMINATE_EXIT_CODE);
-    let held_answer = answered(&held);
+    let held_answer = answered(held);
     let again =
         component_startup::open::<probe::Protocol>(&again, COMPONENT_REPLY_TIMEOUT).map(drop);
     let pinged = ping(&importer, PROBE);
@@ -921,7 +925,7 @@ fn a_child_exit_is_handled_while_an_importer_waits_for_an_accept() {
 
     composition.terminate(leaving.name, TERMINATE_EXIT_CODE);
     let restarted = await_component_lines(leaving.name, 2);
-    let held_answer = answered(&held);
+    let held_answer = answered(held);
 
     kernel_tests::kassert_eq!(idle_started, ["started"]);
     kernel_tests::kassert_eq!(leaving_started, ["started"]);
@@ -1081,7 +1085,7 @@ fn a_session_waits_for_a_feature_and_opens_after_its_publication() {
 
     let waiting = request.wait(REQUEST_DELIVERY_PAUSE).is_err();
     registered(&composition, &names, PUBLISHER).expect("publisher added");
-    let answer = answered(&request);
+    let answer = answered(request);
     let published = await_component_lines(PUBLISHER.name, 1);
 
     kernel_tests::kassert!(waiting);

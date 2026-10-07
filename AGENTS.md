@@ -11,22 +11,22 @@
 
 ## Документация
 
-| Документ                                       | Описание                                                  |
-|------------------------------------------------|-----------------------------------------------------------|
-| [`docs/commands.md`](docs/commands.md)         | Команды сборки, запуска и проверок                        |
-| [`docs/environment.md`](docs/environment.md)   | Настройка окружения и зависимости                         |
-| [`docs/workspace.md`](docs/workspace.md)       | Устройство репозитория: домены, слои, таргеты, имена      |
-| [`docs/architecture.md`](docs/architecture.md) | Архитектура ядра: изоляция, полномочия, память, загрузка  |
-| [`docs/code-style.md`](docs/code-style.md)     | Корень крейта, константы, язык вывода, `unsafe`, ошибки   |
-| [`docs/testing.md`](docs/testing.md)           | Тесты: размещение, уровни, прогоны под QEMU               |
-| [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                     |
-| [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала        |
-| [`docs/port.md`](docs/port.md)                 | Семантика `Port`: рандеву, значки, живость сторон         |
-| [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap            |
-| [`docs/concurrency.md`](docs/concurrency.md)   | Синхронизация потоков процесса: futex, `Mutex`, `Condvar` |
-| [`docs/rootkeeper.md`](docs/rootkeeper.md)     | Rootkeeper: план загрузки, запуск и перезапуск записей    |
-| [`docs/smp.md`](docs/smp.md)                   | Многопроцессорность: подъём ядер, per-CPU состояние, локи |
-| [`docs/filesystem.md`](docs/filesystem.md)     | Файловая подсистема: маршрутизатор имён, серверы, сессии  |
+| Документ                                       | Описание                                                   |
+| ---------------------------------------------- | ---------------------------------------------------------- |
+| [`docs/commands.md`](docs/commands.md)         | Команды сборки, запуска и проверок                         |
+| [`docs/environment.md`](docs/environment.md)   | Настройка окружения и зависимости                          |
+| [`docs/workspace.md`](docs/workspace.md)       | Устройство репозитория: домены, слои, таргеты, имена       |
+| [`docs/architecture.md`](docs/architecture.md) | Архитектура ядра: изоляция, полномочия, память, загрузка   |
+| [`docs/code-style.md`](docs/code-style.md)     | Корень крейта, константы, язык вывода, `unsafe`, ошибки    |
+| [`docs/testing.md`](docs/testing.md)           | Тесты: размещение, уровни, прогоны под QEMU                |
+| [`docs/syscalls.md`](docs/syscalls.md)         | ABI и полный реестр системных вызовов                      |
+| [`docs/ipc.md`](docs/ipc.md)                   | Формат типизированных IPC-контрактов поверх канала         |
+| [`docs/port.md`](docs/port.md)                 | Семантика `Port`: рандеву, значки, живость сторон          |
+| [`docs/userland.md`](docs/userland.md)         | Устройство userland: образ, рантайм, bootstrap             |
+| [`docs/concurrency.md`](docs/concurrency.md)   | Синхронизация потоков процесса: futex, `Mutex`, `Condvar`  |
+| [`docs/rootkeeper.md`](docs/rootkeeper.md)     | Rootkeeper: план загрузки, связи и перезапуски компонентов |
+| [`docs/smp.md`](docs/smp.md)                   | Многопроцессорность: подъём ядер, per-CPU состояние, локи  |
+| [`docs/filesystem.md`](docs/filesystem.md)     | Файловая подсистема: маршрутизатор имён, серверы, сессии   |
 
 ## Навигация по коду
 

@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "userland-loader"
 version.workspace = true
 edition.workspace = true

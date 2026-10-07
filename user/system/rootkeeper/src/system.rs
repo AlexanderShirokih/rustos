@@ -32,6 +32,7 @@ use userland_image::{ExportIndex, IndexedExport, PlanComponent};
 
 use crate::{
     component::{Component, ImporterRequirement, Origin, Record},
+    mount::MountThreads,
     relay::LogSources,
 };
 
@@ -181,6 +182,7 @@ pub struct RootSystem<'a> {
     features: Vec<Feature>,
     waiting: Vec<Waiting>,
     resource: Resource,
+    pub(crate) mounts: MountThreads,
 }
 
 impl From<Stopped> for u64 {
@@ -229,6 +231,7 @@ impl<'a> RootSystem<'a> {
             features: Vec::new(),
             waiting: Vec::new(),
             resource,
+            mounts: MountThreads::default(),
         })
     }
 

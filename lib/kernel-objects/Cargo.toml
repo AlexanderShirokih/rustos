@@ -1,6 +1,7 @@
 # Крейт держит межархитектурный API объектов ядра: типизированные capability и владение ими
 # выражаются одинаково на любой архитектуре.
 [package]
+license.workspace = true
 name = "kernel-objects"
 version.workspace = true
 edition.workspace = true

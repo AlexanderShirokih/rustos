@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "std-selftest"
 version.workspace = true
 edition.workspace = true

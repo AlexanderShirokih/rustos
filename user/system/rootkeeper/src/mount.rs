@@ -1,4 +1,4 @@
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 
 use component_abi::{Attributes, RequirementDeclaration};
 use component_startup::session;
@@ -8,13 +8,28 @@ use ipc::{
     wire::{IpcError, Str},
 };
 use kernel_objects::{Port, Session};
-use runtime::{Priority, Timeout, spawn_owned};
+use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
 use syscall::{Handle, kind};
 use userland_image::BootPlan;
 
 use crate::{BootFailure, RootSystem};
 
 const MOUNT_STACK_SIZE: u64 = 0x8000;
+
+const MOUNT_JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
+
+#[derive(Default)]
+pub(crate) struct MountThreads(Vec<JoinHandle>);
+
+impl Drop for MountThreads {
+    fn drop(&mut self) {
+        // Поток монтирования завершается, когда закрыты порты остальных полей системы, и
+        // `RootSystem` объявляет это поле последним. Без `join` стек потока остаётся выданным.
+        for thread in self.0.drain(..) {
+            let _ = thread.join(MOUNT_JOIN_TIMEOUT);
+        }
+    }
+}
 
 pub(crate) fn start(
     system: &mut RootSystem<'_>,
@@ -47,12 +62,13 @@ pub(crate) fn start(
             )
             .map_err(|_| BootFailure::BadImage)?;
         let path = String::from(path.as_str());
-        spawn_owned(
+        let thread = spawn_owned(
             move || mount(&importer, &path, kernel),
             MOUNT_STACK_SIZE,
             Priority::new(1),
         )
         .map_err(|_| BootFailure::Budget(crate::BudgetFailure::StartupPort))?;
+        system.mounts.0.push(thread);
     }
     Ok(())
 }

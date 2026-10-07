@@ -8,7 +8,6 @@ cargo xtask build devices/spec/qemu-aarch64.yaml --run
 
 Подробности — в документации:
 
-- [docs/environment.md](docs/environment.md) — toolchain и host-зависимости,
-  device specs;
+- [docs/environment.md](docs/environment.md) — toolchain и зависимости хоста;
 - [docs/commands.md](docs/commands.md) — команды сборки, запуска и тестов,
   артефакты под разные `boot.format`.
