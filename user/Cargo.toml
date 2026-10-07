@@ -9,6 +9,7 @@ members = [
     "examples/hello-std",
     "system/driver-pl031",
     "system/driver-simplefb",
+    "system/driver-virtio-gpu",
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
     "system/namespace-router",

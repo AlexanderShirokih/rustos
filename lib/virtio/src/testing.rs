@@ -20,7 +20,15 @@ pub(crate) enum Event {
 #[derive(Clone, Default)]
 pub(crate) struct Log(Rc<RefCell<Vec<Event>>>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegisterFailure {
+    Read(usize),
+    Write(usize),
+}
+
 pub(crate) struct FakeRegisters {
+    read_refused: Option<usize>,
+    write_refused: Option<usize>,
     values: HashMap<usize, u32>,
     features: u64,
     accepts_features: bool,
@@ -76,6 +84,8 @@ impl FakeRegisters {
             (register::QUEUE_SIZE_MAX, 256),
         ]);
         Self {
+            read_refused: None,
+            write_refused: None,
             values,
             features: 1 << 32,
             accepts_features: true,
@@ -99,14 +109,29 @@ impl FakeRegisters {
         self
     }
 
+    pub(crate) fn refusing_read(mut self, offset: usize) -> Self {
+        self.read_refused = Some(offset);
+        self
+    }
+
+    pub(crate) fn refusing_write(mut self, offset: usize) -> Self {
+        self.write_refused = Some(offset);
+        self
+    }
+
     pub(crate) fn set(&mut self, offset: usize, value: u32) {
         self.values.insert(offset, value);
     }
 }
 
 impl Registers for FakeRegisters {
-    fn read(&self, offset: usize) -> u32 {
+    type Error = RegisterFailure;
+
+    fn read(&self, offset: usize) -> Result<u32, RegisterFailure> {
         self.log.push(Event::Read(offset));
+        if self.read_refused == Some(offset) {
+            return Err(RegisterFailure::Read(offset));
+        }
         if offset == register::DEVICE_FEATURES {
             let select = self
                 .values
@@ -114,19 +139,23 @@ impl Registers for FakeRegisters {
                 .copied()
                 .unwrap_or(0);
             let half = (self.features >> (32 * select)) & u64::from(u32::MAX);
-            return u32::try_from(half).unwrap();
+            return u32::try_from(half).map_err(|_| RegisterFailure::Read(offset));
         }
-        self.values.get(&offset).copied().unwrap_or(0)
+        Ok(self.values.get(&offset).copied().unwrap_or(0))
     }
 
-    fn write(&mut self, offset: usize, value: u32) {
+    fn write(&mut self, offset: usize, value: u32) -> Result<(), RegisterFailure> {
         self.log.push(Event::Write(offset, value));
+        if self.write_refused == Some(offset) {
+            return Err(RegisterFailure::Write(offset));
+        }
         let stored = match offset {
             register::STATUS if value == 0 && !self.completes_reset => status::ACKNOWLEDGE,
             register::STATUS if !self.accepts_features => value & !status::FEATURES_OK,
             _ => value,
         };
         self.values.insert(offset, stored);
+        Ok(())
     }
 
     fn barrier(&mut self) {

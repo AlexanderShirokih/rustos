@@ -25,6 +25,10 @@ package = "virtio-mmio"
 path = "/virtio-mmio"
 
 [[programs]]
+package = "driver-virtio-gpu"
+path = "/driver-virtio-gpu"
+
+[[programs]]
 package = "namespace-router"
 path = "/namespace-router"
 

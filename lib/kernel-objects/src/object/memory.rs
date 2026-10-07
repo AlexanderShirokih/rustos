@@ -9,6 +9,8 @@
 //! целым словом передаются побайтно, середина - словами по `u64`. Каждый байт при этом
 //! передаётся ровно один раз. Из другого адресного пространства середина наблюдается
 //! пословно, голова и хвост - побайтно. Порядок трёх частей между собой ничем не закреплён.
+//! Копия между маппингами передаётся словами, только если начала обоих диапазонов одинаково
+//! смещены относительно границы слова. Иначе она передаётся побайтно целиком.
 
 use core::{mem, ops::Range};
 
@@ -67,6 +69,21 @@ unsafe fn write_bytes(base: *mut u8, start: usize, src: &[u8]) {
         let target = unsafe { base.add(start + offset) };
         // SAFETY: адрес лежит в маппинге, установленном ядром.
         unsafe { target.write_volatile(byte) };
+    }
+}
+
+#[allow(clippy::multiple_unsafe_ops_per_block)]
+unsafe fn copy_bytes(source: *const u8, target: *mut u8, start: usize, len: usize) {
+    for offset in start..start + len {
+        // SAFETY: вызывающий даёт диапазон `[start, start + len)`, проверенный `range_ptr`
+        // у обоих маппингов. Указатели остаются внутри отображений, установленных ядром;
+        // исходное отображение доступно для чтения, целевое - для записи.
+        unsafe {
+            let from = source.add(offset);
+            let to = target.add(offset);
+            let byte = from.read_volatile();
+            to.write_volatile(byte);
+        }
     }
 }
 
@@ -450,6 +467,46 @@ impl Mapping {
         Ok(())
     }
 
+    /// Копирует `len` байт маппинга со смещения `offset` в `destination` со смещения
+    /// `destination_offset`, минуя промежуточный буфер. Диапазон сверх размера любого из
+    /// маппингов - `OutOfBounds`. Диапазоны должны быть неперекрывающимися в памяти региона,
+    /// в том числе при разных отображениях одного региона.
+    pub fn copy_to(
+        &self,
+        offset: usize,
+        destination: &Mapping,
+        destination_offset: usize,
+        len: usize,
+    ) -> Result<()> {
+        let source = self.range_ptr(offset, len)?;
+        let target = destination.range_ptr(destination_offset, len)?;
+        let head = if source.addr() % WORD == target.addr() % WORD {
+            head_len(source, len)
+        } else {
+            len
+        };
+        let words = (len - head) / WORD;
+        let tail_start = head + words * WORD;
+        // SAFETY: `[0, head)` лежит в диапазонах, проверенных `range_ptr`.
+        unsafe { copy_bytes(source, target, 0, head) };
+        for number in 0..words {
+            let index = head + number * WORD;
+            // SAFETY: слово отстоит от `head` на `number` слов и лежит в диапазоне, проверенном
+            // `range_ptr`.
+            let from = unsafe { word_ptr(source, index) };
+            // SAFETY: слово лежит в диапазоне, проверенном `range_ptr`. Начала диапазонов
+            // одинаково смещены относительно границы слова, поэтому адрес выровнен на слово.
+            let to = unsafe { word_ptr(target, index) };
+            // SAFETY: слово лежит в маппинге, установленном ядром.
+            let word = unsafe { from.read_volatile() };
+            // SAFETY: слово лежит в маппинге, установленном ядром.
+            unsafe { to.write_volatile(word) };
+        }
+        // SAFETY: хвост `[tail_start, len)` лежит в диапазонах, проверенных `range_ptr`.
+        unsafe { copy_bytes(source, target, tail_start, len - tail_start) };
+        Ok(())
+    }
+
     /// Заполняет нулями `len` байт маппинга со смещения `offset`. Диапазон сверх размера
     /// маппинга - `OutOfBounds`.
     pub fn zero_at(&self, offset: usize, len: usize) -> Result<()> {
@@ -469,6 +526,34 @@ impl Mapping {
         // SAFETY: хвост `[tail_start, len)` лежит в диапазоне, проверенном `range_ptr`.
         unsafe { zero_bytes(base, tail_start, len - tail_start) };
         Ok(())
+    }
+
+    /// Читает два байта маппинга со смещения `offset` одним обращением. Диапазон сверх размера
+    /// маппинга либо нечётный адрес - `OutOfBounds`.
+    pub fn read_u16_at(&self, offset: usize) -> Result<u16> {
+        let target = self.half_word_ptr(offset)?;
+        // SAFETY: `half_word_ptr` проверил, что два байта лежат в маппинге, установленном ядром,
+        // и адрес выровнен на `u16`.
+        Ok(unsafe { target.read_volatile() })
+    }
+
+    /// Записывает `value` в два байта маппинга со смещения `offset` одним обращением. Диапазон
+    /// сверх размера маппинга либо нечётный адрес - `OutOfBounds`.
+    pub fn write_u16_at(&self, offset: usize, value: u16) -> Result<()> {
+        let target = self.half_word_ptr(offset)?;
+        // SAFETY: `half_word_ptr` проверил, что два байта лежат в маппинге, установленном ядром,
+        // и адрес выровнен на `u16`.
+        unsafe { target.write_volatile(value) };
+        Ok(())
+    }
+
+    fn half_word_ptr(&self, offset: usize) -> Result<*mut u16> {
+        let base = self.range_ptr(offset, mem::size_of::<u16>())?;
+        if base.addr() % mem::align_of::<u16>() == 0 {
+            Ok(base.cast())
+        } else {
+            Err(Error::OutOfBounds)
+        }
     }
 
     fn range_ptr(&self, offset: usize, len: usize) -> Result<*mut u8> {
@@ -674,6 +759,34 @@ mod tests {
     }
 
     #[test]
+    fn copy_to_moves_exactly_the_range_between_mappings() {
+        let pattern = source_bytes();
+
+        for source_shift in SHIFTS {
+            for target_shift in SHIFTS {
+                for len in lens() {
+                    let mut source = WordAlignedBuffer::untouched();
+                    let mut target = WordAlignedBuffer::untouched();
+                    let source_mapping = source.mapping();
+                    let target_mapping = target.mapping();
+                    let bytes = &pattern[1..=len];
+                    source_mapping.copy_in_at(source_shift, bytes).unwrap();
+
+                    source_mapping
+                        .copy_to(source_shift, &target_mapping, target_shift, len)
+                        .unwrap();
+
+                    assert_eq!(
+                        target.0,
+                        untouched_except(target_shift, bytes),
+                        "source shift {source_shift}, target shift {target_shift}, len {len}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn zero_at_clears_exactly_the_range() {
         let zeros = [0; LEN_MAX];
 
@@ -694,6 +807,22 @@ mod tests {
     }
 
     #[test]
+    fn half_word_round_trips_at_an_even_offset_and_odd_one_is_refused() {
+        let mut buffer = WordAlignedBuffer::untouched();
+        let mapping = buffer.mapping();
+
+        mapping.write_u16_at(2, 0x1234).unwrap();
+        let read = mapping.read_u16_at(2);
+        let odd = mapping.write_u16_at(3, 0);
+        let past_end = mapping.read_u16_at(BUFFER_BYTES - 1);
+
+        assert_eq!(read, Ok(0x1234));
+        assert_eq!(odd, Err(Error::OutOfBounds));
+        assert_eq!(past_end, Err(Error::OutOfBounds));
+        assert_eq!(buffer.0, untouched_except(2, &0x1234u16.to_ne_bytes()));
+    }
+
+    #[test]
     fn range_beyond_mapping_is_out_of_bounds() {
         let mut buffer = WordAlignedBuffer::untouched();
         let mapping = buffer.mapping();
@@ -706,9 +835,11 @@ mod tests {
             mapping.copy_out_at(usize::MAX, &mut target[..1]),
             mapping.zero_at(0, BUFFER_BYTES + 1),
             mapping.zero_at(usize::MAX, 1),
+            mapping.copy_to(BUFFER_BYTES - 4, &mapping, 0, 5),
+            mapping.copy_to(0, &mapping, BUFFER_BYTES - 4, 5),
         ];
 
-        assert_eq!(results, [Err(Error::OutOfBounds); 6]);
+        assert_eq!(results, [Err(Error::OutOfBounds); 8]);
         assert_eq!(buffer.0, [UNTOUCHED; BUFFER_BYTES]);
         assert_eq!(target, [UNTOUCHED; 8]);
     }

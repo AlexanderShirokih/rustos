@@ -104,6 +104,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-virtio-gpu"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "display-abi",
+ "ipc",
+ "kernel-objects",
+ "runtime",
+ "syscall",
+ "userland-build",
+ "virtio",
+ "virtio-mmio-abi",
+]
+
+[[package]]
 name = "fdt"
 version = "0.1.0"
 dependencies = [

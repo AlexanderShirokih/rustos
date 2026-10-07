@@ -34,7 +34,7 @@ impl Descriptors {
         }
     }
 
-    pub(super) fn reserve(&self) -> Result<Chain, QueueError> {
+    pub(super) fn reserve<E>(&self) -> Result<Chain, QueueError<E>> {
         if self.free_count < CHAIN_DESCRIPTORS {
             return Err(QueueError::Full);
         }
@@ -61,9 +61,8 @@ impl Descriptors {
         }
     }
 
-    pub(super) fn release(&mut self, id: u32) -> Result<u16, QueueError> {
-        let unknown = QueueError::UnknownHead(id);
-        let head = u16::try_from(id).map_err(|_| unknown)?;
+    pub(super) fn release<E>(&mut self, id: u32) -> Result<u16, QueueError<E>> {
+        let head = u16::try_from(id).map_err(|_| QueueError::UnknownHead(id))?;
         let tail = self.link(head)?;
         let issued = self
             .issued
@@ -71,7 +70,7 @@ impl Descriptors {
             .filter(|issued| **issued);
         let tail_link = self.next.get_mut(usize::from(tail));
         let (Some(issued), Some(tail_link)) = (issued, tail_link) else {
-            return Err(unknown);
+            return Err(QueueError::UnknownHead(id));
         };
 
         *issued = false;
@@ -81,7 +80,7 @@ impl Descriptors {
         Ok(head)
     }
 
-    fn link(&self, descriptor: u16) -> Result<u16, QueueError> {
+    fn link<E>(&self, descriptor: u16) -> Result<u16, QueueError<E>> {
         let next = self.next.get(usize::from(descriptor)).copied();
         next.ok_or(QueueError::UnknownHead(descriptor.into()))
     }

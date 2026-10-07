@@ -57,7 +57,9 @@ pub struct Completion {
 
 /// Отказ очереди.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueError {
+pub enum QueueError<E> {
+    /// Обращение к регистру транспорта завершилось отказом.
+    Register(E),
     /// Размер после ограничения пределом устройства равен 0, не степень двойки либо
     /// больше [`QUEUE_SIZE_MAX`].
     InvalidSize(u32),
@@ -82,7 +84,7 @@ pub struct SplitQueue {
     used_index: u16,
 }
 
-impl From<OutOfRange> for QueueError {
+impl<E> From<OutOfRange> for QueueError<E> {
     fn from(_: OutOfRange) -> Self {
         Self::OutOfRange
     }
@@ -98,12 +100,14 @@ impl SplitQueue {
         memory: &mut M,
         index: u16,
         requested: u16,
-    ) -> Result<Self, QueueError> {
-        transport.select_queue(index);
-        if transport.queue_ready() {
+    ) -> Result<Self, QueueError<R::Error>> {
+        transport
+            .select_queue(index)
+            .map_err(QueueError::Register)?;
+        if transport.queue_ready().map_err(QueueError::Register)? {
             return Err(QueueError::AlreadyActive);
         }
-        let limit = transport.queue_size_max();
+        let limit = transport.queue_size_max().map_err(QueueError::Register)?;
         let size = limit.min(u32::from(requested));
         let valid = size.is_power_of_two() && size <= u32::from(QUEUE_SIZE_MAX);
         let size = u16::try_from(size)
@@ -120,7 +124,9 @@ impl SplitQueue {
         }
 
         let [descriptors, driver, device] = AREA_OFFSETS.map(|offset| base + offset as u64);
-        transport.configure_queue(size, descriptors, driver, device);
+        transport
+            .configure_queue(size, descriptors, driver, device)
+            .map_err(QueueError::Register)?;
 
         Ok(Self {
             index,
@@ -138,14 +144,16 @@ impl SplitQueue {
 
     /// Отправляет цепочку "`request`, затем `response`" и уведомляет устройство.
     ///
-    /// Устройство читает `request` и пишет в `response`.
+    /// Устройство читает `request` и пишет в `response`. Отказ уведомления не отменяет
+    /// опубликованную цепочку. Её буферы остаются занятыми до завершения команды или
+    /// сброса устройства.
     pub fn submit<R: Registers, M: DeviceMemory>(
         &mut self,
         transport: &mut Transport<R>,
         memory: &mut M,
         request: Buffer,
         response: Buffer,
-    ) -> Result<Token, QueueError> {
+    ) -> Result<Token, QueueError<R::Error>> {
         let chain = self.descriptors.reserve()?;
         let (head, tail) = (chain.head, chain.tail);
         write_descriptor(memory, head, request, DESCRIPTOR_FLAG_NEXT, tail)?;
@@ -162,10 +170,9 @@ impl SplitQueue {
         memory.write(AVAILABLE_OFFSET + 2, &available_index.to_le_bytes())?;
         // Уведомление идёт после записи индекса, иначе устройство не увидит элемент.
         transport.barrier();
-        transport.notify(self.index);
-
         self.descriptors.commit(chain);
         self.available_index = available_index;
+        transport.notify(self.index).map_err(QueueError::Register)?;
         Ok(Token(head))
     }
 
@@ -174,7 +181,7 @@ impl SplitQueue {
         &mut self,
         transport: &mut Transport<R>,
         memory: &mut M,
-    ) -> Result<Option<Completion>, QueueError> {
+    ) -> Result<Option<Completion>, QueueError<R::Error>> {
         let mut index = [0; 2];
         memory.read(USED_OFFSET + 2, &mut index)?;
         if u16::from_le_bytes(index) == self.used_index {
@@ -202,13 +209,13 @@ impl SplitQueue {
     }
 }
 
-fn write_descriptor<M: DeviceMemory>(
+fn write_descriptor<M: DeviceMemory, E>(
     memory: &mut M,
     descriptor: u16,
     buffer: Buffer,
     flags: u16,
     next: u16,
-) -> Result<(), QueueError> {
+) -> Result<(), QueueError<E>> {
     let mut bytes = [0; DESCRIPTOR_BYTES];
     let fields = buffer
         .address
@@ -229,7 +236,7 @@ fn write_descriptor<M: DeviceMemory>(
 mod tests {
     use super::*;
     use crate::{
-        testing::{Event, FakeMemory, FakeRegisters, Log, REGION_ADDRESS},
+        testing::{Event, FakeMemory, FakeRegisters, Log, REGION_ADDRESS, RegisterFailure},
         transport::{DeviceType, register},
     };
 
@@ -335,6 +342,58 @@ mod tests {
                     .any(|event| matches!(event, Event::MemoryWrite(..)))
             );
         }
+    }
+
+    #[test]
+    fn queue_setup_stops_at_register_failure() {
+        let log = Log::default();
+        let registers = FakeRegisters::gpu(&log).refusing_write(register::QUEUE_DRIVER_LOW);
+        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut memory = FakeMemory::new(QUEUE_REGION_BYTES, &log);
+
+        let result = SplitQueue::new(&mut transport, &mut memory, 0, 2);
+
+        assert_eq!(
+            result.err(),
+            Some(QueueError::Register(RegisterFailure::Write(
+                register::QUEUE_DRIVER_LOW
+            )))
+        );
+        assert!(matches!(
+            log.events().last(),
+            Some(Event::Write(register::QUEUE_DRIVER_LOW, _))
+        ));
+        assert!(log.writes_to(register::QUEUE_READY).is_empty());
+    }
+
+    #[test]
+    fn failed_notification_keeps_published_descriptors_until_completion() {
+        let log = Log::default();
+        let registers = FakeRegisters::gpu(&log).refusing_write(register::QUEUE_NOTIFY);
+        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut memory = FakeMemory::new(QUEUE_REGION_BYTES, &log);
+        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
+
+        let failed = queue.submit(&mut transport, &mut memory, REQUEST, RESPONSE);
+        let occupied = queue.submit(&mut transport, &mut memory, REQUEST, RESPONSE);
+        publish_first_used(&mut memory, 0, RESPONSE.length);
+        let completion = queue.take_used(&mut transport, &mut memory).unwrap();
+
+        assert_eq!(
+            failed,
+            Err(QueueError::Register(RegisterFailure::Write(
+                register::QUEUE_NOTIFY
+            )))
+        );
+        assert_eq!(occupied, Err(QueueError::Full));
+        assert_eq!(memory.get(AVAILABLE_OFFSET + 2, 2), 1u16.to_le_bytes());
+        assert_eq!(
+            completion,
+            Some(Completion {
+                token: Token(0),
+                written: RESPONSE.length
+            })
+        );
     }
 
     #[test]
