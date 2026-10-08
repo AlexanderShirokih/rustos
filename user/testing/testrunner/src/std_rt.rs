@@ -10,7 +10,6 @@ use core::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
 };
 
-use kernel_tests::kernel_test;
 use runtime::{Mutex, Priority, Timeout, alloc as rt_alloc, dealloc as rt_dealloc, spawn};
 
 const STACK_SIZE: u64 = 0x4000;
@@ -19,13 +18,13 @@ const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 const CLASS_SIZES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_heap_serves_every_size_class() {
     for size in CLASS_SIZES {
         for round in 0..3u8 {
             // SAFETY: размер ненулевой, выравнивание - степень двойки.
             let block = unsafe { rt_alloc(size, 16) };
-            kernel_tests::kassert!(!block.is_null());
+            test_harness::check!(!block.is_null());
 
             // SAFETY: блок выдан под `size` байт и принадлежит только этому кадру.
             unsafe { ptr::write_bytes(block, round, size) };
@@ -33,8 +32,8 @@ fn std_rt_heap_serves_every_size_class() {
             let first = unsafe { block.read() };
             // SAFETY: последний байт лежит внутри блока.
             let last = unsafe { block.add(size - 1).read() };
-            kernel_tests::kassert_eq!(first, round);
-            kernel_tests::kassert_eq!(last, round);
+            test_harness::check_eq!(first, round);
+            test_harness::check_eq!(last, round);
 
             // SAFETY: блок выдан `rt_alloc` с теми же size и align и ещё не освобождался.
             unsafe { rt_dealloc(block, size, 16) };
@@ -44,7 +43,7 @@ fn std_rt_heap_serves_every_size_class() {
 
 const LIVE_BLOCKS: usize = 64;
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_heap_blocks_do_not_overlap() {
     const SIZE: usize = 64;
 
@@ -52,7 +51,7 @@ fn std_rt_heap_blocks_do_not_overlap() {
     for index in 0..LIVE_BLOCKS {
         // SAFETY: размер ненулевой, выравнивание - степень двойки.
         let block = unsafe { rt_alloc(SIZE, 16) };
-        kernel_tests::kassert!(!block.is_null());
+        test_harness::check!(!block.is_null());
         // SAFETY: блок выдан под SIZE байт и пока принадлежит только этому кадру.
         unsafe { ptr::write_bytes(block, u8::try_from(index).unwrap_or(0), SIZE) };
         blocks.push(block);
@@ -61,7 +60,7 @@ fn std_rt_heap_blocks_do_not_overlap() {
     for (index, block) in blocks.iter().enumerate() {
         // SAFETY: блок жив, значение писали выше.
         let stored = unsafe { block.read() };
-        kernel_tests::kassert_eq!(stored, u8::try_from(index).unwrap_or(0));
+        test_harness::check_eq!(stored, u8::try_from(index).unwrap_or(0));
     }
 
     for block in blocks {
@@ -70,29 +69,29 @@ fn std_rt_heap_blocks_do_not_overlap() {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_heap_serves_large_allocations() {
     for size in [4096usize, 8192, 64 * 1024] {
         // SAFETY: размер ненулевой, выравнивание - степень двойки.
         let block = unsafe { rt_alloc(size, 16) };
-        kernel_tests::kassert!(!block.is_null());
+        test_harness::check!(!block.is_null());
         // SAFETY: блок выдан под `size` байт и принадлежит только этому кадру.
         unsafe { ptr::write_bytes(block, 0xC3, size) };
         // SAFETY: последний байт лежит внутри блока.
         let last = unsafe { block.add(size - 1).read() };
-        kernel_tests::kassert_eq!(last, 0xC3);
+        test_harness::check_eq!(last, 0xC3);
         // SAFETY: блок выдан `rt_alloc` с теми же size и align и ещё не освобождался.
         unsafe { rt_dealloc(block, size, 16) };
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_heap_honours_alignment() {
     for align in [16usize, 32, 64, 128, 256, 512, 1024, 2048] {
         // SAFETY: размер ненулевой, выравнивание - степень двойки.
         let block = unsafe { rt_alloc(8, align) };
-        kernel_tests::kassert!(!block.is_null());
-        kernel_tests::kassert_eq!(block as usize % align, 0);
+        test_harness::check!(!block.is_null());
+        test_harness::check_eq!(block as usize % align, 0);
         // SAFETY: блок выдан `rt_alloc` с теми же size и align и ещё не освобождался.
         unsafe { rt_dealloc(block, 8, align) };
     }
@@ -112,7 +111,7 @@ extern "C" fn lock_worker(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_lock_serialises_workers() {
     {
         let mut counter = COUNTER.lock();
@@ -129,23 +128,23 @@ fn std_rt_lock_serialises_workers() {
     }
 
     let counter = COUNTER.lock();
-    kernel_tests::kassert_eq!(*counter, LOCK_WORKERS * LOCK_ITERS);
+    test_harness::check_eq!(*counter, LOCK_WORKERS * LOCK_ITERS);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_start_hands_out_the_bootstrap_handle_once() {
     let root = crate::bootstrap_handle();
     // SAFETY: номер - стартовый handle из `x0` точки входа testrunner, и владелец из
     // `take_bootstrap` отказывается от записи через `leak`.
     unsafe { runtime::start(root.raw()) };
     let published = runtime::take_bootstrap().expect("bootstrap handle is published");
-    kernel_tests::kassert_eq!(published.leak().raw(), root.raw());
-    kernel_tests::kassert!(runtime::take_bootstrap().is_none());
+    test_harness::check_eq!(published.leak().raw(), root.raw());
+    test_harness::check!(runtime::take_bootstrap().is_none());
 }
 
 const RANDOM_MAX_LEN: usize = 17;
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_random_fills_buffers_of_any_length() {
     let mut buffer = [0u8; RANDOM_MAX_LEN];
     for len in 0..=RANDOM_MAX_LEN {
@@ -156,7 +155,7 @@ fn std_rt_random_fills_buffers_of_any_length() {
     let mut second = [0u8; 8];
     runtime::random::fill_bytes(&mut first);
     runtime::random::fill_bytes(&mut second);
-    kernel_tests::kassert!(first != second);
+    test_harness::check!(first != second);
 }
 
 const TLS_WORKERS: u32 = 3;
@@ -195,10 +194,10 @@ extern "C" fn tls_worker(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn std_rt_thread_locals_are_private_and_destroyed() {
     let key = runtime::tls::create(Some(count_destroyed));
-    kernel_tests::kassert!(key != 0);
+    test_harness::check!(key != 0);
     TLS_KEY.store(key as u64, Relaxed);
     TLS_MISMATCHES.store(0, Relaxed);
     TLS_DESTROYED.store(0, Relaxed);
@@ -212,8 +211,8 @@ fn std_rt_thread_locals_are_private_and_destroyed() {
             .expect("worker joins before timeout");
     }
 
-    kernel_tests::kassert_eq!(TLS_MISMATCHES.load(Relaxed), 0);
-    kernel_tests::kassert_eq!(TLS_DESTROYED.load(Relaxed), TLS_WORKERS);
+    test_harness::check_eq!(TLS_MISMATCHES.load(Relaxed), 0);
+    test_harness::check_eq!(TLS_DESTROYED.load(Relaxed), TLS_WORKERS);
 
     // SAFETY: ключ выдан `create` выше, рабочие потоки завершены, больше им не пользуются.
     unsafe { runtime::tls::destroy(key) };

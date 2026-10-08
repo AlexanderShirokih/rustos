@@ -33,14 +33,14 @@ impl Watched {
     }
 
     pub(crate) fn assert_closed(&self) {
-        kernel_tests::kassert!(matches!(
+        test_harness::check!(matches!(
             self.port.recv(CLOSURE_TIMEOUT).err(),
             Some(Error::Syscall(SyscallError::SenderGone))
         ));
     }
 
     pub(crate) fn assert_alive(&self) {
-        kernel_tests::kassert!(matches!(
+        test_harness::check!(matches!(
             self.port.recv(LIVENESS_TIMEOUT).err(),
             Some(Error::Syscall(SyscallError::Timeout))
         ));

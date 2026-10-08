@@ -271,6 +271,19 @@ fn long_doc_on_a_test_exceeds_the_regression_budget() {
 }
 
 #[test]
+fn a_path_test_attribute_with_a_profile_marks_a_test() {
+    let source = concat!(
+        "/// Line one.\n",
+        "/// Line two.\n",
+        "/// Line three.\n",
+        "#[test_harness::test(bench)]\n",
+        "fn scenario() {}\n"
+    );
+    let hits = check(&rule("comment_on_test"), source);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+}
+
+#[test]
 fn plain_comment_on_a_test_spends_the_same_budget() {
     let source = concat!(
         "// Line one.\n",
@@ -489,7 +502,7 @@ fn an_inline_module_in_the_crate_root_is_reported() {
 fn a_procedural_macro_entry_point_stays_in_the_crate_root() {
     let hits = check_root(concat!(
         "#[proc_macro_attribute]\n",
-        "pub fn kernel_test(attr: TokenStream, item: TokenStream) -> TokenStream {\n",
+        "pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {\n",
         "    item\n",
         "}\n",
     ));

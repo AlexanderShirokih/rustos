@@ -4,7 +4,6 @@
 //! процесс, а вместе с ним процессы, которые снятый держал.
 
 use kernel_objects::{Error, Port, Process, Resource, Thread, ThreadEntry};
-use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, UserMemFlags, thread_exit};
 use syscall::SyscallError;
 
@@ -28,7 +27,7 @@ fn assert_fixture_removed(port: &Port) {
 
     // До дренажа таблицы снятого процесса запрос паркуется и получает `PeerClosed` на
     // обнулении множества получателей, после дренажа отказ приходит отзывом деривации.
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         port.call(REMOVAL_TIMEOUT).err(),
         Some(Error::Syscall(
             SyscallError::Revoked | SyscallError::PeerClosed
@@ -40,7 +39,7 @@ extern "C" fn exiting_entry(code: usize) -> ! {
     thread_exit(code as u64)
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn thread_exit_publishes_exit_code() {
     let stack = Resource::self_resource()
         .expect("self metering resource")
@@ -63,48 +62,48 @@ fn thread_exit_publishes_exit_code() {
     thread
         .join(JOIN_TIMEOUT)
         .expect("worker terminates before timeout");
-    kernel_tests::kassert_eq!(thread.exit_code().expect("thread exit code"), EXIT_CODE);
+    test_harness::check_eq!(thread.exit_code().expect("thread exit code"), EXIT_CODE);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn child_process_exit_code_is_observable() {
     let fixture = Fixture::spawn();
 
     let status = fixture.request_status(OP_EXIT, u64::from(EXIT_CODE), &[]);
-    kernel_tests::kassert_eq!(status, REPLY_OK);
+    test_harness::check_eq!(status, REPLY_OK);
 
     fixture
         .process()
         .join(JOIN_TIMEOUT)
         .expect("child terminates");
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         fixture.process().exit_code().expect("child exit code"),
         EXIT_CODE
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn process_exit_terminates_the_parked_sibling() {
     let fixture = Fixture::spawn();
 
     let status = fixture.request_status(OP_PROCESS_EXIT, u64::from(PROCESS_EXIT_CODE), &[]);
-    kernel_tests::kassert_eq!(status, REPLY_OK);
+    test_harness::check_eq!(status, REPLY_OK);
 
     fixture
         .process()
         .join(JOIN_TIMEOUT)
         .expect("child terminates");
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         fixture.process().exit_code().expect("child exit code"),
         PROCESS_EXIT_CODE
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn closing_the_last_child_capability_removes_the_child() {
     let fixture = Fixture::spawn();
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         fixture.request_status(OP_WRITE_SLOT, LIFETIME_PROBE, &[]),
         REPLY_OK
     );
@@ -115,13 +114,13 @@ fn closing_the_last_child_capability_removes_the_child() {
     assert_fixture_removed(&port);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn removing_a_holder_removes_the_processes_it_held() {
     let holder = Fixture::spawn();
     let (child_process, child_port) = Fixture::spawn().into_parts();
 
     let child_cap = child_process.into_raw().raw();
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         holder.request_status(OP_HOLD_CAP, 0, &[child_cap]),
         REPLY_OK
     );
@@ -133,24 +132,24 @@ fn removing_a_holder_removes_the_processes_it_held() {
     assert_fixture_removed(&child_port);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn closing_the_last_holder_from_inside_leaves_the_request_unanswered() {
     let (process, port) = Fixture::spawn().into_parts();
 
     let own_cap = process.into_raw().raw();
     ipc_raw::write_frame(&encode_request(OP_CLOSE_CAP, 0), &[own_cap]);
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         port.call(REMOVAL_TIMEOUT).err(),
         Some(Error::Syscall(SyscallError::PeerClosed))
     ));
     assert_fixture_removed(&port);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_self_capability_does_not_keep_the_child_alive() {
     let fixture = Fixture::spawn();
-    kernel_tests::kassert_eq!(fixture.request_status(OP_HOLD_SELF, 0, &[]), REPLY_OK);
+    test_harness::check_eq!(fixture.request_status(OP_HOLD_SELF, 0, &[]), REPLY_OK);
 
     let (process, port) = fixture.into_parts();
     drop(process);

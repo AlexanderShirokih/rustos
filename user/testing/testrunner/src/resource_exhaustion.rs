@@ -5,7 +5,6 @@
 use alloc::vec::Vec;
 
 use kernel_objects::{Error, MemoryRegion, Resource, Signal};
-use kernel_tests::kernel_test;
 use runtime::MemoryAccess;
 use syscall::{HANDLE_TABLE_CAPACITY, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
@@ -78,18 +77,18 @@ fn fill(resource: &Resource, granted: &mut Vec<MemoryRegion>) -> Error {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn budget_exhaustion_is_refused_by_its_own_code() {
     let probe = SaturatedBudget::probe();
 
-    kernel_tests::kassert_eq!(probe.granted_pages(), PROBE_BUDGET_PAGES);
-    kernel_tests::kassert!(matches!(
+    test_harness::check_eq!(probe.granted_pages(), PROBE_BUDGET_PAGES);
+    test_harness::check!(matches!(
         probe.refusal(),
         Error::Syscall(SyscallError::ResourceExhausted)
     ));
 
     for _ in 0..4 {
-        kernel_tests::kassert_eq!(
+        test_harness::check_eq!(
             probe.request(1).err(),
             Some(Error::Syscall(SyscallError::ResourceExhausted))
         );
@@ -102,16 +101,16 @@ fn budget_exhaustion_is_refused_by_its_own_code() {
     drop(region);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_released_budget_yields_the_same_pages_again() {
     let mut probe = SaturatedBudget::probe();
     let granted = probe.granted_pages();
     probe.release(granted);
 
-    kernel_tests::kassert_eq!(probe.saturate(), granted);
+    test_harness::check_eq!(probe.saturate(), granted);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_partial_release_returns_exactly_what_was_freed() {
     let mut probe = SaturatedBudget::probe();
     probe.release(PARTIAL_RELEASE_PAGES);
@@ -120,7 +119,7 @@ fn a_partial_release_returns_exactly_what_was_freed() {
         .request(PARTIAL_RELEASE_PAGES)
         .expect("the released pages are back in the budget");
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         probe.request(1).err(),
         Some(Error::Syscall(SyscallError::ResourceExhausted))
     );
@@ -142,18 +141,18 @@ fn fill_handle_table() -> (Vec<Signal>, Option<Error>) {
     (held, refusal)
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_full_handle_table_refuses_the_next_object() {
     let (held, refusal) = fill_handle_table();
     drop(held);
 
-    kernel_tests::kassert_eq!(refusal, Some(Error::Syscall(SyscallError::OutOfHandles)));
+    test_harness::check_eq!(refusal, Some(Error::Syscall(SyscallError::OutOfHandles)));
 
     let signal = Signal::create().expect("the table takes objects after the refusal");
     drop(signal);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn closing_a_handle_makes_room_after_the_refusal() {
     let (mut held, _) = fill_handle_table();
     held.pop().expect("the table took at least one object");
@@ -164,6 +163,6 @@ fn closing_a_handle_makes_room_after_the_refusal() {
     drop(taken);
     drop(held);
 
-    kernel_tests::kassert!(slot_taken);
-    kernel_tests::kassert_eq!(over, Some(Error::Syscall(SyscallError::OutOfHandles)));
+    test_harness::check!(slot_taken);
+    test_harness::check_eq!(over, Some(Error::Syscall(SyscallError::OutOfHandles)));
 }

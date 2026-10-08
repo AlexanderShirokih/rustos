@@ -8,7 +8,6 @@ use alloc::vec;
 
 use filesystem_abi::{AccessMode, OpenFlags, Opened, file_system};
 use kernel_objects::{MemoryRegion, Resource, SessionTransport};
-use kernel_tests::{kernel_test, kreport};
 use runtime::{Instant, MemoryAccess, UserMemFlags};
 use userland::USERLAND_PAGE_SIZE;
 
@@ -52,7 +51,7 @@ fn fill(client: &file_system::Client<SessionTransport>, opened: &Opened, size: u
         .write(opened.fd, 0, size as u32)
         .expect("write call")
         .expect("write ok");
-    kernel_tests::kassert_eq!(written.count, size as u32);
+    test_harness::check_eq!(written.count, size as u32);
 }
 
 fn measure_frame_plane(
@@ -70,7 +69,7 @@ fn measure_frame_plane(
             .expect("read call")
             .expect("read ok");
     });
-    kreport!("fs {plane} read bytes={size} ns_per_op={read}");
+    test_harness::report!("fs {plane} read bytes={size} ns_per_op={read}");
 
     let write = nanos_per_op(rounds, || {
         client
@@ -78,10 +77,10 @@ fn measure_frame_plane(
             .expect("write call")
             .expect("write ok");
     });
-    kreport!("fs {plane} write bytes={size} ns_per_op={write}");
+    test_harness::report!("fs {plane} write bytes={size} ns_per_op={write}");
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_call_floor() {
     // Пол кадровой плоскости: вызов без обмена данными через буфер сессии, и под ним - syscall
     // без IPC, разделяющий цену входа в ядро и цену раунда.
@@ -91,7 +90,7 @@ fn bench_call_floor() {
     let inspect = nanos_per_op(rounds_for(PROBE), || {
         buffer.inspect().expect("inspect region");
     });
-    kreport!("fs call inspect ns_per_op={inspect}");
+    test_harness::report!("fs call inspect ns_per_op={inspect}");
 
     let opened = open(
         &client,
@@ -103,10 +102,10 @@ fn bench_call_floor() {
     let stat = nanos_per_op(rounds_for(PROBE), || {
         client.stat(opened.fd).expect("stat call").expect("stat ok");
     });
-    kreport!("fs call stat ns_per_op={stat}");
+    test_harness::report!("fs call stat ns_per_op={stat}");
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_plain_memory() {
     // Опорная строка стенда показывает, во сколько обходятся проходы по обычной памяти, из
     // которых сложены staging-копии сервера.
@@ -119,17 +118,17 @@ fn bench_plain_memory() {
             target.fill(0);
             core::hint::black_box(&target);
         });
-        kreport!("mem zero bytes={size} ns_per_op={zeroed}");
+        test_harness::report!("mem zero bytes={size} ns_per_op={zeroed}");
 
         let copied = nanos_per_op(rounds, || {
             target.copy_from_slice(&source);
             core::hint::black_box(&target);
         });
-        kreport!("mem copy bytes={size} ns_per_op={copied}");
+        test_harness::report!("mem copy bytes={size} ns_per_op={copied}");
     }
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_ramfs_heap_plane() {
     let client = connect(ram_session());
     let _buffer = acquire(&client);
@@ -144,7 +143,7 @@ fn bench_ramfs_heap_plane() {
     }
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_ramfs_promoted_plane() {
     let client = connect(ram_session());
     let _buffer = acquire(&client);
@@ -176,11 +175,11 @@ fn bench_ramfs_promoted_plane() {
         let direct = nanos_per_op(rounds_for(size), || {
             mapped.copy_out_at(0, &mut sink).expect("direct read");
         });
-        kreport!("fs direct read bytes={size} ns_per_op={direct}");
+        test_harness::report!("fs direct read bytes={size} ns_per_op={direct}");
     }
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_ramfs_imported_plane() {
     let client = connect(ram_session());
     let _buffer = acquire(&client);
@@ -207,7 +206,7 @@ fn bench_ramfs_imported_plane() {
     }
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_ramfs_imported_scales_with_region() {
     let client = connect(ram_session());
     let _buffer = acquire(&client);
@@ -233,6 +232,8 @@ fn bench_ramfs_imported_scales_with_region() {
                 .expect("read call")
                 .expect("read ok");
         });
-        kreport!("fs imported read bytes={PROBE} region_pages={pages} ns_per_op={read}");
+        test_harness::report!(
+            "fs imported read bytes={PROBE} region_pages={pages} ns_per_op={read}"
+        );
     }
 }

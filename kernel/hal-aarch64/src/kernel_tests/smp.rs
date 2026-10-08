@@ -11,7 +11,6 @@ use core::{
 };
 
 use capability::{ParkState, WaitToken};
-use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use scheduler::{ArchCpu, SchedulerServiceExt, SpawnConfig, with_preemption_disabled};
 
@@ -163,7 +162,7 @@ fn run_workers() -> Option<Arc<Run>> {
     None
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn threads_run_on_every_online_cpu() {
     let online = smp::online_cpus();
     let Some(run) = run_workers() else {
@@ -184,7 +183,7 @@ fn threads_run_on_every_online_cpu() {
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_backlog_on_one_cpu_is_drained_by_migration() {
     let online = smp::online_cpus();
     let anchors = online - 1;
@@ -295,7 +294,7 @@ fn settled_free_frames() -> usize {
     last
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn repeated_thread_load_stops_spending_frames() {
     assert!(
         free_frames() > 0,

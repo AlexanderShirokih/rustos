@@ -12,7 +12,6 @@ use ipc::{
     wire::{Cap, IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, Port};
-use kernel_tests::kernel_test;
 use runtime::{PortTransport, Priority, Timeout, spawn_owned};
 use syscall::{Rights, kind};
 
@@ -48,7 +47,7 @@ fn badge_client(badged: &Port, plain: &Port) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn server_reads_badge_of_receiving_handle() {
     let port = Port::create().expect("port create");
     let badged = port
@@ -79,32 +78,32 @@ fn server_reads_badge_of_receiving_handle() {
         .resources
         .badge;
 
-    kernel_tests::kassert_eq!(badged_seen, BADGE.get());
-    kernel_tests::kassert_eq!(plain_seen, 0);
+    test_harness::check_eq!(badged_seen, BADGE.get());
+    test_harness::check_eq!(plain_seen, 0);
 
     client
         .join(JOIN_TIMEOUT)
         .expect("client joins before timeout");
-    kernel_tests::kassert_eq!(CLIENT_RESULT.load(SeqCst), 1);
+    test_harness::check_eq!(CLIENT_RESULT.load(SeqCst), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn client_cast_timeout_when_receiver_stays_open_without_recv() {
     let service = Port::create_service(None).expect("port create");
     let client = cast_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(Timeout::POLL);
 
-    kernel_tests::kassert_eq!(client.hand(7), Err(IpcError::Timeout));
+    test_harness::check_eq!(client.hand(7), Err(IpcError::Timeout));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn client_cast_reports_peer_close_when_receiver_closes_before_recv() {
     let service = Port::create_service(None).expect("port create");
     let client = cast_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(Timeout::POLL);
     drop(service.server);
 
-    kernel_tests::kassert_eq!(client.hand(7), Err(IpcError::PeerClosed));
+    test_harness::check_eq!(client.hand(7), Err(IpcError::PeerClosed));
 }
 
 impl answer_exhaustion::Service<Delivery> for Option<Port> {
@@ -116,7 +115,7 @@ impl answer_exhaustion::Service<Delivery> for Option<Port> {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn client_call_reports_resource_exhaustion_when_the_answer_does_not_fit() {
     let service = Port::create_service(None).expect("port create");
     let process = spawn_entry(ANSWER_EXHAUSTION_FIXTURE, service.client);
@@ -130,5 +129,5 @@ fn client_call_reports_resource_exhaustion_when_the_answer_does_not_fit() {
     let _ = answer_exhaustion::dispatch(&mut answer, frame);
 
     process.join(JOIN_TIMEOUT).expect("fixture exits");
-    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), EXHAUSTED_EXIT_CODE);
+    test_harness::check_eq!(process.exit_code().expect("exit code"), EXHAUSTED_EXIT_CODE);
 }

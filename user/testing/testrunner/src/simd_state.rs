@@ -7,7 +7,6 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel_tests::kernel_test;
 use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
 use syscall::SyscallOp;
 
@@ -174,7 +173,7 @@ fn simd_worker(shared: &Shared) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn simd_state_is_private_to_the_thread() {
     let shared = Arc::new(Shared {
         next_lane: AtomicU32::new(1),
@@ -194,6 +193,6 @@ fn simd_state_is_private_to_the_thread() {
             .expect("worker joins before timeout");
     }
 
-    kernel_tests::kassert!(main_keeps_state);
-    kernel_tests::kassert_eq!(shared.mismatches.load(Ordering::Relaxed), 0);
+    test_harness::check!(main_keeps_state);
+    test_harness::check_eq!(shared.mismatches.load(Ordering::Relaxed), 0);
 }

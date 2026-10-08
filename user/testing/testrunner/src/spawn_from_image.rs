@@ -1,7 +1,6 @@
 //! E2E спавна из реального userland-образа.
 
 use kernel_objects::{Resource, Signal};
-use kernel_tests::kernel_test;
 use runtime::Timeout;
 use syscall::{ProcessName, Rights, SIGNALED, SyscallError};
 use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE};
@@ -16,7 +15,7 @@ const PROCESS_CLEANUP_RETRY_ATTEMPTS: usize = 64;
 const PROCESS_CLEANUP_RETRY: Timeout = Timeout::from_millis(1);
 const PROCESS_CREATE_ROLLBACK_ATTEMPTS: usize = 80;
 
-#[kernel_test]
+#[test_harness::test]
 fn load_image_error_reclaims_each_created_process() {
     const BASE: u64 = 0x4000_0000;
     let segments = [
@@ -59,7 +58,7 @@ fn load_image_error_reclaims_each_created_process() {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn start_error_reclaims_each_loaded_process() {
     let child = crate::fixture::program(FIXTURE_ENTRY);
 

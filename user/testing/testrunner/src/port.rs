@@ -20,7 +20,6 @@ use core::{
 };
 
 use kernel_objects::{Error, Port, kind};
-use kernel_tests::kernel_test;
 use runtime::{
     JoinHandle, Priority, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_recv,
     port_send, signal_create, signal_set, signal_wait_one, spawn, spawn_owned,
@@ -48,7 +47,7 @@ fn ipc_va() -> usize {
 }
 
 fn assert_positive(v: i64) {
-    kernel_tests::kassert!(v > 0);
+    test_harness::check!(v > 0);
 }
 
 // SAFETY: ядро замаппило per-thread IPC-буфер user-RW (одна страница);
@@ -130,7 +129,7 @@ extern "C" fn sender_worker(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn send_recv_round_trip_sender_first() {
     let ep = Port::create().expect("port create");
     EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
@@ -142,12 +141,12 @@ fn send_recv_round_trip_sender_first() {
 
     let mut buf = [0u8; 8];
     let (len, reply) = ep.recv_bytes(&mut buf, Timeout::INFINITE).expect("recv");
-    kernel_tests::kassert!(reply.is_none());
-    kernel_tests::kassert_eq!(len, 4);
-    kernel_tests::kassert!(&buf[..4] == b"ping");
+    test_harness::check!(reply.is_none());
+    test_harness::check_eq!(len, 4);
+    test_harness::check!(&buf[..4] == b"ping");
 
     join(worker);
-    kernel_tests::kassert_eq!(WORKER_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(WORKER_RESULT.load(SeqCst), 0);
 }
 
 // --- (d, receiver-first): worker = receiver, main = sender. ------------------
@@ -170,7 +169,7 @@ extern "C" fn receiver_worker(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn send_recv_round_trip_receiver_first() {
     let ep = Port::create().expect("port create");
     EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
@@ -183,7 +182,7 @@ fn send_recv_round_trip_receiver_first() {
     ep.send_bytes(b"hello", Timeout::INFINITE).expect("send");
 
     join(worker);
-    kernel_tests::kassert_eq!(WORKER_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(WORKER_RESULT.load(SeqCst), 0);
 }
 
 // --- (b) call/reply round-trip: worker = server (Port::recv + Reply::reply), -
@@ -205,7 +204,7 @@ fn serve_one_call(ep: &Port) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn call_reply_round_trip() {
     let ep = Port::create().expect("port create");
     let ep_raw = ep.as_raw();
@@ -223,17 +222,17 @@ fn call_reply_round_trip() {
     unsafe {
         write_msg(va, b"req", &[]);
     }
-    kernel_tests::kassert_eq!(port_call(ep_raw, Timeout::INFINITE), 0);
+    test_harness::check_eq!(port_call(ep_raw, Timeout::INFINITE), 0);
 
     let mut buf = [0u8; 8];
     // SAFETY: собственный буфер.
     let (len, ncaps) = unsafe { read_msg(va, &mut buf) };
-    kernel_tests::kassert_eq!(len, 4);
-    kernel_tests::kassert_eq!(ncaps, 0);
-    kernel_tests::kassert!(&buf[..4] == b"resp");
+    test_harness::check_eq!(len, 4);
+    test_harness::check_eq!(ncaps, 0);
+    test_harness::check!(&buf[..4] == b"resp");
 
     join(worker);
-    kernel_tests::kassert_eq!(WORKER_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(WORKER_RESULT.load(SeqCst), 0);
 }
 
 // --- (c) cap transfer: worker = sender (передаёт Signal), main = recv. -
@@ -262,7 +261,7 @@ extern "C" fn cap_sender_worker(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn cap_transfer_through_port() {
     let ep = Port::create().expect("port create");
     EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
@@ -274,13 +273,13 @@ fn cap_transfer_through_port() {
 
     let va = ipc_va();
     let reply = ep.recv(Timeout::INFINITE).expect("recv");
-    kernel_tests::kassert!(reply.is_none());
+    test_harness::check!(reply.is_none());
 
     let mut buf = [0u8; 1];
     // SAFETY: собственный буфер главного потока.
     let (len, ncaps) = unsafe { read_msg(va, &mut buf) };
-    kernel_tests::kassert_eq!(len, 0);
-    kernel_tests::kassert_eq!(ncaps, 1);
+    test_harness::check_eq!(len, 0);
+    test_harness::check_eq!(ncaps, 1);
 
     // SAFETY: собственный буфер.
     let received_raw = unsafe { read_cap(va, 0) };
@@ -290,10 +289,10 @@ fn cap_transfer_through_port() {
 
     let observed = signal_wait_one(received, SIGNALED, Timeout::POLL);
     let bit = i64::from(SIGNALED);
-    kernel_tests::kassert!(observed & bit == bit);
+    test_harness::check!(observed & bit == bit);
 
     join(worker);
-    kernel_tests::kassert_eq!(WORKER_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(WORKER_RESULT.load(SeqCst), 0);
 }
 
 // --- (e) badge round-trip: сервер минтит две badged-копии, два клиента ---
@@ -319,7 +318,7 @@ extern "C" fn badge_client(index: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn badge_round_trip_two_clients() {
     let ep = Port::create().expect("port create");
     let ep_raw = ep.as_raw();
@@ -344,45 +343,45 @@ fn badge_round_trip_two_clients() {
     let mut seen = [0u64; 2];
     for slot in &mut seen {
         let reply = ep.recv(Timeout::INFINITE).expect("recv");
-        kernel_tests::kassert!(reply.is_none());
+        test_harness::check!(reply.is_none());
         // SAFETY: собственный буфер сервера.
         *slot = unsafe { read_badge(va) };
     }
 
     let got_a = seen[0] == BADGE_A || seen[1] == BADGE_A;
     let got_b = seen[0] == BADGE_B || seen[1] == BADGE_B;
-    kernel_tests::kassert!(got_a);
-    kernel_tests::kassert!(got_b);
-    kernel_tests::kassert!(seen[0] != seen[1]);
+    test_harness::check!(got_a);
+    test_harness::check!(got_b);
+    test_harness::check!(seen[0] != seen[1]);
 
     join(client_a);
     join(client_b);
     for result in &CLIENT_RESULTS {
-        kernel_tests::kassert_eq!(result.load(SeqCst), 0);
+        test_harness::check_eq!(result.load(SeqCst), 0);
     }
 }
 
 // --- (f) timeout/poll: блокирующие Port-syscall не виснут на RT-пути. ---------
 
-#[kernel_test]
+#[test_harness::test]
 fn send_poll_no_receiver_should_wait() {
     let ep = Port::create().expect("port create");
     assert_timeout(ep.send_bytes(b"x", Timeout::POLL));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn recv_poll_no_sender_should_wait() {
     let ep = Port::create().expect("port create");
     assert_timeout(ep.recv(Timeout::POLL).map(|_| ()));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn recv_finite_timeout_no_sender_should_wait() {
     let ep = Port::create().expect("port create");
     assert_timeout(ep.recv(Timeout::from_millis(10)).map(|_| ()));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn call_finite_timeout_no_server_should_wait() {
     let ep = Port::create().expect("port create");
     let mut buf = [0u8; 8];
@@ -393,5 +392,5 @@ fn call_finite_timeout_no_server_should_wait() {
 }
 
 fn assert_timeout(result: kernel_objects::Result<()>) {
-    kernel_tests::kassert!(matches!(result, Err(Error::Syscall(SyscallError::Timeout))));
+    test_harness::check!(matches!(result, Err(Error::Syscall(SyscallError::Timeout))));
 }

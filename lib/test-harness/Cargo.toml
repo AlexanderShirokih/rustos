@@ -1,12 +1,9 @@
 [package]
 license.workspace = true
-name = "test-harness-qemu"
+name = "test-harness"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
-
-[lib]
-name = "kernel_tests"
 
 [dependencies]
 io = { workspace = true }

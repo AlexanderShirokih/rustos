@@ -305,7 +305,7 @@ fn route_path<'m>(
     let mut full = [0; PATH_MAX];
     let full = rebase(scope, Path::new(path)?, &mut full)?;
     let Some((prefix, mount)) = covering(mounts, scope, full) else {
-        return Ok(None);
+        return uncovered(mounts, scope, full);
     };
     let tail = full.strip_prefix(prefix).ok_or(FileSystemError::NotFound)?;
     Ok(Some((mount, String::from(tail.as_str()), 0)))
@@ -320,9 +320,13 @@ fn route_pair<'m>(
     let (mut from_full, mut to_full) = ([0; PATH_MAX], [0; PATH_MAX]);
     let from = rebase(scope, Path::new(from)?, &mut from_full)?;
     let to = rebase(scope, Path::new(to)?, &mut to_full)?;
-    let (Some((prefix, mount)), Some((other, _))) =
-        (covering(mounts, scope, from), covering(mounts, scope, to))
-    else {
+    let (from_mount, to_mount) = (covering(mounts, scope, from), covering(mounts, scope, to));
+    let (Some((prefix, mount)), Some((other, _))) = (from_mount, to_mount) else {
+        for (path, found) in [(from, from_mount), (to, to_mount)] {
+            if found.is_none() {
+                uncovered(mounts, scope, path)?;
+            }
+        }
         return Ok(None);
     };
     if prefix != other {
@@ -351,6 +355,21 @@ fn covering<'m>(
             prefix.strip_prefix(scope).is_some() && path.strip_prefix(*prefix).is_some()
         })
         .max_by_key(|(prefix, _)| prefix.as_str().len())
+}
+
+fn uncovered<'m>(
+    mounts: &BTreeMap<String, Mount>,
+    scope: Path<'_>,
+    path: Path<'_>,
+) -> Result<Route<'m>, FileSystemError> {
+    let above_mount = mounts
+        .keys()
+        .filter_map(|prefix| Path::new(prefix).ok())
+        .any(|prefix| prefix.strip_prefix(scope).is_some() && prefix.strip_prefix(path).is_some());
+    if above_mount {
+        return Err(FileSystemError::NotFound);
+    }
+    Ok(None)
 }
 
 fn take_covered(tree: &mut Tree) -> Vec<Waiting> {

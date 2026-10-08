@@ -15,7 +15,6 @@ use ipc::{
     wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf},
 };
 use kernel_objects::{Delivery, IssuedHandle, Port, Resource, SessionTransport, Signal, kind};
-use kernel_tests::kernel_test;
 use runtime::{Mutex, PortTransport, Priority, Timeout, spawn, spawn_owned};
 use syscall::{Handle, ProcessName, kind as object_kind};
 use userland_loader::load_program;
@@ -293,7 +292,7 @@ fn tampered_reply_worker(exchange: TamperedReply) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_frame_hands_its_capability_to_the_parameter() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
@@ -320,10 +319,10 @@ fn a_frame_hands_its_capability_to_the_parameter() {
     watched.assert_closed();
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
-    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), 1);
+    test_harness::check_eq!(exchange.outcome.load(SeqCst), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_nested_call_does_not_change_the_received_set() {
     let service = Port::create_service(None).expect("port create");
     let nested = Port::create_service(None).expect("nested port create");
@@ -371,7 +370,7 @@ fn a_nested_call_does_not_change_the_received_set() {
     vendor.join(JOIN_TIMEOUT).expect("vendor joins");
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_unanswered_frame_refuses_its_caller() {
     let service = Port::create_service(None).expect("port create");
     let exchange = Exchange::new(service.client.as_raw());
@@ -387,10 +386,10 @@ fn an_unanswered_frame_refuses_its_caller() {
     serve_one(&transport, RECV_TIMEOUT, |frame| drop(frame)).expect("frame delivered");
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
-    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_REFUSED);
+    test_harness::check_eq!(exchange.outcome.load(SeqCst), OUTCOME_REFUSED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_answered_frame_does_not_close_its_reply_twice() {
     let service = Port::create_service(None).expect("port create");
     let exchange = Exchange::new(service.client.as_raw());
@@ -411,12 +410,12 @@ fn an_answered_frame_does_not_close_its_reply_twice() {
     .expect("frame answered");
     let signal = Signal::create().expect("signal after the answer");
 
-    kernel_tests::kassert!(signal.notify_all().is_ok());
+    test_harness::check!(signal.notify_all().is_ok());
     worker.join(JOIN_TIMEOUT).expect("worker joins");
-    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    test_harness::check_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
     let watched = Watched::create(FIRST_BADGE);
     let service = Port::create_service(None).expect("port create");
@@ -442,7 +441,7 @@ fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
     watched.assert_closed();
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_client_decode_failure_closes_its_reply_capabilities() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
@@ -460,12 +459,12 @@ fn a_client_decode_failure_closes_its_reply_capabilities() {
     let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
     let answer = client.request();
-    kernel_tests::kassert!(matches!(answer, Err(IpcError::MissingField)));
+    test_harness::check!(matches!(answer, Err(IpcError::MissingField)));
     watched.assert_closed();
     worker.join(JOIN_TIMEOUT).expect("reply worker joins");
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_scalar_reply_closes_extra_capabilities() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
@@ -483,12 +482,12 @@ fn a_scalar_reply_closes_extra_capabilities() {
     let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
     let answer = client.echo(PROBE_VALUE).expect("scalar answer");
-    kernel_tests::kassert_eq!(answer, PROBE_VALUE);
+    test_harness::check_eq!(answer, PROBE_VALUE);
     watched.assert_closed();
     worker.join(JOIN_TIMEOUT).expect("reply worker joins");
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_dropped_answer_closes_its_capability() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
@@ -511,7 +510,7 @@ fn a_dropped_answer_closes_its_capability() {
     worker.join(JOIN_TIMEOUT).expect("vendor joins");
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_undelivered_answer_closes_the_capability_it_vended() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
@@ -530,14 +529,14 @@ fn an_undelivered_answer_closes_the_capability_it_vended() {
     let client = client.with_wait(CALL_TIMEOUT);
     let answered = client.echo(PROBE_VALUE);
 
-    kernel_tests::kassert!(matches!(abandoned, Err(IpcError::Timeout)));
-    kernel_tests::kassert_eq!(answered, Ok(PROBE_VALUE));
+    test_harness::check!(matches!(abandoned, Err(IpcError::Timeout)));
+    test_harness::check_eq!(answered, Ok(PROBE_VALUE));
     watched.assert_closed();
     vendor.join(JOIN_TIMEOUT).expect("vendor joins");
-    kernel_tests::kassert_eq!(vending.outcome.load(SeqCst), 1);
+    test_harness::check_eq!(vending.outcome.load(SeqCst), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_kept_debt_is_answered_after_its_frame() {
     let service = Port::create_service(None).expect("port create");
     let exchange = Exchange::new(service.client.as_raw());
@@ -564,12 +563,12 @@ fn a_kept_debt_is_answered_after_its_frame() {
 
     debt.send(PROBE_VALUE).expect("the kept debt is answered");
 
-    kernel_tests::kassert_eq!(idle, Err(RecvError::Timeout));
+    test_harness::check_eq!(idle, Err(RecvError::Timeout));
     worker.join(JOIN_TIMEOUT).expect("worker joins");
-    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    test_harness::check_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_forwarded_debt_is_answered_by_its_new_holder() {
     let service = Port::create_service(None).expect("port create");
     let holder_port = Port::create_service(None).expect("holder port create");
@@ -609,11 +608,11 @@ fn a_forwarded_debt_is_answered_by_its_new_holder() {
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
     holder.join(JOIN_TIMEOUT).expect("holder joins");
-    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
-    kernel_tests::kassert_eq!(holding.outcome.load(SeqCst), 1);
+    test_harness::check_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    test_harness::check_eq!(holding.outcome.load(SeqCst), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_unsent_forward_keeps_the_debt_with_its_holder() {
     let service = Port::create_service(None).expect("port create");
     let absent = Port::create_service(None).expect("port without a receiver");
@@ -643,7 +642,7 @@ fn an_unsent_forward_keeps_the_debt_with_its_holder() {
         .with_wait(IDLE_TIMEOUT)
         .forward(debt)
         .expect_err("nobody receives the forward");
-    kernel_tests::kassert_eq!(refused.error, IpcError::Timeout);
+    test_harness::check_eq!(refused.error, IpcError::Timeout);
     refused
         .into_value()
         .expect("the debt returns to its holder")
@@ -668,11 +667,11 @@ fn an_unsent_forward_keeps_the_debt_with_its_holder() {
     second_worker
         .join(JOIN_TIMEOUT)
         .expect("second worker joins");
-    kernel_tests::kassert_eq!(first.outcome.load(SeqCst), OUTCOME_ANSWERED);
-    kernel_tests::kassert_eq!(second.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    test_harness::check_eq!(first.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    test_harness::check_eq!(second.outcome.load(SeqCst), OUTCOME_ANSWERED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_owning_transport_carries_both_sides_of_a_session() {
     let service = Port::create_service(None).expect("port create");
     let client = service.client;
@@ -694,10 +693,10 @@ fn an_owning_transport_carries_both_sides_of_a_session() {
     .expect("frame answered");
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
-    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
+    test_harness::check_eq!(exchange.outcome.load(SeqCst), OUTCOME_ANSWERED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_dropped_owning_transport_refuses_its_caller() {
     let service = Port::create_service(None).expect("port create");
     let client = service.client;
@@ -713,5 +712,5 @@ fn a_dropped_owning_transport_refuses_its_caller() {
     drop(SessionTransport::new(service.server));
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
-    kernel_tests::kassert_eq!(exchange.outcome.load(SeqCst), OUTCOME_REFUSED);
+    test_harness::check_eq!(exchange.outcome.load(SeqCst), OUTCOME_REFUSED);
 }

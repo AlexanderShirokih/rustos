@@ -6,8 +6,6 @@
 //! Совпадение адресов проверяется явно, чтобы тест не выродился в
 //! "две программы пишут по разным адресам".
 
-use kernel_tests::kernel_test;
-
 use crate::{
     fixture::Fixture,
     fixture_protocol::{OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_OK},
@@ -24,25 +22,25 @@ struct Slot {
 fn read_slot(fixture: &Fixture) -> Slot {
     let mut out = [0u8; READ_REPLY_LEN];
     let len = fixture.request(OP_READ_SLOT, 0, &[], &mut out);
-    kernel_tests::kassert_eq!(len, READ_REPLY_LEN);
+    test_harness::check_eq!(len, READ_REPLY_LEN);
     Slot {
         value: u64::from_le_bytes(out[..8].try_into().expect("8 bytes")),
         address: u64::from_le_bytes(out[8..].try_into().expect("8 bytes")),
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn two_processes_see_distinct_memory_at_same_va() {
     let a = Fixture::spawn();
     let b = Fixture::spawn();
 
-    kernel_tests::kassert_eq!(a.request_status(OP_WRITE_SLOT, SENTINEL_A, &[]), REPLY_OK);
-    kernel_tests::kassert_eq!(b.request_status(OP_WRITE_SLOT, SENTINEL_B, &[]), REPLY_OK);
+    test_harness::check_eq!(a.request_status(OP_WRITE_SLOT, SENTINEL_A, &[]), REPLY_OK);
+    test_harness::check_eq!(b.request_status(OP_WRITE_SLOT, SENTINEL_B, &[]), REPLY_OK);
 
     let slot_a = read_slot(&a);
     let slot_b = read_slot(&b);
 
-    kernel_tests::kassert_eq!(slot_a.address, slot_b.address);
-    kernel_tests::kassert_eq!(slot_a.value, SENTINEL_A);
-    kernel_tests::kassert_eq!(slot_b.value, SENTINEL_B);
+    test_harness::check_eq!(slot_a.address, slot_b.address);
+    test_harness::check_eq!(slot_a.value, SENTINEL_A);
+    test_harness::check_eq!(slot_b.value, SENTINEL_B);
 }

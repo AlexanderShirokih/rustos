@@ -11,7 +11,6 @@ use ipc::{
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
-use kernel_tests::kernel_test;
 use managed_component::{Departure, GrantError, Outcome, Status};
 use runtime::{Instant, JoinHandle, PortTransport, Priority, Timeout, port_send, spawn_owned};
 use syscall::{MAX_RESOURCE_DEPTH, ProcessName, Rights, SyscallError};
@@ -259,7 +258,7 @@ fn own_depth() -> u16 {
 
 fn resource_chain(depth: u16) -> Vec<Resource> {
     let own = own_depth();
-    kernel_tests::kassert!(own <= depth);
+    test_harness::check!(own <= depth);
     let mut chain = vec![Resource::self_resource().expect("self metering resource")];
     for _ in own..depth {
         let next = chain
@@ -272,34 +271,34 @@ fn resource_chain(depth: u16) -> Vec<Resource> {
     chain
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_undelivered_request_waits_for_the_next_accept() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
     let importer = probe_importer(&parent, provider);
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert!(parent.await_requests(1));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(finished(asking), GRANTED);
+    test_harness::check!(parent.await_requests(1));
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(finished(asking), GRANTED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_the_importer_did_not_receive_is_closed_by_the_provider() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         asked(&request::<probe::Protocol>(
             importer.as_raw(),
             PROBE_REQUIREMENT,
@@ -307,57 +306,57 @@ fn a_session_the_importer_did_not_receive_is_closed_by_the_provider() {
         )),
         failed(IpcError::Timeout)
     );
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(
         steps.run(Step::answer_badged(SESSION_BADGE)),
         answered(false)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         steps.run(Step::recv(SENDER_GONE_TIMEOUT)),
         report(outcome::SENDER_GONE, SESSION_BADGE)
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_provider_refusal_reaches_the_importer() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(
         steps.run(Step::answer_refusal(SessionError::Refused)),
         answered(true)
     );
-    kernel_tests::kassert_eq!(finished(asking), refused(SessionError::Refused));
+    test_harness::check_eq!(finished(asking), refused(SessionError::Refused));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_dropped_request_ends_the_importer_wait() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::drop_request()), report(outcome::DROPPED, 0));
-    kernel_tests::kassert_eq!(finished(asking), failed(IpcError::PeerClosed));
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::drop_request()), report(outcome::DROPPED, 0));
+    test_harness::check_eq!(finished(asking), failed(IpcError::PeerClosed));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_repeated_session_request_takes_the_place_of_the_waiting_one() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         asked(&request::<probe::Protocol>(
             importer.as_raw(),
             PROBE_REQUIREMENT,
@@ -366,162 +365,162 @@ fn a_repeated_session_request_takes_the_place_of_the_waiting_one() {
         failed(IpcError::Timeout)
     );
     let repeat = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert!(parent.await_requests(2));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(finished(repeat), GRANTED);
-    kernel_tests::kassert_eq!(
+    test_harness::check!(parent.await_requests(2));
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(finished(repeat), GRANTED);
+    test_harness::check_eq!(
         steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_request_replaced_by_a_repeat_is_answered_with_no_space() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
     let first = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert!(parent.await_requests(1));
+    test_harness::check!(parent.await_requests(1));
     let second = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert!(parent.await_requests(2));
-    kernel_tests::kassert_eq!(finished(first), refused(SessionError::NoSpace));
+    test_harness::check!(parent.await_requests(2));
+    test_harness::check_eq!(finished(first), refused(SessionError::NoSpace));
 
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(finished(second), GRANTED);
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(finished(second), GRANTED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_repeated_accept_takes_the_place_of_the_waiting_one() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
     steps.send(Step::accept(Timeout::INFINITE));
-    kernel_tests::kassert!(parent.await_accepts(2));
+    test_harness::check!(parent.await_accepts(2));
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert_eq!(steps.next(), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(finished(asking), GRANTED);
+    test_harness::check_eq!(steps.next(), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(finished(asking), GRANTED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_departure_of_an_importer_removes_its_waiting_request() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     let importer = parent.add(Child::new(IMPORTER_ENTRY, IMPORTER).requirement(
         PROBE_REQUIREMENT,
         Answer::export::<probe::Protocol>(provider),
     ));
-    kernel_tests::kassert!(parent.await_requests(1));
+    test_harness::check!(parent.await_requests(1));
     parent.terminate(importer, READ_EXIT_CODE);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(importer, Outcome::Exit(READ_EXIT_CODE)))
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_waiting_request_outlives_the_departure_of_the_provider() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert!(parent.await_requests(1));
+    test_harness::check!(parent.await_requests(1));
     steps.send(Step::exit(FAILURE_EXIT_CODE));
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
 
     parent.restart(provider);
-    kernel_tests::kassert_eq!(steps.next(), started(true));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(finished(asking), GRANTED);
+    test_harness::check_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(finished(asking), GRANTED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_request_lost_with_the_provider_is_repeated_by_the_start() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let importer = parent.add(Child::new(IMPORTER_ENTRY, IMPORTER).requirement(
         PROBE_REQUIREMENT,
         Answer::export::<probe::Protocol>(provider),
     ));
 
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     steps.send(Step::exit(FAILURE_EXIT_CODE));
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
-    kernel_tests::kassert!(parent.await_requests(2));
+    test_harness::check!(parent.await_requests(2));
 
     parent.restart(provider);
-    kernel_tests::kassert_eq!(steps.next(), started(true));
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
-    kernel_tests::kassert_eq!(parent.status(importer), Some(Status::Running));
+    test_harness::check_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
+    test_harness::check_eq!(parent.status(importer), Some(Status::Running));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_accept_is_paired_only_with_requests_routed_to_its_provider() {
     let parent = Parent::start();
     let mut routed = Steps::new();
     let mut other = Steps::new();
     let provider = parent.add(routed.child(PROVIDER));
     parent.add(other.child(SECOND_PROVIDER));
-    kernel_tests::kassert_eq!(routed.next(), started(true));
-    kernel_tests::kassert_eq!(other.next(), started(true));
+    test_harness::check_eq!(routed.next(), started(true));
+    test_harness::check_eq!(other.next(), started(true));
     let importer = probe_importer(&parent, provider);
 
     let asking = ask(&importer, PROBE_REQUIREMENT);
-    kernel_tests::kassert!(parent.await_requests(1));
-    kernel_tests::kassert_eq!(
+    test_harness::check!(parent.await_requests(1));
+    test_harness::check_eq!(
         other.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
-    kernel_tests::kassert_eq!(routed.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(routed.run(Step::answer_session()), answered(true));
-    kernel_tests::kassert_eq!(finished(asking), GRANTED);
+    test_harness::check_eq!(routed.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(routed.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(finished(asking), GRANTED);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_unexpected_call_on_the_startup_port_refuses_its_caller() {
     let parent = Parent::start();
     let outsider = parent.outsider(OUTSIDER_BADGE);
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         probe::Client::new(PortTransport::new(&outsider))
             .with_wait(OUTSIDER_REFUSAL_TIMEOUT)
             .ping(PING),
         Err(IpcError::PeerClosed)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         asked(&request::<probe::Protocol>(
             outsider.as_raw(),
             PROBE_REQUIREMENT,
@@ -531,12 +530,12 @@ fn an_unexpected_call_on_the_startup_port_refuses_its_caller() {
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_refused_requirement_ends_the_start_and_keeps_the_earlier_capabilities() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     let two = parent.add(
         Child::new(TWO_REQUIREMENTS_ENTRY, TWO_REQUIREMENTS)
@@ -546,34 +545,34 @@ fn a_refused_requirement_ends_the_start_and_keeps_the_earlier_capabilities() {
             )
             .requirement(SECOND_REQUIREMENT, Answer::Refuse),
     );
-    kernel_tests::kassert_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(
         steps.run(Step::answer_badged(SESSION_BADGE)),
         answered(true)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(
             two,
             Outcome::Exit(SECOND_SESSION_REFUSED_EXIT_CODE)
         ))
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         steps.run(Step::recv(SENDER_GONE_TIMEOUT)),
         report(outcome::SENDER_GONE, SESSION_BADGE)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         steps.run(Step::recv(NO_EVENT_TIMEOUT)),
         report(outcome::RECV_TIMEOUT, 0)
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_unanswered_requirement_ends_the_start_after_the_request_timeout() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     let since = Instant::now();
     let two = parent.add(
@@ -587,150 +586,150 @@ fn an_unanswered_requirement_ends_the_start_after_the_request_timeout() {
                 Answer::export::<probe::Protocol>(provider),
             ),
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(UNANSWERED_IMPORTER_DEPARTURE_TIMEOUT),
         Some(departed(two, Outcome::Exit(FIRST_IPC_FAILED_EXIT_CODE)))
     );
-    kernel_tests::kassert!(Instant::now().since(since).raw() >= STARTUP_REQUEST_TIMEOUT.raw());
-    kernel_tests::kassert_eq!(parent.requests(), 1);
+    test_harness::check!(Instant::now().since(since).raw() >= STARTUP_REQUEST_TIMEOUT.raw());
+    test_harness::check_eq!(parent.requests(), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_restart_of_a_running_child_changes_nothing() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let badge = parent.badge(provider);
-    kernel_tests::kassert!(badge.is_some());
+    test_harness::check!(badge.is_some());
 
     parent.restart(provider);
-    kernel_tests::kassert_eq!(steps.report(NO_REPORT_TIMEOUT), None);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(steps.report(NO_REPORT_TIMEOUT), None);
+    test_harness::check_eq!(
         steps.run(Step::accept(NO_EVENT_TIMEOUT)),
         step_failed(IpcError::Timeout)
     );
-    kernel_tests::kassert_eq!(parent.badge(provider), badge);
-    kernel_tests::kassert_eq!(parent.status(provider), Some(Status::Running));
+    test_harness::check_eq!(parent.badge(provider), badge);
+    test_harness::check_eq!(parent.status(provider), Some(Status::Running));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_exit_of_an_earlier_launch_is_reported_once_and_spares_the_next_launch() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     steps.send(Step::exit(FAILURE_EXIT_CODE));
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
     parent.restart(provider);
-    kernel_tests::kassert_eq!(steps.next(), started(true));
-    kernel_tests::kassert_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
-    kernel_tests::kassert_eq!(steps.run(Step::log()), report(outcome::LOGGED, 0));
-    kernel_tests::kassert_eq!(parent.status(provider), Some(Status::Running));
+    test_harness::check_eq!(steps.next(), started(true));
+    test_harness::check_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
+    test_harness::check_eq!(steps.run(Step::log()), report(outcome::LOGGED, 0));
+    test_harness::check_eq!(parent.status(provider), Some(Status::Running));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_child_terminated_by_its_parent_departs_with_the_named_code() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     parent.terminate(provider, TERMINATE_EXIT_CODE);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(TERMINATE_EXIT_CODE)))
     );
     parent.terminate(provider, TERMINATE_EXIT_CODE);
-    kernel_tests::kassert_eq!(parent.status(provider), Some(Status::Departed));
-    kernel_tests::kassert_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
+    test_harness::check_eq!(parent.status(provider), Some(Status::Departed));
+    test_harness::check_eq!(parent.departure(NO_DEPARTURE_TIMEOUT), None);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_living_child_that_closes_its_start_session_is_terminated() {
     let parent = Parent::start();
     let closed = parent.add(Child::new(CLOSED_ENTRY, CLOSED));
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(closed, Outcome::TakenDown))
     );
-    kernel_tests::kassert!(parent.last_depart().raw() < TAKE_DOWN_DURATION_MAX.raw());
+    test_harness::check!(parent.last_depart().raw() < TAKE_DOWN_DURATION_MAX.raw());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_panic_in_a_helper_thread_ends_the_child_process() {
     let parent = Parent::start();
     let helper = parent.add(Child::new(HELPER_PANIC_ENTRY, HELPER_PANIC));
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(helper, Outcome::Exit(PANIC_EXIT_CODE)))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_child_whose_parent_refuses_log_starts_without_it() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER).log(Answer::Refuse));
 
-    kernel_tests::kassert_eq!(steps.next(), started(false));
+    test_harness::check_eq!(steps.next(), started(false));
     steps.send(Step::exit(0));
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(0)))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_log_session_of_a_departed_incarnation_is_revoked() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
     let copy = parent
         .log_copy(provider)
         .expect("log copy of the incarnation");
 
     parent.terminate(provider, TERMINATE_EXIT_CODE);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(TERMINATE_EXIT_CODE)))
     );
     ipc_raw::write_frame(&[], &[]);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         port_send(copy.as_raw(), REVOKED_SEND_TIMEOUT),
         SyscallError::Revoked.as_return_value()
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_idle_provider_calls_accept_once() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     steps.send(Step::accept(Timeout::INFINITE));
     parent.add(Child::new(IMPORTER_ENTRY, IMPORTER).requirement(
         PROBE_REQUIREMENT,
         Answer::export::<probe::Protocol>(provider),
     ));
-    kernel_tests::kassert_eq!(steps.next(), accepted());
-    kernel_tests::kassert_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(steps.next(), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
     steps.send(Step::wait());
 
     pause(NO_ACCEPT_PAUSE);
-    kernel_tests::kassert_eq!(parent.accepts(), 1);
-    kernel_tests::kassert_eq!(parent.requests(), 1);
+    test_harness::check_eq!(parent.accepts(), 1);
+    test_harness::check_eq!(parent.requests(), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_parent_at_resource_depth_six_restarts_its_child() {
     let chain = resource_chain(DEPTH_SIX);
     let parent = Parent::start();
@@ -741,32 +740,32 @@ fn a_parent_at_resource_depth_six_restarts_its_child() {
             chain.last().expect("chain is non-empty"),
         )
         .expect("record at depth six");
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     steps.send(Step::exit(FAILURE_EXIT_CODE));
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(provider, Outcome::Exit(FAILURE_EXIT_CODE)))
     );
     parent.restart(provider);
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_parent_at_resource_depth_seven_is_refused_a_child_record() {
     let chain = resource_chain(DEPTH_SEVEN);
     let resource = chain.last().expect("chain is non-empty");
     let parent = Parent::start();
     let steps = Steps::new();
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         parent.add_on(steps.child(PROVIDER).budget(DEPTH_BUDGET), resource),
         Err(Error::Syscall(SyscallError::ResourceExhausted))
     ));
-    kernel_tests::kassert!(resource.split(DEPTH_BUDGET).is_ok());
+    test_harness::check!(resource.split(DEPTH_BUDGET).is_ok());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_repeated_key_in_add_is_refused() {
     let resource = Resource::self_resource().expect("self metering resource");
     let program = crate::fixture::program(EXPORT_ENTRY);
@@ -783,7 +782,7 @@ fn a_repeated_key_in_add_is_refused() {
         )
         .expect("first record added");
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         children.add(
             0u16,
             program,
@@ -796,13 +795,13 @@ fn a_repeated_key_in_add_is_refused() {
     ));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn next_launch_is_infinite_without_a_waiting_record_and_poll_with_a_fresh_one() {
     let resource = Resource::self_resource().expect("self metering resource");
     let program = crate::fixture::program(EXPORT_ENTRY);
     let budget = crate::fixture::process_bytes(&program);
     let mut children = managed_component::Children::new().expect("startup port created");
-    kernel_tests::kassert_eq!(children.next_launch(), Timeout::INFINITE);
+    test_harness::check_eq!(children.next_launch(), Timeout::INFINITE);
 
     children
         .add(
@@ -814,19 +813,19 @@ fn next_launch_is_infinite_without_a_waiting_record_and_poll_with_a_fresh_one() 
             Timeout::from_secs(1),
         )
         .expect("record added");
-    kernel_tests::kassert_eq!(children.next_launch(), Timeout::POLL);
+    test_harness::check_eq!(children.next_launch(), Timeout::POLL);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_grant_of_another_kind_on_a_granted_requirement_is_wrong_type() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
-    kernel_tests::kassert_eq!(steps.next(), started(true));
+    test_harness::check_eq!(steps.next(), started(true));
 
     let mismatched = parent.log_copy_as_resource(provider);
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         mismatched,
         Err(GrantError::Kernel(Error::Syscall(SyscallError::WrongType)))
     ));

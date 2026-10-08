@@ -3,7 +3,6 @@
 //! физический фрейм, но по своему VA.
 
 use kernel_objects::Resource;
-use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, UserMemFlags, signal_set};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, kind};
 
@@ -15,7 +14,7 @@ use crate::{
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0x5EED_F00D_C0DE_AB1E;
 
-#[kernel_test]
+#[test_harness::test]
 fn memory_region_shared_with_child() {
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
@@ -40,16 +39,16 @@ fn memory_region_shared_with_child() {
     let leased_raw = lease.as_raw();
 
     let status = fixture.request_status(OP_MAP_CHECK, PATTERN, &[leased_raw.raw()]);
-    kernel_tests::kassert_eq!(status, REPLY_OK);
+    test_harness::check_eq!(status, REPLY_OK);
 
     let stale = Handle::<kind::Signal>::from_abi(lease.into_raw().as_nonzero());
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         signal_set(stale, SIGNALED, 0, WakeCount::None),
         SyscallError::BadHandle.as_return_value()
     );
 
     // SAFETY: см. выше.
     unsafe {
-        kernel_tests::kassert_eq!(slot.read_volatile(), !PATTERN);
+        test_harness::check_eq!(slot.read_volatile(), !PATTERN);
     }
 }

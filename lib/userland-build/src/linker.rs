@@ -2,7 +2,7 @@
 //!
 //! Секция `.component.manifest` стоит вне загружаемых. Её читает сборщик образа из ELF, а в
 //! адресное пространство процесса она не попадает. Таблица тестов, наоборот, лежит в `.rodata`
-//! между `__tests_kernel_start` и `__tests_kernel_end`: её читает сам процесс.
+//! между `__tests_start` и `__tests_end`: её читает сам процесс.
 
 use std::{env, fs, path::PathBuf};
 
@@ -19,9 +19,9 @@ SECTIONS
 
   .rodata ALIGN(0x1000) : {
     . = ALIGN(8);
-    __tests_kernel_start = .;
-    KEEP(*(.tests.kernel))
-    __tests_kernel_end = .;
+    __tests_start = .;
+    KEEP(*(.tests))
+    __tests_end = .;
 
     *(.rodata .rodata.*)
   }

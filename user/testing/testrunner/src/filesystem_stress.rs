@@ -13,7 +13,6 @@ use filesystem_abi::{
     OpenFlags, file_system,
 };
 use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
-use kernel_tests::kernel_test;
 use runtime::UserMemFlags;
 
 use crate::{
@@ -700,7 +699,7 @@ impl Run {
     }
 }
 
-#[kernel_test(stress)]
+#[test_harness::test(stress)]
 fn filesystem_ramfs_stress() {
     let plan = StressPlan::load();
     for seed in plan.seeds() {
@@ -736,7 +735,7 @@ fn scope_of(seed: u64) -> String {
 }
 
 fn report(seed: u64, step: u64, operation: &'static str, mismatch: &Mismatch) -> ! {
-    kernel_tests::macros::fail(
+    test_harness::macros::fail(
         format_args!("stress seed={seed} step={step} operation={operation}: {mismatch}"),
         file!(),
         line!(),

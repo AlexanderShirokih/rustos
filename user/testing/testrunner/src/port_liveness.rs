@@ -16,7 +16,6 @@ use ipc::{
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Error, MemoryRegion, Port, Reply, Result, kind};
-use kernel_tests::kernel_test;
 use runtime::{
     Instant, PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr,
     port_call, port_send, spawn, spawn_owned,
@@ -61,7 +60,7 @@ fn received_badge() -> u64 {
 fn pause(budget: Timeout) {
     let idle = Port::create().expect("port create");
     let waited = idle.recv(budget);
-    kernel_tests::kassert!(matches!(waited, Err(Error::Syscall(SyscallError::Timeout))));
+    test_harness::check!(matches!(waited, Err(Error::Syscall(SyscallError::Timeout))));
 }
 
 fn client_capability(slot: &AtomicU32) -> Handle<kind::Port> {
@@ -71,11 +70,11 @@ fn client_capability(slot: &AtomicU32) -> Handle<kind::Port> {
 }
 
 fn assert_sender_gone(result: Result<Option<Reply>>, badge: u64) {
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         result.err(),
         Some(Error::Syscall(SyscallError::SenderGone))
     ));
-    kernel_tests::kassert_eq!(received_badge(), badge);
+    test_harness::check_eq!(received_badge(), badge);
 }
 
 static REFUSED_CLIENT_CAP: AtomicU32 = AtomicU32::new(0);
@@ -93,7 +92,7 @@ extern "C" fn refused_client(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn sender_is_refused_when_the_last_receiver_goes() {
     let port = Port::create().expect("port create");
     let client = port
@@ -111,18 +110,18 @@ fn sender_is_refused_when_the_last_receiver_goes() {
     drop(port);
     worker.join(JOIN_TIMEOUT).expect("client joins");
 
-    kernel_tests::kassert_eq!(REFUSED_HANDSHAKE.load(SeqCst), 0);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(REFUSED_HANDSHAKE.load(SeqCst), 0);
+    test_harness::check_eq!(
         SyscallError::from_return(REFUSED_PARKED_CALL.load(SeqCst)),
         Some(SyscallError::PeerClosed)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         SyscallError::from_return(REFUSED_FRESH_CALL.load(SeqCst)),
         Some(SyscallError::Revoked)
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn badge_departs_when_the_client_process_dies() {
     let port = Port::create().expect("port create");
     let client = port
@@ -131,10 +130,10 @@ fn badge_departs_when_the_client_process_dies() {
     let process = spawn_entry("/badge-client/exec", client);
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
-    kernel_tests::kassert_eq!(received_badge(), DYING_CLIENT_BADGE.get());
+    test_harness::check_eq!(received_badge(), DYING_CLIENT_BADGE.get());
 
     process.join(JOIN_TIMEOUT).expect("client terminates");
-    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
+    test_harness::check_eq!(process.exit_code().expect("exit code"), 0);
 
     assert_sender_gone(port.recv(SERVE_TIMEOUT), DYING_CLIENT_BADGE.get());
 }
@@ -152,7 +151,7 @@ fn living_client(badged: Port, plain: Port) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn badge_departs_when_a_living_client_closes_its_capability() {
     let port = Port::create().expect("port create");
     let badged = port
@@ -171,16 +170,16 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
     .expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("badged frame");
-    kernel_tests::kassert_eq!(received_badge(), LIVING_CLIENT_BADGE.get());
+    test_harness::check_eq!(received_badge(), LIVING_CLIENT_BADGE.get());
 
     assert_sender_gone(port.recv(SERVE_TIMEOUT), LIVING_CLIENT_BADGE.get());
 
     port.recv(SERVE_TIMEOUT)
         .expect("frame from the living client");
-    kernel_tests::kassert_eq!(received_badge(), 0);
+    test_harness::check_eq!(received_badge(), 0);
 
     worker.join(JOIN_TIMEOUT).expect("client joins");
-    kernel_tests::kassert_eq!(LIVING_CLIENT_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(LIVING_CLIENT_RESULT.load(SeqCst), 0);
 }
 
 static SERVED_CLIENT_CLOSED: AtomicU32 = AtomicU32::new(0);
@@ -194,7 +193,7 @@ fn served_client(badged: Port) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn departed_badge_waits_for_the_busy_server() {
     let port = Port::create().expect("port create");
     let badged = port
@@ -207,7 +206,7 @@ fn departed_badge_waits_for_the_busy_server() {
         .expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
-    kernel_tests::kassert_eq!(received_badge(), SERVED_CLIENT_BADGE.get());
+    test_harness::check_eq!(received_badge(), SERVED_CLIENT_BADGE.get());
 
     while SERVED_CLIENT_CLOSED.load(SeqCst) == 0 {
         core::hint::spin_loop();
@@ -216,23 +215,23 @@ fn departed_badge_waits_for_the_busy_server() {
     assert_sender_gone(port.recv(Timeout::POLL), SERVED_CLIENT_BADGE.get());
 
     worker.join(JOIN_TIMEOUT).expect("client joins");
-    kernel_tests::kassert_eq!(SERVED_CLIENT_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(SERVED_CLIENT_RESULT.load(SeqCst), 0);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn served_child_exits_when_its_client_capability_goes() {
     let fixture = Fixture::spawn();
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         fixture.request_status(OP_WRITE_SLOT, SESSION_PROBE, &[]),
         REPLY_OK
     );
 
     let process = fixture.into_process();
     process.join(JOIN_TIMEOUT).expect("fixture terminates");
-    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
+    test_harness::check_eq!(process.exit_code().expect("exit code"), 0);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn kernel_server_serves_past_a_departed_badge() {
     let session = Port::from(
         handle_duplicate(
@@ -253,7 +252,7 @@ fn kernel_server_serves_past_a_departed_badge() {
         .expect("log after the badge departure");
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn kernel_server_closes_the_capabilities_of_a_discarded_frame() {
     let rider = Port::create().expect("port create");
     let derived = rider
@@ -261,11 +260,11 @@ fn kernel_server_closes_the_capabilities_of_a_discarded_frame() {
         .expect("mint derived capability");
 
     crate::ipc_raw::write_frame(&[0], &[rider.into_raw().raw()]);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         SyscallError::from_return(port_call(crate::bootstrap_handle(), SERVE_TIMEOUT)),
         Some(SyscallError::PeerClosed)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         SyscallError::from_return(port_send(derived.as_raw(), Timeout::POLL)),
         Some(SyscallError::Revoked)
     );
@@ -294,7 +293,7 @@ extern "C" fn second_client(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn departed_badge_names_the_session_that_left() {
     let port = Port::create().expect("port create");
     let first = port
@@ -318,15 +317,15 @@ fn departed_badge_names_the_session_that_left() {
         port.recv(SERVE_TIMEOUT).expect("client frame");
         *slot = received_badge();
     }
-    kernel_tests::kassert!(seen.contains(&FIRST_CLIENT_BADGE.get()));
-    kernel_tests::kassert!(seen.contains(&SECOND_CLIENT_BADGE.get()));
+    test_harness::check!(seen.contains(&FIRST_CLIENT_BADGE.get()));
+    test_harness::check!(seen.contains(&SECOND_CLIENT_BADGE.get()));
 
     first_worker.join(JOIN_TIMEOUT).expect("first client joins");
     second_worker
         .join(JOIN_TIMEOUT)
         .expect("second client joins");
-    kernel_tests::kassert_eq!(FIRST_CLIENT_RESULT.load(SeqCst), 0);
-    kernel_tests::kassert_eq!(SECOND_CLIENT_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(FIRST_CLIENT_RESULT.load(SeqCst), 0);
+    test_harness::check_eq!(SECOND_CLIENT_RESULT.load(SeqCst), 0);
 
     first.close().expect("close first client capability");
     assert_sender_gone(port.recv(SERVE_TIMEOUT), FIRST_CLIENT_BADGE.get());
@@ -355,7 +354,7 @@ extern "C" fn stale_frame_client(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_frame_with_a_stale_handle_leaves_a_listener_serving() {
     let port = Port::create().expect("port create");
     let client = port
@@ -371,14 +370,14 @@ fn a_frame_with_a_stale_handle_leaves_a_listener_serving() {
     let incoming = server
         .recv(&mut bytes, SERVE_TIMEOUT)
         .expect("frame after the refused one");
-    kernel_tests::kassert_eq!(incoming.bytes, &[2u8][..]);
+    test_harness::check_eq!(incoming.bytes, &[2u8][..]);
 
     worker.join(JOIN_TIMEOUT).expect("client joins");
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         SyscallError::from_return(STALE_FRAME_SEND.load(SeqCst)),
         Some(SyscallError::BadHandle)
     );
-    kernel_tests::kassert_eq!(STALE_FRAME_FOLLOWUP.load(SeqCst), 0);
+    test_harness::check_eq!(STALE_FRAME_FOLLOWUP.load(SeqCst), 0);
 }
 
 static LATE_SENDER_CAP: AtomicU32 = AtomicU32::new(0);
@@ -392,7 +391,7 @@ extern "C" fn late_stale_sender(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_failed_transfer_does_not_extend_the_receive_deadline() {
     let port = Port::create().expect("port create");
     let client = port
@@ -406,19 +405,19 @@ fn a_failed_transfer_does_not_extend_the_receive_deadline() {
     let received = port.recv(DEADLINE_RECV);
     let elapsed = Instant::now().since(started);
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         received,
         Err(Error::Syscall(SyscallError::Timeout))
     ));
-    kernel_tests::kassert!(elapsed.raw() < DEADLINE_RECV.raw() + SENDER_DELAY.raw());
+    test_harness::check!(elapsed.raw() < DEADLINE_RECV.raw() + SENDER_DELAY.raw());
     worker.join(JOIN_TIMEOUT).expect("sender joins");
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         SyscallError::from_return(LATE_SENDER_RESULT.load(SeqCst)),
         Some(SyscallError::BadHandle)
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn kernel_server_serves_past_frames_it_refuses() {
     let refused: [(&[u8], &[u32], SyscallError); 3] = [
         (&[0], &[stale_handle()], SyscallError::BadHandle),
@@ -427,7 +426,7 @@ fn kernel_server_serves_past_frames_it_refuses() {
     ];
     for (body, caps, error) in refused {
         crate::ipc_raw::write_frame(body, caps);
-        kernel_tests::kassert_eq!(
+        test_harness::check_eq!(
             SyscallError::from_return(port_call(crate::bootstrap_handle(), SERVE_TIMEOUT)),
             Some(error)
         );
@@ -440,7 +439,7 @@ fn kernel_server_serves_past_frames_it_refuses() {
     drop(MemoryRegion::from(image));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn kernel_server_closes_what_it_vended_to_a_full_table() {
     let kernel = Port::from(
         handle_duplicate(
@@ -453,30 +452,30 @@ fn kernel_server_closes_what_it_vended_to_a_full_table() {
     let process = spawn_entry(VEND_EXHAUSTION_FIXTURE, kernel);
 
     process.join(JOIN_TIMEOUT).expect("fixture exits");
-    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
+    test_harness::check_eq!(process.exit_code().expect("exit code"), 0);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_hardware_session_does_not_receive() {
     let session = crate::hardware_session().into_handle();
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         session.recv(Timeout::POLL),
         Err(Error::Syscall(SyscallError::AccessDenied))
     ));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn each_role_refuses_the_operations_of_the_other() {
     let session = crate::hardware_session();
     let as_bootstrap = bootstrap::Client::new(PortTransport::new(session.handle().as_raw()));
     let as_hardware = hardware::Client::new(PortTransport::new(crate::bootstrap_handle()));
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         as_bootstrap.acquire_userland_image().err(),
         Some(IpcError::PeerClosed)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         as_hardware.acquire_irq_control().err(),
         Some(IpcError::PeerClosed)
     );

@@ -3,11 +3,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use hal_aarch64_paging::preset::KernelData;
-use kernel_tests::kernel_test;
 
 use crate::memory::layout::{MemoryLayout, MemoryRegion, RegionTag};
 
-#[kernel_test]
+#[test_harness::test]
 fn free_heap_regions_exclude_unmapped_regions() {
     let mut layout = MemoryLayout::new();
 
@@ -28,7 +27,7 @@ fn free_heap_regions_exclude_unmapped_regions() {
         .map(|interval| (interval.start.as_usize(), interval.end.as_usize()))
         .collect();
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         free,
         [
             (0x4000_0000, 0x4040_0000),
@@ -38,7 +37,7 @@ fn free_heap_regions_exclude_unmapped_regions() {
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mapped_regions_exclude_unmapped_intervals_except_kernel() {
     let mut layout = MemoryLayout::new();
 
@@ -65,7 +64,7 @@ fn mapped_regions_exclude_unmapped_intervals_except_kernel() {
         .map(|region| (region.tag, region.start.as_usize(), region.end.as_usize()))
         .collect();
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         mapped,
         [
             (RegionTag::Other, 0x403f_0000, 0x4040_0000),

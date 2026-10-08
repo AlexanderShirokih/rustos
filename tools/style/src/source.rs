@@ -223,7 +223,7 @@ fn attribute_head(text: &str) -> String {
     text.trim_start_matches(['#', '!', '['])
         .trim_start()
         .chars()
-        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+        .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '_' | ':'))
         .collect()
 }
 

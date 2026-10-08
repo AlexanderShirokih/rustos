@@ -4,7 +4,6 @@
 
 extern crate alloc;
 
-use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use scheduler::{AddressSpace, ArchContext};
 
@@ -25,7 +24,7 @@ fn read_ttbr0() -> u64 {
     raw
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn ttbr0_tracks_active_address_space() {
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
@@ -34,13 +33,13 @@ fn ttbr0_tracks_active_address_space() {
     let root = handle.root.as_u64();
 
     Aarch64Context::switch_address_space(Some(handle));
-    kernel_tests::kassert_eq!(read_ttbr0() & TTBR0_ROOT_MASK, root);
+    test_harness::check_eq!(read_ttbr0() & TTBR0_ROOT_MASK, root);
 
     // Возврат в kernel-AS идёт до drop: TLB держит трансляции освобождённого
     // user-AS до следующего switch.
     Aarch64Context::switch_address_space(None);
-    kernel_tests::kassert_eq!(read_ttbr0(), 0);
+    test_harness::check_eq!(read_ttbr0(), 0);
 
     drop(user_as);
-    kernel_tests::kassert_eq!(read_ttbr0(), 0);
+    test_harness::check_eq!(read_ttbr0(), 0);
 }

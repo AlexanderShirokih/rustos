@@ -18,7 +18,6 @@ use ipc::{
     wire::{Bytes, IpcError, Str},
 };
 use kernel_objects::{Error, IrqLine, MemoryRegion, Port, Session, SessionTransport};
-use kernel_tests::kernel_test;
 use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
 use platform_abi::{Description, MmioWindow, PlatformError, platform};
@@ -578,7 +577,7 @@ fn answered(request: JoinHandle) -> u32 {
 fn budget_scenario() -> (Composition, Importer) {
     let composition = scenario(&[ROUTER, RAM_FS, HOLDER, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(HELD), probe_of(PROBE), view(TMP_VIEW, "/tmp")]);
-    kernel_tests::kassert_eq!(await_component_lines(HOLDER.name, 1), ["budget held"]);
+    test_harness::check_eq!(await_component_lines(HOLDER.name, 1), ["budget held"]);
     (composition, importer)
 }
 
@@ -632,7 +631,7 @@ fn refusals() -> Vec<String> {
     lines
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_log_badge_names_its_record() {
     let plan = encoded(&[PARENT, EXPORT, IDLE_EXPORT]);
     let names = ComponentNames::of(&plan);
@@ -644,14 +643,14 @@ fn a_log_badge_names_its_record() {
     });
     let unnamed = names.name(log_badge(3).get());
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         owners.each_ref().map(LogBuffer::as_str),
         [EXPORT.name, IDLE_EXPORT.name]
     );
-    kernel_tests::kassert!(unnamed.is_none());
+    test_harness::check!(unnamed.is_none());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn compiled_plan_carries_the_boot_composition() {
     let plan = image()
         .plan(BOOT_PLAN_ENTRY)
@@ -684,66 +683,66 @@ fn compiled_plan_carries_the_boot_composition() {
     });
 
     for (scope, mountpoint, serves, mounts_nothing) in file_systems {
-        kernel_tests::kassert_eq!(mountpoint, Some(scope));
-        kernel_tests::kassert!(serves);
-        kernel_tests::kassert!(mounts_nothing);
+        test_harness::check_eq!(mountpoint, Some(scope));
+        test_harness::check!(serves);
+        test_harness::check!(mounts_nothing);
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_program_entry_read_as_a_plan_names_the_boot_failure() {
     let failure = image().plan(EXPORT_ENTRY).err();
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         failure,
         Some(BootFailure::Plan(PlanDecodeError::InvalidMagic(
             USERLAND_PROGRAM_MAGIC
         )))
     );
-    kernel_tests::kassert_eq!(failure.map(BootFailure::stopped), Some(Stopped::BadImage));
+    test_harness::check_eq!(failure.map(BootFailure::stopped), Some(Stopped::BadImage));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_requirement_outside_the_record_of_the_caller_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(
+    test_harness::check!(
         lines
             .iter()
             .any(|line| line == "outside Err(Parent(Refused))")
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_requirement_of_another_protocol_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(
+    test_harness::check!(
         lines
             .iter()
             .any(|line| line == "protocol Err(Parent(Refused))")
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_accept_of_an_export_outside_the_record_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(
+    test_harness::check!(
         lines
             .iter()
             .any(|line| line == "accept Err(Parent(Refused))")
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_log_requirement_of_another_protocol_is_refused_at_once() {
     let lines = refusals();
 
-    kernel_tests::kassert!(lines.iter().any(|line| line == "log Err(Parent(Refused))"));
+    test_harness::check!(lines.iter().any(|line| line == "log Err(Parent(Refused))"));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
     let composition = started(
         &[ComponentSpec {
@@ -757,11 +756,11 @@ fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
 
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
 
-    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_importer_cannot_take_the_requests_of_a_child_export() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -778,13 +777,13 @@ fn an_importer_cannot_take_the_requests_of_a_child_export() {
     .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(taken, Err(RequestError::Parent(AcceptError::Refused)));
-    kernel_tests::kassert_eq!(log, Err(RequestError::Parent(SessionError::Refused)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(taken, Err(RequestError::Parent(AcceptError::Refused)));
+    test_harness::check_eq!(log, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_importer_stays_waiting_while_its_provider_lives_without_accept() {
     let composition = scenario(&[IDLE_EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -792,12 +791,12 @@ fn an_importer_stays_waiting_while_its_provider_lives_without_accept() {
 
     let waited = requested::<probe::Protocol>(&importer, PROBE, IDLE_PROVIDER_REQUEST_TIMEOUT);
 
-    kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(waited, Err(RequestError::Ipc(IpcError::Timeout)));
+    test_harness::check_eq!(started, ["started"]);
+    test_harness::check_eq!(waited, Err(RequestError::Ipc(IpcError::Timeout)));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_component_logs_under_its_instance_name() {
     let composition = scenario(&[
         ComponentSpec {
@@ -812,23 +811,23 @@ fn a_component_logs_under_its_instance_name() {
 
     let sources = await_component_sources(&["first-probe", "second-probe"]);
 
-    kernel_tests::kassert!(sources.iter().any(|source| source == "first-probe/export"));
-    kernel_tests::kassert!(sources.iter().any(|source| source == "second-probe/export"));
-    kernel_tests::kassert!(!sources.iter().any(|source| source.starts_with("badge-")));
+    test_harness::check!(sources.iter().any(|source| source == "first-probe/export"));
+    test_harness::check!(sources.iter().any(|source| source == "second-probe/export"));
+    test_harness::check!(!sources.iter().any(|source| source.starts_with("badge-")));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_child_log_session_refuses_duplicate() {
     let composition = scenario(&[LOG_DUPLICATE]);
 
     let lines = await_component_lines(LOG_DUPLICATE.name, 1);
 
-    kernel_tests::kassert_eq!(lines, ["Err(Syscall(AccessDenied))"]);
+    test_harness::check_eq!(lines, ["Err(Syscall(AccessDenied))"]);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
     let composition = scenario(&[IDLE_EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(HELD), probe_of(PROBE)]);
@@ -846,14 +845,14 @@ fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
         component_startup::open::<probe::Protocol>(&again, COMPONENT_REPLY_TIMEOUT).map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(held_answer, UNAVAILABLE);
-    kernel_tests::kassert_eq!(again, Err(RequestError::Parent(SessionError::Unavailable)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(started, ["started"]);
+    test_harness::check_eq!(held_answer, UNAVAILABLE);
+    test_harness::check_eq!(again, Err(RequestError::Parent(SessionError::Unavailable)));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
     let composition = scenario(&[ComponentSpec {
         restarts: 2,
@@ -869,14 +868,14 @@ fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
     let again = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let lines = await_component_lines(EXPORT.name, 2);
 
-    kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Unavailable)));
-    kernel_tests::kassert_eq!(again, Err(RequestError::Parent(SessionError::Unbound)));
-    kernel_tests::kassert_eq!(lines, ["started"]);
+    test_harness::check_eq!(started, ["started"]);
+    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Unavailable)));
+    test_harness::check_eq!(again, Err(RequestError::Parent(SessionError::Unbound)));
+    test_harness::check_eq!(lines, ["started"]);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_failing_child_spends_each_restart_once() {
     let composition = scenario(&[ComponentSpec {
         restarts: 2,
@@ -886,12 +885,12 @@ fn a_failing_child_spends_each_restart_once() {
     let failures = await_component_lines(LOG_DUPLICATE.name, 3);
     let after = await_component_lines(LOG_DUPLICATE.name, 4);
 
-    kernel_tests::kassert_eq!(failures, ["Err(Syscall(AccessDenied))"; 3]);
-    kernel_tests::kassert_eq!(after.len(), 3);
+    test_harness::check_eq!(failures, ["Err(Syscall(AccessDenied))"; 3]);
+    test_harness::check_eq!(after.len(), 3);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_child_taken_down_for_a_closed_startup_session_spends_a_restart() {
     let composition = scenario(&[ComponentSpec {
         restarts: 1,
@@ -901,12 +900,12 @@ fn a_child_taken_down_for_a_closed_startup_session_spends_a_restart() {
     let restarted = await_component_lines(CLOSED.name, 2);
     let after = await_component_lines(CLOSED.name, 3);
 
-    kernel_tests::kassert_eq!(restarted.len(), 2);
-    kernel_tests::kassert_eq!(after.len(), 2);
+    test_harness::check_eq!(restarted.len(), 2);
+    test_harness::check_eq!(after.len(), 2);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_child_exit_is_handled_while_an_importer_waits_for_an_accept() {
     let leaving = ComponentSpec {
         name: "leaving",
@@ -927,14 +926,14 @@ fn a_child_exit_is_handled_while_an_importer_waits_for_an_accept() {
     let restarted = await_component_lines(leaving.name, 2);
     let held_answer = answered(held);
 
-    kernel_tests::kassert_eq!(idle_started, ["started"]);
-    kernel_tests::kassert_eq!(leaving_started, ["started"]);
-    kernel_tests::kassert_eq!(restarted, ["started", "started"]);
-    kernel_tests::kassert_eq!(held_answer, TIMED_OUT);
+    test_harness::check_eq!(idle_started, ["started"]);
+    test_harness::check_eq!(leaving_started, ["started"]);
+    test_harness::check_eq!(restarted, ["started", "started"]);
+    test_harness::check_eq!(held_answer, TIMED_OUT);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_provider_restart_leaves_its_importer_running() {
     let composition = scenario(&[
         ComponentSpec {
@@ -951,13 +950,13 @@ fn a_provider_restart_leaves_its_importer_running() {
     });
     let lines = await_component_lines(PROBE_IMPORTER.name, 2);
 
-    kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(incarnations, [2, 3]);
-    kernel_tests::kassert_eq!(lines, ["started"]);
+    test_harness::check_eq!(started, ["started"]);
+    test_harness::check_eq!(incarnations, [2, 3]);
+    test_harness::check_eq!(lines, ["started"]);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_component_out_of_restarts_does_not_stop_the_root() {
     let composition = scenario(&[
         ComponentSpec {
@@ -977,17 +976,17 @@ fn a_component_out_of_restarts_does_not_stop_the_root() {
         component_startup::open::<namespace::Protocol>(&router, COMPONENT_REPLY_TIMEOUT).map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(restarted.len(), 2);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(started, ["started"]);
+    test_harness::check_eq!(restarted.len(), 2);
+    test_harness::check_eq!(
         refused,
         Err(RequestError::Parent(SessionError::Unavailable))
     );
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_child_is_served_while_another_waits_for_its_budget() {
     let (composition, importer) = budget_scenario();
 
@@ -1000,13 +999,13 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
         .expect("unlink call");
     let pinged = ping_found(&first_found::<probe::Protocol>(&importer, HELD));
 
-    kernel_tests::kassert_eq!(served, Some(Ok(())));
-    kernel_tests::kassert!(removed.is_ok());
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(served, Some(Ok(())));
+    test_harness::check!(removed.is_ok());
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
     let (composition, importer) = budget_scenario();
 
@@ -1017,12 +1016,12 @@ fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
     .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(held, Err(RequestError::Parent(SessionError::Unavailable)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(held, Err(RequestError::Parent(SessionError::Unavailable)));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_launch_short_of_memory_removes_the_child_without_stopping_the_root() {
     let composition = scenario(&[
         ComponentSpec {
@@ -1038,16 +1037,16 @@ fn a_launch_short_of_memory_removes_the_child_without_stopping_the_root() {
     let found_pinged = found.first().map(ping_found);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(found.len(), 1);
-    kernel_tests::kassert_eq!(found_pinged, Some(Ok(PING)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(found.len(), 1);
+    test_harness::check_eq!(found_pinged, Some(Ok(PING)));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
     if !platform_describes(PL031) {
-        kernel_tests::kskip!("{} is not described", PL031);
+        test_harness::skip!("{} is not described", PL031);
     }
 
     let composition = with_drivers();
@@ -1062,13 +1061,13 @@ fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
     drop(renewed);
     let lines = binding_lines(2);
 
-    kernel_tests::kassert!(ticked >= now);
-    kernel_tests::kassert!(again.is_ok());
-    kernel_tests::kassert_eq!(lines, ["/pl031@9010000 bound"]);
+    test_harness::check!(ticked >= now);
+    test_harness::check!(again.is_ok());
+    test_harness::check_eq!(lines, ["/pl031@9010000 bound"]);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_waits_for_a_feature_and_opens_after_its_publication() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
@@ -1088,13 +1087,13 @@ fn a_session_waits_for_a_feature_and_opens_after_its_publication() {
     let answer = answered(request);
     let published = await_component_lines(PUBLISHER.name, 1);
 
-    kernel_tests::kassert!(waiting);
-    kernel_tests::kassert_eq!(answer, GRANTED);
-    kernel_tests::kassert_eq!(published, ["published Ok(Ok(())) Ok(Ok(()))"]);
+    test_harness::check!(waiting);
+    test_harness::check_eq!(answer, GRANTED);
+    test_harness::check_eq!(published, ["published Ok(Ok(())) Ok(Ok(()))"]);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_waiting_for_a_feature_times_out_and_its_retry_waits_again() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
@@ -1104,13 +1103,13 @@ fn a_session_waiting_for_a_feature_times_out_and_its_retry_waits_again() {
     registered(&composition, &names, PUBLISHER).expect("publisher added");
     let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
 
-    kernel_tests::kassert_eq!(first, Err(RequestError::Ipc(IpcError::Timeout)));
-    kernel_tests::kassert_eq!(retry, Err(RequestError::Ipc(IpcError::Timeout)));
-    kernel_tests::kassert_eq!(opened, Ok(PING));
+    test_harness::check_eq!(first, Err(RequestError::Ipc(IpcError::Timeout)));
+    test_harness::check_eq!(retry, Err(RequestError::Ipc(IpcError::Timeout)));
+    test_harness::check_eq!(opened, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_enumeration_finds_a_featured_export_only_while_its_publisher_lives() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1121,23 +1120,23 @@ fn an_enumeration_finds_a_featured_export_only_while_its_publisher_lives() {
     composition.terminate(PUBLISHER.name, TERMINATE_EXIT_CODE);
     let left = await_featured(&importer, 0);
 
-    kernel_tests::kassert_eq!(hidden, 0);
-    kernel_tests::kassert_eq!(published, 1);
-    kernel_tests::kassert_eq!(left, 0);
+    test_harness::check_eq!(hidden, 0);
+    test_harness::check_eq!(published, 1);
+    test_harness::check_eq!(left, 0);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn registration_refuses_a_plan_record_with_a_feature() {
     let (composition, names) = started(&[PARENT], ExportIndex::EMPTY);
 
     let added = registered(&composition, &names, FEATURED);
 
-    kernel_tests::kassert!(matches!(added, Err(rootkeeper::AddFailure::Declaration)));
+    test_harness::check!(matches!(added, Err(rootkeeper::AddFailure::Declaration)));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
@@ -1146,8 +1145,8 @@ fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
     let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
     let lines = await_component_lines(FEATURED.name, 4);
 
-    kernel_tests::kassert_eq!(opened, Ok(PING));
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(opened, Ok(PING));
+    test_harness::check_eq!(
         lines,
         [
             "hardware Ok(())",
@@ -1159,23 +1158,23 @@ fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_restarted_child_takes_the_same_line_and_region_again() {
     if !platform_describes(PL031) {
-        kernel_tests::kskip!("{} is not described", PL031);
+        test_harness::skip!("{} is not described", PL031);
     }
 
     let composition = scenario(&[PLATFORM, IRQ]);
 
     let lines = await_component_lines(IRQ.name, 2);
 
-    kernel_tests::kassert_eq!(lines.len(), 2);
-    kernel_tests::kassert!(lines[0].starts_with("line and region "));
-    kernel_tests::kassert_eq!(lines[0], lines[1]);
+    test_harness::check_eq!(lines.len(), 2);
+    test_harness::check!(lines[0].starts_with("line and region "));
+    test_harness::check_eq!(lines[0], lines[1]);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_device_outside_the_platform_description_is_not_described() {
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
@@ -1185,17 +1184,17 @@ fn a_device_outside_the_platform_description_is_not_described() {
     let absent_window = window(&session, ABSENT).map(drop);
     let relative_line = line(&session, RELATIVE).map(drop);
 
-    kernel_tests::kassert_eq!(absent_line, Err(PlatformError::NotDescribed));
-    kernel_tests::kassert_eq!(absent_window, Err(PlatformError::NotDescribed));
-    kernel_tests::kassert_eq!(relative_line, Err(PlatformError::NotDescribed));
+    test_harness::check_eq!(absent_line, Err(PlatformError::NotDescribed));
+    test_harness::check_eq!(absent_window, Err(PlatformError::NotDescribed));
+    test_harness::check_eq!(relative_line, Err(PlatformError::NotDescribed));
     drop(session);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes() {
     if !platform_describes(PL031) {
-        kernel_tests::kskip!("{} is not described", PL031);
+        test_harness::skip!("{} is not described", PL031);
     }
 
     let composition = scenario(&[PLATFORM]);
@@ -1213,20 +1212,20 @@ fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes
     let granted_line = line(&second, PL031).map(drop);
     let granted_window = window(&second, PL031).map(drop);
 
-    kernel_tests::kassert_eq!(contested_line, Err(PlatformError::Taken));
-    kernel_tests::kassert_eq!(contested_window, Err(PlatformError::Taken));
-    kernel_tests::kassert!(region_revoked);
-    kernel_tests::kassert!(line_revoked);
-    kernel_tests::kassert_eq!(granted_line, Ok(()));
-    kernel_tests::kassert_eq!(granted_window, Ok(()));
+    test_harness::check_eq!(contested_line, Err(PlatformError::Taken));
+    test_harness::check_eq!(contested_window, Err(PlatformError::Taken));
+    test_harness::check!(region_revoked);
+    test_harness::check!(line_revoked);
+    test_harness::check_eq!(granted_line, Ok(()));
+    test_harness::check_eq!(granted_window, Ok(()));
     drop(second);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_window_in_the_region_of_another_session_is_taken() {
     if !platform_describes(FIRST_VIRTIO) {
-        kernel_tests::kskip!("{} is not described", FIRST_VIRTIO);
+        test_harness::skip!("{} is not described", FIRST_VIRTIO);
     }
 
     let composition = scenario(&[PLATFORM]);
@@ -1237,15 +1236,15 @@ fn a_window_in_the_region_of_another_session_is_taken() {
 
     let contested = window(&second, SECOND_VIRTIO).map(drop);
 
-    kernel_tests::kassert_eq!(contested, Err(PlatformError::Taken));
+    test_harness::check_eq!(contested, Err(PlatformError::Taken));
     drop((first, second, taken));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets_and_sizes() {
     if !platform_describes(FIRST_VIRTIO) {
-        kernel_tests::kskip!("{} is not described", FIRST_VIRTIO);
+        test_harness::skip!("{} is not described", FIRST_VIRTIO);
     }
 
     let composition = scenario(&[PLATFORM]);
@@ -1255,21 +1254,21 @@ fn windows_of_one_session_in_one_page_share_the_region_at_their_offsets_and_size
     let first = window(&session, FIRST_VIRTIO).expect("first window");
     let second = window(&session, SECOND_VIRTIO).expect("second window");
 
-    kernel_tests::kassert_eq!(region_base(&first.region), VIRTIO_REGION);
-    kernel_tests::kassert_eq!(region_base(&second.region), VIRTIO_REGION);
-    kernel_tests::kassert_eq!((first.offset, second.offset), (0, VIRTIO_STRIDE));
-    kernel_tests::kassert_eq!((first.size, second.size), (VIRTIO_STRIDE, VIRTIO_STRIDE));
-    kernel_tests::kassert!(
+    test_harness::check_eq!(region_base(&first.region), VIRTIO_REGION);
+    test_harness::check_eq!(region_base(&second.region), VIRTIO_REGION);
+    test_harness::check_eq!((first.offset, second.offset), (0, VIRTIO_STRIDE));
+    test_harness::check_eq!((first.size, second.size), (VIRTIO_STRIDE, VIRTIO_STRIDE));
+    test_harness::check!(
         first.region.inspect().expect("region inspects").size_bytes > VIRTIO_STRIDE
     );
     drop(session);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
     if !platform_describes(SECOND_VIRTIO) {
-        kernel_tests::kskip!("{} is not described", SECOND_VIRTIO);
+        test_harness::skip!("{} is not described", SECOND_VIRTIO);
     }
 
     let composition = scenario(&[PLATFORM]);
@@ -1289,17 +1288,17 @@ fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
     let device_end = usize::try_from(device.size).expect("window size fits usize");
     let past_end = mapping.copy_in_at(device_end - 1, &[0u8; 2]);
 
-    kernel_tests::kassert_eq!(magic, VIRTIO_MAGIC);
-    kernel_tests::kassert_eq!(past_end, Err(Error::OutOfBounds));
+    test_harness::check_eq!(magic, VIRTIO_MAGIC);
+    test_harness::check_eq!(past_end, Err(Error::OutOfBounds));
     drop(mapping);
     drop(session);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_grants_of_a_platform_incarnation_are_revoked_when_it_ends() {
     if !platform_describes(PL031) {
-        kernel_tests::kskip!("{} is not described", PL031);
+        test_harness::skip!("{} is not described", PL031);
     }
 
     let composition = scenario(&[PLATFORM]);
@@ -1315,15 +1314,15 @@ fn the_grants_of_a_platform_incarnation_are_revoked_when_it_ends() {
     let renewed_line = line(&renewed, PL031).map(drop);
     let renewed_window = window(&renewed, PL031).map(drop);
 
-    kernel_tests::kassert!(region_revoked);
-    kernel_tests::kassert!(line_revoked);
-    kernel_tests::kassert_eq!(renewed_line, Ok(()));
-    kernel_tests::kassert_eq!(renewed_window, Ok(()));
+    test_harness::check!(region_revoked);
+    test_harness::check!(line_revoked);
+    test_harness::check_eq!(renewed_line, Ok(()));
+    test_harness::check_eq!(renewed_window, Ok(()));
     drop((session, renewed));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn sessions_read_one_description_through_read_only_copies() {
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
@@ -1339,21 +1338,21 @@ fn sessions_read_one_description_through_read_only_copies() {
         .expect("description maps read-only");
     let tree = Description::new(mapping.as_bytes(), offset).expect("description parses");
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         (region_base(&repeated), repeated_offset),
         (region_base(&region), offset)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         (region_base(&other), other_offset),
         (region_base(&region), offset)
     );
-    kernel_tests::kassert_eq!(writable, Err(Error::Syscall(SyscallError::AccessDenied)));
-    kernel_tests::kassert!(tree.devices().next().is_some());
+    test_harness::check_eq!(writable, Err(Error::Syscall(SyscallError::AccessDenied)));
+    test_harness::check!(tree.devices().next().is_some());
     drop((first, second));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_description_and_its_copies_are_revoked_when_the_session_closes() {
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
@@ -1369,14 +1368,14 @@ fn the_description_and_its_copies_are_revoked_when_the_session_closes() {
     let copy_revoked = await_revoked(|| copy.inspect());
     let renewed = description(&second).map(drop);
 
-    kernel_tests::kassert!(region_revoked);
-    kernel_tests::kassert!(copy_revoked);
-    kernel_tests::kassert_eq!(renewed, Ok(()));
+    test_harness::check!(region_revoked);
+    test_harness::check!(copy_revoked);
+    test_harness::check_eq!(renewed, Ok(()));
     drop(second);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_image_region_of_an_image_file_system_incarnation_is_revoked_when_it_ends() {
     let composition = scenario(&[ROUTER, IMAGE_FS]);
     let importer = composition.importer(&[view(ROOT_VIEW, "")]);
@@ -1396,13 +1395,13 @@ fn the_image_region_of_an_image_file_system_incarnation_is_revoked_when_it_ends(
     composition.terminate(IMAGE_FS.name, TERMINATE_EXIT_CODE);
     let revoked = await_revoked(|| window.inspect());
 
-    kernel_tests::kassert!(granted);
-    kernel_tests::kassert!(revoked);
+    test_harness::check!(granted);
+    test_harness::check!(revoked);
     drop(files);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_directory_session_is_opened_anew_for_every_incarnation() {
     let composition = scenario(&[
         ROUTER,
@@ -1426,12 +1425,12 @@ fn a_directory_session_is_opened_anew_for_every_incarnation() {
 
     let lines = await_component_lines(SCOPE_CONSUMER.name, 2);
 
-    kernel_tests::kassert_eq!(lines, ["area read", "area read"]);
+    test_harness::check_eq!(lines, ["area read", "area read"]);
     drop(mounted);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_component_that_faults_is_restarted() {
     let composition = scenario(&[ROUTER, CRASH_FS]);
     let importer = composition.importer(&[view(FILES, "/crash")]);
@@ -1443,12 +1442,12 @@ fn a_component_that_faults_is_restarted() {
     let restarted = resolved(&filesystem, "/");
     let rewritten = written(&restarted);
 
-    kernel_tests::kassert!(renamed.is_err());
-    kernel_tests::kassert_eq!(rewritten, Err(FileSystemError::NotFound));
+    test_harness::check!(renamed.is_err());
+    test_harness::check_eq!(rewritten, Err(FileSystemError::NotFound));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_restarted_file_system_serves_its_prefix_again_without_restarting_the_router() {
     let composition = scenario(&[
         ROUTER,
@@ -1465,12 +1464,12 @@ fn a_restarted_file_system_serves_its_prefix_again_without_restarting_the_router
     let restarted = await_component_lines(RAM_FS.name, 2);
     let rewritten = written(&resolved(&tmp, "/"));
 
-    kernel_tests::kassert_eq!(restarted, ["started", "started"]);
-    kernel_tests::kassert_eq!(rewritten, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(restarted, ["started", "started"]);
+    test_harness::check_eq!(rewritten, Err(FileSystemError::NotFound));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_restarted_router_is_mounted_again_by_every_file_system() {
     let composition = scenario(&[
         ComponentSpec {
@@ -1491,13 +1490,13 @@ fn a_restarted_router_is_mounted_again_by_every_file_system() {
     });
     let stale = resolution(&before, IMAGE_MOUNT, STALE_VIEW_TIMEOUT);
 
-    kernel_tests::kassert_eq!(mounted, Ok(Ok(())));
-    kernel_tests::kassert_eq!(renewed, [Ok(Ok(())), Ok(Ok(()))]);
-    kernel_tests::kassert!(stale.is_err());
+    test_harness::check_eq!(mounted, Ok(Ok(())));
+    test_harness::check_eq!(renewed, [Ok(Ok(())), Ok(Ok(()))]);
+    test_harness::check!(stale.is_err());
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn router_restart_keeps_file_system_components_and_their_sessions() {
     let composition = scenario(&[
         ComponentSpec {
@@ -1515,12 +1514,12 @@ fn router_restart_keeps_file_system_components_and_their_sessions() {
     let renewed = written(&tmp);
     let kept = written(&files);
 
-    kernel_tests::kassert_eq!(renewed, Ok(NodeKind::File));
-    kernel_tests::kassert_eq!(kept, Ok(NodeKind::File));
+    test_harness::check_eq!(renewed, Ok(NodeKind::File));
+    test_harness::check_eq!(kept, Ok(NodeKind::File));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_removed_file_system_frees_its_prefix() {
     let composition = scenario(&[ROUTER, IMAGE_FS, NESTED_SPARE_FS]);
     let importer =
@@ -1533,13 +1532,13 @@ fn a_removed_file_system_frees_its_prefix() {
     let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
     let nested = resolution(&root, NESTED_SPARE_PATH, RESOLVE_TIMEOUT);
 
-    kernel_tests::kassert_eq!(mounted, Ok(Ok(())));
-    kernel_tests::kassert_eq!(freed, Err(IpcError::Timeout));
-    kernel_tests::kassert_eq!(nested, Ok(Err(FileSystemError::NotFound)));
+    test_harness::check_eq!(mounted, Ok(Ok(())));
+    test_harness::check_eq!(freed, Err(IpcError::Timeout));
+    test_harness::check_eq!(nested, Ok(Err(FileSystemError::NotFound)));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_mount_ends_when_its_file_system_closes_its_port() {
     let composition = scenario(&[ROUTER, SPARE_FS]);
     let importer = composition.importer(&[
@@ -1566,13 +1565,13 @@ fn a_mount_ends_when_its_file_system_closes_its_port() {
     let freed = resolution(&other, "/", FREED_PREFIX_TIMEOUT);
     let ended = mounted.ended(COMPONENT_REPLY_TIMEOUT);
 
-    kernel_tests::kassert_eq!(freed, Err(IpcError::Timeout));
-    kernel_tests::kassert!(ended);
+    test_harness::check_eq!(freed, Err(IpcError::Timeout));
+    test_harness::check!(ended);
     drop(mounted);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn optional_and_all_start_with_empty_or_populated_provider_lists() {
     let consumer = ComponentSpec {
         ..fixture("/multiplicity-fixture", "multiplicity")
@@ -1589,7 +1588,7 @@ fn optional_and_all_start_with_empty_or_populated_provider_lists() {
         lines
     });
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         lines,
         [
             [
@@ -1610,7 +1609,7 @@ fn optional_and_all_start_with_empty_or_populated_provider_lists() {
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_started_consumer_discovers_a_provider_added_at_runtime() {
     let consumer = ComponentSpec {
         ..fixture("/multiplicity-fixture", "multiplicity")
@@ -1621,7 +1620,7 @@ fn a_started_consumer_discovers_a_provider_added_at_runtime() {
     registered(&composition, &names, EXPORT).expect("runtime component added");
     let lines = await_component_lines(consumer.name, 6);
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         started,
         [
             "optional empty",
@@ -1631,7 +1630,7 @@ fn a_started_consumer_discovers_a_provider_added_at_runtime() {
             "image found"
         ]
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         lines,
         [
             "optional empty",
@@ -1645,7 +1644,7 @@ fn a_started_consumer_discovers_a_provider_added_at_runtime() {
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
     let plan = encoded(&[PARENT, EXPORT]);
     let names = ComponentNames::of(&plan);
@@ -1690,17 +1689,17 @@ fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
     let drained_count = drained(&before).len();
     let held_pinged = ping_found(&held);
 
-    kernel_tests::kassert!(matches!(failure, Err(rootkeeper::AddFailure::Declaration)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
-    kernel_tests::kassert_eq!(record, 2);
-    kernel_tests::kassert_eq!(found.len(), 2);
-    kernel_tests::kassert_eq!(found_pinged, Some(Ok(PING)));
-    kernel_tests::kassert_eq!(drained_count, 1);
-    kernel_tests::kassert_eq!(held_pinged, Ok(PING));
+    test_harness::check!(matches!(failure, Err(rootkeeper::AddFailure::Declaration)));
+    test_harness::check_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(record, 2);
+    test_harness::check_eq!(found.len(), 2);
+    test_harness::check_eq!(found_pinged, Some(Ok(PING)));
+    test_harness::check_eq!(drained_count, 1);
+    test_harness::check_eq!(held_pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn two_instances_of_one_program_keep_their_mounts_separate() {
     let composition = scenario(&[ROUTER, RAM_FS, SPARE_FS]);
     let importer = composition.importer(&[view(TMP_VIEW, "/tmp"), view(SPARE_VIEW, "/spare")]);
@@ -1711,23 +1710,23 @@ fn two_instances_of_one_program_keep_their_mounts_separate() {
     let first_written = written(&first);
     let second_written = written(&second);
 
-    kernel_tests::kassert_eq!(first_written, Ok(NodeKind::File));
-    kernel_tests::kassert_eq!(second_written, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(first_written, Ok(NodeKind::File));
+    test_harness::check_eq!(second_written, Err(FileSystemError::NotFound));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_requirement_without_providers_enumerates_nothing() {
     let composition = scenario(&[]);
     let importer = composition.importer(&[probe_of(PROBE)]);
 
     let found = importer.found::<probe::Protocol>(PROBE);
 
-    kernel_tests::kassert!(found.is_empty());
+    test_harness::check!(found.is_empty());
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_enumeration_by_a_session_requirement_is_refused() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[crate::composition::Import {
@@ -1740,12 +1739,12 @@ fn an_enumeration_by_a_session_requirement_is_refused() {
         .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_with_two_matching_exports_is_refused() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1753,12 +1752,12 @@ fn a_session_with_two_matching_exports_is_refused() {
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let found_count = importer.found::<probe::Protocol>(PROBE).len();
 
-    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
-    kernel_tests::kassert_eq!(found_count, 2);
+    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(found_count, 2);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_matching_a_record_and_an_image_program_is_refused() {
     let (composition, _) = indexed(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1766,12 +1765,12 @@ fn a_session_matching_a_record_and_an_image_program_is_refused() {
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let found_count = importer.found::<probe::Protocol>(PROBE).len();
 
-    kernel_tests::kassert_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
-    kernel_tests::kassert!(found_count > 1);
+    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check!(found_count > 1);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_found_export_opens_only_as_its_protocol() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1783,13 +1782,13 @@ fn a_found_export_opens_only_as_its_protocol() {
         .map(drop);
     let pinged = ping_found(&found);
 
-    kernel_tests::kassert_eq!(other, Err(RequestError::Parent(SessionError::Refused)));
-    kernel_tests::kassert_eq!(all, Err(RequestError::Parent(SessionError::Refused)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(other, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(all, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn next_skips_an_export_removed_after_all() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1801,14 +1800,14 @@ fn next_skips_an_export_removed_after_all() {
     let rest = drained(&enumeration);
     let rest_pinged = rest.first().map(ping_found);
 
-    kernel_tests::kassert_eq!(started, ["started"]);
-    kernel_tests::kassert_eq!(remaining, 1);
-    kernel_tests::kassert_eq!(rest.len(), 1);
-    kernel_tests::kassert_eq!(rest_pinged, Some(Ok(PING)));
+    test_harness::check_eq!(started, ["started"]);
+    test_harness::check_eq!(remaining, 1);
+    test_harness::check_eq!(rest.len(), 1);
+    test_harness::check_eq!(rest_pinged, Some(Ok(PING)));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_filtered_export_answers_with_the_first_matching_filter() {
     let composition = scenario(&[EXPORT, FILTERED]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1833,16 +1832,16 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
     .with_wait(COMPONENT_REPLY_TIMEOUT)
     .ping(PING);
 
-    kernel_tests::kassert_eq!(unfiltered, [""]);
-    kernel_tests::kassert_eq!(first_matching, ["kind=a"]);
-    kernel_tests::kassert!(unmatched.is_empty());
-    kernel_tests::kassert_eq!(with_extra, ["kind=b,role=c"]);
-    kernel_tests::kassert_eq!(role_only, ["role=c"]);
-    kernel_tests::kassert_eq!(filtered, Ok(PING));
+    test_harness::check_eq!(unfiltered, [""]);
+    test_harness::check_eq!(first_matching, ["kind=a"]);
+    test_harness::check!(unmatched.is_empty());
+    test_harness::check_eq!(with_extra, ["kind=b,role=c"]);
+    test_harness::check_eq!(role_only, ["role=c"]);
+    test_harness::check_eq!(filtered, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_query_with_a_repeated_key_is_refused_and_the_next_one_is_served() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1858,12 +1857,12 @@ fn a_query_with_a_repeated_key_is_refused_and_the_next_one_is_served() {
         .map(|answer| answer.map(drop));
     let pinged = ping(&importer, PROBE);
 
-    kernel_tests::kassert_eq!(answer, Ok(Err(SessionError::Refused)));
-    kernel_tests::kassert_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(answer, Ok(Err(SessionError::Refused)));
+    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_importer_finds_a_root_export_but_cannot_open_it() {
     let composition = scenario(&[]);
     let importer = composition.importer(&[crate::composition::Import {
@@ -1878,16 +1877,16 @@ fn an_importer_finds_a_root_export_but_cannot_open_it() {
     let direct =
         requested::<hardware::Protocol>(&importer, HARDWARE_REQUIREMENT, COMPONENT_REPLY_TIMEOUT);
 
-    kernel_tests::kassert_eq!(found.len(), 1);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(found.len(), 1);
+    test_harness::check_eq!(
         opened,
         Some(Err(RequestError::Parent(SessionError::Refused)))
     );
-    kernel_tests::kassert_eq!(direct, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(direct, Err(RequestError::Parent(SessionError::Refused)));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_finished_enumeration_keeps_the_results_it_gave() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1899,13 +1898,13 @@ fn a_finished_enumeration_keeps_the_results_it_gave() {
     drop(enumeration);
     let pinged = found.iter().all(|found| ping_found(found) == Ok(PING));
 
-    kernel_tests::kassert_eq!(after, Ok(true));
-    kernel_tests::kassert_eq!(found.len(), 2);
-    kernel_tests::kassert!(pinged);
+    test_harness::check_eq!(after, Ok(true));
+    test_harness::check_eq!(found.len(), 2);
+    test_harness::check!(pinged);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn closing_one_of_two_enumerations_leaves_the_other() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1915,11 +1914,11 @@ fn closing_one_of_two_enumerations_leaves_the_other() {
     drop(first);
     let rest_count = drained(&second).len();
 
-    kernel_tests::kassert_eq!(rest_count, 2);
+    test_harness::check_eq!(rest_count, 2);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn closing_one_result_leaves_the_others_of_any_importer() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1934,12 +1933,12 @@ fn closing_one_result_leaves_the_others_of_any_importer() {
     drop(other);
     let importer_closed = ping_found(&second);
 
-    kernel_tests::kassert_eq!(sibling_closed, Ok(PING));
-    kernel_tests::kassert_eq!(importer_closed, Ok(PING));
+    test_harness::check_eq!(sibling_closed, Ok(PING));
+    test_harness::check_eq!(importer_closed, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn closing_an_importer_revokes_its_searches_and_keeps_foreign_results() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1953,13 +1952,13 @@ fn closing_an_importer_revokes_its_searches_and_keeps_foreign_results() {
     let found_revoked = await_revoked(|| found.session.handle().duplicate(Rights::WRITE, None));
     let foreign_pinged = ping_found(&foreign);
 
-    kernel_tests::kassert!(enumeration_revoked);
-    kernel_tests::kassert!(found_revoked);
-    kernel_tests::kassert_eq!(foreign_pinged, Ok(PING));
+    test_harness::check!(enumeration_revoked);
+    test_harness::check!(found_revoked);
+    test_harness::check_eq!(foreign_pinged, Ok(PING));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn repeated_searches_release_their_grants() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1973,7 +1972,7 @@ fn repeated_searches_release_their_grants() {
     });
     let found_count = importer.found::<probe::Protocol>(PROBE).len();
 
-    kernel_tests::kassert!(pinged);
-    kernel_tests::kassert_eq!(found_count, 2);
+    test_harness::check!(pinged);
+    test_harness::check_eq!(found_count, 2);
     finish(composition);
 }

@@ -90,11 +90,6 @@ code_in_crate_root|lib/log-abi/src/lib.rs|LOG_TAG_MAX|c349525f
 code_in_crate_root|lib/log-abi/src/lib.rs|TERMINATOR_SIZE|049ef224
 code_in_crate_root|lib/log-abi/src/lib.rs|tests|4dfda322
 code_in_crate_root|lib/rtc-abi/src/lib.rs|<file-root>|98c71a2d
-code_in_crate_root|lib/test-harness-macros/src/lib.rs|TestKind|e9276e43
-code_in_crate_root|lib/test-harness-macros/src/lib.rs|expand_kernel_test|d3c97530
-code_in_crate_root|lib/test-harness-macros/src/lib.rs|parse_kind|3f883c97
-code_in_crate_root|lib/test-harness-macros/src/lib.rs|tests|4dfda322
-code_in_crate_root|lib/test-harness-macros/src/lib.rs|validate_signature|b56c8866
 code_in_crate_root|lib/userland-loader/src/lib.rs|<PendingProcess as Drop>|76c9b637
 code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|76c9b637
 code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|c7c338b1

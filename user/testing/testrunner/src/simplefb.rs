@@ -10,7 +10,6 @@ use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 use fdt_test::Token;
 use ipc::Protocol;
 use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
-use kernel_tests::kernel_test;
 use platform_abi::{Description, DeviceId};
 use runtime::{Timeout, UserMemFlags};
 use userland::USERLAND_PAGE_SIZE;
@@ -204,25 +203,25 @@ fn whole(dimension: DisplayDimension) -> Area {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_described_framebuffer_reports_its_dimension_and_needs_a_window_of_its_frame() {
     let phone = framebuffer("/phone@1000").expect("framebuffer accepted");
     let frame = 4320 * 2340;
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         phone.dimension(),
         DisplayDimension {
             width: 1080,
             height: 2340
         }
     );
-    kernel_tests::kassert_eq!(phone.stride(), 4320);
-    kernel_tests::kassert_eq!(phone.format(), "a8r8g8b8");
-    kernel_tests::kassert_eq!(phone.fits(frame), Ok(()));
-    kernel_tests::kassert_eq!(phone.fits(frame - 1), Err(Refusal::Malformed));
+    test_harness::check_eq!(phone.stride(), 4320);
+    test_harness::check_eq!(phone.format(), "a8r8g8b8");
+    test_harness::check_eq!(phone.fits(frame), Ok(()));
+    test_harness::check_eq!(phone.fits(frame - 1), Err(Refusal::Malformed));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_framebuffer_description_outside_the_supported_one_is_refused() {
     let refused = [
         ("/short-stride@3000", Refusal::Malformed),
@@ -236,11 +235,11 @@ fn a_framebuffer_description_outside_the_supported_one_is_refused() {
     ];
 
     for (path, refusal) in refused {
-        kernel_tests::kassert_eq!(framebuffer(path), Err(refusal));
+        test_harness::check_eq!(framebuffer(path), Err(refusal));
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn each_device_of_one_description_presents_with_its_own_geometry() {
     let padded = framebuffer("/padded@2000").expect("framebuffer accepted");
     let unpadded = framebuffer("/unpadded@9000").expect("framebuffer accepted");
@@ -252,35 +251,35 @@ fn each_device_of_one_description_presents_with_its_own_geometry() {
         height: 1,
     };
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         padded.dimension(),
         DisplayDimension {
             width: 70,
             height: 3
         }
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         unpadded.dimension(),
         DisplayDimension {
             width: 4,
             height: 2
         }
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         written(&padded, 288 * 3, area),
         (288 + A8R8G8B8_PIXEL_BYTES..288 + 3 * A8R8G8B8_PIXEL_BYTES).collect::<Vec<_>>()
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         written(&unpadded, 16 * 2, area),
         (16 + A8R8G8B8_PIXEL_BYTES..16 + 3 * A8R8G8B8_PIXEL_BYTES).collect::<Vec<_>>()
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         written(&packed, 16 * 2, area),
         (16 + R8G8B8_PIXEL_BYTES..16 + 3 * R8G8B8_PIXEL_BYTES).collect::<Vec<_>>()
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn each_binding_format_encodes_a_surface_pixel_with_an_opaque_alpha() {
     let encoded: [(&str, &[u8]); 11] = [
         ("r5g6b5", &[0x10, 0xF8]),
@@ -325,12 +324,12 @@ fn each_binding_format_encodes_a_surface_pixel_with_an_opaque_alpha() {
             &mut screen,
         );
 
-        kernel_tests::kassert_eq!(presented, Ok(()));
-        kernel_tests::kassert_eq!((format, screen.as_slice()), (format, expected));
+        test_harness::check_eq!(presented, Ok(()));
+        test_harness::check_eq!((format, screen.as_slice()), (format, expected));
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn present_writes_the_area_opaque_and_keeps_the_neighbours_and_the_row_padding() {
     let padded = framebuffer("/padded@2000").expect("framebuffer accepted");
     let surface: Vec<u8> = (0..70 * 3 * SURFACE_PIXEL_BYTES as usize)
@@ -346,7 +345,7 @@ fn present_writes_the_area_opaque_and_keeps_the_neighbours_and_the_row_padding()
 
     let presented = present(&padded, area, &surface, &mut screen);
 
-    kernel_tests::kassert_eq!(presented, Ok(()));
+    test_harness::check_eq!(presented, Ok(()));
     for (offset, &byte) in screen.iter().enumerate() {
         let (row, column) = (offset / 288, offset % 288);
         let inside =
@@ -356,11 +355,11 @@ fn present_writes_the_area_opaque_and_keeps_the_neighbours_and_the_row_padding()
             (true, 3) => OPAQUE_ALPHA,
             (true, _) => surface[70 * SURFACE_PIXEL_BYTES as usize + column],
         };
-        kernel_tests::kassert_eq!(byte, expected);
+        test_harness::check_eq!(byte, expected);
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn present_of_an_area_past_the_screen_is_out_of_bounds_before_any_copy() {
     let padded = framebuffer("/padded@2000").expect("framebuffer accepted");
     let mut copies = 0;
@@ -380,11 +379,11 @@ fn present_of_an_area_past_the_screen_is_out_of_bounds_before_any_copy() {
         |_, _| Ok(()),
     );
 
-    kernel_tests::kassert_eq!(presented, Err(DisplayError::OutOfBounds));
-    kernel_tests::kassert_eq!(copies, 0);
+    test_harness::check_eq!(presented, Err(DisplayError::OutOfBounds));
+    test_harness::check_eq!(copies, 0);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
     let composition = with_drivers();
     let importer = composition.importer(DISPLAY_IMPORTS);
@@ -417,18 +416,18 @@ fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
         fill(&surface, dimension, rectangle, |_, _| RECTANGLE_COLOR);
         let shown = screen.present(rectangle).expect("present call");
 
-        kernel_tests::kassert_eq!(gradient, Ok(()));
-        kernel_tests::kassert_eq!(shown, Ok(()));
-        kernel_tests::kreport!("the framebuffer shows the gradient and the rectangle");
+        test_harness::check_eq!(gradient, Ok(()));
+        test_harness::check_eq!(shown, Ok(()));
+        test_harness::report!("the framebuffer shows the gradient and the rectangle");
     }
     finish(composition);
 
     if framebuffers.is_empty() {
-        kernel_tests::kskip!("no simple-framebuffer described");
+        test_harness::skip!("no simple-framebuffer described");
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions() {
     let composition = with_drivers();
     let importer = composition.importer(DISPLAY_IMPORTS);
@@ -440,7 +439,7 @@ fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions(
         let refusal = (0..=SIMPLEFB_MEMORY / USERLAND_PAGE_SIZE).find_map(|_| {
             let screen = opened(found);
             let before = screen.present(whole(screen.dimension().expect("dimension call")));
-            kernel_tests::kassert_eq!(before, Ok(Err(DisplayError::NoSurface)));
+            test_harness::check_eq!(before, Ok(Err(DisplayError::NoSurface)));
             match screen.acquire_surface().expect("acquire_surface call") {
                 Ok(region) => {
                     screens.push((screen, MemoryRegion::from(region)));
@@ -457,14 +456,14 @@ fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions(
             .expect("acquire_surface call")
             .map(drop);
 
-        kernel_tests::kassert_eq!(refusal, Some(DisplayError::NoSpace));
-        kernel_tests::kassert!(held >= 1);
-        kernel_tests::kassert_eq!(regained, Ok(()));
-        kernel_tests::kreport!("the framebuffer held {} surfaces", held);
+        test_harness::check_eq!(refusal, Some(DisplayError::NoSpace));
+        test_harness::check!(held >= 1);
+        test_harness::check_eq!(regained, Ok(()));
+        test_harness::report!("the framebuffer held {} surfaces", held);
     }
     finish(composition);
 
     if framebuffers.is_empty() {
-        kernel_tests::kskip!("no simple-framebuffer described");
+        test_harness::skip!("no simple-framebuffer described");
     }
 }

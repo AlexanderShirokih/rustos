@@ -122,7 +122,7 @@ cargo xtask userland doc --no-deps --workspace
 cargo xtask qemu-test [--timeout <seconds>] [--spec <path>]
 ```
 
-Тайм-аут по умолчанию — 80 секунд, конфигурация —
+Тайм-аут по умолчанию — 120 секунд, конфигурация —
 [devices/spec/qemu-aarch64-test.yaml](../devices/spec/qemu-aarch64-test.yaml).
 Альтернативный контроллер прерываний проверяется так:
 

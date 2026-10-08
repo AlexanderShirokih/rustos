@@ -6,7 +6,6 @@
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, ipc_buffer_addr, ipc_buffer_ptr, spawn};
 use syscall::{IPC_BUFFER_DATA_MAX, encode_tag};
 
@@ -15,10 +14,10 @@ const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 static SIBLING_VA: AtomicU64 = AtomicU64::new(0);
 
-#[kernel_test]
+#[test_harness::test]
 fn ipc_buffer_roundtrip() {
     let ptr = ipc_buffer_ptr().expect("user thread must have an ipc buffer");
-    kernel_tests::kassert!(!ptr.is_null());
+    test_harness::check!(!ptr.is_null());
 
     // SAFETY: ядро замаппило IPC-буфер user-RW размером в одну страницу;
     // запись/чтение полей структуры лежат в его границах. Поток - единственный
@@ -32,11 +31,11 @@ fn ipc_buffer_roundtrip() {
             *slot = (i as u8) ^ 0x5A;
         }
 
-        kernel_tests::kassert_eq!(buf.tag, encode_tag(IPC_BUFFER_DATA_MAX, 2));
-        kernel_tests::kassert_eq!(buf.caps[0], 0xAABB_CCDD);
-        kernel_tests::kassert_eq!(buf.caps[1], 0x1122_3344);
+        test_harness::check_eq!(buf.tag, encode_tag(IPC_BUFFER_DATA_MAX, 2));
+        test_harness::check_eq!(buf.caps[0], 0xAABB_CCDD);
+        test_harness::check_eq!(buf.caps[1], 0x1122_3344);
         for (i, slot) in buf.data.iter().enumerate() {
-            kernel_tests::kassert_eq!(*slot, (i as u8) ^ 0x5A);
+            test_harness::check_eq!(*slot, (i as u8) ^ 0x5A);
         }
     }
 }
@@ -63,10 +62,10 @@ extern "C" fn sibling_worker(_arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn ipc_buffer_per_thread_distinct() {
     let main_ret = ipc_buffer_addr();
-    kernel_tests::kassert!(main_ret > 0);
+    test_harness::check!(main_ret > 0);
     let main_va = u64::try_from(main_ret).expect("positive va fits u64");
 
     let thread =
@@ -76,6 +75,6 @@ fn ipc_buffer_per_thread_distinct() {
         .expect("sibling joins before timeout");
 
     let sibling_va = SIBLING_VA.load(Relaxed);
-    kernel_tests::kassert!(sibling_va > 0);
-    kernel_tests::kassert!(sibling_va != main_va);
+    test_harness::check!(sibling_va > 0);
+    test_harness::check!(sibling_va != main_va);
 }

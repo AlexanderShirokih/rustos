@@ -10,7 +10,6 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
-use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
@@ -110,7 +109,7 @@ fn make_user_as_with_probe_page(va: usize, sentinel: u64) -> (Arc<AddressSpace>,
 
 /// Каждый user-AS получает ненулевой ASID, разные AS - разные ASID, и один и
 /// тот же AS сохраняет свой между переключениями.
-#[kernel_test]
+#[test_harness::test]
 fn ttbr0_carries_stable_distinct_asids() {
     let (as_a, _) = make_user_as_with_probe_page(PROBE_VA, 0x1);
     let (as_b, _) = make_user_as_with_probe_page(PROBE_VA, 0x2);
@@ -124,17 +123,17 @@ fn ttbr0_carries_stable_distinct_asids() {
     let ttbr_a_again = read_ttbr0();
     Aarch64Context::switch_address_space(None);
 
-    kernel_tests::kassert!(asid_of(ttbr_a) != 0);
-    kernel_tests::kassert!(asid_of(ttbr_b) != 0);
-    kernel_tests::kassert!(asid_of(ttbr_a) != asid_of(ttbr_b));
-    kernel_tests::kassert_eq!(ttbr_a, ttbr_a_again);
+    test_harness::check!(asid_of(ttbr_a) != 0);
+    test_harness::check!(asid_of(ttbr_b) != 0);
+    test_harness::check!(asid_of(ttbr_a) != asid_of(ttbr_b));
+    test_harness::check_eq!(ttbr_a, ttbr_a_again);
 
     drop(as_a);
     drop(as_b);
 }
 
 /// `TCR_EL1.AS` выставлен по ширине ASID, обнаруженной в `ID_AA64MMFR0_EL1`.
-#[kernel_test]
+#[test_harness::test]
 fn tcr_as_matches_runtime_asid_width() {
     let width = IdAa64Mmfr0::<EL1>::asid_width();
     let tcr = read_tcr();
@@ -143,18 +142,18 @@ fn tcr_as_matches_runtime_asid_width() {
         crate::memory::regs::id_aa64mmfr0::AsidWidth::Bits16 => 1,
         crate::memory::regs::id_aa64mmfr0::AsidWidth::Bits8 => 0,
     };
-    kernel_tests::kassert_eq!(as_bit, expected);
+    test_harness::check_eq!(as_bit, expected);
 }
 
 /// Активирует много AS подряд, чтобы спровоцировать ASID rollover.
-#[kernel_test]
+#[test_harness::test]
 fn rollover_smoke() {
     let (probe_as, kva_a) = make_user_as_with_probe_page(PROBE_VA, 0x1234);
     let h_probe = probe_as.handle().expect("handle");
     Aarch64Context::switch_address_space(Some(h_probe));
     // SAFETY: PROBE_VA замаплен с UserRW, чтение валидно.
     let observed = unsafe { (PROBE_VA as *const u64).read_volatile() };
-    kernel_tests::kassert_eq!(observed, 0x1234);
+    test_harness::check_eq!(observed, 0x1234);
     Aarch64Context::switch_address_space(None);
 
     let (shared_kheap, shared_pa) = allocate_probe_page();
@@ -179,7 +178,7 @@ fn rollover_smoke() {
         Aarch64Context::switch_address_space(Some(h));
         // SAFETY: PROBE_VA+4K замаплен с UserRW.
         let v = unsafe { ((PROBE_VA + 0x1000) as *const u64).read_volatile() };
-        kernel_tests::kassert_eq!(v, 0x5555);
+        test_harness::check_eq!(v, 0x5555);
         Aarch64Context::switch_address_space(None);
         drop(a);
     }
@@ -189,7 +188,7 @@ fn rollover_smoke() {
     Aarch64Context::switch_address_space(Some(h_probe2));
     // SAFETY: см. выше.
     let observed2 = unsafe { (PROBE_VA as *const u64).read_volatile() };
-    kernel_tests::kassert_eq!(observed2, 0x1234);
+    test_harness::check_eq!(observed2, 0x1234);
     Aarch64Context::switch_address_space(None);
 
     let _ = kva_a;

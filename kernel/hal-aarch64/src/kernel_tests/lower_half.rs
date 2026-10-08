@@ -1,7 +1,6 @@
 #![allow(unsafe_code)]
 
 use kbase::{CriticalSection as _, DaifCriticalSection};
-use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{MemFlags, virtual_address::PageAlignedVirtualAddress};
 use scheduler::{AddressSpace, ArchContext};
@@ -54,7 +53,7 @@ fn is_level_0_translation_fault(par: u64) -> bool {
         && (par >> PAR_FST_SHIFT) & PAR_FST_MASK == FST_TRANSLATION_FAULT_LEVEL_0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn lower_half_walks_follow_address_space_and_stay_off_after_disable() {
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
@@ -92,10 +91,10 @@ fn lower_half_walks_follow_address_space_and_stay_off_after_disable() {
     Aarch64Context::switch_address_space(None);
     drop(irq_mask);
 
-    kernel_tests::kassert_eq!(mapped & PAR_FAULT, 0);
-    kernel_tests::kassert!(is_level_0_translation_fault(after_kernel_switch));
-    kernel_tests::kassert_eq!(remapped & PAR_FAULT, 0);
-    kernel_tests::kassert!(is_level_0_translation_fault(after_disable));
+    test_harness::check_eq!(mapped & PAR_FAULT, 0);
+    test_harness::check!(is_level_0_translation_fault(after_kernel_switch));
+    test_harness::check_eq!(remapped & PAR_FAULT, 0);
+    test_harness::check!(is_level_0_translation_fault(after_disable));
 
     drop(user_as);
     let _ = fa.deallocate_frame(frame);

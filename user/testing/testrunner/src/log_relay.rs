@@ -17,7 +17,6 @@ use core::{
 use bootstrap_abi::bootstrap;
 use ipc::wire::{Header, IpcError, MessageBuf};
 use kernel_objects::{Port, Session};
-use kernel_tests::kernel_test;
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
 use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
 use rootkeeper::relay::LogSessions;
@@ -234,7 +233,7 @@ fn wait_for_records(count: usize) -> Vec<Record> {
         if records.len() >= count {
             return records;
         }
-        kernel_tests::kassert!(waited < RECORD_TIMEOUT.raw());
+        test_harness::check!(waited < RECORD_TIMEOUT.raw());
         let _ = idle.recv(RECORD_POLL);
         waited += RECORD_POLL.raw();
     }
@@ -253,7 +252,7 @@ fn send_unknown_ordinal(session: &Port) {
         .expect("header fits");
     frame.finish().expect("frame fits");
     ipc_raw::write_frame(frame.as_bytes(), &[]);
-    kernel_tests::kassert_eq!(port_send(session.as_raw(), SEND_TIMEOUT), 0);
+    test_harness::check_eq!(port_send(session.as_raw(), SEND_TIMEOUT), 0);
 }
 
 fn send_log_frame_with_cap(session: &Port, cap: Port) -> i64 {
@@ -285,7 +284,7 @@ fn exhaust_handle_table() -> (Port, Vec<Port>) {
         match source.duplicate(Rights::TRANSFER, None) {
             Ok(handle) => handles.push(handle),
             Err(error) => {
-                kernel_tests::kassert!(matches!(
+                test_harness::check!(matches!(
                     error,
                     kernel_objects::Error::Syscall(SyscallError::OutOfHandles)
                 ));
@@ -296,42 +295,42 @@ fn exhaust_handle_table() -> (Port, Vec<Port>) {
     (source, handles)
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_forwards_a_frame_under_the_trusted_source() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "local", "hello");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert_eq!(records.len(), 1);
-        kernel_tests::kassert!(records[0].source == "named-subsystem/local");
-        kernel_tests::kassert!(records[0].message == "hello");
+        test_harness::check_eq!(records.len(), 1);
+        test_harness::check!(records[0].source == "named-subsystem/local");
+        test_harness::check!(records[0].message == "hello");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_forwards_an_untagged_frame_under_the_badge_name() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "", "untagged");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].source == "named-subsystem");
+        test_harness::check!(records[0].source == "named-subsystem");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_names_an_unnamed_badge_numerically() {
     with_relay(|session| {
         let logger = session(UNNAMED_BADGE);
         write_log(&logger, "named-subsystem", "spoof attempt");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].source == "badge-0202020202020202/named-subsystem");
+        test_harness::check!(records[0].source == "badge-0202020202020202/named-subsystem");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_escapes_control_characters_in_the_message() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -339,22 +338,22 @@ fn relay_escapes_control_characters_in_the_message() {
 
         let records = wait_for_records(1);
         let expected = "first\\r\\n\\tsecond\\u{1b}[2J\\u{0}\\u{85}";
-        kernel_tests::kassert!(records[0].message == expected);
+        test_harness::check!(records[0].message == expected);
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_escapes_control_characters_and_brackets_in_the_local_tag() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "left[inner]\r\nright", "line");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].source == "named-subsystem/left\\[inner\\]\\r\\nright");
+        test_harness::check!(records[0].source == "named-subsystem/left\\[inner\\]\\r\\nright");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_escapes_unicode_line_and_paragraph_separators() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -362,11 +361,11 @@ fn relay_escapes_unicode_line_and_paragraph_separators() {
 
         let records = wait_for_records(1);
         let expected = "a\\u{2028}b\\u{2029}c";
-        kernel_tests::kassert!(records[0].message == expected);
+        test_harness::check!(records[0].message == expected);
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_escapes_unicode_format_controls() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -375,12 +374,12 @@ fn relay_escapes_unicode_format_controls() {
         let records = wait_for_records(1);
         let source = "named-subsystem/a\\u{202e}b";
         let message = "c\\u{2066}d";
-        kernel_tests::kassert!(records[0].source == source);
-        kernel_tests::kassert!(records[0].message == message);
+        test_harness::check!(records[0].source == source);
+        test_harness::check!(records[0].message == message);
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_splits_a_grown_message_without_losing_its_tail() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -396,8 +395,8 @@ fn relay_splits_a_grown_message_without_losing_its_tail() {
             .map(|record| record.message.as_str())
             .collect();
         let expected = "\\u{1b}".repeat(LOG_MESSAGE_MAX);
-        kernel_tests::kassert!(joined == expected);
-        kernel_tests::kassert!(
+        test_harness::check!(joined == expected);
+        test_harness::check!(
             records
                 .iter()
                 .all(|record| record.message.len() <= LOG_MESSAGE_MAX)
@@ -405,44 +404,44 @@ fn relay_splits_a_grown_message_without_losing_its_tail() {
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_keeps_ordinary_utf8_unchanged() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "播放器", "こんにちは, 世界!");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].source == "named-subsystem/播放器");
-        kernel_tests::kassert!(records[0].message == "こんにちは, 世界!");
+        test_harness::check!(records[0].source == "named-subsystem/播放器");
+        test_harness::check!(records[0].message == "こんにちは, 世界!");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_never_writes_an_unprefixed_physical_line() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "]\n[forged", "ok\n\u{1b}[31mforged");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].source.starts_with("named-subsystem/"));
-        kernel_tests::kassert!(!records[0].source.chars().any(char::is_control));
-        kernel_tests::kassert!(!records[0].message.chars().any(char::is_control));
+        test_harness::check!(records[0].source.starts_with("named-subsystem/"));
+        test_harness::check!(!records[0].source.chars().any(char::is_control));
+        test_harness::check!(!records[0].message.chars().any(char::is_control));
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_forwards_an_empty_message_once() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "local", "");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert_eq!(records.len(), 1);
-        kernel_tests::kassert!(records[0].message.is_empty());
+        test_harness::check_eq!(records.len(), 1);
+        test_harness::check!(records[0].message.is_empty());
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_serves_past_a_departed_session() {
     with_relay(|session| {
         let departing = session(UNNAMED_BADGE);
@@ -453,11 +452,11 @@ fn relay_serves_past_a_departed_session() {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "second", "after departure");
         let records = wait_for_records(2);
-        kernel_tests::kassert!(records[1].message == "after departure");
+        test_harness::check!(records[1].message == "after departure");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_rejects_one_bad_frame_and_serves_the_next() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -465,11 +464,11 @@ fn relay_rejects_one_bad_frame_and_serves_the_next() {
         write_log(&logger, "local", "after a bad frame");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].message == "after a bad frame");
+        test_harness::check!(records[0].message == "after a bad frame");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_closes_capabilities_carried_by_a_log_frame() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -477,24 +476,24 @@ fn relay_closes_capabilities_carried_by_a_log_frame() {
         let writer = carried
             .duplicate(Rights::WRITE | Rights::TRANSFER, None)
             .expect("writer side");
-        kernel_tests::kassert_eq!(send_log_frame_with_cap(&logger, carried), 0);
+        test_harness::check_eq!(send_log_frame_with_cap(&logger, carried), 0);
         wait_for_records(1);
 
-        kernel_tests::kassert_eq!(
+        test_harness::check_eq!(
             port_send(writer.as_raw(), SEND_TIMEOUT),
             SyscallError::Revoked.as_return_value()
         );
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_serves_after_receiver_resource_exhaustion() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
         let (_source, mut fillers) = exhaust_handle_table();
         let carried = fillers.pop().expect("full table contains filler handles");
 
-        kernel_tests::kassert_eq!(
+        test_harness::check_eq!(
             send_log_frame_with_cap(&logger, carried),
             SyscallError::OutOfHandles.as_return_value()
         );
@@ -504,28 +503,28 @@ fn relay_serves_after_receiver_resource_exhaustion() {
         write_log(&logger, "local", "after resource exhaustion");
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].message == "after resource exhaustion");
+        test_harness::check!(records[0].message == "after resource exhaustion");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn log_session_denies_bootstrap_operations() {
     with_relay(|session| {
         let fixture = spawn_entry(LOG_CLIENT_FIXTURE, session(NAMED_BADGE));
         fixture.join(JOIN_TIMEOUT).expect("fixture terminates");
-        kernel_tests::kassert_eq!(fixture.exit_code().expect("exit code"), 0);
+        test_harness::check_eq!(fixture.exit_code().expect("exit code"), 0);
 
         let records = wait_for_records(1);
-        kernel_tests::kassert!(records[0].message == FIXTURE_LINE);
+        test_harness::check!(records[0].message == FIXTURE_LINE);
 
         let next = session(NAMED_BADGE);
         write_log(&next, "local", "relay is alive");
         let records = wait_for_records(2);
-        kernel_tests::kassert!(records[1].message == "relay is alive");
+        test_harness::check!(records[1].message == "relay is alive");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_drains_departed_badges_so_new_sessions_mint() {
     with_relay(|session| {
         let mut minted = 0;
@@ -543,14 +542,14 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_stops_when_its_log_port_closes() {
     let relay =
         LogRelayThread::start(TestSourceNames, RecordingSink).expect("test log relay starts");
     relay.shutdown(JOIN_TIMEOUT).expect("test log relay stops");
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_stops_a_frame_at_the_first_refused_chunk() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -559,16 +558,16 @@ fn relay_stops_a_frame_at_the_first_refused_chunk() {
         SINK_REFUSES.store(true, SeqCst);
         write_log(&logger, "local", &message);
         let records = wait_for_records(1);
-        kernel_tests::kassert_eq!(records.len(), 1);
+        test_harness::check_eq!(records.len(), 1);
 
         SINK_REFUSES.store(false, SeqCst);
         write_log(&logger, "local", "accepted after refused frame");
         let records = wait_for_records(2);
-        kernel_tests::kassert!(records[1].message == "accepted after refused frame");
+        test_harness::check!(records[1].message == "accepted after refused frame");
     });
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn relay_stops_after_the_sink_refuses_in_a_row() {
     with_relay(|session| {
         let logger = session(NAMED_BADGE);
@@ -580,7 +579,7 @@ fn relay_stops_after_the_sink_refuses_in_a_row() {
         SINK_REFUSES.store(false, SeqCst);
         write_log(&logger, "local", "accepted");
         let records = wait_for_records(SINK_FAILURE_LIMIT);
-        kernel_tests::kassert!(records[SINK_FAILURE_LIMIT - 1].message == "accepted");
+        test_harness::check!(records[SINK_FAILURE_LIMIT - 1].message == "accepted");
 
         SINK_REFUSES.store(true, SeqCst);
         for _ in 0..SINK_FAILURE_LIMIT {
@@ -589,7 +588,7 @@ fn relay_stops_after_the_sink_refuses_in_a_row() {
         wait_for_records(2 * SINK_FAILURE_LIMIT);
         SINK_REFUSES.store(false, SeqCst);
 
-        kernel_tests::kassert_eq!(
+        test_harness::check_eq!(
             port_send(logger.as_raw(), SEND_TIMEOUT),
             SyscallError::Timeout.as_return_value()
         );

@@ -21,18 +21,16 @@ pub enum TestKind {
     Bench,
 }
 
-/// Регистрирует тест-кейс в секции `.tests.kernel`.
+/// Регистрирует тест-кейс в секции `.tests`.
 ///
 /// Раскрытие кладёт в эту секцию статик `$symbol: TestCase { name: $name, run: $run,
 /// kind: $kind }`. [`crate::runner::run_tests`] обходит секцию между линкер-символами
-/// `__tests_kernel_start` и `__tests_kernel_end` и берёт из неё записи выбранного `kind`.
+/// `__tests_start` и `__tests_end` и берёт из неё записи выбранного `kind`.
 ///
-/// Обычно вызывается не напрямую, а через атрибут `kernel_test`.
+/// Обычно вызывается не напрямую, а через атрибут [`test`](crate::test).
 ///
 /// ```ignore
-/// use kernel_tests::kernel_test;
-///
-/// #[kernel_test]
+/// #[test_harness::test]
 /// fn meta_test() {}
 /// ```
 #[macro_export]
@@ -42,7 +40,7 @@ macro_rules! register_test {
         // перечислены здесь, потому что проходы `qemu-test` идут и там, и там.
         #[cfg_attr(
             any(target_os = "none", target_os = "molecular"),
-            unsafe(link_section = ".tests.kernel")
+            unsafe(link_section = ".tests")
         )]
         #[used]
         static $symbol: $crate::case::TestCase = $crate::case::TestCase {

@@ -16,7 +16,6 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX, Str},
 };
 use kernel_objects::{Delivery, IssuedHandle, Port, Session, kind};
-use kernel_tests::kernel_test;
 use managed_component::{Departure, Outcome};
 use rootkeeper::relay::LogSessions as _;
 use runtime::{PortTransport, Priority, Timeout, spawn_owned};
@@ -202,7 +201,7 @@ impl file_system::Service<Delivery> for Failing<'_> {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn std_selftest_program_passes_its_checks() {
     let mount_badge = NonZeroU64::new(MOUNT_BADGE).expect("badge is non-zero");
     let failing = Port::create_service(Some(mount_badge)).expect("failing service");
@@ -236,7 +235,7 @@ fn std_selftest_program_passes_its_checks() {
             .budget(budget),
     );
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         parent.departure(PROCESS_TIMEOUT),
         Some(Departure {
             child: selftest,
@@ -246,8 +245,8 @@ fn std_selftest_program_passes_its_checks() {
 
     let lines = await_component_lines(INSTANCE_NAME, 3);
     stop_component_relay();
-    kernel_tests::kassert_eq!(lines.first().map(String::as_str), Some("selftest started"));
-    kernel_tests::kassert_eq!(lines.last().map(String::as_str), Some("checks passed"));
+    test_harness::check_eq!(lines.first().map(String::as_str), Some("selftest started"));
+    test_harness::check_eq!(lines.last().map(String::as_str), Some("checks passed"));
 
     drop(mounted);
     failing_server

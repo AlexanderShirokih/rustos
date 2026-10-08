@@ -11,13 +11,12 @@
 
 use core::arch::asm;
 
-use kernel_tests::kernel_test;
 use syscall::SyscallOp;
 use syscall_kernel::SyscallError;
 
 /// `svc` из EL1 возвращает `-KernelOriginated` независимо от номера
 /// операции и аргументов: trap зарезервирован за user->kernel-переходом.
-#[kernel_test]
+#[test_harness::test]
 fn syscall_from_kernel_origin_is_rejected() {
     let result: i64;
     // SAFETY: SVC с произвольными аргументами - диспатчер отвергает trap
@@ -33,5 +32,5 @@ fn syscall_from_kernel_origin_is_rejected() {
             options(nostack, preserves_flags),
         );
     }
-    kernel_tests::kassert_eq!(result, i64::from(SyscallError::KernelOriginated));
+    test_harness::check_eq!(result, i64::from(SyscallError::KernelOriginated));
 }

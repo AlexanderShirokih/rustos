@@ -37,7 +37,7 @@ process = { path = "../process" }
 scheduler = { path = "../scheduler" }
 syscall = { path = "../../lib/syscall" }
 syscall-kernel = { path = "../syscall" }
-test-harness-qemu = { path = "../../lib/test-harness-qemu" }
+test-harness = { path = "../../lib/test-harness" }
 
 # Таблица повторяет корневую дословно, комментарии к отдельным правилам лежат там же.
 [workspace.lints.rust]

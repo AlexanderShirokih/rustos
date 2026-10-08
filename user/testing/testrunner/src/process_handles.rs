@@ -3,9 +3,8 @@
 //! `close` закрывает их без ошибок.
 
 use kernel_objects::{Process, Thread};
-use kernel_tests::kernel_test;
 
-#[kernel_test]
+#[test_harness::test]
 fn process_and_thread_self_handles() {
     let process = Process::self_process().expect("process_self handle");
     process.close().expect("process handle close");

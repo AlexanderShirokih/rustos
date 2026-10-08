@@ -5,7 +5,6 @@ use alloc::string::String;
 use component_abi::RequirementDeclaration;
 use ipc::Protocol;
 use kernel_objects::{Error, IrqLine, Session, SessionTransport};
-use kernel_tests::kernel_test;
 use runtime::Timeout;
 use syscall::SyscallError;
 use virtio::{DeviceType, register};
@@ -73,7 +72,7 @@ fn offset(register: usize) -> u16 {
     u16::try_from(register).expect("register offset fits u16")
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_gpu_slot_reads_the_gpu_device_id_and_a_second_open_is_busy() {
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
@@ -86,14 +85,14 @@ fn a_gpu_slot_reads_the_gpu_device_id_and_a_second_open_is_busy() {
     // Транспорт, окно которого не выдано, шина пропускает строкой журнала до итоговой.
     let lines = await_component_lines(BUS, 1);
 
-    kernel_tests::kassert_eq!(device_id, Ok(GPU));
-    kernel_tests::kassert_eq!(busy, Err(VirtioMmioError::Busy));
-    kernel_tests::kassert_eq!(lines.first().map(String::as_str), Some(QEMU_VIRT_TAKEN));
+    test_harness::check_eq!(device_id, Ok(GPU));
+    test_harness::check_eq!(busy, Err(VirtioMmioError::Busy));
+    test_harness::check_eq!(lines.first().map(String::as_str), Some(QEMU_VIRT_TAKEN));
     drop((gpu, bus, second));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_absent_or_empty_device_type_is_no_device() {
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
@@ -102,13 +101,13 @@ fn an_absent_or_empty_device_type_is_no_device() {
     let absent = open(&bus, NETWORK).map(drop);
     let empty = open(&bus, EMPTY).map(drop);
 
-    kernel_tests::kassert_eq!(absent, Err(VirtioMmioError::NoDevice));
-    kernel_tests::kassert_eq!(empty, Err(VirtioMmioError::NoDevice));
+    test_harness::check_eq!(absent, Err(VirtioMmioError::NoDevice));
+    test_harness::check_eq!(empty, Err(VirtioMmioError::NoDevice));
     drop(bus);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_register_past_the_window_or_unaligned_is_out_of_range() {
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
@@ -121,15 +120,15 @@ fn a_register_past_the_window_or_unaligned_is_out_of_range() {
     let read_past = gpu.read(u16::MAX - 3).expect("read call");
     let untouched = gpu.read(status).expect("read call");
 
-    kernel_tests::kassert_eq!(past_window, Err(SlotError::OutOfRange));
-    kernel_tests::kassert_eq!(unaligned, Err(SlotError::OutOfRange));
-    kernel_tests::kassert_eq!(read_past, Err(SlotError::OutOfRange));
-    kernel_tests::kassert_eq!(untouched, Ok(0));
+    test_harness::check_eq!(past_window, Err(SlotError::OutOfRange));
+    test_harness::check_eq!(unaligned, Err(SlotError::OutOfRange));
+    test_harness::check_eq!(read_past, Err(SlotError::OutOfRange));
+    test_harness::check_eq!(untouched, Ok(0));
     drop((gpu, bus));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_slot_of_a_terminated_client_reopens_with_the_device_reset() {
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
@@ -142,13 +141,13 @@ fn the_slot_of_a_terminated_client_reopens_with_the_device_reset() {
         .map(client)
         .map(|gpu| gpu.read(offset(register::STATUS)).expect("read call"));
 
-    kernel_tests::kassert_eq!(fixture.exit_code().expect("exit code"), 0);
-    kernel_tests::kassert_eq!(status, Some(Ok(0)));
+    test_harness::check_eq!(fixture.exit_code().expect("exit code"), 0);
+    test_harness::check_eq!(status, Some(Ok(0)));
     drop(bus);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_line_of_a_closed_slot_is_revoked() {
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
@@ -161,9 +160,9 @@ fn the_line_of_a_closed_slot_is_revoked() {
     let reopened = reopen(&bus);
     let released = line.ack().err();
 
-    kernel_tests::kassert!(held != Some(Error::Syscall(SyscallError::Revoked)));
-    kernel_tests::kassert!(reopened.is_some());
-    kernel_tests::kassert_eq!(released, Some(Error::Syscall(SyscallError::Revoked)));
+    test_harness::check!(held != Some(Error::Syscall(SyscallError::Revoked)));
+    test_harness::check!(reopened.is_some());
+    test_harness::check_eq!(released, Some(Error::Syscall(SyscallError::Revoked)));
     drop((reopened, bus));
     finish(composition);
 }

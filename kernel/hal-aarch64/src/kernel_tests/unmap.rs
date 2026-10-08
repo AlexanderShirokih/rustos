@@ -24,7 +24,6 @@ use hal_aarch64_paging::{
     page_table::PageTable,
 };
 use kbase::MutexCell;
-use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
@@ -91,7 +90,7 @@ fn runtime_frame_allocator() -> &'static RuntimeFrameAllocator {
 }
 
 /// `map -> unmap -> query_leaf_raw` должен показать, что leaf-PTE обнулены.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_roundtrip() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -104,7 +103,7 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_some());
+        test_harness::check!(downcast_user_mapper(mapper).query_leaf_raw(p).is_some());
     }
 
     mapper
@@ -113,11 +112,11 @@ fn mapper_unmap_roundtrip() {
 
     for i in 0..pages {
         let p = va(PROBE_BASE + i * PAGE_SIZE);
-        kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(p).is_none());
+        test_harness::check!(downcast_user_mapper(mapper).query_leaf_raw(p).is_none());
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mapper_map_rejects_init_longer_than_range() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -128,12 +127,12 @@ fn mapper_map_rejects_init_longer_than_range() {
     let err = mapper
         .map(base, pages, &init, MemFlags::user_rw())
         .expect_err("init longer than the range must be rejected");
-    kernel_tests::kassert!(matches!(err, MemoryMappingError::InitExceedsMapping));
+    test_harness::check!(matches!(err, MemoryMappingError::InitExceedsMapping));
 
-    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+    test_harness::check!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mapper_map_rejects_init_for_empty_range() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -142,12 +141,12 @@ fn mapper_map_rejects_init_for_empty_range() {
     let err = mapper
         .map(base, 0, &[0xA5], MemFlags::user_rw())
         .expect_err("init for an empty range must be rejected");
-    kernel_tests::kassert!(matches!(err, MemoryMappingError::InitExceedsMapping));
+    test_harness::check!(matches!(err, MemoryMappingError::InitExceedsMapping));
 
-    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+    test_harness::check!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mapper_map_rejects_page_count_size_overflow() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -156,12 +155,12 @@ fn mapper_map_rejects_page_count_size_overflow() {
     let err = mapper
         .map(base, usize::MAX, &[], MemFlags::user_rw())
         .expect_err("mapping size overflow must be rejected");
-    kernel_tests::kassert!(matches!(err, MemoryMappingError::VirtualMappingError));
+    test_harness::check!(matches!(err, MemoryMappingError::VirtualMappingError));
 
-    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+    test_harness::check!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mapper_map_rejects_virtual_range_overflow() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -170,12 +169,12 @@ fn mapper_map_rejects_virtual_range_overflow() {
     let err = mapper
         .map(base, 1, &[], MemFlags::user_rw())
         .expect_err("virtual range overflow must be rejected");
-    kernel_tests::kassert!(matches!(err, MemoryMappingError::VirtualMappingError));
+    test_harness::check!(matches!(err, MemoryMappingError::VirtualMappingError));
 
-    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
+    test_harness::check!(downcast_user_mapper(mapper).query_leaf_raw(base).is_none());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_then_remap() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -195,7 +194,7 @@ fn mapper_unmap_then_remap() {
         .expect("re-map after unmap must succeed");
 
     for i in 0..pages {
-        kernel_tests::kassert!(
+        test_harness::check!(
             downcast_user_mapper(mapper)
                 .query_leaf_raw(va(base.as_usize() + i * PAGE_SIZE))
                 .is_some()
@@ -210,7 +209,7 @@ fn mapper_unmap_then_remap() {
 }
 
 /// `unmap` несуществующего диапазона возвращает `NotMapped`.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_unmapped_returns_not_mapped() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -219,12 +218,12 @@ fn mapper_unmap_unmapped_returns_not_mapped() {
     let err = mapper
         .unmap(base, PAGE_SIZE)
         .expect_err("unmap of unmapped VA must fail");
-    kernel_tests::kassert!(matches!(err, MemoryUnmappingError::NotMapped));
+    test_harness::check!(matches!(err, MemoryUnmappingError::NotMapped));
 }
 
 /// Регресс к Codex P1: до появления `OWNED_BY_FA_BIT` `unmap` дёргал
 /// `deallocate_frame` на любом leaf и корруптил bitmap на cleanup MMIO.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     let real_fa = runtime_frame_allocator();
     let user_as = make_user_as();
@@ -235,7 +234,7 @@ fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     // в FA не возвращает.
     let sentinel = real_fa.allocate_frame().expect("sentinel frame");
     let sentinel_pa = sentinel.page_address();
-    kernel_tests::kassert!(real_fa.is_allocated(sentinel));
+    test_harness::check!(real_fa.is_allocated(sentinel));
 
     let target_va = va(PROBE_BASE + 0x50_0000);
     mapper
@@ -245,7 +244,7 @@ fn mapper_unmap_after_map_exact_keeps_frame_allocated() {
     mapper.unmap(target_va, PAGE_SIZE).expect("unmap sentinel");
 
     // Главный assert: после unmap sentinel-фрейм всё ещё считается занятым.
-    kernel_tests::kassert!(real_fa.is_allocated(sentinel));
+    test_harness::check!(real_fa.is_allocated(sentinel));
 
     // Sentinel освобождаем сами - фрейм наш, mapper его не выдавал.
     let _ = real_fa.deallocate_frame(sentinel);
@@ -277,7 +276,7 @@ fn build_capped_mapper() -> (
 }
 
 /// `unmap` последней 4K leaf-записи возвращает leaf и все промежуточные L1/L2/L3.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_releases_empty_tables() {
     let (mapper, capped, root_frame) = build_capped_mapper();
     let baseline = capped.outstanding();
@@ -287,16 +286,16 @@ fn mapper_unmap_releases_empty_tables() {
         .map(base, 1, &[], MemFlags::user_rw())
         .expect("initial map");
     // leaf + L1 + L2 + L3 = 4.
-    kernel_tests::kassert!(capped.outstanding() == baseline + 4);
+    test_harness::check!(capped.outstanding() == baseline + 4);
 
     mapper.unmap(base, PAGE_SIZE).expect("unmap last page");
-    kernel_tests::kassert!(capped.outstanding() == baseline);
+    test_harness::check!(capped.outstanding() == baseline);
 
     let _ = runtime_frame_allocator().deallocate_frame(root_frame);
 }
 
 /// Partial unmap внутри L2 block-leaf отбивается без модификации таблиц.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_partial_block_rejected() {
     let (mapper, capped, root_frame) = build_capped_mapper();
 
@@ -312,15 +311,15 @@ fn mapper_unmap_partial_block_rejected() {
     let err = mapper
         .unmap(inside, PAGE_SIZE)
         .expect_err("partial unmap inside block must reject");
-    kernel_tests::kassert!(matches!(err, MemoryUnmappingError::UnsupportedBlockMapping));
-    kernel_tests::kassert!(capped.outstanding() == after_map);
+    test_harness::check!(matches!(err, MemoryUnmappingError::UnsupportedBlockMapping));
+    test_harness::check!(capped.outstanding() == after_map);
 
     // Aligned start, но size < block.
     let err = mapper
         .unmap(base, PAGE_SIZE)
         .expect_err("aligned-start short unmap inside block must reject");
-    kernel_tests::kassert!(matches!(err, MemoryUnmappingError::UnsupportedBlockMapping));
-    kernel_tests::kassert!(capped.outstanding() == after_map);
+    test_harness::check!(matches!(err, MemoryUnmappingError::UnsupportedBlockMapping));
+    test_harness::check!(capped.outstanding() == after_map);
 
     mapper
         .unmap(base, L2_BLOCK_SIZE)
@@ -331,7 +330,7 @@ fn mapper_unmap_partial_block_rejected() {
 
 /// `map_exact` может поставить L2 block descriptor. Exact unmap всего блока
 /// должен снять его без split и разрешить повторный map_exact.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_l2_block_then_remap() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -355,7 +354,7 @@ fn mapper_unmap_l2_block_then_remap() {
 
 /// Аналогично для L1 block descriptor: exact 1G block unmap снимает leaf без
 /// выделения/split-а нижних таблиц.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_l1_block_then_remap() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -379,7 +378,7 @@ fn mapper_unmap_l1_block_then_remap() {
 
 /// `unmap` с size, не кратным странице, отбивается типом ошибки до любых
 /// модификаций таблиц.
-#[kernel_test]
+#[test_harness::test]
 fn mapper_unmap_misaligned_size_rejected() {
     let user_as = make_user_as();
     let mapper = user_as.mapper().expect("user variant has mapper");
@@ -392,9 +391,9 @@ fn mapper_unmap_misaligned_size_rejected() {
     let err = mapper
         .unmap(base, PAGE_SIZE + 1)
         .expect_err("unmap must reject misaligned size");
-    kernel_tests::kassert!(matches!(err, MemoryUnmappingError::MisalignedRange));
+    test_harness::check!(matches!(err, MemoryUnmappingError::MisalignedRange));
 
-    kernel_tests::kassert!(downcast_user_mapper(mapper).query_leaf_raw(base).is_some());
+    test_harness::check!(downcast_user_mapper(mapper).query_leaf_raw(base).is_some());
 
     mapper.unmap(base, PAGE_SIZE).expect("cleanup unmap");
 }
@@ -446,7 +445,7 @@ impl FrameAllocator for CappedAllocator<'_> {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mapper_map_partial_oom_rollback() {
     let real_fa = runtime_frame_allocator();
 
@@ -484,11 +483,11 @@ fn mapper_map_partial_oom_rollback() {
     let err = mapper
         .map(base, pages, &[], MemFlags::user_rw())
         .expect_err("map must OOM after capped allocate count");
-    kernel_tests::kassert!(matches!(err, MemoryMappingError::OutOfMemory));
+    test_harness::check!(matches!(err, MemoryMappingError::OutOfMemory));
 
     for i in 0..pages {
         let p = va(base.as_usize() + i * PAGE_SIZE);
-        kernel_tests::kassert!(mapper.query_leaf_raw(p).is_none());
+        test_harness::check!(mapper.query_leaf_raw(p).is_none());
     }
 
     // Drop mapper вернёт root + intermediate L1/L2/L3 в реальный FA через

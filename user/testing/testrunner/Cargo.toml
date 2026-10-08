@@ -199,6 +199,7 @@ driver-simplefb = { path = "../../system/driver-simplefb" }
 fdt-test = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
+filesystem-client = { workspace = true }
 filesystem-server = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }
@@ -207,7 +208,7 @@ log-relay = { workspace = true }
 platform-abi = { workspace = true }
 runtime = { workspace = true }
 spin = { workspace = true }
-test-harness-qemu = { workspace = true }
+test-harness = { workspace = true }
 syscall = { workspace = true }
 managed-component = { workspace = true }
 rootkeeper = { path = "../../system/rootkeeper" }

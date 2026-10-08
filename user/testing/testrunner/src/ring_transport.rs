@@ -9,7 +9,6 @@
 
 use io::{RingError, SpscRing};
 use kernel_objects::{Resource, RingConsumer, RingProducer, Signal, kind};
-use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags, spawn};
 use syscall::Handle;
 
@@ -56,10 +55,10 @@ extern "C" fn consumer_worker(arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn ring_transport_round_trip() {
     let region_len = SpscRing::region_bytes(RING_CAPACITY, SLOT_PAYLOAD);
-    kernel_tests::kassert!(region_len as u64 <= PAGE_SIZE);
+    test_harness::check!(region_len as u64 <= PAGE_SIZE);
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
@@ -67,7 +66,7 @@ fn ring_transport_round_trip() {
     let mapping = region
         .map(PAGE_SIZE, UserMemFlags::ReadWrite)
         .expect("map region");
-    kernel_tests::kassert!(mapping.va() > 0);
+    test_harness::check!(mapping.va() > 0);
 
     let data_signal = Signal::create().expect("signal create");
 
@@ -95,7 +94,7 @@ fn ring_transport_round_trip() {
         match producer.push(&sent.to_le_bytes()) {
             Ok(()) => sent += 1,
             Err(RingError::Full) => core::hint::spin_loop(),
-            Err(_) => kernel_tests::kassert!(false),
+            Err(_) => test_harness::check!(false),
         }
     }
 
@@ -103,5 +102,5 @@ fn ring_transport_round_trip() {
         .join(JOIN_TIMEOUT)
         .expect("consumer joins before timeout");
 
-    kernel_tests::kassert!(shared.ok.load(core::sync::atomic::Ordering::Acquire));
+    test_harness::check!(shared.ok.load(core::sync::atomic::Ordering::Acquire));
 }

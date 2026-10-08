@@ -10,7 +10,6 @@
 extern crate alloc;
 
 use hal_aarch64_paging::memory_attribute::MemoryAttribute;
-use kernel_tests::kernel_test;
 use kernelspace::syscall_bridge;
 use memory::{
     MemFlags,
@@ -70,7 +69,7 @@ fn leaf(mapper: &(dyn MemoryMapper + Send + Sync), va: PageAlignedVirtualAddress
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn user_page_flags_map_and_remap() {
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
@@ -86,26 +85,26 @@ fn user_page_flags_map_and_remap() {
         .expect("map_exact probe page as UserRW");
 
     let rw = leaf(mapper, va);
-    kernel_tests::kassert!(rw.is_page());
-    kernel_tests::kassert_eq!(rw.ap(), 0b01);
-    kernel_tests::kassert_eq!(rw.af(), 1);
-    kernel_tests::kassert_eq!(rw.ng(), 1);
-    kernel_tests::kassert_eq!(rw.pxn(), 1);
-    kernel_tests::kassert_eq!(rw.uxn(), 1);
-    kernel_tests::kassert_eq!(rw.attr_index(), MemoryAttribute::Cached.index());
+    test_harness::check!(rw.is_page());
+    test_harness::check_eq!(rw.ap(), 0b01);
+    test_harness::check_eq!(rw.af(), 1);
+    test_harness::check_eq!(rw.ng(), 1);
+    test_harness::check_eq!(rw.pxn(), 1);
+    test_harness::check_eq!(rw.uxn(), 1);
+    test_harness::check_eq!(rw.attr_index(), MemoryAttribute::Cached.index());
 
     mapper
         .remap(va, PAGE_SIZE, MemFlags::user_rx())
         .expect("remap probe page to UserRX");
 
     let rx = leaf(mapper, va);
-    kernel_tests::kassert!(rx.is_page());
-    kernel_tests::kassert_eq!(rx.ap(), 0b11);
-    kernel_tests::kassert_eq!(rx.af(), 1);
-    kernel_tests::kassert_eq!(rx.ng(), 1);
-    kernel_tests::kassert_eq!(rx.pxn(), 1);
-    kernel_tests::kassert_eq!(rx.uxn(), 0);
-    kernel_tests::kassert_eq!(rx.attr_index(), MemoryAttribute::Cached.index());
+    test_harness::check!(rx.is_page());
+    test_harness::check_eq!(rx.ap(), 0b11);
+    test_harness::check_eq!(rx.af(), 1);
+    test_harness::check_eq!(rx.ng(), 1);
+    test_harness::check_eq!(rx.pxn(), 1);
+    test_harness::check_eq!(rx.uxn(), 0);
+    test_harness::check_eq!(rx.attr_index(), MemoryAttribute::Cached.index());
 
     // AS ни разу не активировался, его entries в TLB нет - drop безопасен.
     // Фрейм страницы пришёл от вызывающего, drop leaf-дескрипторов в FA его
@@ -116,7 +115,7 @@ fn user_page_flags_map_and_remap() {
 
 // Regression guard: индекс слота в PTE и состав MAIR_EL1 определены в разных
 // крейтах, и разошедшись, переводят страницу в чужой тип памяти без отказа.
-#[kernel_test]
+#[test_harness::test]
 fn user_page_profiles_select_their_mair_slots() {
     let factory =
         syscall_bridge::address_space_factory().expect("address space factory must be installed");
@@ -146,11 +145,11 @@ fn user_page_profiles_select_their_mair_slots() {
             .remap(va, PAGE_SIZE, flags)
             .expect("remap probe page to the next profile");
         let observed = leaf(mapper, va);
-        kernel_tests::kassert!(observed.is_page());
-        kernel_tests::kassert_eq!(observed.attr_index(), attribute.index());
+        test_harness::check!(observed.is_page());
+        test_harness::check_eq!(observed.attr_index(), attribute.index());
 
         let slot = (mair_el1() >> (u64::from(attribute.index()) * 8)) & 0xFF;
-        kernel_tests::kassert_eq!(slot as u8, attribute.encoding());
+        test_harness::check_eq!(slot as u8, attribute.encoding());
     }
 
     drop(user_as);

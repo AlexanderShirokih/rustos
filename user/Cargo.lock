@@ -425,21 +425,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-harness"
+version = "0.1.0"
+dependencies = [
+ "io",
+ "spin",
+ "test-harness-macros",
+]
+
+[[package]]
 name = "test-harness-macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "test-harness-qemu"
-version = "0.1.0"
-dependencies = [
- "io",
- "spin",
- "test-harness-macros",
 ]
 
 [[package]]
@@ -454,6 +454,7 @@ dependencies = [
  "fdt-test",
  "filesystem",
  "filesystem-abi",
+ "filesystem-client",
  "filesystem-server",
  "io",
  "ipc",
@@ -467,7 +468,7 @@ dependencies = [
  "runtime",
  "spin",
  "syscall",
- "test-harness-qemu",
+ "test-harness",
  "userland",
  "userland-build",
  "userland-image",

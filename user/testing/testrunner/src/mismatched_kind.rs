@@ -13,7 +13,6 @@ use ipc::{
     wire::{Header, MESSAGE_INLINE_MAX, MessageBuf},
 };
 use kernel_objects::{Delivery, IssuedHandle, OwnedHandle, Port, Signal, kind};
-use kernel_tests::kernel_test;
 use runtime::{PortTransport, Priority, Timeout, port_send, signal_set, spawn_owned};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 
@@ -93,7 +92,7 @@ fn sending_worker(arg: usize, signal: Signal) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     let service = Port::create_service(None).expect("port create");
     let signal = Signal::create().expect("signal create");
@@ -123,14 +122,14 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     kind_probe::dispatch(&mut probe, frame).expect("frame dispatched");
     let owned = probe.handed.take().expect("the capability has an owner");
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         port_send(owned.as_raw(), Timeout::POLL),
         SyscallError::WrongType.as_return_value()
     );
 
     let stale = Handle::<kind::Signal>::from_abi(owned.as_raw().as_nonzero());
     drop(owned);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         signal_set(stale, SIGNALED, 0, WakeCount::None),
         SyscallError::BadHandle.as_return_value()
     );
@@ -141,6 +140,6 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     kind_probe::dispatch(&mut probe, frame).expect("next request answered");
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
-    kernel_tests::kassert_eq!(exchange.sent.load(SeqCst), 1);
-    kernel_tests::kassert_eq!(exchange.answered.load(SeqCst), 1);
+    test_harness::check_eq!(exchange.sent.load(SeqCst), 1);
+    test_harness::check_eq!(exchange.answered.load(SeqCst), 1);
 }

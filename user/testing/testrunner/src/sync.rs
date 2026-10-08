@@ -4,7 +4,6 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_objects::Signal;
-use kernel_tests::kernel_test;
 use runtime::{Condvar, Instant, Mutex, Priority, Timeout, spawn};
 use syscall::{SIGNALED, WakeCount};
 
@@ -59,7 +58,7 @@ extern "C" fn pingpong_worker(arg: usize) -> u32 {
     0
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_thread_round_trip() {
     // Раунд между потоками одного процесса: переключение без смены адресного пространства.
     let shared = Shared2 {
@@ -87,10 +86,10 @@ fn bench_thread_round_trip() {
     thread
         .join(JOIN_TIMEOUT)
         .expect("worker joins before timeout");
-    kernel_tests::kreport!("sched thread_round_trip ns_per_op={}", elapsed / ROUNDS);
+    test_harness::report!("sched thread_round_trip ns_per_op={}", elapsed / ROUNDS);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn mutex_contention() {
     let shared = Shared { m: Mutex::new(0) };
     let arg = (&raw const shared) as usize;
@@ -102,10 +101,10 @@ fn mutex_contention() {
             .join(JOIN_TIMEOUT)
             .expect("worker joins before timeout");
     }
-    kernel_tests::kassert_eq!(*shared.m.lock(), WORKERS * ITERS);
+    test_harness::check_eq!(*shared.m.lock(), WORKERS * ITERS);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn condvar_ping_pong() {
     let shared = Shared2 {
         m: Mutex::new(PingPong {
@@ -130,7 +129,7 @@ fn condvar_ping_pong() {
     thread
         .join(JOIN_TIMEOUT)
         .expect("worker joins before timeout");
-    kernel_tests::kassert_eq!(shared.m.lock().count, 2 * ROUNDS);
+    test_harness::check_eq!(shared.m.lock().count, 2 * ROUNDS);
 }
 
 const STEAL_WINDOW: Timeout = Timeout::from_millis(50);
@@ -175,7 +174,7 @@ extern "C" fn theft_thief(arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn condvar_notify_is_not_stolen_by_a_later_waiter() {
     let shared = Theft {
         turns: Mutex::new(Turns {
@@ -261,7 +260,7 @@ extern "C" fn baton_waiter(arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn condvar_notify_one_releases_waiters_one_by_one() {
     let shared = Baton {
         tokens: Mutex::new(0),
@@ -300,5 +299,5 @@ fn condvar_notify_one_releases_waiters_one_by_one() {
         .join(JOIN_TIMEOUT)
         .expect("second joins before timeout");
 
-    kernel_tests::kassert!(released_in_turn);
+    test_harness::check!(released_in_turn);
 }

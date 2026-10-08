@@ -66,7 +66,7 @@ platform-abi = { path = "../lib/platform-abi" }
 rtc-abi = { path = "../lib/rtc-abi" }
 syscall = { path = "../lib/syscall" }
 syscall-user = { path = "../lib/syscall-user" }
-test-harness-qemu = { path = "../lib/test-harness-qemu" }
+test-harness = { path = "../lib/test-harness" }
 userland = { path = "../lib/userland" }
 userland-build = { path = "../lib/userland-build" }
 userland-image = { path = "../lib/userland-image" }

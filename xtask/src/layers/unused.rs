@@ -104,13 +104,13 @@ mod tests {
     fn lib_target_name_wins_over_the_package_name() {
         let meta = CargoMetadata {
             packages: vec![MetaPackage {
-                name: "test-harness-qemu".to_string(),
-                manifest_path: PathBuf::from("lib/test-harness-qemu/Cargo.toml"),
+                name: "demo-harness".to_string(),
+                manifest_path: PathBuf::from("lib/demo-harness/Cargo.toml"),
                 dependencies: Vec::new(),
                 targets: vec![MetaTarget {
-                    name: "kernel_tests".to_string(),
+                    name: "demo_tests".to_string(),
                     kind: vec!["lib".to_string()],
-                    src_path: PathBuf::from("lib/test-harness-qemu/src/lib.rs"),
+                    src_path: PathBuf::from("lib/demo-harness/src/lib.rs"),
                 }],
             }],
         };
@@ -118,8 +118,8 @@ mod tests {
         let names = lib_target_names(std::slice::from_ref(&meta));
 
         assert_eq!(
-            names.get("test-harness-qemu").map(|name| name.as_str()),
-            Some("kernel_tests")
+            names.get("demo-harness").map(|name| name.as_str()),
+            Some("demo_tests")
         );
     }
 }

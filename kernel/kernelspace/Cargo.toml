@@ -8,7 +8,7 @@ publish.workspace = true
 [features]
 default = []
 kernel-tests = [
-    "dep:test-harness-qemu",
+    "dep:test-harness",
 ]
 
 [dependencies]
@@ -27,7 +27,7 @@ syscall-kernel = { workspace = true }
 userland = { workspace = true }
 userland-image = { workspace = true }
 process = { workspace = true }
-test-harness-qemu = { workspace = true, optional = true }
+test-harness = { workspace = true, optional = true }
 
 [lints]
 workspace = true

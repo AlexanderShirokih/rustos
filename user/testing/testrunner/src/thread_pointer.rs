@@ -6,7 +6,6 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, spawn, thread_yield};
 
 const WORKER_STACK_SIZE: u64 = 0x4000;
@@ -73,7 +72,7 @@ extern "C" fn pointer_worker(arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn thread_pointer_is_private_to_the_thread() {
     let entry_pointer = thread_pointer();
     let shared = Shared {
@@ -102,6 +101,6 @@ fn thread_pointer_is_private_to_the_thread() {
     }
     set_thread_pointer(entry_pointer);
 
-    kernel_tests::kassert_eq!(main_mismatches, 0);
-    kernel_tests::kassert_eq!(shared.mismatches.load(Ordering::Relaxed), 0);
+    test_harness::check_eq!(main_mismatches, 0);
+    test_harness::check_eq!(shared.mismatches.load(Ordering::Relaxed), 0);
 }

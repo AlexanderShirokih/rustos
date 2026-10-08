@@ -1,7 +1,7 @@
 //! Test-mode ядра под `cfg(feature = "kernel-tests")`.
 //!
 //! `kmain` после bootstrap создаёт начальный процесс и под этой фичей запускает все
-//! зарегистрированные тест-кейсы через `kernel_tests::run_all_tests()`.
+//! зарегистрированные тест-кейсы через `test_harness::run_all_tests()`.
 //!
 //! Тестам вендится только консоль для маркеров.
 
@@ -84,7 +84,7 @@ pub fn run(kernel: &mut KernelContext) -> ! {
 
     let writer: &'static (dyn Writer + Send + Sync) =
         ADAPTER.get().expect("ADAPTER initialised above");
-    kernel_tests::runner::install_writer(writer);
-    kernel_tests::runner::install_exit(harness_exit);
-    kernel_tests::run_all_tests()
+    test_harness::runner::install_writer(writer);
+    test_harness::runner::install_exit(harness_exit);
+    test_harness::run_all_tests()
 }

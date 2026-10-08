@@ -24,7 +24,7 @@ members = [
     "kernel/scheduler",
     "kernel/syscall",
     "lib/test-harness-macros",
-    "lib/test-harness-qemu",
+    "lib/test-harness",
     "lib/component-abi",
     "lib/device-resolver",
     "lib/fdt",
@@ -112,7 +112,7 @@ scheduler = { path = "kernel/scheduler" }
 syscall = { path = "lib/syscall" }
 syscall-kernel = { path = "kernel/syscall" }
 syscall-user = { path = "lib/syscall-user" }
-test-harness-qemu = { path = "lib/test-harness-qemu" }
+test-harness = { path = "lib/test-harness" }
 test-harness-macros = { path = "lib/test-harness-macros" }
 userland = { path = "lib/userland" }
 userland-build = { path = "lib/userland-build" }

@@ -8,7 +8,6 @@ use core::{
 };
 
 use kernel_objects::Signal;
-use kernel_tests::kernel_test;
 use runtime::{
     Futex, Instant, JoinHandle, Priority, Timeout, futex_bucket, futex_wait,
     futex_wait_interleaved, futex_wait_without_slot, futex_wake, futex_wake_all, spawn_owned,
@@ -120,30 +119,30 @@ fn join_all(threads: Vec<JoinHandle>) {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn wait_returns_at_once_when_the_value_differs() {
     let futex = Futex::new(RELEASED);
     let started = Instant::now();
 
-    kernel_tests::kassert!(futex_wait(&futex, PARKED, PARK_LIMIT));
-    kernel_tests::kassert!(Instant::now().since(started).raw() < Timeout::from_secs(1).raw());
+    test_harness::check!(futex_wait(&futex, PARKED, PARK_LIMIT));
+    test_harness::check!(Instant::now().since(started).raw() < Timeout::from_secs(1).raw());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn wait_reports_the_timeout_it_was_given() {
     let futex = Futex::new(PARKED);
     let started = Instant::now();
 
-    kernel_tests::kassert!(!futex_wait(&futex, PARKED, Some(Duration::from_millis(50))));
-    kernel_tests::kassert!(Instant::now().since(started).raw() >= Timeout::from_millis(40).raw());
+    test_harness::check!(!futex_wait(&futex, PARKED, Some(Duration::from_millis(50))));
+    test_harness::check!(Instant::now().since(started).raw() >= Timeout::from_millis(40).raw());
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn wake_addresses_a_parked_waiter() {
     let pack = Pack::new();
     let waiters = pack.spawn_waiters(1);
 
-    kernel_tests::kassert!(wait_for(&pack.ready, 1, JOIN_TIMEOUT));
+    test_harness::check!(wait_for(&pack.ready, 1, JOIN_TIMEOUT));
     pause(SETTLE_MS);
 
     let addressed = futex_wake(&pack.futex);
@@ -152,16 +151,16 @@ fn wake_addresses_a_parked_waiter() {
     pack.release();
     join_all(waiters);
 
-    kernel_tests::kassert!(addressed);
-    kernel_tests::kassert!(released);
+    test_harness::check!(addressed);
+    test_harness::check!(released);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn wake_all_releases_every_waiter() {
     let pack = Pack::new();
     let waiters = pack.spawn_waiters(WAITERS);
 
-    kernel_tests::kassert!(wait_for(&pack.ready, WAITERS as u32, JOIN_TIMEOUT));
+    test_harness::check!(wait_for(&pack.ready, WAITERS as u32, JOIN_TIMEOUT));
     pause(SETTLE_MS);
 
     futex_wake_all(&pack.futex);
@@ -170,10 +169,10 @@ fn wake_all_releases_every_waiter() {
     pack.release();
     join_all(waiters);
 
-    kernel_tests::kassert!(released_in_time);
+    test_harness::check!(released_in_time);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn wake_inside_the_park_window_is_not_lost() {
     let shared = Arc::new(Handoff {
         futex: Futex::new(PARKED),
@@ -213,11 +212,11 @@ fn wake_inside_the_park_window_is_not_lost() {
         .join(JOIN_TIMEOUT)
         .expect("waiter joins before timeout");
 
-    kernel_tests::kassert!(addressed);
-    kernel_tests::kassert_eq!(shared.outcome.load(Ordering::Acquire), 1);
+    test_harness::check!(addressed);
+    test_harness::check_eq!(shared.outcome.load(Ordering::Acquire), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn baton_under_contention_completes_every_lap() {
     let shared = Arc::new(Baton {
         turn: Futex::new(0),
@@ -252,11 +251,11 @@ fn baton_under_contention_completes_every_lap() {
 
     join_all(runners);
 
-    kernel_tests::kassert_eq!(shared.total.load(Ordering::Acquire), RUNNERS * LAPS);
-    kernel_tests::kassert_eq!(shared.turn.load(Ordering::Acquire), 0);
+    test_harness::check_eq!(shared.total.load(Ordering::Acquire), RUNNERS * LAPS);
+    test_harness::check_eq!(shared.turn.load(Ordering::Acquire), 0);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_waiter_without_a_slot_follows_the_value() {
     let pack = Pack::new();
     let waiter = {
@@ -275,7 +274,7 @@ fn a_waiter_without_a_slot_follows_the_value() {
         .expect("spawn waiter")
     };
 
-    kernel_tests::kassert!(wait_for(&pack.ready, 1, JOIN_TIMEOUT));
+    test_harness::check!(wait_for(&pack.ready, 1, JOIN_TIMEOUT));
     pause(SETTLE_MS);
     let parked_still = pack.returned.load(Ordering::Acquire);
 
@@ -284,21 +283,21 @@ fn a_waiter_without_a_slot_follows_the_value() {
         .join(JOIN_TIMEOUT)
         .expect("waiter joins before timeout");
 
-    kernel_tests::kassert_eq!(parked_still, 0);
-    kernel_tests::kassert_eq!(pack.returned.load(Ordering::Acquire), 1);
+    test_harness::check_eq!(parked_still, 0);
+    test_harness::check_eq!(pack.returned.load(Ordering::Acquire), 1);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_waiter_without_a_slot_reports_its_timeout() {
     let futex = Futex::new(PARKED);
     let started = Instant::now();
 
-    kernel_tests::kassert!(!futex_wait_without_slot(
+    test_harness::check!(!futex_wait_without_slot(
         &futex,
         PARKED,
         Some(Duration::from_millis(50))
     ));
-    kernel_tests::kassert!(Instant::now().since(started).raw() >= Timeout::from_millis(40).raw());
+    test_harness::check!(Instant::now().since(started).raw() >= Timeout::from_millis(40).raw());
 }
 
 fn colliding_pair(cells: &[Futex]) -> Option<(usize, usize)> {
@@ -312,7 +311,7 @@ fn colliding_pair(cells: &[Futex]) -> Option<(usize, usize)> {
     None
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_wake_leaves_a_colliding_address_parked() {
     let shared = Arc::new(Colliding {
         cells: [const { Futex::new(PARKED) }; CELLS],
@@ -345,7 +344,7 @@ fn a_wake_leaves_a_colliding_address_parked() {
         })
         .collect();
 
-    kernel_tests::kassert!(wait_for(&shared.ready, 2, JOIN_TIMEOUT));
+    test_harness::check!(wait_for(&shared.ready, 2, JOIN_TIMEOUT));
     pause(SETTLE_MS);
 
     futex_wake(&shared.cells[first]);
@@ -357,6 +356,6 @@ fn a_wake_leaves_a_colliding_address_parked() {
     futex_wake_all(&shared.cells[second]);
     join_all(waiters);
 
-    kernel_tests::kassert_eq!(woken, 1);
-    kernel_tests::kassert_eq!(untouched, 0);
+    test_harness::check_eq!(woken, 1);
+    test_harness::check_eq!(untouched, 0);
 }

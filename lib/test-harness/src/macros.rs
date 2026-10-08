@@ -1,4 +1,4 @@
-//! `kassert!`/`kassert_eq!`/`kassert_ne!`/`kreport!`/`kskip!`, [`fail`] и [`skip`].
+//! `check!`/`check_eq!`/`check_ne!`/`report!`/`skip!`, [`fail`] и [`skip`].
 
 use core::fmt::{Arguments, Write as _};
 
@@ -21,7 +21,7 @@ pub fn fail(reason: Arguments<'_>, file: &'static str, line: u32) -> ! {
 
 /// Отмечает текущий тест пропущенным с причиной `reason`.
 ///
-/// После вызова тест обязан вернуться. Макрос [`kskip!`](crate::kskip) возвращается за него.
+/// После вызова тест обязан вернуться. Макрос [`skip!`](crate::skip) возвращается за него.
 pub fn skip(reason: Arguments<'_>, file: &'static str, line: u32) {
     with_writer(|w| {
         let mut fmt = FmtAdapter::new(w);
@@ -34,7 +34,7 @@ pub fn skip(reason: Arguments<'_>, file: &'static str, line: u32) {
 ///
 /// Применяется, когда на машине нет условия теста, например описанного устройства.
 #[macro_export]
-macro_rules! kskip {
+macro_rules! skip {
     ($($arg:tt)+) => {{
         $crate::macros::skip(::core::format_args!($($arg)+), file!(), line!());
         return;
@@ -42,18 +42,18 @@ macro_rules! kskip {
 }
 
 #[macro_export]
-macro_rules! kreport {
+macro_rules! report {
     ($($arg:tt)+) => {
         $crate::macros::report(::core::format_args!($($arg)+));
     };
 }
 
 #[macro_export]
-macro_rules! kassert {
+macro_rules! check {
     ($cond:expr $(,)?) => {
         if !($cond) {
             $crate::macros::fail(
-                ::core::format_args!(concat!("kassert ", stringify!($cond))),
+                ::core::format_args!(concat!("check ", stringify!($cond))),
                 file!(),
                 line!(),
             );
@@ -67,14 +67,14 @@ macro_rules! kassert {
 }
 
 #[macro_export]
-macro_rules! kassert_eq {
+macro_rules! check_eq {
     ($left:expr, $right:expr $(,)?) => {{
         let left_val = &($left);
         let right_val = &($right);
         if left_val != right_val {
             $crate::macros::fail(
                 ::core::format_args!(
-                    "kassert_eq {} != {} (left={:?} right={:?})",
+                    "check_eq {} != {} (left={:?} right={:?})",
                     stringify!($left),
                     stringify!($right),
                     left_val,
@@ -88,14 +88,14 @@ macro_rules! kassert_eq {
 }
 
 #[macro_export]
-macro_rules! kassert_ne {
+macro_rules! check_ne {
     ($left:expr, $right:expr $(,)?) => {{
         let left_val = &($left);
         let right_val = &($right);
         if left_val == right_val {
             $crate::macros::fail(
                 ::core::format_args!(
-                    "kassert_ne {} == {} (left={:?} right={:?})",
+                    "check_ne {} == {} (left={:?} right={:?})",
                     stringify!($left),
                     stringify!($right),
                     left_val,

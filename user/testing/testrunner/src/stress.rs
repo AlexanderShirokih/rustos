@@ -9,7 +9,6 @@ use core::{
 };
 
 use kernel_objects::{Error, ObjectKind, Port, Resource, Signal, kind};
-use kernel_tests::kernel_test;
 use rootkeeper::SystemImage;
 use runtime::{
     JoinHandle, Priority, Timeout, handle_close, ipc_buffer_ptr, port_call, port_send,
@@ -149,16 +148,16 @@ impl StressPlan {
             SystemImage::acquire(crate::bootstrap_handle()).expect("userland image is mapped");
         let entries = image.entries().expect("userland image decodes");
         let record = entries.entry(PLAN_PATH);
-        kernel_tests::kassert!(record.is_some(), "stress plan is missing at {PLAN_PATH}");
+        test_harness::check!(record.is_some(), "stress plan is missing at {PLAN_PATH}");
         let record = record.expect("the record is present");
 
         let text = core::str::from_utf8(record.data());
-        kernel_tests::kassert!(text.is_ok(), "stress plan at {PLAN_PATH} is not UTF-8");
+        test_harness::check!(text.is_ok(), "stress plan at {PLAN_PATH} is not UTF-8");
         let text = text.expect("the record is UTF-8");
 
         let parsed = Self::parse(text);
         if let Err(error) = parsed {
-            kernel_tests::kassert!(
+            test_harness::check!(
                 false,
                 "stress plan at {PLAN_PATH}: {} '{}'",
                 error.describe(),
@@ -842,19 +841,19 @@ fn report(context: fmt::Arguments<'_>, failure: StepFailure) -> ! {
     // Истечение отведённого времени уходит отдельным маркером: xtask отличает
     // его от нарушенного утверждения.
     if failure.expired() {
-        kernel_tests::runner::with_writer(|writer| {
-            let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+        test_harness::runner::with_writer(|writer| {
+            let mut output = test_harness::runner::FmtAdapter::new(writer);
             let _ = writeln!(output, "[STRESS-TIMEOUT: {context} {failure}]");
         });
     }
-    kernel_tests::macros::fail(format_args!("stress {context} {failure}"), file!(), line!())
+    test_harness::macros::fail(format_args!("stress {context} {failure}"), file!(), line!())
 }
 
 fn measure(context: fmt::Arguments<'_>) -> u64 {
     // Нехватка остатка на само снятие величины - то же расхождение.
     match remaining_budget() {
         Ok(budget) => budget,
-        Err(error) => kernel_tests::macros::fail(
+        Err(error) => test_harness::macros::fail(
             format_args!("stress {context}: budget probe refused ({error:?})"),
             file!(),
             line!(),
@@ -863,30 +862,30 @@ fn measure(context: fmt::Arguments<'_>) -> u64 {
 }
 
 pub(crate) fn log_seed(seed: u64, steps: u64) {
-    kernel_tests::runner::with_writer(|writer| {
-        let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+    test_harness::runner::with_writer(|writer| {
+        let mut output = test_harness::runner::FmtAdapter::new(writer);
         let _ = writeln!(output, "[STRESS-START: seed={seed} steps={steps}]");
     });
 }
 
 pub(crate) fn log_pass(seed: u64) {
-    kernel_tests::runner::with_writer(|writer| {
-        let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+    test_harness::runner::with_writer(|writer| {
+        let mut output = test_harness::runner::FmtAdapter::new(writer);
         // Форму маркера разбирает xtask, считая пройденные seed прогона.
         let _ = writeln!(output, "[STRESS-PASS: seed={seed}]");
     });
 }
 
 fn log_base(budget: u64) {
-    kernel_tests::runner::with_writer(|writer| {
-        let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+    test_harness::runner::with_writer(|writer| {
+        let mut output = test_harness::runner::FmtAdapter::new(writer);
         let _ = writeln!(output, "[STRESS-BASE: budget={budget}]");
     });
 }
 
 fn log_epoch(seed: u64, epoch: u64, budget: u64) {
-    kernel_tests::runner::with_writer(|writer| {
-        let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+    test_harness::runner::with_writer(|writer| {
+        let mut output = test_harness::runner::FmtAdapter::new(writer);
         // Форму маркера разбирает xtask, считая отчитавшиеся эпохи прогона.
         let _ = writeln!(
             output,
@@ -895,7 +894,7 @@ fn log_epoch(seed: u64, epoch: u64, budget: u64) {
     });
 }
 
-#[kernel_test(stress)]
+#[test_harness::test(stress)]
 fn port_signal_lifecycle_stress() {
     let plan = StressPlan::load();
     let epochs = plan.epochs();
@@ -909,7 +908,7 @@ fn port_signal_lifecycle_stress() {
         for epoch in 0..epochs {
             run_epoch(seed, epoch, plan.epoch_length(epoch));
             let budget = measure(format_args!("seed={seed} epoch={epoch}"));
-            kernel_tests::kassert!(
+            test_harness::check!(
                 budget == base,
                 "stress seed={seed} epoch={epoch}: budget base={base} now={budget}"
             );
@@ -919,95 +918,95 @@ fn port_signal_lifecycle_stress() {
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn plan_parses_declared_fields() {
     let plan = StressPlan::parse("seed=7\nseeds=3\nsteps=64\nepoch=16\n").expect("plan parses");
-    kernel_tests::kassert_eq!(plan.steps, 64);
-    kernel_tests::kassert_eq!(plan.epochs(), 4);
+    test_harness::check_eq!(plan.steps, 64);
+    test_harness::check_eq!(plan.epochs(), 4);
     let seeds: alloc::vec::Vec<u64> = plan.seeds().collect();
-    kernel_tests::kassert_eq!(seeds, alloc::vec![7, 8, 9]);
+    test_harness::check_eq!(seeds, alloc::vec![7, 8, 9]);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn epochs_cover_the_steps_of_a_seed() {
     let plan = StressPlan::parse("seed=1\nseeds=1\nsteps=70\nepoch=32\n").expect("plan parses");
-    kernel_tests::kassert_eq!(plan.epochs(), 3);
+    test_harness::check_eq!(plan.epochs(), 3);
     let lengths: alloc::vec::Vec<u64> = (0..plan.epochs()).map(|e| plan.epoch_length(e)).collect();
-    kernel_tests::kassert_eq!(lengths, alloc::vec![32, 32, 6]);
-    kernel_tests::kassert_eq!(lengths.iter().sum::<u64>(), plan.steps);
+    test_harness::check_eq!(lengths, alloc::vec![32, 32, 6]);
+    test_harness::check_eq!(lengths.iter().sum::<u64>(), plan.steps);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn plan_rejects_an_unknown_key() {
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nsteps=2\nseeds=3\nepoch=1\ndepth=4\n").err(),
         Some(PlanError::Unknown("depth"))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn plan_rejects_a_repeated_key() {
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nseed=2\nseeds=3\nsteps=4\nepoch=1\n").err(),
         Some(PlanError::Repeated("seed"))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn plan_rejects_a_value_that_is_not_a_number() {
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nseeds=many\nsteps=4\nepoch=1\n").err(),
         Some(PlanError::NotANumber("seeds"))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn plan_rejects_a_line_without_a_separator() {
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nseeds\nsteps=4\nepoch=1\n").err(),
         Some(PlanError::Malformed("seeds"))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn plan_rejects_a_zero_count() {
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nseeds=0\nsteps=4\nepoch=1\n").err(),
         Some(PlanError::Zero("seeds"))
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nseeds=2\nsteps=0\nepoch=1\n").err(),
         Some(PlanError::Zero("steps"))
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nseeds=2\nsteps=4\nepoch=0\n").err(),
         Some(PlanError::Zero("epoch"))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn plan_rejects_an_incomplete_declaration() {
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seeds=2\nsteps=4\nepoch=1\n").err(),
         Some(PlanError::Missing("seed"))
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("seed=1\nseeds=2\nsteps=4\n").err(),
         Some(PlanError::Missing("epoch"))
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         StressPlan::parse("").err(),
         Some(PlanError::Missing("seed"))
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_first_epoch_runs_the_seed_of_the_run() {
-    kernel_tests::kassert_eq!(epoch_seed(0x1234_5678, 0), 0x1234_5678);
-    kernel_tests::kassert_ne!(epoch_seed(0x1234_5678, 1), 0x1234_5678);
+    test_harness::check_eq!(epoch_seed(0x1234_5678, 0), 0x1234_5678);
+    test_harness::check_ne!(epoch_seed(0x1234_5678, 1), 0x1234_5678);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn the_same_seed_repeats_the_step_sequence() {
     const SEQUENCE_STEPS: usize = 64;
 
@@ -1028,16 +1027,16 @@ fn the_same_seed_repeats_the_step_sequence() {
     }
 
     let sequence_of_the_seed = sequence(0x51ED);
-    kernel_tests::kassert_eq!(sequence_of_the_seed, sequence(0x51ED));
+    test_harness::check_eq!(sequence_of_the_seed, sequence(0x51ED));
 
-    kernel_tests::kassert!(
+    test_harness::check!(
         sequence_of_the_seed
             .iter()
             .any(|step| step.kind == StepKind::Release && step.index > 0)
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_operation_out_of_time_is_not_a_violated_assertion() {
     let port = Port::create().expect("port of the probe");
     let refusal = port
@@ -1045,14 +1044,14 @@ fn an_operation_out_of_time_is_not_a_violated_assertion() {
         .expect_err("a port without a sender refuses a poll");
 
     let kind = FailureKind::from_error("recv", Timeout::POLL, refusal, -1102);
-    kernel_tests::kassert!(kind.expired());
-    kernel_tests::kassert_eq!(
+    test_harness::check!(kind.expired());
+    test_harness::check_eq!(
         alloc::format!("{kind}"),
         alloc::string::String::from("outcome=expired phase=recv timeout_ns=0")
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_refused_operation_is_not_an_expiry() {
     let signal = Signal::create().expect("signal of the probe");
     let blind = signal
@@ -1061,5 +1060,5 @@ fn a_refused_operation_is_not_an_expiry() {
 
     let failure =
         signal_set_wait(&signal, blind.as_raw(), 1).expect_err("waiting without READ is refused");
-    kernel_tests::kassert!(!failure.expired());
+    test_harness::check!(!failure.expired());
 }

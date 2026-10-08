@@ -8,7 +8,6 @@ use filesystem_abi::{
     AccessMode, FileSystemError, NAME_MAX, NodeKind, OpenFlags, PATH_MAX, file_system,
 };
 use kernel_objects::{Session, SessionTransport};
-use kernel_tests::kernel_test;
 use runtime::UserMemFlags;
 
 use crate::filesystem::{
@@ -35,17 +34,17 @@ fn window_of(
     open_root(client, text).expect("window granted")
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn filesystem_scopes_a_session_to_an_image_directory() {
     let parent = connect(image_session());
     let _parent_buffer = acquire_buffer(&parent);
     let scoped = connect(window_of(&parent, COMPONENT_DIRECTORY));
 
     let opened = open(&scoped, "/sample", AccessMode::Read, OpenFlags::NONE);
-    kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
-    kernel_tests::kassert_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
+    test_harness::check_eq!(opened.kind, NodeKind::File);
+    test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
     let unread = scoped.read(opened.fd, 0, BUFFER_SIZE).expect("read call");
-    kernel_tests::kassert_eq!(unread, Err(FileSystemError::NoBuffer));
+    test_harness::check_eq!(unread, Err(FileSystemError::NoBuffer));
 
     let region = acquire_buffer(&scoped);
     let buffer = region
@@ -55,16 +54,16 @@ fn filesystem_scopes_a_session_to_an_image_directory() {
         .read(opened.fd, 0, BUFFER_SIZE)
         .expect("read call")
         .expect("read ok");
-    kernel_tests::kassert_eq!(buffer_head(&buffer, count as usize), IMAGE_FILE_BODY);
+    test_harness::check_eq!(buffer_head(&buffer, count as usize), IMAGE_FILE_BODY);
 
     let root = open(&scoped, "/", AccessMode::Read, OpenFlags::DIRECTORY);
     let names = walk_directory(&scoped, &buffer, root.fd);
     for expected in ["sample", "exec"] {
-        kernel_tests::kassert!(names.iter().any(|name| name.as_str() == expected));
+        test_harness::check!(names.iter().any(|name| name.as_str() == expected));
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn filesystem_scoped_session_stays_inside_its_window() {
     let parent = connect(image_session());
     let scoped = connect(window_of(&parent, COMPONENT_DIRECTORY));
@@ -72,12 +71,12 @@ fn filesystem_scoped_session_stays_inside_its_window() {
     let absolute = scoped
         .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE)
         .expect("open call");
-    kernel_tests::kassert_eq!(absolute, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(absolute, Err(FileSystemError::NotFound));
 
     let escape = scoped
         .open(path("/../sample"), AccessMode::Read, OpenFlags::NONE)
         .expect("open call");
-    kernel_tests::kassert_eq!(escape, Err(FileSystemError::InvalidPath));
+    test_harness::check_eq!(escape, Err(FileSystemError::InvalidPath));
 
     let mut tail = String::new();
     while tail.len() + COMPONENT_DIRECTORY.len() <= PATH_MAX {
@@ -88,15 +87,15 @@ fn filesystem_scoped_session_stays_inside_its_window() {
     let overflow = scoped
         .open(path(&tail), AccessMode::Read, OpenFlags::NONE)
         .expect("open call");
-    kernel_tests::kassert_eq!(overflow, Err(FileSystemError::InvalidPath));
+    test_harness::check_eq!(overflow, Err(FileSystemError::InvalidPath));
 
     let unscoped = parent
         .open(path(&tail), AccessMode::Read, OpenFlags::NONE)
         .expect("open call");
-    kernel_tests::kassert_eq!(unscoped, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(unscoped, Err(FileSystemError::NotFound));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn filesystem_scoped_windows_narrow_and_compose() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
@@ -126,20 +125,20 @@ fn filesystem_scoped_windows_narrow_and_compose() {
     let first = connect(window_of(&client, &format!("{CHAIN_WINDOW}/outer")));
     let scoped = connect(window_of(&first, "/inner"));
     let reached = open(&scoped, "/leaf", AccessMode::Read, OpenFlags::NONE);
-    kernel_tests::kassert_eq!(reached.size, payload.len() as u64);
+    test_harness::check_eq!(reached.size, payload.len() as u64);
 
     let outside = scoped
         .open(path("/inner/leaf"), AccessMode::Read, OpenFlags::NONE)
         .expect("open call");
-    kernel_tests::kassert_eq!(outside, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(outside, Err(FileSystemError::NotFound));
 
     drop(scoped);
     drop(first);
     let alive = client.stat(leaf.fd).expect("stat call").expect("stat ok");
-    kernel_tests::kassert_eq!(alive.size, payload.len() as u64);
+    test_harness::check_eq!(alive.size, payload.len() as u64);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn filesystem_scoped_session_writes_through_its_window() {
     let client = connect(ram_session());
     open(
@@ -164,7 +163,7 @@ fn filesystem_scoped_session_writes_through_its_window() {
         AccessMode::Read,
         OpenFlags::NONE,
     );
-    kernel_tests::kassert_eq!(outer.size, payload.len() as u64);
+    test_harness::check_eq!(outer.size, payload.len() as u64);
 
     scoped
         .rename(path("/fresh"), path("/renamed"))
@@ -181,33 +180,33 @@ fn filesystem_scoped_session_writes_through_its_window() {
             OpenFlags::NONE,
         )
         .expect("open call");
-    kernel_tests::kassert_eq!(removed, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(removed, Err(FileSystemError::NotFound));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn filesystem_open_root_accepts_any_existing_node() {
     let parent = connect(image_session());
 
     let file = connect(window_of(&parent, IMAGE_FILE));
     let opened = open(&file, "/", AccessMode::Read, OpenFlags::NONE);
-    kernel_tests::kassert_eq!(opened.kind, NodeKind::File);
-    kernel_tests::kassert_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(opened.kind, NodeKind::File);
+    test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
+    test_harness::check_eq!(
         file.open(path("/child"), AccessMode::Read, OpenFlags::NONE)
             .expect("open call"),
         Err(FileSystemError::NotADirectory)
     );
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         open_root(&parent, "/absent-window").err(),
         Some(FileSystemError::NotFound)
     );
 
     let scoped = connect(window_of(&parent, "/"));
     let opened = open(&scoped, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
-    kernel_tests::kassert_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
+    test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn filesystem_scoped_session_cannot_name_its_own_root() {
     let client = connect(ram_session());
     open(
@@ -221,18 +220,18 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
     let removed = scoped
         .unlink(path("/"), NodeKind::Directory)
         .expect("unlink call");
-    kernel_tests::kassert_eq!(removed, Err(FileSystemError::InvalidPath));
+    test_harness::check_eq!(removed, Err(FileSystemError::InvalidPath));
     let moved = scoped
         .rename(path("/"), path("/inside"))
         .expect("rename call");
-    kernel_tests::kassert_eq!(moved, Err(FileSystemError::InvalidPath));
+    test_harness::check_eq!(moved, Err(FileSystemError::InvalidPath));
     let onto = scoped
         .rename(path("/inside"), path("/"))
         .expect("rename call");
-    kernel_tests::kassert_eq!(onto, Err(FileSystemError::InvalidPath));
+    test_harness::check_eq!(onto, Err(FileSystemError::InvalidPath));
 
     let alive = open(&client, ROOT_WINDOW, AccessMode::Read, OpenFlags::DIRECTORY);
-    kernel_tests::kassert_eq!(alive.kind, NodeKind::Directory);
+    test_harness::check_eq!(alive.kind, NodeKind::Directory);
 
     client
         .unlink(path(ROOT_WINDOW), NodeKind::Directory)
@@ -241,5 +240,5 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
     let recreated = scoped
         .open(path("/"), AccessMode::ReadWrite, OpenFlags::CREATE)
         .expect("open call");
-    kernel_tests::kassert_eq!(recreated, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(recreated, Err(FileSystemError::NotFound));
 }

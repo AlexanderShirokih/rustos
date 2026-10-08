@@ -12,7 +12,6 @@ use core::{
 };
 
 use kernel_objects::{Port, Resource, Signal, kind};
-use kernel_tests::kernel_test;
 use runtime::{
     JoinHandle, Priority, Timeout, UserMemFlags, handle_close, handle_duplicate, port_call,
     port_recv, port_reply, port_send, signal_wait_one, spawn_owned, thread_exit_code,
@@ -286,7 +285,7 @@ fn await_brigade(arena: &Arena, workers: u64, seed: u64) {
             idle_polls = 0;
             last = progress;
         }
-        kernel_tests::kassert!(
+        test_harness::check!(
             idle_polls < STALL_POLLS,
             "smp stress seed={seed} stalled: steps={progress} finished={} of {workers} \
              calls_ok={} replies_ok={} replies_lost={}",
@@ -354,22 +353,22 @@ fn run_brigade(seed: u64, steps: u64) {
 
     let calls_ok = arena.calls_ok.load(Relaxed);
     let replies_ok = arena.replies_ok.load(Relaxed);
-    kernel_tests::kassert!(
+    test_harness::check!(
         arena.failures.load(Relaxed) == 0,
         "smp stress seed={seed}: {} syscalls failed outside the model, first {}",
         arena.failures.load(Relaxed),
         arena.first_failure.load(Relaxed)
     );
-    kernel_tests::kassert!(
+    test_harness::check!(
         arena.mismatched.load(Relaxed) == 0,
         "smp stress seed={seed}: {} messages reached the wrong thread",
         arena.mismatched.load(Relaxed)
     );
-    kernel_tests::kassert!(
+    test_harness::check!(
         calls_ok == replies_ok,
         "smp stress seed={seed}: {calls_ok} completed calls against {replies_ok} delivered replies"
     );
-    kernel_tests::kassert!(
+    test_harness::check!(
         calls_ok > 0,
         "smp stress seed={seed}: no call completed, the run proved nothing"
     );
@@ -377,8 +376,8 @@ fn run_brigade(seed: u64, steps: u64) {
 }
 
 fn report(seed: u64, arena: &Arena) {
-    kernel_tests::runner::with_writer(|writer| {
-        let mut output = kernel_tests::runner::FmtAdapter::new(writer);
+    test_harness::runner::with_writer(|writer| {
+        let mut output = test_harness::runner::FmtAdapter::new(writer);
         let _ = writeln!(
             output,
             "[SMP-STRESS: seed={seed} steps={} calls={} replies_lost={} maps={} handles={}]",
@@ -432,7 +431,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     // мьютекс кучи. Готовая жертва прошла пролог и кучу отпустила.
     let mut waits = 0;
     while VICTIMS_READY.load(Acquire) != VICTIMS as u64 {
-        kernel_tests::kassert!(
+        test_harness::check!(
             waits < READY_YIELD_LIMIT,
             "smp stress seed={seed} round={round}: only {} of {VICTIMS} victims ready",
             VICTIMS_READY.load(Acquire)
@@ -444,7 +443,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     for index in shuffled(VICTIMS, random) {
         let exit_code = VICTIM_EXIT_BASE + u32::try_from(index).unwrap_or(0);
         let result = thread_terminate(victims[index].handle(), u64::from(exit_code));
-        kernel_tests::kassert!(
+        test_harness::check!(
             result == 0,
             "smp stress seed={seed} round={round}: terminating victim {index} failed with {result}"
         );
@@ -453,7 +452,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     for (index, victim) in victims.drain(..).enumerate() {
         let handle = victim.handle();
         let waited = signal_wait_one(handle, SIGNALED, JOIN_TIMEOUT);
-        kernel_tests::kassert!(
+        test_harness::check!(
             waited >= 0,
             "smp stress seed={seed} round={round}: victim {index} never terminated ({waited})"
         );
@@ -461,7 +460,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
         // а вместе с ним каскадом уходят и производные хэндлы.
         let expected = i64::from(VICTIM_EXIT_BASE + u32::try_from(index).unwrap_or(0));
         let code = thread_exit_code(handle);
-        kernel_tests::kassert!(
+        test_harness::check!(
             code == expected,
             "smp stress seed={seed} round={round}: victim {index} left code {code}, not {expected}"
         );
@@ -471,7 +470,7 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     }
 }
 
-#[kernel_test(stress)]
+#[test_harness::test(stress)]
 fn smp_port_brigade_stress() {
     let plan = StressPlan::load();
     for seed in plan.seeds() {
@@ -481,7 +480,7 @@ fn smp_port_brigade_stress() {
     }
 }
 
-#[kernel_test(stress)]
+#[test_harness::test(stress)]
 fn smp_terminate_blocked_threads_stress() {
     let plan = StressPlan::load();
     for seed in plan.seeds() {

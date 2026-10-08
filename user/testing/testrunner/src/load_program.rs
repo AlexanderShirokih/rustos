@@ -5,7 +5,6 @@
 //! `testrunner`.
 
 use kernel_objects::{Process, Resource, Signal};
-use kernel_tests::kernel_test;
 use runtime::{Timeout, signal_set};
 use syscall::{ProcessName, SIGNALED, SyscallError, SyscallOp, WakeCount};
 use userland::{Program, Segment, SegmentPermissions};
@@ -68,7 +67,7 @@ fn load_synthetic_child(
     .expect("load_program spawns child")
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn load_program_passes_bootstrap_handle() {
     let resource = Resource::self_resource().expect("self metering resource");
     let code = clean_exit_child_code();
@@ -76,15 +75,15 @@ fn load_program_passes_bootstrap_handle() {
     let passed = bootstrap.as_raw();
     let process = load_synthetic_child(&resource, "child", &code, bootstrap);
 
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         signal_set(passed, SIGNALED, 0, WakeCount::None),
         SyscallError::BadHandle.as_return_value()
     );
     process.join(CHILD_WAIT_TIMEOUT).expect("child terminates");
-    kernel_tests::kassert_eq!(process.exit_code().expect("exit code"), 0);
+    test_harness::check_eq!(process.exit_code().expect("exit code"), 0);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn synchronous_fault_terminates_child_and_runner_continues() {
     let resource = Resource::self_resource().expect("self metering resource");
     let fault_code = data_abort_child_code();
@@ -98,7 +97,7 @@ fn synchronous_fault_terminates_child_and_runner_continues() {
     faulting
         .join(CHILD_WAIT_TIMEOUT)
         .expect("faulting child terminates");
-    kernel_tests::kassert!(faulting.exit_code().expect("fault exit code") != 0);
+    test_harness::check!(faulting.exit_code().expect("fault exit code") != 0);
 
     let canary_code = clean_exit_child_code();
     let canary = load_synthetic_child(
@@ -110,5 +109,5 @@ fn synchronous_fault_terminates_child_and_runner_continues() {
     canary
         .join(CHILD_WAIT_TIMEOUT)
         .expect("post-fault child terminates");
-    kernel_tests::kassert_eq!(canary.exit_code().expect("canary exit code"), 0);
+    test_harness::check_eq!(canary.exit_code().expect("canary exit code"), 0);
 }

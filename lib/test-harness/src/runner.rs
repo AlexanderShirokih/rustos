@@ -21,8 +21,8 @@ use crate::case::{TestCase, TestKind};
 
 #[allow(improper_ctypes)]
 unsafe extern "C" {
-    static __tests_kernel_start: TestCase;
-    static __tests_kernel_end: TestCase;
+    static __tests_start: TestCase;
+    static __tests_end: TestCase;
 }
 
 static WRITER: Once<&'static (dyn Writer + Send + Sync)> = Once::new();
@@ -76,10 +76,10 @@ impl core::fmt::Write for FmtAdapter<'_> {
 }
 
 fn iter_cases() -> &'static [TestCase] {
-    let start = core::ptr::addr_of!(__tests_kernel_start);
-    let end = core::ptr::addr_of!(__tests_kernel_end);
+    let start = core::ptr::addr_of!(__tests_start);
+    let end = core::ptr::addr_of!(__tests_end);
     // SAFETY: оба символа экспортирует линкер-скрипт тестового бинаря, они обрамляют секцию
-    // `.tests.kernel` и лежат в одном образе.
+    // `.tests` и лежат в одном образе.
     let len = usize::try_from(unsafe { end.offset_from(start) }).unwrap_or(0);
     // SAFETY: секция хранит `len` статиков `TestCase`, размещённых линкером подряд, и остаётся
     // отображённой до конца прогона.
@@ -110,7 +110,7 @@ fn run_case(case: &TestCase) {
 
 /// Прогоняет зарегистрированные кейсы профиля `kind` и выключает машину.
 ///
-/// Порядок обхода задаётся раскладкой секции `.tests.kernel` линкером и не
+/// Порядок обхода задаётся раскладкой секции `.tests` линкером и не
 /// является частью контракта. Кейс обязан быть самодостаточным - сам создавать
 /// нужное ему состояние и не полагаться на то, что оставил предыдущий.
 pub fn run_tests(kind: TestKind) -> ! {

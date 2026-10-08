@@ -23,7 +23,7 @@ power-semihosting = []
 short-quantum = []
 kernel-tests = [
     "kernelspace/kernel-tests",
-    "dep:test-harness-qemu",
+    "dep:test-harness",
 ]
 
 [dependencies]
@@ -45,7 +45,7 @@ fdt = { workspace = true }
 io = { workspace = true }
 klog = { workspace = true }
 spin = { workspace = true }
-test-harness-qemu = { workspace = true, optional = true }
+test-harness = { workspace = true, optional = true }
 
 [build-dependencies]
 serde = { workspace = true }

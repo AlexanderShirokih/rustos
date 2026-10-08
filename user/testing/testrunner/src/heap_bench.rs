@@ -6,7 +6,6 @@
 use alloc::alloc::{Layout, alloc, dealloc};
 use core::hint::black_box;
 
-use kernel_tests::{kernel_test, kreport};
 use runtime::Instant;
 
 const SIZES: [usize; 6] = [32, 256, 2048, 4096, 16 * 1024, 64 * 1024];
@@ -34,7 +33,7 @@ fn layout_of(size: usize) -> Layout {
     Layout::from_size_align(size, 16).expect("layout of a bench size")
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_heap_alloc_free() {
     for size in SIZES {
         let layout = layout_of(size);
@@ -48,11 +47,11 @@ fn bench_heap_alloc_free() {
                 dealloc(block, layout);
             }
         });
-        kreport!("heap alloc_free bytes={size} ns_per_op={elapsed}");
+        test_harness::report!("heap alloc_free bytes={size} ns_per_op={elapsed}");
     }
 }
 
-#[kernel_test(bench)]
+#[test_harness::test(bench)]
 fn bench_heap_live_set() {
     // Куча держит LIVE занятых блоков и отдаёт по одному на круг. Поэтому замер измеряет
     // переиспользование списка свободных, а не первую выдачу.
@@ -76,7 +75,7 @@ fn bench_heap_live_set() {
             }
             cursor = (cursor + 1) % LIVE;
         });
-        kreport!("heap live_set bytes={size} ns_per_op={elapsed}");
+        test_harness::report!("heap live_set bytes={size} ns_per_op={elapsed}");
 
         for slot in live {
             // SAFETY: блок выдан этим же layout и больше не адресуется.

@@ -3,7 +3,6 @@
 //! не утекая. Запущенный процесс получает стартовый хэндл без права передачи.
 
 use kernel_objects::{Error, Port, Process, Signal, ThreadEntry, kind};
-use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, signal_set};
 use syscall::{Handle, ProcessName, Rights, SIGNALED, SyscallError, WakeCount};
 
@@ -17,7 +16,7 @@ fn is_closed(handle: Handle<kind::Signal>) -> bool {
     signal_set(handle, SIGNALED, 0, WakeCount::None) == SyscallError::BadHandle.as_return_value()
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn start_error_closes_passed_handles() {
     let process = Process::create(ProcessName::new("start-error").expect("process name"))
         .expect("process create must succeed");
@@ -33,12 +32,12 @@ fn start_error_closes_passed_handles() {
     };
 
     let error = process.start(entry, owned, None).err();
-    kernel_tests::kassert!(error.is_some());
+    test_harness::check!(error.is_some());
 
-    kernel_tests::kassert!(is_closed(stale));
+    test_harness::check!(is_closed(stale));
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_started_process_cannot_pass_its_start_handle_on() {
     let port = Port::create().expect("port create");
     let start = port
@@ -46,13 +45,13 @@ fn a_started_process_cannot_pass_its_start_handle_on() {
         .expect("client copy of the port");
     let process = spawn_entry(FORWARD_FIXTURE, start);
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         port.recv(RECV_TIMEOUT),
         Err(Error::Syscall(SyscallError::Timeout))
     ));
 
     process.join(JOIN_TIMEOUT).expect("fixture exits");
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         process.exit_code().expect("exit code"),
         SyscallError::AccessDenied as u32
     );

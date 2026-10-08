@@ -4,52 +4,51 @@
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use kernel_tests::kernel_test;
 use runtime::{Priority, Timeout, spawn};
 
 const STACK_SIZE: u64 = 0x4000;
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-#[kernel_test]
+#[test_harness::test]
 fn heap_basic() {
     let mut v: Vec<u64> = Vec::new();
     for i in 0..1000 {
         v.push(i);
     }
     let sum: u64 = v.iter().copied().sum();
-    kernel_tests::kassert_eq!(sum, 999 * 1000 / 2);
+    test_harness::check_eq!(sum, 999 * 1000 / 2);
 
     let boxed = Box::new(0xDEAD_BEEF_u64);
-    kernel_tests::kassert_eq!(*boxed, 0xDEAD_BEEF_u64);
+    test_harness::check_eq!(*boxed, 0xDEAD_BEEF_u64);
 
     let mut s = String::new();
     for _ in 0..64 {
         s.push_str("ab");
     }
-    kernel_tests::kassert_eq!(s.len(), 128);
+    test_harness::check_eq!(s.len(), 128);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn heap_threshold_boundary() {
     for size in [64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1] {
         let mut v: Vec<u8> = Vec::with_capacity(size);
         v.resize(size, 0xA5);
-        kernel_tests::kassert_eq!(v.len(), size);
-        kernel_tests::kassert_eq!(v[0], 0xA5);
-        kernel_tests::kassert_eq!(v[size - 1], 0xA5);
+        test_harness::check_eq!(v.len(), size);
+        test_harness::check_eq!(v[0], 0xA5);
+        test_harness::check_eq!(v[size - 1], 0xA5);
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn heap_passthrough() {
     const BIG: usize = 128 * 1024;
     for round in 0..8u8 {
         let mut v: Vec<u8> = Vec::with_capacity(BIG);
         v.resize(BIG, round);
-        kernel_tests::kassert_eq!(v.len(), BIG);
-        kernel_tests::kassert_eq!(v[0], round);
-        kernel_tests::kassert_eq!(v[BIG - 1], round);
+        test_harness::check_eq!(v.len(), BIG);
+        test_harness::check_eq!(v[0], round);
+        test_harness::check_eq!(v[BIG - 1], round);
     }
 }
 
@@ -76,7 +75,7 @@ extern "C" fn churn_worker(arg: usize) -> u32 {
     0
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn heap_concurrent() {
     let shared = ConcurrentShared {
         total: AtomicU64::new(0),
@@ -94,5 +93,5 @@ fn heap_concurrent() {
 
     let per_iter = VECTOR_LEN * (VECTOR_LEN - 1) / 2;
     let expected = WORKERS * ITERS * per_iter;
-    kernel_tests::kassert_eq!(shared.total.load(Relaxed), expected);
+    test_harness::check_eq!(shared.total.load(Relaxed), expected);
 }

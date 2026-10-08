@@ -32,7 +32,7 @@ impl Settings {
         Ok(Settings {
             max_width,
             test_comment_max_lines: 2,
-            test_attributes: vec!["test".to_owned(), "kernel_test".to_owned()],
+            test_attributes: vec!["test".to_owned(), "test_harness::test".to_owned()],
             doc_bearing_derives: vec![
                 "Parser".to_owned(),
                 "Subcommand".to_owned(),
@@ -48,7 +48,7 @@ impl Default for Settings {
         Settings {
             max_width: DEFAULT_MAX_WIDTH,
             test_comment_max_lines: 2,
-            test_attributes: vec!["test".to_owned(), "kernel_test".to_owned()],
+            test_attributes: vec!["test".to_owned(), "test_harness::test".to_owned()],
             doc_bearing_derives: vec![
                 "Parser".to_owned(),
                 "Subcommand".to_owned(),

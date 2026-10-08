@@ -7,7 +7,6 @@ use component_startup::{Attributes, Found};
 use display_abi::{Area, DisplayError, display};
 use ipc::Protocol;
 use kernel_objects::{MemoryRegion, SessionTransport};
-use kernel_tests::kernel_test;
 use runtime::Timeout;
 use userland_image::ComponentSpec;
 
@@ -80,7 +79,7 @@ fn present(session: &display::Client<SessionTransport>, area: Area) -> Result<()
     session.present(area).expect("present call")
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_display_session_gets_the_dimension_and_a_surface_that_holds_it() {
     let composition = scenario(&[DISPLAY]);
     let importer = composition.importer(SCREEN_REQUIREMENTS);
@@ -89,9 +88,9 @@ fn a_display_session_gets_the_dimension_and_a_surface_that_holds_it() {
     let dimension = screen.dimension().expect("dimension call");
     let region = surface(&screen).expect("surface granted");
 
-    kernel_tests::kassert_eq!(dimension, DIMENSION);
+    test_harness::check_eq!(dimension, DIMENSION);
     let size = region.inspect().expect("surface inspects").size_bytes;
-    kernel_tests::kassert!(
+    test_harness::check!(
         dimension
             .surface_size()
             .is_some_and(|needed| size >= needed)
@@ -100,7 +99,7 @@ fn a_display_session_gets_the_dimension_and_a_surface_that_holds_it() {
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_second_surface_request_of_a_session_keeps_the_first_surface() {
     let composition = scenario(&[DISPLAY]);
     let importer = composition.importer(SCREEN_REQUIREMENTS);
@@ -109,24 +108,24 @@ fn a_second_surface_request_of_a_session_keeps_the_first_surface() {
 
     let again = surface(&screen).map(drop);
 
-    kernel_tests::kassert_eq!(again, Err(DisplayError::AlreadyAcquired));
-    kernel_tests::kassert!(region.inspect().is_ok());
+    test_harness::check_eq!(again, Err(DisplayError::AlreadyAcquired));
+    test_harness::check!(region.inspect().is_ok());
     drop((screen, region));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_present_before_the_surface_is_no_surface() {
     let composition = scenario(&[DISPLAY]);
     let importer = composition.importer(SCREEN_REQUIREMENTS);
     let screen = session(&importer);
 
-    kernel_tests::kassert_eq!(present(&screen, WHOLE_SCREEN), Err(DisplayError::NoSurface));
+    test_harness::check_eq!(present(&screen, WHOLE_SCREEN), Err(DisplayError::NoSurface));
     drop(screen);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_present_past_the_edge_or_of_an_empty_area_is_out_of_bounds() {
     let composition = scenario(&[DISPLAY]);
     let importer = composition.importer(SCREEN_REQUIREMENTS);
@@ -143,13 +142,13 @@ fn a_present_past_the_edge_or_of_an_empty_area_is_out_of_bounds() {
         ..WHOLE_SCREEN
     };
 
-    kernel_tests::kassert_eq!(present(&screen, past_edge), Err(DisplayError::OutOfBounds));
-    kernel_tests::kassert_eq!(present(&screen, empty), Err(DisplayError::OutOfBounds));
+    test_harness::check_eq!(present(&screen, past_edge), Err(DisplayError::OutOfBounds));
+    test_harness::check_eq!(present(&screen, empty), Err(DisplayError::OutOfBounds));
     drop((screen, region));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_present_inside_the_screen_succeeds() {
     let composition = scenario(&[DISPLAY]);
     let importer = composition.importer(SCREEN_REQUIREMENTS);
@@ -163,12 +162,12 @@ fn a_present_inside_the_screen_succeeds() {
         height: 4,
     };
 
-    kernel_tests::kassert_eq!(present(&screen, corner), Ok(()));
+    test_harness::check_eq!(present(&screen, corner), Ok(()));
     drop((screen, region));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_surface_over_the_budget_is_granted_after_the_holder_session_closes() {
     let composition = scenario(&[DISPLAY]);
     let importer = composition.importer(SCREEN_REQUIREMENTS);
@@ -176,18 +175,18 @@ fn a_surface_over_the_budget_is_granted_after_the_holder_session_closes() {
     let second = session(&importer);
     let held = surface(&first).expect("first session takes the budget");
 
-    kernel_tests::kassert_eq!(surface(&second).map(drop), Err(DisplayError::NoSpace));
+    test_harness::check_eq!(surface(&second).map(drop), Err(DisplayError::NoSpace));
 
     drop(first);
 
-    kernel_tests::kassert!(await_revoked(|| held.inspect()));
+    test_harness::check!(await_revoked(|| held.inspect()));
     drop(held);
-    kernel_tests::kassert!(surface(&second).is_ok());
+    test_harness::check!(surface(&second).is_ok());
     drop(second);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_session_starts_an_image_program_under_its_index_name() {
     let (composition, _) = indexed(&[]);
     let importer = composition.importer(SCREENS);
@@ -196,13 +195,13 @@ fn a_session_starts_an_image_program_under_its_index_name() {
     let dimension = screen.dimension().expect("dimension call");
     let lines = await_component_lines(DISPLAY.name, 1);
 
-    kernel_tests::kassert_eq!(dimension, DIMENSION);
-    kernel_tests::kassert_eq!(lines, ["started"]);
+    test_harness::check_eq!(dimension, DIMENSION);
+    test_harness::check_eq!(lines, ["started"]);
     drop(screen);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_enumeration_finds_an_image_program_without_starting_it() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(SCREENS);
@@ -210,12 +209,12 @@ fn an_enumeration_finds_an_image_program_without_starting_it() {
     let found = found(&importer).len();
     let record = registered(&composition, &names, DISPLAY);
 
-    kernel_tests::kassert_eq!(found, 1);
-    kernel_tests::kassert!(matches!(record, Ok(1)));
+    test_harness::check_eq!(found, 1);
+    test_harness::check!(matches!(record, Ok(1)));
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_open_after_the_session_reaches_the_started_image_program() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(SCREENS);
@@ -234,13 +233,13 @@ fn an_open_after_the_session_reaches_the_started_image_program() {
         },
     );
 
-    kernel_tests::kassert_eq!(opened, Some(Ok(())));
-    kernel_tests::kassert!(matches!(record, Ok(2)));
+    test_harness::check_eq!(opened, Some(Ok(())));
+    test_harness::check!(matches!(record, Ok(2)));
     drop(screen);
     finish(composition);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn an_image_program_with_a_plan_record_is_found_once() {
     let (composition, _) = indexed(&[DISPLAY]);
     let importer = composition.importer(SCREENS);
@@ -248,7 +247,7 @@ fn an_image_program_with_a_plan_record_is_found_once() {
     let found = found(&importer).len();
     let dimension = session(&importer).dimension().expect("dimension call");
 
-    kernel_tests::kassert_eq!(found, 1);
-    kernel_tests::kassert_eq!(dimension, DIMENSION);
+    test_harness::check_eq!(found, 1);
+    test_harness::check_eq!(dimension, DIMENSION);
     finish(composition);
 }

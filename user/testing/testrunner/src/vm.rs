@@ -8,13 +8,12 @@
 //! страницы.
 
 use kernel_objects::Resource;
-use kernel_tests::kernel_test;
 use runtime::UserMemFlags;
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xC0DE_F00D_DEAD_BEEF;
 
-#[kernel_test]
+#[test_harness::test]
 fn allocate_write_then_remap_readonly() {
     let resource = Resource::self_resource().expect("self metering resource");
     let mapping = resource
@@ -26,7 +25,7 @@ fn allocate_write_then_remap_readonly() {
     // её базе лежат в границах, а другие владельцы отсутствуют.
     unsafe {
         slot.write_volatile(PATTERN);
-        kernel_tests::kassert_eq!(slot.read_volatile(), PATTERN);
+        test_harness::check_eq!(slot.read_volatile(), PATTERN);
     }
 
     mapping
@@ -35,11 +34,11 @@ fn allocate_write_then_remap_readonly() {
 
     // SAFETY: ReadOnly сохраняет право чтения по тому же VA.
     unsafe {
-        kernel_tests::kassert_eq!(slot.read_volatile(), PATTERN);
+        test_harness::check_eq!(slot.read_volatile(), PATTERN);
     }
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn allocate_free_reuses_va() {
     let resource = Resource::self_resource().expect("self metering resource");
 
@@ -59,10 +58,10 @@ fn allocate_free_reuses_va() {
     let second = resource
         .allocate(PAGE_SIZE, UserMemFlags::ReadWrite)
         .expect("second allocate");
-    kernel_tests::kassert_eq!(second.va(), va);
+    test_harness::check_eq!(second.va(), va);
 
     // SAFETY: см. выше.
     unsafe {
-        kernel_tests::kassert_eq!(slot.read_volatile(), 0);
+        test_harness::check_eq!(slot.read_volatile(), 0);
     }
 }

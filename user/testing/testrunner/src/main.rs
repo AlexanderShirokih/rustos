@@ -1,4 +1,4 @@
-//! Исполняет функции, помеченные `#[kernel_test]` в модулях этого крейта, и завершает
+//! Исполняет функции, помеченные `#[test_harness::test]` в модулях этого крейта, и завершает
 //! процесс кодом их итога.
 //!
 //! Набор выбирает переменная сборки `TEST_PROFILE`: `stress` берёт стрессовые прогоны,
@@ -29,7 +29,6 @@ use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, features, hardware, image};
 use component_startup::component_manifest;
 use io::writer::Writer;
 use kernel_objects::Session;
-use kernel_tests::kernel_test;
 use runtime::{PortTransport, process_exit};
 use spin::{Mutex, Once};
 use syscall::{Handle, kind};
@@ -181,21 +180,21 @@ fn runner_exit(code: u32) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
     BOOTSTRAP_HANDLE.call_once(|| root);
-    kernel_tests::runner::install_writer(&LOG_WRITER);
-    kernel_tests::runner::install_exit(runner_exit);
+    test_harness::runner::install_writer(&LOG_WRITER);
+    test_harness::runner::install_exit(runner_exit);
     let profile = match env!("TEST_PROFILE") {
-        "stress" => kernel_tests::TestKind::Stress,
-        "bench" => kernel_tests::TestKind::Bench,
-        _ => kernel_tests::TestKind::Regular,
+        "stress" => test_harness::TestKind::Stress,
+        "bench" => test_harness::TestKind::Bench,
+        _ => test_harness::TestKind::Regular,
     };
-    kernel_tests::run_tests(profile)
+    test_harness::run_tests(profile)
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn userland_smoke() {
     let sum: u64 = (1..=10).sum();
-    kernel_tests::kassert_eq!(sum, 55);
-    kernel_tests::kassert!(sum.is_multiple_of(5));
+    test_harness::check_eq!(sum, 55);
+    test_harness::check!(sum.is_multiple_of(5));
 }
 
 struct PanicBuffer {

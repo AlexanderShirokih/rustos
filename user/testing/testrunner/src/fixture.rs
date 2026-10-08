@@ -116,7 +116,7 @@ impl Fixture {
     pub(crate) fn request_status(&self, op: u8, arg: u64, caps: &[u32]) -> u8 {
         let mut out = [0u8; 1];
         let len = self.request(op, arg, caps, &mut out);
-        kernel_tests::kassert_eq!(len, 1);
+        test_harness::check_eq!(len, 1);
         out[0]
     }
 

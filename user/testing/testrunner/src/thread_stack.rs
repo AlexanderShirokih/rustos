@@ -5,7 +5,6 @@
 use core::sync::atomic::Ordering::Relaxed;
 
 use kernel_objects::Resource;
-use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, Timeout, UserMemFlags};
 use syscall::{ProcessName, Rights};
 use userland_image::component_name;
@@ -24,7 +23,7 @@ const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const DEEPEST_FRAME_SPAN: u64 = 512;
 
-#[kernel_test]
+#[test_harness::test]
 fn thread_stack_overflow_faults_on_the_guard_page() {
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
@@ -47,7 +46,7 @@ fn thread_stack_overflow_faults_on_the_guard_page() {
 
     process.join(JOIN_TIMEOUT).expect("fixture terminates");
     let exit_code = process.exit_code().expect("exit code");
-    kernel_tests::kassert!(
+    test_harness::check!(
         ![
             0,
             MAP_FAILED_EXIT_CODE,
@@ -64,9 +63,9 @@ fn thread_stack_overflow_faults_on_the_guard_page() {
     let report = unsafe { &*(va as *const StackReport) };
     let entry = report.entry_frame.load(Relaxed);
     let deepest = report.deepest_frame.load(Relaxed);
-    kernel_tests::kassert!(entry != 0);
+    test_harness::check!(entry != 0);
 
     let stack_base = (entry / PAGE_SIZE + 1) * PAGE_SIZE - THREAD_STACK_BYTES;
-    kernel_tests::kassert!(deepest >= stack_base);
-    kernel_tests::kassert!(deepest < stack_base + DEEPEST_FRAME_SPAN);
+    test_harness::check!(deepest >= stack_base);
+    test_harness::check!(deepest < stack_base + DEEPEST_FRAME_SPAN);
 }

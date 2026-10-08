@@ -2,14 +2,13 @@
 //! `Resource`/`MemoryRegion`/`Mapping` из EL0.
 
 use kernel_objects::{Error, MmioWindow, RegionInfo, RegionKind, Resource};
-use kernel_tests::kernel_test;
 use runtime::{MemoryAccess, MemoryProfile, UserMemFlags};
 use syscall::SyscallError;
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;
 
-#[kernel_test]
+#[test_harness::test]
 fn memory_capability_target_map_and_inspect() {
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
@@ -23,11 +22,11 @@ fn memory_capability_target_map_and_inspect() {
     // 8 байт лежат в его границах.
     unsafe {
         slot.write_volatile(PATTERN);
-        kernel_tests::kassert_eq!(slot.read_volatile(), PATTERN);
+        test_harness::check_eq!(slot.read_volatile(), PATTERN);
     }
 
     let info = region.inspect().expect("inspect");
-    kernel_tests::kassert_eq!(
+    test_harness::check_eq!(
         info,
         RegionInfo {
             size_bytes: PAGE_SIZE,
@@ -39,7 +38,7 @@ fn memory_capability_target_map_and_inspect() {
     );
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn contiguous_region_reports_its_physical_base() {
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
@@ -48,10 +47,10 @@ fn contiguous_region_reports_its_physical_base() {
 
     let info = region.inspect().expect("inspect region");
 
-    kernel_tests::kassert!(info.base != 0);
+    test_harness::check!(info.base != 0);
 }
 
-#[kernel_test]
+#[test_harness::test]
 fn a_write_combining_mapping_refuses_a_cached_region() {
     let resource = Resource::self_resource().expect("self metering resource");
     let window = MmioWindow {
@@ -62,7 +61,7 @@ fn a_write_combining_mapping_refuses_a_cached_region() {
         size: PAGE_SIZE,
     };
 
-    kernel_tests::kassert!(matches!(
+    test_harness::check!(matches!(
         window.map_write_combining(),
         Err(Error::Syscall(SyscallError::InvalidArgument))
     ));
