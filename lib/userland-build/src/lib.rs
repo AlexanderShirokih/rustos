@@ -8,7 +8,9 @@
 //! загружаемой части.
 
 mod c_sources;
+mod error;
 mod linker;
 
 pub use c_sources::{compile_c, link_libc};
+pub use error::Error;
 pub use linker::emit_linker_script;

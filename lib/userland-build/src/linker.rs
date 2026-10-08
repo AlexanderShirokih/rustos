@@ -9,7 +9,9 @@
 //! обработчиками `atexit`. Обход массива с конца вызывает обработчики `atexit` раньше
 //! деструкторов библиотеки. Таблица адресов `.got` C-кода лежит там же, в `.data`.
 
-use std::{env, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
+
+use crate::{Error, error::cargo_variable};
 
 const LINKER_SCRIPT: &str = "\
 ENTRY(_start)
@@ -72,12 +74,12 @@ SECTIONS
 const GENERATED_NAME: &str = "userland.ld";
 
 /// Кладёт в сборку стандартный linker script программы userspace и передаёт его компоновщику.
-#[allow(clippy::expect_used)]
-pub fn emit_linker_script() {
-    // Отказ окружения или файловой системы прекращает сборку, и `cargo` читает именно
-    // панику скрипта.
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
-    let linker_script = out_dir.join(GENERATED_NAME);
-    fs::write(&linker_script, LINKER_SCRIPT).expect("write the linker script");
+pub fn emit_linker_script() -> Result<(), Error> {
+    let linker_script = PathBuf::from(cargo_variable("OUT_DIR")?).join(GENERATED_NAME);
+    fs::write(&linker_script, LINKER_SCRIPT).map_err(|source| Error::Write {
+        path: linker_script.clone(),
+        source,
+    })?;
     println!("cargo:rustc-link-arg=-T{}", linker_script.display());
+    Ok(())
 }

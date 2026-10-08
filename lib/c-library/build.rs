@@ -1,10 +1,11 @@
 //! Компонует библиотеку C и компилирует системный слой файлов и значения `errno` и
 //! `pthread.h` из её заголовков.
 
-fn main() {
+fn main() -> Result<(), userland_build::Error> {
     userland_build::compile_c(
         "c-library",
         &["src/errno.c", "src/files.c", "src/pthread.c"],
-    );
-    userland_build::link_libc();
+    )?;
+    userland_build::link_libc()?;
+    Ok(())
 }
