@@ -217,3 +217,46 @@ fn std_rt_thread_locals_are_private_and_destroyed() {
     // SAFETY: ключ выдан `create` выше, рабочие потоки завершены, больше им не пользуются.
     unsafe { runtime::tls::destroy(key) };
 }
+
+static PLAIN_KEY: AtomicU64 = AtomicU64::new(0);
+
+static PLAIN_SEEN: AtomicU64 = AtomicU64::new(0);
+
+const PLAIN_VALUE: usize = 0x5EED;
+
+unsafe extern "C" fn record_plain(_value: *mut u8) {
+    let key = PLAIN_KEY.load(Relaxed) as usize;
+    // SAFETY: ключ выдан `create` до запуска рабочего потока.
+    let plain = unsafe { runtime::tls::get(key) };
+    PLAIN_SEEN.store(plain as usize as u64, Relaxed);
+}
+
+extern "C" fn plain_worker(key: usize) -> u32 {
+    // SAFETY: ключ выдан `create` до запуска потока; значение - непрозрачный для слоя
+    // указатель.
+    unsafe { runtime::tls::set(PLAIN_KEY.load(Relaxed) as usize, PLAIN_VALUE as *mut u8) };
+    // SAFETY: см. выше.
+    unsafe { runtime::tls::set(key, PLAIN_VALUE as *mut u8) };
+    0
+}
+
+#[test_harness::test]
+fn std_rt_destructor_reads_a_key_without_destructor() {
+    let plain = runtime::tls::create(None);
+    let recording = runtime::tls::create(Some(record_plain));
+    test_harness::check!(plain != 0 && recording != 0);
+    PLAIN_KEY.store(plain as u64, Relaxed);
+    PLAIN_SEEN.store(0, Relaxed);
+
+    spawn(plain_worker, recording, STACK_SIZE, Priority::new(1))
+        .expect("spawn worker")
+        .join(JOIN_TIMEOUT)
+        .expect("worker joins before timeout");
+
+    test_harness::check_eq!(PLAIN_SEEN.load(Relaxed), PLAIN_VALUE as u64);
+
+    // SAFETY: ключи выданы `create` выше, рабочий поток завершён.
+    unsafe { runtime::tls::destroy(plain) };
+    // SAFETY: см. выше.
+    unsafe { runtime::tls::destroy(recording) };
+}

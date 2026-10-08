@@ -173,7 +173,7 @@ fn declaration_inside_a_macro_body_is_not_judged() {
 
 #[test]
 fn doc_on_a_test_is_left_to_its_own_rule() {
-    let source = "/// Regression guard.\n#[test]\nfn scenario() {}\n";
+    let source = "/// Bug the test pins.\n#[test]\nfn scenario() {}\n";
     let hits = check(&rule("doc_on_declaration"), source);
     assert!(hits.is_empty(), "{hits:?}");
 }

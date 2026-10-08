@@ -75,7 +75,7 @@ mod tests {
         }
     }
 
-    // Regression guard: индекс шире трёх бит не представим полем `AttrIndx`
+    // Индекс шире трёх бит не представим полем `AttrIndx`
     // и молча выбирает чужой слот.
     #[test]
     fn slot_indices_fit_the_attr_index_field() {
@@ -93,7 +93,7 @@ mod tests {
         }
     }
 
-    // Regression guard: незапрограммированный слот читается как 0x00 -
+    // Незапрограммированный слот читается как 0x00 -
     // Device-nGnRnE, и опечатка в индексе не даёт ни отказа, ни исключения.
     #[test]
     fn declared_slots_are_never_zero() {

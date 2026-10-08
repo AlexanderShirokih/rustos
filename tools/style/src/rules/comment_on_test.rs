@@ -10,10 +10,10 @@ pub(crate) fn rule() -> Rule {
     Rule {
         meta: RuleMeta {
             id: "comment_on_test".to_owned(),
-            title: "comment on a test function exceeds the regression-guard budget".to_owned(),
+            title: "comment on a test function exceeds the budget of a bug note".to_owned(),
             explain: concat!(
-                "A test states its scenario through its name and its body. The budget above ",
-                "it belongs to a regression guard: which bug the test pins, in a line or two. ",
+                "A test states its scenario through its name and its body. A comment above it ",
+                "names the bug the test pins, in a line or two. ",
                 "A retelling of the body goes away, and the marker of the comment does not ",
                 "change the budget.",
             )
@@ -45,7 +45,7 @@ fn run(source: &Source, out: &mut Vec<Finding>) {
             out.push(Finding::new(
                 block.span,
                 format!(
-                    "comment on a test spans {} lines, the regression-guard budget is {budget}",
+                    "comment on a test spans {} lines, the budget of a bug note is {budget}",
                     block.lines
                 ),
             ));

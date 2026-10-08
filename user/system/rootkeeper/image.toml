@@ -45,5 +45,9 @@ package = "hello-std"
 path = "/hello-std"
 
 [[programs]]
+package = "hello-c"
+path = "/hello-c"
+
+[[programs]]
 package = "clock-std"
 path = "/clock-std"

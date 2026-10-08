@@ -808,7 +808,7 @@ mod tests {
         mock().reset();
     }
 
-    /// Regression guard: handle, исчезнувший между снимком источников и
+    /// Handle, исчезнувший между снимком источников и
     /// взведением, закрывает ожидание тем же `Canceled`, что и уход во сне.
     #[test]
     fn arming_a_wait_on_a_vanished_handle_is_canceled() {

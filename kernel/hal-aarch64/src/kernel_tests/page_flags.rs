@@ -113,7 +113,7 @@ fn user_page_flags_map_and_remap() {
     let _ = fa.deallocate_frame(frame);
 }
 
-// Regression guard: индекс слота в PTE и состав MAIR_EL1 определены в разных
+// Индекс слота в PTE и состав MAIR_EL1 определены в разных
 // крейтах, и разошедшись, переводят страницу в чужой тип памяти без отказа.
 #[test_harness::test]
 fn user_page_profiles_select_their_mair_slots() {

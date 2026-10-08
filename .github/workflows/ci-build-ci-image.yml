@@ -90,6 +90,11 @@ jobs:
         sccache --version
         similarity-rs --version
         qemu-system-aarch64 --version
+        clang --version
+        ld.lld --version
+        meson --version
+        ninja --version
+        cargo xtask libc-src
         cargo xtask check-layers
 
   promote:

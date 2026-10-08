@@ -21,7 +21,6 @@
 use std::{
     fmt::Write as _,
     fs,
-    fs::{File, TryLockError},
     path::{Path, PathBuf},
     process::Command,
     time::UNIX_EPOCH,
@@ -30,7 +29,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use userland_image_tool::USERLAND_WORKSPACE;
 
-use crate::{context::project_root, shell};
+use crate::{
+    context::{lock_tree, project_root},
+    shell,
+};
 
 const OVERLAY: &str = "patches/std-molecular.patch";
 
@@ -46,31 +48,10 @@ pub(crate) fn materialize(force: bool) -> Result<PathBuf> {
     let root = project_root();
     // Замок держится до конца подготовки, включая чистку крейтов графа. Вызов, пришедший
     // вторым, ждёт освобождения и получает готовое дерево со свежим отпечатком.
-    let _lock = lock(&root)?;
+    let _lock = lock_tree(&root.join(LOCK), "std-src")?;
     let library = materialize_tree(&root, force)?;
     refresh_std_graph(&root, &library)?;
     Ok(library)
-}
-
-fn lock(root: &Path) -> Result<File> {
-    let path = root.join(LOCK);
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-    }
-    let file = File::create(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            println!("std-src: another xtask holds {}, waiting", path.display());
-            file.lock()
-                .with_context(|| format!("Failed to lock {}", path.display()))?;
-        }
-        Err(TryLockError::Error(error)) => {
-            return Err(error).with_context(|| format!("Failed to lock {}", path.display()));
-        }
-    }
-    Ok(file)
 }
 
 fn materialize_tree(root: &Path, force: bool) -> Result<PathBuf> {
@@ -284,24 +265,4 @@ fn apply_overlay(library: &Path, overlay: &Path) -> Result<()> {
     shell::run(&mut command, &format!("git apply {}", overlay.display())).context(
         "the overlay does not match the toolchain pinned in rust-toolchain.toml, rebase it",
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_lock_keeps_a_second_caller_out_until_the_guard_drops() {
-        let root = std::env::temp_dir().join(format!("xtask-std-src-{}", std::process::id()));
-        let path = root.join(LOCK);
-
-        let guard = lock(&root).unwrap();
-        let second = File::open(&path).unwrap();
-        assert!(matches!(second.try_lock(), Err(TryLockError::WouldBlock)));
-
-        drop(guard);
-        assert!(File::open(&path).unwrap().try_lock().is_ok());
-
-        fs::remove_dir_all(&root).unwrap();
-    }
 }

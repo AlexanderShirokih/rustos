@@ -148,6 +148,20 @@ Rootkeeper предоставляет её компоненту `platform`, ко
 Пример — [files-demo](../user/examples/files-demo/src/main.rs).
 Поддерживаемые файловые операции описаны в [filesystem.md](filesystem.md).
 
+### Программа на C
+
+Программа на C — пакет Cargo, корень которого вызывает
+`c_library::c_program!()`. Её C-исходники компилирует
+`userland_build::compile_c` из `build.rs`. Крейт
+[c-library](../lib/c-library/src/lib.rs) даёт программе точку входа, кучу,
+завершение, файлы по абсолютным путям и потоки POSIX; `stdout` и `stderr` поступают
+в системный журнал.
+Файлы требуют файлового корня — сессии `Namespace`, которую программа получает
+требованием манифеста и устанавливает через `c_library::install_filesystem_root`.
+Конструкторы C выполняются до установки корня, и операции с путями в них дают
+`ENOTCONN`.
+Пример — [hello-c](../user/examples/hello-c/src/hello.c).
+
 ### Freestanding-программа
 
 Программа на `no_std` объявляет `_start`, обработчик паники и глобальный

@@ -11,6 +11,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 #   qemu-system-arm   — запуск QEMU integration tests (xtask qemu-test)
 #   gcc/g++/libc6-dev — линкер для host-сборок, build-скриптов и libFuzzer
 #   git/ca-certs/curl — checkout, rustup, загрузка crates
+#   meson/ninja/xz    — сборка picolibc из релизного архива (xtask libc-src)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -18,7 +19,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         git \
         libc6-dev \
+        meson \
+        ninja-build \
         qemu-system-arm \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# clang компилирует picolibc и C-исходники программ userland. Версия не ниже
+# `MIN_CLANG_MAJOR` из xtask/src/libc_src.rs, поэтому пакет берётся из репозитория LLVM.
+# meson проверяет компоновщик кросс-компилятора, и cross-файл задаёт ему ld.lld. Без llvm-ar
+# архиватором остаётся GNU ar из binutils.
+ARG LLVM_VERSION=18
+RUN install -d /etc/apt/keyrings \
+    && curl --proto '=https' --tlsv1.2 -sSfL https://apt.llvm.org/llvm-snapshot.gpg.key \
+        -o /etc/apt/keyrings/llvm.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/llvm.asc] https://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" \
+        > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update && apt-get install -y --no-install-recommends "clang-${LLVM_VERSION}" "lld-${LLVM_VERSION}" \
+    && ln -s "/usr/bin/clang-${LLVM_VERSION}" /usr/local/bin/clang \
+    && ln -s "/usr/bin/ld.lld-${LLVM_VERSION}" /usr/local/bin/ld.lld \
     && rm -rf /var/lib/apt/lists/*
 
 # rustup без дефолтного toolchain — версию диктует rust-toolchain.toml ниже.

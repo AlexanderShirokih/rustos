@@ -1728,7 +1728,7 @@ mod tests {
         ));
     }
 
-    /// Regression guard на гонку revoke между регистрацией хука и активацией.
+    /// Гонка revoke между регистрацией хука и активацией.
     #[test]
     fn releasing_an_unactivated_ticket_neither_uncounts_nor_wakes() {
         let rt = StubRuntime::arc();

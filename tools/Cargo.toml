@@ -29,6 +29,7 @@ object = "0.39.1"
 toml = "1.1.2"
 ra_ap_syntax = "=0.0.344"
 regex = "1"
+sha2 = "0.10"
 tempfile = "3"
 
 # Крейты этого workspace

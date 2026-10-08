@@ -6,7 +6,8 @@
 //! вызовов и усекает тег.
 //!
 //! [`LogBuffer`] копит строку на стеке до отправки, [`LineAssembler`] собирает строки из
-//! потока фрагментов, [`chunks`] режет текст по границе символа.
+//! потока фрагментов, [`chunks`] режет текст по границе символа. [`Utf8Assembler`] собирает
+//! текст из байтового потока вывода.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -15,10 +16,12 @@ extern crate std;
 
 mod buffer;
 mod line;
+mod utf8;
 mod write;
 
 pub use buffer::{LogBuffer, chunks};
 pub use line::LineAssembler;
+pub use utf8::Utf8Assembler;
 
 /// Граница локального тега источника, назначаемого клиентом.
 pub const LOG_TAG_MAX: usize = 32;

@@ -3,8 +3,9 @@
 //! Ключ - индекс слота в блоке потока, ноль зарезервирован под "ключа нет". Блок создаётся при
 //! первой записи, и его адрес хранится в указателе локальных данных потока.
 //!
-//! [`run_destructors`] обязан позвать тот, кто закрывает поток: для потоков `lib/runtime` это
-//! трамплин запуска, для главного потока программы на `std` - платформенный `cleanup`.
+//! [`run_destructors`] обязан позвать тот, кто закрывает поток, в том числе рантайм программы
+//! при завершении её главного потока. Прогон обнуляет только слоты ключей с деструктором, и
+//! значение ключа без деструктора доступно деструкторам других ключей до освобождения блока.
 //! Ключевой TLS стандартной библиотеки рассчитывает на этот прогон и без него не отработают
 //! ни `Drop` у `thread_local!`, ни её собственная уборка потока.
 
@@ -20,7 +21,7 @@ pub type Key = usize;
 /// Деструктор значения, зарегистрированного под ключом.
 pub type Dtor = unsafe extern "C" fn(*mut u8);
 
-const MAX_KEYS: usize = 64;
+const MAX_KEYS: usize = 130;
 
 const DESTRUCTOR_ROUNDS: usize = 4;
 
@@ -102,6 +103,11 @@ pub fn run_destructors() {
     for _ in 0..DESTRUCTOR_ROUNDS {
         let mut pending = false;
         for (key, destructor) in DESTRUCTORS.iter().enumerate().skip(1) {
+            let raw = destructor.load(Ordering::Acquire);
+            if raw == 0 {
+                continue;
+            }
+
             // SAFETY: блок жив, а слот берётся проверенным доступом.
             let Some(value) = (unsafe { (*block).slots.get(key).copied() }) else {
                 continue;
@@ -117,14 +123,11 @@ pub fn run_destructors() {
                 }
             }
 
-            let raw = destructor.load(Ordering::Acquire);
-            if raw != 0 {
-                // SAFETY: в слоте лежит указатель на `Dtor`, положенный `create`.
-                let dtor: Dtor = unsafe { core::mem::transmute::<usize, Dtor>(raw) };
-                // SAFETY: значение выдано владельцем ключа под его же деструктор.
-                unsafe { dtor(value) };
-                pending = true;
-            }
+            // SAFETY: в слоте лежит указатель на `Dtor`, положенный `create`.
+            let dtor: Dtor = unsafe { core::mem::transmute::<usize, Dtor>(raw) };
+            // SAFETY: значение выдано владельцем ключа под его же деструктор.
+            unsafe { dtor(value) };
+            pending = true;
         }
         if !pending {
             break;

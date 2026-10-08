@@ -1,5 +1,6 @@
 # Имя таргета резолвится по `RUST_TARGET_PATH`, а `core` и `std` поднимаются из дерева,
-# которое готовит `cargo xtask std-src`.
+# которое готовит `cargo xtask std-src`. Библиотеку C для C-исходников программ готовит
+# `cargo xtask libc-src`.
 [build]
 target = "aarch64-unknown-molecular"
 target-dir = "../target"
@@ -19,3 +20,4 @@ json-target-spec = true
 [env]
 RUST_TARGET_PATH = { value = "../targets", relative = true }
 __CARGO_TESTS_ONLY_SRC_ROOT = { value = "../target/std-src/library", relative = true }
+MOLECULAR_LIBC_SYSROOT = { value = "../target/libc-sysroot", relative = true }

@@ -198,3 +198,7 @@ source = "user/testing/testrunner/assets/area.txt"
 [[programs]]
 package = "std-selftest"
 path = "/std-selftest"
+
+[[programs]]
+package = "c-selftest"
+path = "/c-selftest"

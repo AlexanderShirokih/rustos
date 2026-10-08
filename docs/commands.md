@@ -19,6 +19,7 @@
 | Образ userland | `cargo xtask build-userland` |
 | Cargo в userland | `cargo xtask userland <аргументы cargo>` |
 | Исходники стандартной библиотеки | `cargo xtask std-src` |
+| Библиотека C | `cargo xtask libc-src` |
 | Тесты под QEMU | `cargo xtask qemu-test` |
 | Замеры под QEMU | `cargo xtask bench` |
 | Стресс-тесты под QEMU | `cargo xtask stress` |
@@ -195,6 +196,18 @@ cargo xtask std-src [--force] [--verify [--arch <name>]]
 `--arch` ограничивает эту проверку одной архитектурой.
 Успех подтверждает применимость оверлея и сборку программы; исполнение
 проверяется отдельно.
+
+## Исходники библиотеки C
+
+```text
+cargo xtask libc-src [--force]
+```
+
+Команда загружает закреплённый релиз picolibc в `target/libc-src`, сверяет
+его сумму и собирает библиотеку под зарегистрированные архитектуры в
+`target/libc-sysroot`. Команда пересобирает библиотеку при смене релиза, версии
+`clang`, архиватора или флагов, а с `--force` — всегда. Команды, которые собирают
+userland, готовят библиотеку перед сборкой.
 
 ## Clippy и rustdoc
 

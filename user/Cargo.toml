@@ -6,6 +6,7 @@ members = [
     "examples/calculator-demo",
     "examples/clock-std",
     "examples/files-demo",
+    "examples/hello-c",
     "examples/hello-std",
     "system/driver-pl031",
     "system/driver-simplefb",
@@ -16,8 +17,10 @@ members = [
     "system/platform",
     "system/rootkeeper",
     "system/virtio-mmio",
+    "testing/c-selftest",
     "testing/std-selftest",
     "testing/testrunner",
+    "../lib/c-library",
     "../lib/component-startup",
     "../lib/components",
     "../lib/filesystem-server",
@@ -40,6 +43,7 @@ publish = false
 spin = "0.12.0"
 
 # Крейты userspace
+c-library = { path = "../lib/c-library" }
 component-startup = { path = "../lib/component-startup" }
 components = { path = "../lib/components" }
 filesystem-server = { path = "../lib/filesystem-server" }

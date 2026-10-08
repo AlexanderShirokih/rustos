@@ -1,9 +1,9 @@
-//! Спека устройства и контекст сборки: пути артефактов, корень дерева и платформа ядра по
-//! полю `arch` спеки.
+//! Спека устройства и контекст сборки: пути артефактов, корень дерева, платформа ядра по
+//! полю `arch` спеки и межпроцессный замок подготавливаемых деревьев `target/`.
 
 use std::{
     fs,
-    fs::File,
+    fs::{File, TryLockError},
     path::{Path, PathBuf},
 };
 
@@ -142,6 +142,26 @@ pub(crate) fn build_dir(project_root: &Path) -> Result<PathBuf> {
     Ok(build_dir)
 }
 
+pub(crate) fn lock_tree(path: &Path, label: &str) -> Result<File> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    }
+    let file = File::create(path).with_context(|| format!("Failed to open {}", path.display()))?;
+
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            println!("{label}: another xtask holds {}, waiting", path.display());
+            file.lock()
+                .with_context(|| format!("Failed to lock {}", path.display()))?;
+        }
+        Err(TryLockError::Error(error)) => {
+            return Err(error).with_context(|| format!("Failed to lock {}", path.display()));
+        }
+    }
+    Ok(file)
+}
+
 pub(crate) fn image_manifest_path(project_root: &Path, image: &Path) -> Result<PathBuf> {
     resolve(project_root, image, "Userland image manifest")
 }
@@ -203,5 +223,20 @@ mod tests {
         let entry = spec_arch(&spec("riscv64"), &registry).unwrap();
         assert_eq!(kernel_package(&entry), "hal-riscv64");
         assert_eq!(entry.bare, "riscv64gc-unknown-none-elf");
+    }
+
+    #[test]
+    fn the_lock_keeps_a_second_caller_out_until_the_guard_drops() {
+        let root = std::env::temp_dir().join(format!("xtask-lock-tree-{}", std::process::id()));
+        let path = root.join("tree.lock");
+
+        let guard = lock_tree(&path, "test").unwrap();
+        let second = File::open(&path).unwrap();
+        assert!(matches!(second.try_lock(), Err(TryLockError::WouldBlock)));
+
+        drop(guard);
+        assert!(File::open(&path).unwrap().try_lock().is_ok());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

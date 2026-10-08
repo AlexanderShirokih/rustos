@@ -11,6 +11,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "c-library"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "filesystem-abi",
+ "filesystem-client",
+ "log-abi",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
+name = "c-selftest"
+version = "0.1.0"
+dependencies = [
+ "c-library",
+ "component-startup",
+ "filesystem-abi",
+ "userland-build",
+]
+
+[[package]]
 name = "calculator-demo"
 version = "0.1.0"
 dependencies = [
@@ -208,6 +231,14 @@ dependencies = [
  "spin",
  "syscall",
  "userland",
+]
+
+[[package]]
+name = "hello-c"
+version = "0.1.0"
+dependencies = [
+ "c-library",
+ "userland-build",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ mod context;
 mod fmt;
 mod fuzz;
 mod layers;
+mod libc_src;
 mod lint;
 mod qemu_test;
 mod race;
@@ -141,6 +142,12 @@ enum Commands {
         #[arg(long, value_name = "NAME", requires = "verify")]
         arch: Option<String>,
     },
+    /// Build the pinned picolibc under target/libc-sysroot for every registered architecture
+    LibcSrc {
+        /// Rebuild the library even when the release, clang and flags are unchanged
+        #[arg(long)]
+        force: bool,
+    },
     /// Check the code style conventions
     Style(StyleArgs),
     /// Check the duplicate functions against the accepted baseline
@@ -201,6 +208,7 @@ fn main() -> Result<ExitCode> {
                 }
             }
         }
+        Commands::LibcSrc { force } => libc_src::run(force)?,
         Commands::Similarity(args) => similarity::run(args)?,
         Commands::Style(args) => {
             let code = style::run(args)?;

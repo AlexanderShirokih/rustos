@@ -278,7 +278,7 @@ mod tests {
 
     use super::*;
 
-    // Regression guard: сообщения Display уходят в логи ядра и остаются
+    // Сообщения Display уходят в логи ядра и остаются
     // непустыми и различимыми между вариантами.
     #[test]
     fn mapping_error_display_messages() {

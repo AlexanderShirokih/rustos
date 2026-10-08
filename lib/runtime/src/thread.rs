@@ -142,7 +142,11 @@ extern "C" fn trampoline(payload: usize) -> ! {
     // SAFETY: payload получен из Box::into_raw в spawn и реконструируется ровно
     // один раз; разыменование освобождает аллокацию до расходящегося thread_exit.
     let SpawnPayload { entry, arg } = *unsafe { Box::from_raw(payload as *mut SpawnPayload) };
-    let code = entry(arg);
+    exit(entry(arg))
+}
+
+/// Завершает текущий поток с кодом `code` после деструкторов его локальных данных.
+pub fn exit(code: u32) -> ! {
     // Уход потока - последний момент, когда его локальные данные ещё адресуемы.
     run_destructors();
     thread_exit(u64::from(code))

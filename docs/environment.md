@@ -17,6 +17,8 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 | `cargo-binutils` | Извлечение бинарного образа через `cargo objcopy` |
 | `qemu-system-aarch64` | Запуск и тесты QEMU |
 | C/C++ toolchain | Линковка host-программ, сборка зависимостей и fuzz-целей |
+| `clang`, `lld` | Сборка библиотеки C и C-исходников программ userland |
+| `meson`, `ninja-build`, `xz-utils` | Сборка библиотеки C из архива релиза |
 | `mkbootimg` | Сборка Android boot image |
 | `similarity-rs` | Проверка дублирования |
 | `cargo-fuzz` | Сборка и запуск fuzz-целей |
@@ -25,8 +27,15 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 
 ```bash
 cargo install cargo-binutils
-sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm
+sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build xz-utils
 ```
+
+`clang` должен быть доступен в `PATH` под именем `clang`, а компоновщик `lld` той же
+версии — под именем `ld.lld`. Минимальную версию `clang` задаёт `MIN_CLANG_MAJOR` в
+[libc_src.rs](../xtask/src/libc_src.rs).
+Архиватором библиотеки C и C-исходников служит `llvm-ar`, если его находит `clang`
+(`clang -print-prog-name=llvm-ar`), иначе `ar`. Архиватор должен понимать ELF-объекты:
+GNU `ar` из binutils подходит, `ar` macOS — нет.
 
 `mkbootimg` должен быть доступен в `PATH` при сборке Android-образа.
 Нужную версию `similarity-rs` задаёт
@@ -34,6 +43,22 @@ sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm
 `cargo xtask similarity` печатает строку установки при отсутствии анализатора.
 
 Окружение CI описано в [Dockerfile](../Dockerfile).
+
+### macOS
+
+Компоновщик `ld.lld` даёт пакет `lld`, архиватор `llvm-ar` — пакет `llvm`. Пакет `llvm` не
+ставит программы в `PATH`, его каталог `bin` добавляется вручную:
+
+```bash
+brew install meson ninja lld llvm
+export PATH="$PATH:$(brew --prefix llvm)/bin"
+```
+
+Каталог `bin` в конце `PATH` оставляет `clang` от Apple, в начале — подставляет `clang` из
+`llvm`. Библиотека C собирается с любым из них.
+
+`mkbootimg` берётся из репозитория AOSP `platform/system/tools/mkbootimg`; каталог клона
+добавляется в `PATH`.
 
 ## rust-analyzer
 

@@ -1,10 +1,10 @@
 //! E2E проверка userspace `Mutex`/`Condvar` под контенцией из EL0:
 //! рабочие потоки спавнятся через `spawn` в текущем процессе.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use kernel_objects::Signal;
-use runtime::{Condvar, Instant, Mutex, Priority, Timeout, spawn};
+use runtime::{Condvar, Instant, Mutex, Priority, RawCondvar, RawMutex, Timeout, spawn};
 use syscall::{SIGNALED, WakeCount};
 
 const STACK_SIZE: u64 = 0x4000;
@@ -300,4 +300,73 @@ fn condvar_notify_one_releases_waiters_one_by_one() {
         .expect("second joins before timeout");
 
     test_harness::check!(released_in_turn);
+}
+
+struct Teardown {
+    mutex: RawMutex,
+    condvar: RawCondvar,
+    in_window: Signal,
+    notified: Signal,
+    pause: Signal,
+    destroyed: AtomicBool,
+    destroyed_in_window: AtomicBool,
+}
+
+extern "C" fn teardown_waiter(arg: usize) -> u32 {
+    // SAFETY: arg - адрес Teardown в кадре спавнящего потока, живой до завершения
+    // join, который выполняется до выхода из кадра.
+    let shared = unsafe { &*(arg as *const Teardown) };
+
+    shared.mutex.lock();
+    // SAFETY: поток держит `shared.mutex`.
+    unsafe {
+        shared.condvar.wait_interleaved(&shared.mutex, || {
+            shared.in_window.notify_all().expect("report the window");
+            let _ = shared.notified.wait(SIGNALED, JOIN_TIMEOUT);
+            let _ = shared.pause.wait(SIGNALED, STEAL_WINDOW);
+            shared
+                .destroyed_in_window
+                .store(shared.destroyed.load(Ordering::Acquire), Ordering::Release);
+        });
+    }
+
+    // SAFETY: ожидание вернуло мьютекс захваченным.
+    unsafe { shared.mutex.unlock() };
+    0
+}
+
+// Ждущий читал слово счётчика после того, как `destroy` уже вернул управление.
+#[test_harness::test]
+fn raw_condvar_destroy_waits_for_notified_waiter() {
+    let shared = Teardown {
+        mutex: RawMutex::new(),
+        condvar: RawCondvar::new(),
+        in_window: Signal::create().expect("create in_window"),
+        notified: Signal::create().expect("create notified"),
+        pause: Signal::create().expect("create pause"),
+        destroyed: AtomicBool::new(false),
+        destroyed_in_window: AtomicBool::new(false),
+    };
+    let arg = (&raw const shared) as usize;
+    let waiter = spawn(teardown_waiter, arg, STACK_SIZE, Priority::new(1)).expect("spawn waiter");
+
+    shared
+        .in_window
+        .wait(SIGNALED, JOIN_TIMEOUT)
+        .expect("waiter reaches the window");
+
+    shared.condvar.notify_all();
+    shared
+        .notified
+        .notify_all()
+        .expect("report the notification");
+
+    shared.condvar.destroy();
+    shared.destroyed.store(true, Ordering::Release);
+
+    waiter
+        .join(JOIN_TIMEOUT)
+        .expect("waiter joins before timeout");
+
+    test_harness::check!(!shared.destroyed_in_window.load(Ordering::Acquire));
 }

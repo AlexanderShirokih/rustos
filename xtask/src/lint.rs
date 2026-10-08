@@ -15,7 +15,7 @@ use clap::Args;
 use crate::{
     context::project_root,
     layers::{ArchEntry, Profile, Workspace, arch_registry, registered, workspaces},
-    race, shell, std_src,
+    libc_src, race, shell, std_src,
 };
 
 #[derive(Args)]
@@ -282,6 +282,7 @@ fn run_all(invocations: &[Invocation], what: &str) -> Result<()> {
         command.args(&invocation.args).current_dir(&invocation.dir);
         if invocation.std_src {
             command.env("__CARGO_TESTS_ONLY_SRC_ROOT", std_src::materialize(false)?);
+            libc_src::materialize(false)?;
         }
         if invocation.rustdoc_flags {
             command.env("RUSTDOCFLAGS", RUSTDOC_FLAGS);

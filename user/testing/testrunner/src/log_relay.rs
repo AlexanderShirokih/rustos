@@ -32,6 +32,13 @@ const UNNAMED_BADGE: NonZeroU64 =
 
 pub(crate) const SELFTEST_BADGE: NonZeroU64 =
     NonZeroU64::new(0x0400_0000).expect("badge is non-zero");
+pub(crate) const C_SELFTEST_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x0400_0001).expect("badge is non-zero");
+
+const SELFTEST_SOURCES: [(NonZeroU64, &str); 2] = [
+    (SELFTEST_BADGE, "std-selftest"),
+    (C_SELFTEST_BADGE, "c-selftest"),
+];
 
 pub(crate) struct SharedSourceNames;
 
@@ -39,7 +46,10 @@ struct TestSourceNames;
 
 impl SourceNames for SharedSourceNames {
     fn name(&self, badge: u64) -> Option<LogBuffer<LOG_SOURCE_MAX>> {
-        (badge == SELFTEST_BADGE.get()).then(|| source("std-selftest"))
+        SELFTEST_SOURCES
+            .iter()
+            .find(|(selftest, _)| selftest.get() == badge)
+            .map(|(_, name)| source(name))
     }
 }
 

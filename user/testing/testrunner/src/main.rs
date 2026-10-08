@@ -35,11 +35,13 @@ use syscall::{Handle, kind};
 
 mod address_space_isolation;
 mod answer_exhaustion_protocol;
+mod c_selftest;
 mod child_steps_protocol;
 mod clock;
 mod composition;
 mod display;
 mod display_fixture_protocol;
+mod failing_filesystem;
 mod filesystem;
 mod filesystem_bench;
 mod filesystem_scope;

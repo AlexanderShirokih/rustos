@@ -1,5 +1,5 @@
 //! Сборка образа userland и прогон cargo в его workspace: и то, и другое идёт по
-//! подготовленному дереву исходников `std`.
+//! подготовленному дереву исходников `std` и собранной библиотеке C.
 //!
 //! Путь к дереву cargo принимает только переменной окружения: `[env]` из `.cargo/config.toml`
 //! доходит до порождённых процессов, а до самого cargo - нет. Остальную конфигурацию таргета
@@ -18,12 +18,13 @@ use userland_image_tool::{
 use crate::{
     context::{build_dir, image_manifest_path, project_root},
     layers::{ArchEntry, arch_registry, registered},
-    shell, std_src,
+    libc_src, shell, std_src,
 };
 
 pub(crate) fn run(args: &[String]) -> Result<()> {
     let workspace = project_root().join(USERLAND_WORKSPACE);
     let library = std_src::materialize(false)?;
+    libc_src::materialize(false)?;
     let mut command = Command::new("cargo");
     command
         .args(args)
@@ -52,6 +53,7 @@ pub(crate) fn build_image(
 ) -> Result<PathBuf> {
     let manifest_path = image_manifest_path(project_root, image)?;
     let std_src = std_src::materialize(false)?;
+    libc_src::materialize(false)?;
     let target = UserlandTarget::new(project_root.join(&arch.system), &arch.name)?;
     build_userland(
         project_root,

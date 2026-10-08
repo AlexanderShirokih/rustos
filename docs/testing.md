@@ -79,3 +79,7 @@ Seed задаёт последовательность операций. Пор�
 [std-selftest](../user/testing/std-selftest/src/main.rs).
 Testrunner запускает её с отдельной лог-сессией и проверяет код выхода.
 Паника даёт ненулевой код и диагностику через `stderr`.
+
+Библиотеку C проверяет
+[c-selftest](../user/testing/c-selftest/src/selftest.c). Testrunner
+проверяет код выхода и строки журнала, которые выводит завершение через `exit`.

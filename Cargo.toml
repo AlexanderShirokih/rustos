@@ -79,6 +79,7 @@ quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 ra_ap_syntax = "=0.0.344"
 regex = "1"
+sha2 = "0.10"
 tempfile = "3"
 trybuild = "1.0"
 
