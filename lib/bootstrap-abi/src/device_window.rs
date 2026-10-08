@@ -41,8 +41,10 @@ impl<C: Channel> hardware::Client<C> {
         };
 
         for index in 0.. {
-            let Ok(region) = self.acquire_device_memory(index)? else {
-                return Ok(None);
+            let region = match self.acquire_device_memory(index) {
+                Ok(region) => region,
+                Err(ipc::CallError::Remote(_)) => return Ok(None),
+                Err(ipc::CallError::Ipc(error)) => return Err(error),
             };
             let window = W::from(region);
             let offset = window

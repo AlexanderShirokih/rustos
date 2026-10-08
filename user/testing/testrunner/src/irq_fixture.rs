@@ -23,13 +23,13 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = IrqStartup::request(parent.as_raw()).map_err(|_| Failed)?;
-
-    let platform = requirements.platform.ok_or(Failed)?;
-    let platform = platform.client();
+    let platform = IrqStartup::from_parent(parent.as_raw())
+        .platform
+        .open()
+        .map_err(|_| Failed)?
+        .client();
     let device = ipc::wire::Str::new("/pl031@9010000").ok_or(Failed)?;
-    let (Ok(Ok(_line)), Ok(Ok(window))) = (platform.irq(device, 0), platform.mmio(device, 0))
-    else {
+    let (Ok(_line), Ok(window)) = (platform.irq(device, 0), platform.mmio(device, 0)) else {
         log_line("resources refused");
         return Err(Failed);
     };

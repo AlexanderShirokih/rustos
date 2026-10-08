@@ -17,7 +17,7 @@ use std::{
 };
 
 use ipc::{
-    Channel, Incoming, Outgoing, ReceivedResources, ReplyChannel, Timeout, Unsent,
+    CallError, Channel, Incoming, Outgoing, ReceivedResources, ReplyChannel, Timeout, Unsent,
     wire::{Cap, Header, IpcError, MessageBuf, Session, Str, value},
 };
 use ipc_test::{MockChannel, MockHandle, MockReply, MockResources};
@@ -118,7 +118,7 @@ fn operations_round_trip_through_the_dispatcher() {
     let (answers, server) = serve(CalcServer::default(), 4, calc::dispatch, |channel| {
         let client = calc::Client::new(channel);
         let sum = client.add(7, 35).expect("add");
-        let refused = client.div(1, 0).expect("div");
+        let refused = client.div(1, 0);
         let len = client
             .echo_len(Str::new("hello").expect("within bound"))
             .expect("echo_len");
@@ -126,7 +126,7 @@ fn operations_round_trip_through_the_dispatcher() {
         (sum, refused, len)
     });
 
-    assert_eq!(answers, (42, Err(ERR_DIVIDE_BY_ZERO), 5));
+    assert_eq!(answers, (42, Err(CallError::Remote(ERR_DIVIDE_BY_ZERO)), 5));
     assert_eq!(server.seed, 0xDEAD_BEEF);
 }
 
@@ -238,7 +238,7 @@ impl<F: ReceivedResources> lookup::Service<F> for LookupServer {
 fn an_optional_answer_arrives_in_both_states() {
     let (answers, _) = serve(LookupServer, 2, lookup::dispatch, |channel| {
         let client = lookup::Client::new(channel);
-        (client.find(1).expect("find"), client.find(2).expect("find"))
+        (client.find(1), client.find(2))
     });
 
     assert_eq!(answers, (Ok(Some(7)), Ok(None)));
@@ -780,12 +780,15 @@ impl dealer::Service<MockResources> for Dealer {
 fn a_session_reply_round_trips() {
     let (answers, _) = serve(Dealer, 2, dealer::dispatch, |channel| {
         let client = dealer::Client::new(channel);
-        (client.open(1).expect("open"), client.open(0).expect("open"))
+        (client.open(1), client.open(0))
     });
 
     assert_eq!(
         answers,
-        (Ok(DealerSession::from_handle(cap_of(0x51))), Err(3))
+        (
+            Ok(DealerSession::from_handle(cap_of(0x51))),
+            Err(CallError::Remote(3))
+        )
     );
 }
 

@@ -146,7 +146,7 @@ impl<E: Environment> FileSystem<E> {
             cache: _,
             wait,
         } = self;
-        let pair = namespace.resolve_pair(route::wire(from)?, route::wire(to)?)??;
+        let pair = namespace.resolve_pair(route::wire(from)?, route::wire(to)?)?;
         let (from, to) = scoped(from, to, pair.root_len)?;
         rename_in(
             &Session::establish(environment, pair.session, *wait)?,
@@ -230,7 +230,7 @@ fn resolve<E: Environment>(
     directory: Path<'_>,
 ) -> Result<ipc::wire::Session<file_system::Protocol, E::Handle<kind::Port>>> {
     let path = Str::new(directory.as_str()).ok_or(FileSystemError::InvalidPath)?;
-    Ok(namespace.resolve(path)??)
+    Ok(namespace.resolve(path)?)
 }
 
 fn scoped<'a, 'b>(from: Path<'a>, to: Path<'b>, root_len: u32) -> Result<(Path<'a>, Path<'b>)> {
@@ -253,7 +253,7 @@ fn scoped<'a, 'b>(from: Path<'a>, to: Path<'b>, root_len: u32) -> Result<(Path<'
 fn rename_in<E: Environment>(session: &Session<E>, from: Path<'_>, to: Path<'_>) -> Result<()> {
     session
         .client()
-        .rename(route::wire(from)?, route::wire(to)?)??;
+        .rename(route::wire(from)?, route::wire(to)?)?;
     Ok(())
 }
 
@@ -266,9 +266,9 @@ fn open_owned<E: Environment>(
     wait: Timeout,
 ) -> Result<OpenNode<E>> {
     let (directory, leaf) = route::split_scope(within)?;
-    let scoped = session.client().open_root(route::wire(directory)?)??;
+    let scoped = session.client().open_root(route::wire(directory)?)?;
     let scoped = Session::establish(environment, scoped, wait)?;
-    let opened = scoped.client().open(route::wire(leaf)?, mode, flags)??;
+    let opened = scoped.client().open(route::wire(leaf)?, mode, flags)?;
     Ok(OpenNode::new(scoped, opened))
 }
 
@@ -364,7 +364,7 @@ fn open_in<E: Environment>(
 ) -> Result<Opened> {
     Ok(session
         .client()
-        .open(route::wire(path)?, AccessMode::Read, flags)??)
+        .open(route::wire(path)?, AccessMode::Read, flags)?)
 }
 
 fn close_in<E: Environment>(session: &Session<E>, descriptor: NodeDescriptor) {
@@ -372,7 +372,7 @@ fn close_in<E: Environment>(session: &Session<E>, descriptor: NodeDescriptor) {
 }
 
 fn unlink<E: Environment>(session: &Session<E>, path: Path<'_>, expected: NodeKind) -> Result<()> {
-    session.client().unlink(route::wire(path)?, expected)??;
+    session.client().unlink(route::wire(path)?, expected)?;
     Ok(())
 }
 

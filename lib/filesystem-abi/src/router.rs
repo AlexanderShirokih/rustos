@@ -171,9 +171,7 @@ mod tests {
 
     #[test]
     fn resolve_carries_the_session_opened_on_the_path() {
-        let (mounted, resolved) = with_router(1, |client| {
-            client.resolve(path("/boot/sample")).expect("call")
-        });
+        let (mounted, resolved) = with_router(1, |client| client.resolve(path("/boot/sample")));
 
         assert_eq!(mounted, Ok(SESSION));
         assert_eq!(resolved, ["/boot/sample".to_string()]);
@@ -181,17 +179,18 @@ mod tests {
 
     #[test]
     fn resolve_carries_a_refusal_of_the_file_system() {
-        let (mounted, _) = with_router(1, |client| client.resolve(path("/nowhere")).expect("call"));
+        let (mounted, _) = with_router(1, |client| client.resolve(path("/nowhere")));
 
-        assert_eq!(mounted, Err(FileSystemError::NotFound));
+        assert_eq!(
+            mounted,
+            Err(ipc::CallError::Remote(FileSystemError::NotFound))
+        );
     }
 
     #[test]
     fn resolve_pair_carries_the_session_and_the_length_of_the_common_root() {
         let (pair, resolved) = with_router(1, |client| {
-            client
-                .resolve_pair(path("/boot/first"), path("/boot/second"))
-                .expect("call")
+            client.resolve_pair(path("/boot/first"), path("/boot/second"))
         });
 
         let decoded = pair.expect("one mount covers the pair");
@@ -206,22 +205,21 @@ mod tests {
     #[test]
     fn resolve_pair_reports_paths_under_different_mounts() {
         let (pair, _) = with_router(1, |client| {
-            client
-                .resolve_pair(path("/boot/first"), path("/data/second"))
-                .expect("call")
+            client.resolve_pair(path("/boot/first"), path("/data/second"))
         });
 
-        assert_eq!(pair, Err(FileSystemError::CrossMount));
+        assert_eq!(
+            pair,
+            Err(ipc::CallError::Remote(FileSystemError::CrossMount))
+        );
     }
 
     #[test]
     fn resolve_pair_carries_a_refusal_of_the_file_system() {
         let (pair, _) = with_router(1, |client| {
-            client
-                .resolve_pair(path("/nowhere/first"), path("/boot/second"))
-                .expect("call")
+            client.resolve_pair(path("/nowhere/first"), path("/boot/second"))
         });
 
-        assert_eq!(pair, Err(FileSystemError::NotFound));
+        assert_eq!(pair, Err(ipc::CallError::Remote(FileSystemError::NotFound)));
     }
 }

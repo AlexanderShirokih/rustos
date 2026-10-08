@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 
 use component_startup::{Requirements as _, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, PATH_MAX, file_system, namespace};
-use ipc::wire::Str;
+use ipc::{CallError, wire::Str};
 use kernel_objects::{Port, Resource, SessionTransport};
 use runtime::{MemoryAccess, Timeout, log_line, start_component};
 use userland::USERLAND_PAGE_SIZE;
@@ -37,15 +37,15 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = BudgetHolderStartup::request(parent.as_raw()).map_err(|_| Failed)?;
-
-    let files = requirements.files.ok_or(Failed)?;
+    let files = BudgetHolderStartup::from_parent(parent.as_raw())
+        .files
+        .open()
+        .map_err(|_| Failed)?;
     let root = Str::new("/tmp").ok_or(Failed)?;
     let session = files
         .client()
         .with_wait(CALL_TIMEOUT)
         .resolve(root)
-        .map_err(|_| Failed)?
         .map_err(|_| Failed)?;
     let files = kernel_objects::Session::from_session(session)
         .client()
@@ -54,12 +54,12 @@ fn run(parent: &Port) -> Result<(), Failed> {
     let held_path = Str::new(HELD_PATH).ok_or(Failed)?;
 
     match files.open(started_path, AccessMode::Read, OpenFlags::NONE) {
-        Ok(Ok(_)) => {
+        Ok(_) => {
             let export = Port::create().map_err(|_| Failed)?;
             log_line("started");
             serve_probe(parent.as_raw(), Box::leak(Box::new(export)))
         }
-        Ok(Err(FileSystemError::NotFound)) => {
+        Err(CallError::Remote(FileSystemError::NotFound)) => {
             hold_budget(&files, started_path, held_path)?;
             log_line("budget held");
             Err(Failed)
@@ -75,14 +75,10 @@ fn hold_budget(
 ) -> Result<(), Failed> {
     files
         .open(started, AccessMode::ReadWrite, OpenFlags::CREATE)
-        .map_err(|_| Failed)?
         .map_err(|_| Failed)?;
     let region = Resource::self_resource()
         .and_then(|resource| resource.create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW))
         .map_err(|_| Failed)?;
-    files
-        .create_backed(held, region, 0)
-        .map_err(|_| Failed)?
-        .map_err(|_| Failed)?;
+    files.create_backed(held, region, 0).map_err(|_| Failed)?;
     Ok(())
 }

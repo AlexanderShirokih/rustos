@@ -6,9 +6,9 @@ use core::{num::NonZeroU64, sync::atomic::AtomicU64};
 
 use component_abi::component_startup as startup_contract;
 use component_startup::{
-    RequestError, Requirements as _, SessionRequest, accept, component_manifest, mint_session,
+    Requirements as _, SessionRequest, accept, component_manifest, mint_session,
 };
-use ipc::{Listener as _, RecvError, wire::MESSAGE_INLINE_MAX};
+use ipc::{CallError, Listener as _, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::Port;
 use runtime::{PortTransport, Timeout, log_line, process_exit, start_component};
 use syscall::{Handle, Rights, kind};
@@ -46,9 +46,10 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = StepsStartup::request(parent.as_raw()).map_err(|_| Failed)?;
-
-    let steps = requirements.steps.ok_or(Failed)?;
+    let steps = StepsStartup::from_parent(parent.as_raw())
+        .steps
+        .open()
+        .map_err(|_| Failed)?;
     let logged = runtime::log::installed();
     let export = Port::create().map_err(|_| Failed)?;
 
@@ -116,10 +117,10 @@ impl Fixture {
                 self.held = Some(request);
                 (outcome::ACCEPTED, 0)
             }
-            Err(RequestError::Parent(refusal)) => {
+            Err(CallError::Remote(refusal)) => {
                 (outcome::ACCEPT_REFUSED, accept_error_code(refusal))
             }
-            Err(RequestError::Ipc(error)) => (outcome::IPC_FAILED, ipc_error_code(error)),
+            Err(CallError::Ipc(error)) => (outcome::IPC_FAILED, ipc_error_code(error)),
         }
     }
 

@@ -108,7 +108,7 @@ impl Shared {
 
 impl Pl031 {
     fn bind(platform: &platform::Client<SessionTransport>) -> Result<Self> {
-        let description = platform.description()??;
+        let description = platform.description()?;
         // Регион описания нужен только на время поиска узла.
         let region = MemoryRegion::from(description.region);
         let mapping = region.map_full_read_only()?;
@@ -123,8 +123,8 @@ impl Pl031 {
             .map(|device| device.id().clone())
             .ok_or(Error::NoDevice)?;
         let id = &id;
-        let line = IrqLine::from(platform.irq(id.as_wire(), 0)??);
-        let window = platform.mmio(id.as_wire(), 0)??;
+        let line = IrqLine::from(platform.irq(id.as_wire(), 0)?);
+        let window = platform.mmio(id.as_wire(), 0)?;
         let window = MmioWindow {
             region: MemoryRegion::from(window.region),
             offset: window.offset,
@@ -180,8 +180,8 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 
 fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     start_component(parent, LOG_TAG);
-    let requirements = RtcStartup::request(parent)?;
-    let platform = requirements.platform.ok_or(Error::Start)?.client();
+    let requirements = RtcStartup::from_parent(parent);
+    let platform = requirements.platform.open()?.client();
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         service: Port::create()?,
         device: Mutex::new(None),

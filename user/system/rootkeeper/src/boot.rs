@@ -67,7 +67,6 @@ impl SystemImage {
         let client = bootstrap::Client::new(PortTransport::new(kernel));
         let region = client
             .acquire_userland_image()
-            .map_err(|_| BootFailure::BadImage)?
             .map(MemoryRegion::from)
             .map_err(|_| BootFailure::BadImage)?;
         let mapping = region

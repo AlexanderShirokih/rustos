@@ -92,6 +92,11 @@ path = "/feature-publisher-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "feature-holder-fixture"
+path = "/feature-holder-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "helper-panic-fixture"
 path = "/helper-panic-fixture"
 

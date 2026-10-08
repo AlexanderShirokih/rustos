@@ -167,7 +167,6 @@ pub(crate) fn bootstrap_handle() -> Handle<kind::Port> {
 pub(crate) fn hardware_session() -> Session<hardware::Protocol> {
     bootstrap::Client::new(PortTransport::new(bootstrap_handle()))
         .acquire_hardware()
-        .expect("acquire_hardware call")
         .map(Session::from_session)
         .expect("hardware session granted")
 }

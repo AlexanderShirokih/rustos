@@ -20,8 +20,7 @@ component_manifest! {
 fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
-    let requirements =
-        UnresponsiveFileSystemStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let requirements = UnresponsiveFileSystemStartup::from_parent(parent.as_raw());
     let service = Port::create().map_err(|_| Failed)?;
     let _ = serve_export::<file_system::Protocol>(&requirements.parent, whole_export(&service));
     Err(Failed)

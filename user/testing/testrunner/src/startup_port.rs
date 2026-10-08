@@ -5,9 +5,9 @@ use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 
 use component_abi::SessionError;
-use component_startup::{RequestError, STARTUP_REQUEST_TIMEOUT};
+use component_startup::STARTUP_REQUEST_TIMEOUT;
 use ipc::{
-    Listener as _, Protocol as _, RecvError,
+    CallError, Listener as _, Protocol as _, RecvError,
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
@@ -195,21 +195,21 @@ const fn departed(child: u16, outcome: Outcome) -> Departure<u16> {
     Departure { child, outcome }
 }
 
-fn asked(result: &Result<Session<probe::Protocol>, RequestError>) -> u32 {
+fn asked(result: &Result<Session<probe::Protocol>, CallError<SessionError>>) -> u32 {
     let code = match result {
         Ok(_) => u64::from(GRANTED),
-        Err(RequestError::Parent(refusal)) => 100 + session_error_code(*refusal),
-        Err(RequestError::Ipc(error)) => 200 + ipc_error_code(*error),
+        Err(CallError::Remote(refusal)) => 100 + session_error_code(*refusal),
+        Err(CallError::Ipc(error)) => 200 + ipc_error_code(*error),
     };
     u32::try_from(code).expect("request code fits u32")
 }
 
 fn refused(refusal: SessionError) -> u32 {
-    asked(&Err(RequestError::Parent(refusal)))
+    asked(&Err(CallError::Remote(refusal)))
 }
 
 fn failed(error: IpcError) -> u32 {
-    asked(&Err(RequestError::Ipc(error)))
+    asked(&Err(CallError::Ipc(error)))
 }
 
 fn ask(importer: &Port, requirement: &'static str) -> JoinHandle {
@@ -531,7 +531,7 @@ fn an_unexpected_call_on_the_startup_port_refuses_its_caller() {
 }
 
 #[test_harness::test]
-fn a_refused_requirement_ends_the_start_and_keeps_the_earlier_capabilities() {
+fn a_refused_requirement_leaves_the_opened_session_working() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
@@ -549,6 +549,10 @@ fn a_refused_requirement_ends_the_start_and_keeps_the_earlier_capabilities() {
     test_harness::check_eq!(
         steps.run(Step::answer_badged(SESSION_BADGE)),
         answered(true)
+    );
+    test_harness::check_eq!(
+        steps.run(Step::recv(STEP_REPORT_TIMEOUT)),
+        report(outcome::FRAME, SESSION_BADGE)
     );
     test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
@@ -652,13 +656,21 @@ fn a_child_terminated_by_its_parent_departs_with_the_named_code() {
 #[test_harness::test]
 fn a_living_child_that_closes_its_start_session_is_terminated() {
     let parent = Parent::start();
-    let closed = parent.add(Child::new(CLOSED_ENTRY, CLOSED));
+    let mut steps = Steps::new();
+    let provider = parent.add(steps.child(PROVIDER));
+    test_harness::check_eq!(steps.next(), started(true));
+
+    let closed = parent.add(Child::new(CLOSED_ENTRY, CLOSED).requirement(
+        PROBE_REQUIREMENT,
+        Answer::export::<probe::Protocol>(provider),
+    ));
 
     test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(closed, Outcome::TakenDown))
     );
     test_harness::check!(parent.last_depart().raw() < TAKE_DOWN_DURATION_MAX.raw());
+    test_harness::check_eq!(parent.requests(), 0);
 }
 
 #[test_harness::test]
@@ -796,12 +808,12 @@ fn a_repeated_key_in_add_is_refused() {
 }
 
 #[test_harness::test]
-fn next_launch_is_infinite_without_a_waiting_record_and_poll_with_a_fresh_one() {
+fn next_launch_is_poll_only_for_a_fresh_launchable_record() {
     let resource = Resource::self_resource().expect("self metering resource");
     let program = crate::fixture::program(EXPORT_ENTRY);
     let budget = crate::fixture::process_bytes(&program);
     let mut children = managed_component::Children::new().expect("startup port created");
-    test_harness::check_eq!(children.next_launch(), Timeout::INFINITE);
+    test_harness::check_eq!(children.next_launch(|_| true), Timeout::INFINITE);
 
     children
         .add(
@@ -813,7 +825,10 @@ fn next_launch_is_infinite_without_a_waiting_record_and_poll_with_a_fresh_one() 
             Timeout::from_secs(1),
         )
         .expect("record added");
-    test_harness::check_eq!(children.next_launch(), Timeout::POLL);
+    test_harness::check_eq!(children.next_launch(|_| false), Timeout::INFINITE);
+    test_harness::check!(children.launch_due(|_| false).is_none());
+    test_harness::check_eq!(children.status(0), Some(Status::Waiting));
+    test_harness::check_eq!(children.next_launch(|_| true), Timeout::POLL);
 }
 
 #[test_harness::test]

@@ -66,7 +66,7 @@ mod tests {
                     .expect("dispatch ok");
             });
             let feature = Str::new(&long).expect("field bound");
-            assert_eq!(client.publish(feature), Ok(Ok(())));
+            assert_eq!(client.publish(feature), Ok(()));
         });
         assert_eq!(registry.published, [long]);
     }

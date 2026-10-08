@@ -100,7 +100,7 @@ impl<E: Environment> OpenNode<E> {
         let count = self
             .session
             .client()
-            .read(self.descriptor, self.position, requested)??;
+            .read(self.descriptor, self.position, requested)?;
         let count = usize::try_from(count).unwrap_or(0).min(chunk.len());
         if let Some(head) = chunk.get_mut(..count) {
             self.session.region().read_at(0, head)?;
@@ -114,7 +114,7 @@ impl<E: Environment> OpenNode<E> {
         let written = self
             .session
             .client()
-            .write(self.descriptor, self.position, requested)??;
+            .write(self.descriptor, self.position, requested)?;
         Ok(usize::try_from(written.count).unwrap_or(0).min(chunk.len()))
     }
 
@@ -138,27 +138,27 @@ impl<E: Environment> OpenNode<E> {
         Ok(self
             .session
             .client()
-            .write(self.descriptor, APPEND_OFFSET, len)??)
+            .write(self.descriptor, APPEND_OFFSET, len)?)
     }
 
     /// Задаёт длину узла. Байты за `size` отбрасываются, расширение дописывает нули. Позиция
     /// чтения-записи остаётся прежней.
     pub fn set_size(&self, size: u64) -> Result<()> {
-        self.session.client().set_size(self.descriptor, size)??;
+        self.session.client().set_size(self.descriptor, size)?;
         Ok(())
     }
 
     /// Метаданные узла на сервере сейчас. Значения [`kind`](Self::kind) и [`size`](Self::size)
     /// остаются от открытия.
     pub fn metadata(&self) -> Result<NodeInfo> {
-        Ok(self.session.client().stat(self.descriptor)??)
+        Ok(self.session.client().stat(self.descriptor)?)
     }
 
     /// Capability региона, на котором лежит содержимое узла. Права выводятся из режима открытия.
     /// После выдачи длина узла за ёмкость региона не растёт. Пустой узел и файловая система без
     /// такого региона возвращают `NotSupported`.
     pub fn backing_memory(&self) -> Result<E::Handle<kind::MemoryRegion>> {
-        Ok(self.session.client().backing_memory(self.descriptor)??)
+        Ok(self.session.client().backing_memory(self.descriptor)?)
     }
 
     /// Обход каталога с начала перечисления.

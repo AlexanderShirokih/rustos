@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use component_abi::{Attribute, RequirementDeclaration};
 use component_startup::{Attributes, Found};
 use display_abi::{Area, DisplayError, display};
-use ipc::Protocol;
+use ipc::{CallError, Protocol};
 use kernel_objects::{MemoryRegion, SessionTransport};
 use runtime::Timeout;
 use userland_image::ComponentSpec;
@@ -68,15 +68,17 @@ fn found(importer: &Importer) -> Vec<Found> {
         .found_with::<display::Protocol>(SCREEN, Attributes::decode(&bytes).expect("query decodes"))
 }
 
-fn surface(session: &display::Client<SessionTransport>) -> Result<MemoryRegion, DisplayError> {
-    session
-        .acquire_surface()
-        .expect("acquire_surface call")
-        .map(MemoryRegion::from)
+fn surface(
+    session: &display::Client<SessionTransport>,
+) -> Result<MemoryRegion, CallError<DisplayError>> {
+    session.acquire_surface().map(MemoryRegion::from)
 }
 
-fn present(session: &display::Client<SessionTransport>, area: Area) -> Result<(), DisplayError> {
-    session.present(area).expect("present call")
+fn present(
+    session: &display::Client<SessionTransport>,
+    area: Area,
+) -> Result<(), CallError<DisplayError>> {
+    session.present(area)
 }
 
 #[test_harness::test]
@@ -108,7 +110,7 @@ fn a_second_surface_request_of_a_session_keeps_the_first_surface() {
 
     let again = surface(&screen).map(drop);
 
-    test_harness::check_eq!(again, Err(DisplayError::AlreadyAcquired));
+    test_harness::check_eq!(again, Err(CallError::Remote(DisplayError::AlreadyAcquired)));
     test_harness::check!(region.inspect().is_ok());
     drop((screen, region));
     finish(composition);
@@ -120,7 +122,10 @@ fn a_present_before_the_surface_is_no_surface() {
     let importer = composition.importer(SCREEN_REQUIREMENTS);
     let screen = session(&importer);
 
-    test_harness::check_eq!(present(&screen, WHOLE_SCREEN), Err(DisplayError::NoSurface));
+    test_harness::check_eq!(
+        present(&screen, WHOLE_SCREEN),
+        Err(CallError::Remote(DisplayError::NoSurface))
+    );
     drop(screen);
     finish(composition);
 }
@@ -142,8 +147,14 @@ fn a_present_past_the_edge_or_of_an_empty_area_is_out_of_bounds() {
         ..WHOLE_SCREEN
     };
 
-    test_harness::check_eq!(present(&screen, past_edge), Err(DisplayError::OutOfBounds));
-    test_harness::check_eq!(present(&screen, empty), Err(DisplayError::OutOfBounds));
+    test_harness::check_eq!(
+        present(&screen, past_edge),
+        Err(CallError::Remote(DisplayError::OutOfBounds))
+    );
+    test_harness::check_eq!(
+        present(&screen, empty),
+        Err(CallError::Remote(DisplayError::OutOfBounds))
+    );
     drop((screen, region));
     finish(composition);
 }
@@ -175,7 +186,10 @@ fn a_surface_over_the_budget_is_granted_after_the_holder_session_closes() {
     let second = session(&importer);
     let held = surface(&first).expect("first session takes the budget");
 
-    test_harness::check_eq!(surface(&second).map(drop), Err(DisplayError::NoSpace));
+    test_harness::check_eq!(
+        surface(&second).map(drop),
+        Err(CallError::Remote(DisplayError::NoSpace))
+    );
 
     drop(first);
 

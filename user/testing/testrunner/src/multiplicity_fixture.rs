@@ -4,9 +4,10 @@
 
 use bootstrap_abi::image;
 use component_startup::{
-    Attributes, RequestError, Requirements as _, SessionError, all, component_manifest,
-    session as request_session, start_parent,
+    Attributes, Requirements as _, SessionError, StartupError, StartupFailure, all,
+    component_manifest, session as request_session, start_parent,
 };
+use ipc::CallError;
 use kernel_objects::{Port, Signal};
 use rtc_abi::rtc;
 use runtime::{Timeout, log_fmt, log_line, start_component};
@@ -35,12 +36,23 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), "multiplicity");
-    let requirements = MultiplicityStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let requirements = MultiplicityStartup::from_parent(parent.as_raw());
 
-    if requirements.rtc.is_some() {
-        return Err(Failed);
+    match requirements.rtc.open() {
+        Err(StartupError {
+            requirement: "rtc",
+            failure: StartupFailure::Unbound,
+        }) => log_line("optional empty"),
+        _ => return Err(Failed),
     }
-    log_line("optional empty");
+    let one = match requirements.one.open() {
+        Ok(one) => Some(one),
+        Err(StartupError {
+            failure: StartupFailure::Unbound,
+            ..
+        }) => None,
+        Err(_) => return Err(Failed),
+    };
     log_line("started");
 
     let mut count: u16 = 0;
@@ -60,14 +72,14 @@ fn run(parent: &Port) -> Result<(), Failed> {
         }
         count = count.checked_add(1).ok_or(Failed)?;
     }
-    if (count == 0) != requirements.one.is_none() {
+    if (count == 0) != one.is_none() {
         return Err(Failed);
     }
     log_fmt(format_args!("providers {count}"));
 
     let requests = start_parent(parent.as_raw()).with_wait(SESSION_PING_TIMEOUT);
     match all::<probe::Protocol>(&requests, "one", Attributes::empty()) {
-        Err(RequestError::Parent(SessionError::Refused)) => log_line("all refused"),
+        Err(CallError::Remote(SessionError::Refused)) => log_line("all refused"),
         _ => return Err(Failed),
     }
 
@@ -80,7 +92,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
         .map_err(|_| Failed)?;
     let image = requirements.images.open(&image).map_err(|_| Failed)?;
     match image.client().with_wait(SESSION_PING_TIMEOUT).region() {
-        Ok(Ok(_)) => log_line("image found"),
+        Ok(_) => log_line("image found"),
         _ => return Err(Failed),
     }
 

@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use component_abi::{AcceptError, SessionError, SessionRequest, component_startup};
+use component_abi::{AcceptError, AttributeSet, SessionError, SessionRequest, component_startup};
 use kernel_objects::{
     BorrowedHandle, Error, IssuedHandle, ObjectKind, OwnedHandle, Port, Process, Resource, kind,
 };
@@ -125,6 +125,7 @@ struct PendingRequest<C, R = ImporterDebt> {
     protocol: String,
     importer: u64,
     requirement: String,
+    attributes: AttributeSet,
     reply: R,
 }
 
@@ -203,10 +204,15 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         Ok(())
     }
 
-    /// Запускает записи в [`Status::Waiting`] и возвращает первый отказ запуска. Вызывается перед
+    /// Запускает записи в [`Status::Waiting`], для которых `launchable` истинно, и возвращает
+    /// первый отказ запуска. Остальные записи остаются в [`Status::Waiting`]. Вызывается перед
     /// каждым приёмом кадра на [`port`](Self::port).
-    pub fn launch_due(&mut self) -> Option<Departure<C>> {
-        for entry in &mut self.entries {
+    pub fn launch_due(&mut self, launchable: impl Fn(C) -> bool) -> Option<Departure<C>> {
+        for entry in self
+            .entries
+            .iter_mut()
+            .filter(|entry| launchable(entry.child))
+        {
             if let Some(outcome) = entry.launch(&self.port, &self.next_badge) {
                 entry.state = State::Departed;
                 return Some(Departure {
@@ -219,11 +225,13 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         None
     }
 
-    /// Предельный срок приёма кадра до следующего вызова [`launch_due`](Self::launch_due).
+    /// Предельный срок приёма кадра до следующего вызова [`launch_due`](Self::launch_due) с тем
+    /// же `launchable`.
     #[must_use]
-    pub fn next_launch(&self) -> Timeout {
+    pub fn next_launch(&self, launchable: impl Fn(C) -> bool) -> Timeout {
         self.entries
             .iter()
+            .filter(|entry| launchable(entry.child))
             .filter_map(Entry::launch_wait)
             .min_by_key(|wait| wait.raw())
             .unwrap_or(Timeout::INFINITE)
@@ -239,16 +247,17 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .or_else(|| self.importers.get(&badge).map(|importer| importer.key))
     }
 
-    /// Ставит заявку импортёра со значком `importer` по требованию `requirement` на экспорт
-    /// `protocol` записи `provider`. Заявка сохраняется при перезапуске. Повтор заявки того же
-    /// импортёра на тот же экспорт по тому же требованию заменяет прежнюю и отвечает на неё
-    /// `SessionError::NoSpace`.
+    /// Ставит заявку импортёра со значком `importer` и атрибутами его запроса `attributes` по
+    /// требованию `requirement` на экспорт `protocol` записи `provider`. Заявка сохраняется при
+    /// перезапуске. Повтор заявки того же импортёра на тот же экспорт по тому же требованию
+    /// заменяет прежнюю и отвечает на неё `SessionError::NoSpace`.
     pub fn request(
         &mut self,
         provider: C,
         importer: u64,
         requirement: &str,
         protocol: &str,
+        attributes: AttributeSet,
         reply: ImporterDebt,
     ) {
         let request = PendingRequest {
@@ -256,6 +265,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             protocol: String::from(protocol),
             importer,
             requirement: String::from(requirement),
+            attributes,
             reply,
         };
         if let Some(replaced) = queue_request(&mut self.requests, request) {
@@ -496,15 +506,16 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             protocol,
             importer,
             requirement,
+            attributes,
             reply,
         } = self.requests.remove(request);
         let sent = accept
             .reply
-            .send(Ok::<_, AcceptError>(SessionRequest { reply }));
+            .send(Ok::<_, AcceptError>(SessionRequest { reply, attributes }));
 
         // Недоставленная заявка возвращается на своё место в очереди.
         if let Err(undelivered) = sent
-            && let Ok(Ok(SessionRequest { reply })) = undelivered.into_value()
+            && let Ok(Ok(SessionRequest { reply, attributes })) = undelivered.into_value()
         {
             self.requests.insert(
                 request,
@@ -513,6 +524,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
                     protocol,
                     importer,
                     requirement,
+                    attributes,
                     reply,
                 },
             );
@@ -647,6 +659,8 @@ fn queue_request<C: PartialEq, R>(
 
 #[cfg(test)]
 mod tests {
+    use component_abi::{AttributeSet, Attributes};
+
     use super::{PendingRequest, String, Vec, queue_request};
 
     fn request(importer: u64, provider: u16, reply: u16) -> PendingRequest<u16, u16> {
@@ -655,6 +669,7 @@ mod tests {
             protocol: String::from("Clock"),
             importer,
             requirement: String::from("clocks"),
+            attributes: AttributeSet::new(Attributes::empty()),
             reply,
         }
     }

@@ -11,12 +11,18 @@ use kernel_objects::Port;
 use runtime::{Timeout, handle_close, log_line, process_exit, start_component, take_bootstrap};
 use syscall::kind;
 
+mod probe_protocol;
+
+use probe_protocol::probe;
+
 const LOG_TAG: &str = "closed";
 
 const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
-    struct ClosedStartup {}
+    struct ClosedStartup {
+        requirements: { probe: session(probe::Protocol) },
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -28,9 +34,8 @@ pub extern "C" fn _start(parent: u32) -> ! {
     };
     let parent = parent.assume_kind::<kind::Port>();
     start_component(parent.as_raw(), LOG_TAG);
-    if ClosedStartup::request(parent.as_raw()).is_err() {
-        process_exit(FAILED_EXIT_CODE)
-    }
+    // Значение строится без открытия требования, и родитель не получает запроса.
+    let _requirements = ClosedStartup::from_parent(parent.as_raw());
     log_line("started");
     if handle_close(parent) != 0 {
         process_exit(FAILED_EXIT_CODE)

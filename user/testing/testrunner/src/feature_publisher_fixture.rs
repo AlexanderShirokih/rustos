@@ -26,12 +26,17 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = FeaturePublisherStartup::request(parent.as_raw()).map_err(|_| Failed)?;
-    let features = requirements.features.ok_or(Failed)?.client();
+    let features = FeaturePublisherStartup::from_parent(parent.as_raw())
+        .features
+        .open()
+        .map_err(|_| Failed)?
+        .client();
     let feature = Str::new(FEATURE).ok_or(Failed)?;
 
     let first = features.publish(feature);
     let again = features.publish(feature);
+    // Закрытие сессии `Features` завершает публикацию, и rootkeeper запускает удержанные записи.
+    drop(features);
     log_fmt(format_args!("published {first:?} {again:?}"));
 
     let idle = Port::create().map_err(|_| Failed)?;

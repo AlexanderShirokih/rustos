@@ -27,14 +27,12 @@ component_manifest! {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let requirements = components::requirements::<DemoStartup>()?;
-
     let calculator = requirements
         .calculator
-        .ok_or("calculator provider is unavailable")?;
-    let clock = requirements.clock.ok_or("RTC provider is unavailable")?;
-
-    let calculator = calculator.client().with_wait(CALL_TIMEOUT);
-    let clock = clock.client().with_wait(CALL_TIMEOUT);
+        .open()?
+        .client()
+        .with_wait(CALL_TIMEOUT);
+    let clock = requirements.clock.open()?.client().with_wait(CALL_TIMEOUT);
 
     println!("started");
     run(&calculator, &clock)?;

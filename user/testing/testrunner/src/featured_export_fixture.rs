@@ -35,7 +35,7 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = FeaturedExportStartup::request(parent.as_raw()).map_err(|_| Failed)?;
+    let requirements = FeaturedExportStartup::from_parent(parent.as_raw());
 
     log_opened("hardware", &requirements.hardware)?;
     log_opened("image", &requirements.images)?;

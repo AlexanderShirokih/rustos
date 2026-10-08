@@ -8,15 +8,12 @@ use core::{
 };
 
 use component_abi::{
-    Attributes, RequirementDeclaration, STARTUP_REQUEST_TIMEOUT,
+    Attributes, RequirementDeclaration, STARTUP_REQUEST_TIMEOUT, SessionError,
     component_startup as startup_contract,
 };
-use component_startup::{Found, RequestError};
+use component_startup::Found;
 use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
-use ipc::{
-    Protocol,
-    wire::{IpcError, Str},
-};
+use ipc::{CallError, Protocol, wire::Str};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
 use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SystemImage, relay::LogSources, turn};
@@ -199,7 +196,6 @@ impl Importer {
             let client = namespace::Client::new(PortTransport::new(session.handle()));
             let scoped = client
                 .open_root(Str::new(root).expect("view root fits"))
-                .expect("open_root call")
                 .expect("view opened");
             return Session::from_handle(Port::from(scoped.into_handle()));
         }
@@ -226,7 +222,7 @@ impl Importer {
         &self,
         requirement: &str,
         attributes: Attributes<'_>,
-    ) -> Result<Session<startup_contract::Protocol>, RequestError> {
+    ) -> Result<Session<startup_contract::Protocol>, CallError<SessionError>> {
         let parent = startup_contract::Client::new(PortTransport::new(self.handle()))
             .with_wait(IMPORTER_WAIT);
         component_startup::all::<P>(&parent, requirement, attributes)
@@ -264,7 +260,7 @@ impl Mounted {
                         Str::new(&mounted_path).expect("mount path fits"),
                         filesystem,
                     );
-                if matches!(ended, Ok(Ok(_))) {
+                if ended.is_ok() {
                     MOUNT_ENDED
                 } else {
                     MOUNT_FAILED
@@ -274,10 +270,12 @@ impl Mounted {
             Priority::new(1),
         )
         .expect("mount thread starts");
-        let _ = namespace::Client::new(PortTransport::new(&view))
+        let resolved = namespace::Client::new(PortTransport::new(&view))
             .with_wait(IMPORTER_WAIT)
-            .resolve(Str::new("/").expect("root path fits"))
-            .expect("the view of the prefix answers");
+            .resolve(Str::new("/").expect("root path fits"));
+        if let Err(CallError::Ipc(error)) = resolved {
+            panic!("the view of the prefix answers: {error:?}");
+        }
         Self {
             admin: Some(admin),
             thread: Some(thread),
@@ -288,12 +286,12 @@ impl Mounted {
     pub(crate) fn mount(
         &self,
         filesystem: Session<file_system::Protocol>,
-    ) -> Result<Result<(), FileSystemError>, IpcError> {
+    ) -> Result<(), CallError<FileSystemError>> {
         let admin = self.admin.as_ref().expect("admin session is held");
         file_system_mount::Client::new(PortTransport::new(admin))
             .with_wait(IMPORTER_WAIT)
             .mount(Str::new(&self.path).expect("mount path fits"), filesystem)
-            .map(|ended| ended.map(drop))
+            .map(drop)
     }
 
     pub(crate) fn ended(&self, wait: Timeout) -> bool {
@@ -319,7 +317,7 @@ pub(crate) fn request<P: Protocol>(
     importer: Handle<kind::Port>,
     requirement: &str,
     wait: Timeout,
-) -> Result<Session<P>, RequestError> {
+) -> Result<Session<P>, CallError<SessionError>> {
     component_startup::session::<P>(importer, requirement, Attributes::empty(), wait)
 }
 

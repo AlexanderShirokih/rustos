@@ -165,11 +165,10 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = DisplayStartup::request(parent.as_raw()).map_err(|_| Failed)?;
     let service = Port::create().map_err(|_| Failed)?;
     let mut screen = Screen::new().ok_or(Failed)?;
     let service: &'static Port = Box::leak(Box::new(service));
-    let parent_port = requirements.parent;
+    let parent_port = DisplayStartup::from_parent(parent.as_raw()).parent;
     let export_thread = spawn_owned(
         move || {
             let failure = serve_export::<display::Protocol>(&parent_port, whole_export(service));

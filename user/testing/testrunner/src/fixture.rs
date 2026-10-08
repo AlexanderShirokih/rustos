@@ -56,10 +56,7 @@ impl Fixture {
 
     fn spawn_metered_by(metering: &Metering<'_>) -> Result<Self> {
         let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
-        let cap = client
-            .acquire_userland_image()
-            .expect("acquire_userland_image call")
-            .expect("vend ok");
+        let cap = client.acquire_userland_image().expect("vend ok");
 
         let region = MemoryRegion::from(cap);
         let mapping = region.map_full_read_only().expect("map image read-only");

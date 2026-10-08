@@ -171,7 +171,10 @@ mod tests {
         vec::Vec,
     };
 
-    use ipc::wire::{Cap, Str};
+    use ipc::{
+        CallError,
+        wire::{Cap, Str},
+    };
     use ipc_test::{MockHandle, MockResources};
 
     use super::{
@@ -467,39 +470,30 @@ mod tests {
         let from = DirCursor::from_raw(2);
         let (answers, calls) = with_service(|client| {
             [
-                client.acquire_buffer(4096).map(|buffer| buffer.map(|_| 0)),
-                client.acquire_buffer(0).map(|buffer| buffer.map(|_| 0)),
+                client.acquire_buffer(4096).map(|_| 0),
+                client.acquire_buffer(0).map(|_| 0),
                 client
                     .open(path("/data/sample"), AccessMode::ReadWrite, flags)
-                    .map(|opened| opened.map(|opened| opened.size as u32)),
+                    .map(|opened| opened.size as u32),
                 client.close(FD),
                 client.read(FD, 1024, 4096),
-                client
-                    .write(FD, u64::MAX, 12)
-                    .map(|written| written.map(|written| written.count)),
+                client.write(FD, u64::MAX, 12).map(|written| written.count),
                 client.set_size(FD, 8192),
-                client
-                    .stat(FD)
-                    .map(|info| info.map(|info| info.size as u32)),
-                client
-                    .list(FD, from)
-                    .map(|listed| listed.map(|listed| listed.count)),
+                client.stat(FD).map(|info| info.size as u32),
+                client.list(FD, from).map(|listed| listed.count),
                 client.rename(path("/store/a"), path("/store/b")),
                 client.unlink(path("/store/a"), NodeKind::File),
-                client.backing_memory(FD).map(|backing| backing.map(|_| 0)),
+                client.backing_memory(FD).map(|_| 0),
                 client.create_backed(path("/store/shared"), IMPORT_CAP, 123),
-                client
-                    .open_root(path("/window"))
-                    .map(|scoped| scoped.map(|_| 0)),
+                client.open_root(path("/window")).map(|_| 0),
             ]
-            .map(|answer| answer.expect("call ok"))
         });
 
         assert_eq!(
             answers,
             [
                 Ok(0),
-                Err(FileSystemError::NoSpace),
+                Err(CallError::Remote(FileSystemError::NoSpace)),
                 Ok(OPENED.size as u32),
                 Ok(DONE),
                 Ok(READ_COUNT),
@@ -563,13 +557,11 @@ mod tests {
     fn path_at_bound_fits_the_frame() {
         let path = "/".to_string() + &"p".repeat(PATH_MAX - 1);
         let (result, calls) = with_service(|client| {
-            client
-                .open(
-                    Str::new(&path).expect("path at bound"),
-                    AccessMode::Read,
-                    OpenFlags::NONE,
-                )
-                .expect("call ok")
+            client.open(
+                Str::new(&path).expect("path at bound"),
+                AccessMode::Read,
+                OpenFlags::NONE,
+            )
         });
         assert_eq!(result, Ok(OPENED));
         assert_eq!(

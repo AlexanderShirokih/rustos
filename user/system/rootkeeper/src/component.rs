@@ -1,8 +1,10 @@
 use alloc::string::String;
 
+use bootstrap_abi::features;
 use component_abi::{
     ComponentManifest, ManifestExport, ManifestRequirement, RequirementDeclaration,
 };
+use ipc::Protocol as _;
 use syscall::ProcessName;
 use userland::DecodedProgram;
 
@@ -47,5 +49,13 @@ impl<'a> Record<'a> {
         self.manifest
             .exports()
             .find(|export| export.protocol() == protocol)
+    }
+
+    pub(crate) fn publisher(&self) -> bool {
+        self.origin == Origin::Plan
+            && self
+                .manifest
+                .requirements()
+                .any(|requirement| requirement.protocol() == features::Protocol::ID)
     }
 }

@@ -4,7 +4,7 @@ use component_abi::{Attributes, RequirementDeclaration};
 use component_startup::session;
 use filesystem_abi::{MountEnded, PATH_MAX, file_system, file_system_mount};
 use ipc::{
-    Protocol as _,
+    CallError, Protocol as _,
     wire::{IpcError, Str},
 };
 use kernel_objects::{Port, Session};
@@ -93,8 +93,8 @@ fn mount(importer: &Port, path: &str, kernel: Handle<kind::Port>) -> u32 {
             .with_wait(Timeout::INFINITE)
             .mount(path, filesystem)
         {
-            Err(IpcError::PeerClosed) | Ok(Ok(MountEnded::FileSystemGone)) => {}
-            Ok(Ok(MountEnded::Closed | MountEnded::Replaced)) => return 0,
+            Err(CallError::Ipc(IpcError::PeerClosed)) | Ok(MountEnded::FileSystemGone) => {}
+            Ok(MountEnded::Closed | MountEnded::Replaced) => return 0,
             failure => {
                 crate::system::log_line(
                     kernel,

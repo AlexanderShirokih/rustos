@@ -1,7 +1,8 @@
 //! Сторона ребёнка стартовой сессии к родителю.
 //!
-//! Макрос [`component_manifest!`] объявляет требования и экспорты компонента и порождает их
-//! запрос у родителя. Провайдер обслуживает экспорт циклом [`serve_export`].
+//! Макрос [`component_manifest!`] объявляет требования и экспорты компонента и порождает поле
+//! на каждое требование. Поле запрашивает сессию требования у родителя по вызову. Провайдер
+//! обслуживает экспорт циклом [`serve_export`].
 //!
 //! Программа на Rust со стандартной библиотекой получает стартовый handle от
 //! `components`.
@@ -10,6 +11,7 @@
 
 mod declare;
 mod export;
+mod import;
 mod providers;
 mod request;
 
@@ -21,12 +23,13 @@ pub use component_abi::{
     AcceptError, Attribute, Attributes, LOG_REQUIREMENT, STARTUP_REQUEST_TIMEOUT, SessionError,
     component_startup,
 };
-pub use declare::{Requirements, StartupError, StartupFailure};
 #[doc(hidden)]
-pub use declare::{start_parent, start_session};
-pub use export::{ExportError, MintedSession, mint_session, serve_export, whole_export};
+pub use declare::start_parent;
+pub use declare::{Requirements, StartupError, StartupFailure};
+pub use export::{MintedSession, mint_session, serve_export, whole_export};
+pub use import::Import;
 pub use ipc::wire::IpcError;
 pub use kernel_objects::{OwnedHandle, Port, PortTransport, Session, kind};
 pub use providers::{ProviderSessions, Providers};
-pub use request::{Found, RequestError, SessionRequest, accept, all, next, open, session};
+pub use request::{Found, SessionRequest, accept, all, next, open, session};
 pub use syscall::{Handle, ObjectKind};

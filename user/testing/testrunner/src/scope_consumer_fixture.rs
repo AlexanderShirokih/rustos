@@ -4,7 +4,7 @@
 
 use component_startup::{Requirements as _, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, namespace};
-use ipc::wire::Str;
+use ipc::{CallError, wire::Str};
 use kernel_objects::{MemoryRegion, Port, SessionTransport};
 use runtime::{Timeout, UserMemFlags, log_line, start_component};
 
@@ -34,14 +34,15 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = AreaStartup::request(parent.as_raw()).map_err(|_| Failed)?;
-    let area = requirements.area.ok_or(Failed)?;
+    let area = AreaStartup::from_parent(parent.as_raw())
+        .area
+        .open()
+        .map_err(|_| Failed)?;
     let root = Str::new("/boot/scope-consumer-fixture").ok_or(Failed)?;
     let session = area
         .client()
         .with_wait(Timeout::from_secs(5))
         .resolve(root)
-        .map_err(|_| Failed)?
         .map_err(|_| Failed)?;
     let area = kernel_objects::Session::from_session(session)
         .client()
@@ -54,7 +55,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
 }
 
 fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
-    let Ok(Ok(cap)) = client.acquire_buffer(BUFFER_SIZE) else {
+    let Ok(cap) = client.acquire_buffer(BUFFER_SIZE) else {
         return false;
     };
     let region = MemoryRegion::from(cap);
@@ -65,13 +66,13 @@ fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
     let Some(path) = Str::new(RECORD) else {
         return false;
     };
-    let Ok(Ok(opened)) = client.open(path, AccessMode::Read, OpenFlags::NONE) else {
+    let Ok(opened) = client.open(path, AccessMode::Read, OpenFlags::NONE) else {
         return false;
     };
     if opened.kind != NodeKind::File || opened.size != RECORD_BODY.len() as u64 {
         return false;
     }
-    let Ok(Ok(count)) = client.read(opened.fd, 0, BUFFER_SIZE) else {
+    let Ok(count) = client.read(opened.fd, 0, BUFFER_SIZE) else {
         return false;
     };
     let mut body = [0; RECORD_BODY.len()];
@@ -98,5 +99,5 @@ fn escapes(
     let Some(path) = Str::new(text) else {
         return true;
     };
-    client.open(path, AccessMode::Read, OpenFlags::NONE) != Ok(Err(refused))
+    client.open(path, AccessMode::Read, OpenFlags::NONE) != Err(CallError::Remote(refused))
 }

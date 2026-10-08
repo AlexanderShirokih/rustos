@@ -5,8 +5,9 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{num::NonZeroU64, ops::ControlFlow};
 
 use component_abi::{
-    AcceptError, Found, LOG_REQUIREMENT, PROTOCOL_ID_MAX, QueryAttributes, SessionError,
-    SessionRequest, SessionRequirement, component_startup as startup_contract,
+    AcceptError, AttributeSet, Attributes, Found, LOG_REQUIREMENT, PROTOCOL_ID_MAX,
+    QueryAttributes, SessionError, SessionRequest, SessionRequirement,
+    component_startup as startup_contract,
 };
 use ipc::{
     IntoWireValue, Listener as _, Protocol as _, RecvError,
@@ -340,7 +341,7 @@ impl startup_contract::Service<Delivery> for State {
         &mut self,
         frame: &Delivery,
         requirement: SessionRequirement<'_>,
-        _attributes: QueryAttributes<'_>,
+        attributes: QueryAttributes<'_>,
         reply: startup_contract::session::Reply<Debt>,
     ) {
         let badge = frame.badge;
@@ -368,12 +369,21 @@ impl startup_contract::Service<Delivery> for State {
                 protocol: exported,
             }) if *exported == protocol => {
                 let provider = Key::Record(*provider);
+                let attributes = Attributes::decode(attributes.as_bytes());
                 if matches!(self.children.status(provider), None | Some(Status::Removed)) {
                     let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
-                } else {
+                } else if let Some(attributes) = attributes {
                     self.requests += 1;
-                    self.children
-                        .request(provider, badge, name, protocol, reply);
+                    self.children.request(
+                        provider,
+                        badge,
+                        name,
+                        protocol,
+                        AttributeSet::new(attributes),
+                        reply,
+                    );
+                } else {
+                    let _ = reply.send(Err::<Port, _>(SessionError::Refused));
                 }
             }
             Some(Answer::Grant {
@@ -452,10 +462,10 @@ impl startup_contract::Service<Delivery> for State {
 fn turn(state: &Mutex<State>, port: Handle<kind::Port>) -> ControlFlow<()> {
     let wait = {
         let mut state = state.lock();
-        while let Some(departure) = state.children.launch_due() {
+        while let Some(departure) = state.children.launch_due(|_| true) {
             state.depart(departure);
         }
-        let next = state.children.next_launch();
+        let next = state.children.next_launch(|_| true);
         if next.raw() < LAUNCH_CHECK_INTERVAL.raw() {
             next
         } else {

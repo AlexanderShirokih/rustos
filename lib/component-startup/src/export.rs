@@ -6,18 +6,11 @@ use core::{
 };
 
 use component_abi::{AcceptError, SessionError, component_startup};
-use ipc::wire::IpcError;
+use ipc::CallError;
 use kernel_objects::{Error, Port, PortTransport};
 use syscall::Rights;
 
-use crate::request::{RequestError, accept};
-
-/// Отказ, которым кончается цикл [`serve_export`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportError {
-    Accept(AcceptError),
-    Ipc(IpcError),
-}
+use crate::request::accept;
 
 /// Порт сессии из [`mint_session`] и его значок.
 #[derive(Debug)]
@@ -27,19 +20,18 @@ pub struct MintedSession {
 }
 
 /// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`. `open`
-/// строит порт сессии либо отказывает.
+/// строит порт сессии либо отказывает. Возвращает отказ `accept`.
 pub fn serve_export<P: ipc::Protocol>(
     parent: &component_startup::Client<PortTransport>,
     mut open: impl FnMut() -> Result<Port, SessionError>,
-) -> ExportError {
+) -> CallError<AcceptError> {
     loop {
         match accept::<P>(parent) {
             Ok(request) => {
                 let session = open();
                 let _ = request.reply.send(session);
             }
-            Err(RequestError::Parent(error)) => return ExportError::Accept(error),
-            Err(RequestError::Ipc(error)) => return ExportError::Ipc(error),
+            Err(error) => return error,
         }
     }
 }

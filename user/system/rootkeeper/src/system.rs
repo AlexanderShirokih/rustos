@@ -135,14 +135,6 @@ struct Feature {
     publisher: u64,
 }
 
-struct Waiting {
-    owner: u64,
-    requirement: String,
-    protocol: String,
-    attributes: AttributeSet,
-    reply: component_startup::session::Reply<Debt>,
-}
-
 #[derive(Clone, Copy)]
 enum Provider<'a> {
     Record(u16),
@@ -157,6 +149,7 @@ struct Search<'a> {
     id: u64,
     owner: u64,
     requirement: String,
+    attributes: AttributeSet,
     state: SearchState<'a>,
 }
 
@@ -176,11 +169,11 @@ pub struct RootSystem<'a> {
     image: &'a SystemImage,
     kernel: Handle<kind::Port>,
     restarts_used: Vec<u32>,
+    features_closed: Vec<bool>,
     importers: Vec<Vec<ImporterBinding>>,
     searches: Vec<Search<'a>>,
     next_search: u64,
     features: Vec<Feature>,
-    waiting: Vec<Waiting>,
     resource: Resource,
     pub(crate) mounts: MountThreads,
 }
@@ -205,7 +198,6 @@ impl<'a> RootSystem<'a> {
         let hardware = bootstrap::Client::new(PortTransport::new(kernel))
             .acquire_hardware()
             .ok()
-            .and_then(Result::ok)
             .map(Session::from_session)
             .ok_or(BudgetFailure::Hardware)?;
 
@@ -225,11 +217,11 @@ impl<'a> RootSystem<'a> {
             image,
             kernel,
             restarts_used: alloc::vec![0],
+            features_closed: alloc::vec![false],
             importers: Vec::new(),
             searches: Vec::new(),
             next_search: 0,
             features: Vec::new(),
-            waiting: Vec::new(),
             resource,
             mounts: MountThreads::default(),
         })
@@ -293,6 +285,7 @@ impl<'a> RootSystem<'a> {
         });
         self.logs.push(log);
         self.restarts_used.push(0);
+        self.features_closed.push(false);
         Ok(record)
     }
 
@@ -427,15 +420,44 @@ impl<'a> RootSystem<'a> {
     }
 
     fn launch_due(&mut self) {
-        while let Some(departure) = self.children.launch_due() {
+        loop {
+            let pending = self.publication_pending();
+            let records = &self.records;
+            let Some(departure) = self
+                .children
+                .launch_due(|child| launchable(records, pending, child))
+            else {
+                return;
+            };
             self.decide(departure);
         }
+    }
+
+    fn next_launch(&self) -> Timeout {
+        let pending = self.publication_pending();
+        self.children
+            .next_launch(|child| launchable(&self.records, pending, child))
+    }
+
+    fn publication_pending(&self) -> bool {
+        self.records
+            .iter()
+            .zip(&self.features_closed)
+            .zip(0..)
+            .any(|((record, &closed), index)| {
+                record.publisher()
+                    && !closed
+                    && self.children.status(Holder::Record(index)) != Some(Status::Removed)
+            })
     }
 
     fn decide(&mut self, departure: Departure<Holder>) {
         let Holder::Record(record) = departure.child else {
             return;
         };
+        if let Some(closed) = self.features_closed.get_mut(usize::from(record)) {
+            *closed = false;
+        }
         let Some(component) = self.records.get(usize::from(record)) else {
             return;
         };
@@ -505,7 +527,6 @@ impl<'a> RootSystem<'a> {
         &self,
         protocol: &str,
         attributes: Attributes<'_>,
-        hidden: &mut bool,
         found: &mut dyn FnMut(Export<'a>) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         for (index, record) in self.records.iter().enumerate() {
@@ -515,23 +536,17 @@ impl<'a> RootSystem<'a> {
 
             if let Some(export) = record.export(protocol)
                 && self.available(provider)
+                && self.published(&record.manifest)
             {
-                let visible = self.published(&record.manifest);
-                Self::candidate(
-                    Provider::Record(provider),
-                    export,
-                    attributes,
-                    visible,
-                    hidden,
-                    found,
-                )?;
+                Self::candidate(Provider::Record(provider), export, attributes, found)?;
             }
         }
 
         for indexed in self.index.providers(protocol) {
-            if let Some((provider, manifest, export)) = self.indexed(indexed, protocol) {
-                let visible = self.published(&manifest);
-                Self::candidate(provider, export, attributes, visible, hidden, found)?;
+            if let Some((provider, manifest, export)) = self.indexed(indexed, protocol)
+                && self.published(&manifest)
+            {
+                Self::candidate(provider, export, attributes, found)?;
             }
         }
 
@@ -542,18 +557,11 @@ impl<'a> RootSystem<'a> {
         provider: Provider<'a>,
         export: ManifestExport<'a>,
         attributes: Attributes<'_>,
-        visible: bool,
-        hidden: &mut bool,
         found: &mut dyn FnMut(Export<'a>) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         let Some(filter) = match_filters(export.filters(), attributes) else {
             return ControlFlow::Continue(());
         };
-
-        if !visible {
-            *hidden = true;
-            return ControlFlow::Continue(());
-        }
 
         found(Export {
             provider,
@@ -624,13 +632,8 @@ impl<'a> RootSystem<'a> {
         &self,
         protocol: &str,
         attributes: Attributes<'_>,
-    ) -> Result<Option<Export<'a>>, SessionError> {
-        let mut hidden = false;
-
-        match only(|found| self.matches(protocol, attributes, &mut hidden, found)) {
-            Err(SessionError::Unbound) if hidden => Ok(None),
-            result => result.map(Some),
-        }
+    ) -> Result<Export<'a>, SessionError> {
+        only(|found| self.matches(protocol, attributes, found))
     }
 
     fn pinned(&self, provider: u16, protocol: &str) -> Result<Export<'a>, SessionError> {
@@ -652,6 +655,7 @@ impl<'a> RootSystem<'a> {
         owner: u64,
         requirement: &str,
         export: Export<'a>,
+        attributes: Attributes<'_>,
         reply: component_startup::session::Reply<Debt>,
     ) {
         let provider = match export.provider {
@@ -688,60 +692,9 @@ impl<'a> RootSystem<'a> {
             owner,
             requirement,
             export.protocol,
+            AttributeSet::new(attributes),
             reply,
         );
-    }
-
-    fn wait(
-        &mut self,
-        owner: u64,
-        requirement: &str,
-        protocol: &str,
-        attributes: Attributes<'_>,
-        reply: component_startup::session::Reply<Debt>,
-    ) {
-        if self.waiting.try_reserve(1).is_err() {
-            let _ = reply.send(Err::<Port, _>(SessionError::NoSpace));
-            return;
-        }
-
-        self.waiting.push(Waiting {
-            owner,
-            requirement: String::from(requirement),
-            protocol: String::from(protocol),
-            attributes: AttributeSet::new(attributes),
-            reply,
-        });
-    }
-
-    fn rematch(&mut self) {
-        for waiting in core::mem::take(&mut self.waiting) {
-            let attributes = waiting.attributes.as_attributes();
-
-            match self.only_match(&waiting.protocol, attributes) {
-                Ok(Some(export)) => {
-                    self.open_export(waiting.owner, &waiting.requirement, export, waiting.reply);
-                }
-                Ok(None) => self.waiting.push(waiting),
-                Err(error) => {
-                    let _ = waiting.reply.send(Err::<Port, _>(error));
-                }
-            }
-        }
-    }
-
-    fn replace_waiting(&mut self, owner: u64, requirement: &str) {
-        if let Some(index) = self
-            .waiting
-            .iter()
-            .position(|waiting| waiting.owner == owner && waiting.requirement == requirement)
-        {
-            let _ = self
-                .waiting
-                .remove(index)
-                .reply
-                .send(Err::<Port, _>(SessionError::NoSpace));
-        }
     }
 
     fn search(&self, holder: Option<Holder>) -> Option<usize> {
@@ -758,6 +711,7 @@ impl<'a> RootSystem<'a> {
         &mut self,
         owner: u64,
         requirement: String,
+        attributes: AttributeSet,
         state: SearchState<'a>,
     ) -> Result<Port, SessionError> {
         let id = self.next_search;
@@ -772,6 +726,7 @@ impl<'a> RootSystem<'a> {
             id,
             owner,
             requirement,
+            attributes,
             state,
         });
         Ok(issued)
@@ -784,8 +739,14 @@ impl<'a> RootSystem<'a> {
             self.searches.retain(|search| search.owner != badge);
         }
 
-        self.waiting.retain(|waiting| waiting.owner != badge);
         self.features.retain(|feature| feature.publisher != badge);
+
+        if let Some(Holder::Features(owner)) = holder
+            && let Some(Holder::Record(record)) = self.children.caller(owner)
+            && let Some(closed) = self.features_closed.get_mut(usize::from(record))
+        {
+            *closed = true;
+        }
     }
 
     fn log_session(
@@ -885,16 +846,14 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             return;
         }
 
-        self.replace_waiting(badge, name);
         let export = self
             .declared(holder, name, protocol)
             .and_then(|(_, pinned)| match pinned {
-                Some(provider) => self.pinned(provider, protocol).map(Some),
+                Some(provider) => self.pinned(provider, protocol),
                 None => self.only_match(protocol, attributes),
             });
         match export {
-            Ok(Some(export)) => self.open_export(badge, name, export, reply),
-            Ok(None) => self.wait(badge, name, protocol, attributes, reply),
+            Ok(export) => self.open_export(badge, name, export, attributes, reply),
             Err(error) => {
                 let _ = reply.send(Err::<Port, _>(error));
             }
@@ -943,7 +902,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         }
 
         let mut snapshot = VecDeque::new();
-        let listed = self.matches(protocol, attributes, &mut false, &mut |export| {
+        let listed = self.matches(protocol, attributes, &mut |export| {
             if snapshot.try_reserve(1).is_err() {
                 return ControlFlow::Break(());
             }
@@ -959,6 +918,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         self.issue_search(
             frame.badge,
             String::from(name),
+            AttributeSet::new(attributes),
             SearchState::Enumeration(snapshot),
         )
     }
@@ -991,9 +951,13 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         let Some(search) = self.searches.get(index) else {
             return;
         };
-        let (owner, requirement) = (search.owner, search.requirement.clone());
+        let (owner, requirement, attributes) = (
+            search.owner,
+            search.requirement.clone(),
+            search.attributes.clone(),
+        );
         let found = self
-            .issue_search(owner, requirement, SearchState::Found(export))
+            .issue_search(owner, requirement, attributes, SearchState::Found(export))
             .and_then(|session| {
                 Ok(Found {
                     session,
@@ -1025,6 +989,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         let Some(Search {
             owner,
             requirement,
+            attributes,
             state: SearchState::Found(export),
             ..
         }) = self
@@ -1035,8 +1000,15 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             return;
         };
 
-        let (owner, requirement, export) = (*owner, requirement.clone(), *export);
-        self.open_export(owner, &requirement, export, reply);
+        let (owner, requirement, attributes, export) =
+            (*owner, requirement.clone(), attributes.clone(), *export);
+        self.open_export(
+            owner,
+            &requirement,
+            export,
+            attributes.as_attributes(),
+            reply,
+        );
     }
 }
 
@@ -1072,7 +1044,6 @@ impl features::Service<Delivery> for RootSystem<'_> {
             name: String::from(feature),
             publisher,
         });
-        self.rematch();
         Ok(())
     }
 }
@@ -1106,7 +1077,7 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
     let (port, wait) = {
         let mut guard = system.lock();
         guard.launch_due();
-        let next = guard.children.next_launch();
+        let next = guard.next_launch();
         let wait = if next.raw() < timeout.raw() {
             next
         } else {
@@ -1139,6 +1110,12 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
         Err(RecvError::Closed) => return ControlFlow::Break(()),
     }
     ControlFlow::Continue(())
+}
+
+fn launchable(records: &[Record<'_>], publication_pending: bool, child: Holder) -> bool {
+    !publication_pending
+        || matches!(child, Holder::Record(record)
+            if records.get(usize::from(record)).is_some_and(Record::publisher))
 }
 
 fn only<'a>(

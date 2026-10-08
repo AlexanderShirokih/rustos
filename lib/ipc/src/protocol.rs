@@ -55,7 +55,10 @@ pub trait Protocol {
 /// Внутри модуля лежат:
 ///
 /// - `struct Client<C: Channel>` с методом на каждую операцию. Метод `call` возвращает
-///   прочитанный ответ, метод `cast` - пустой успех. Ассоциированная функция
+///   прочитанный ответ, метод `cast` - пустой успех. Ответ, объявленный буквально как
+///   `Result<T, E>`, метод `call` отдаёт одним уровнем: успех `T` либо
+///   [`CallError<E>`](crate::CallError). Ответ через псевдоним или путь `core::result::Result`
+///   метод отдаёт прочитанным ответом, как любой другой тип. Ассоциированная функция
 ///   `Client::new(channel)` строит клиента, `with_wait` задаёт срок ожидания получателя,
 ///   `into_channel` отдаёт канал обратно;
 /// - `trait Service<F: ReceivedResources>` с методом на каждую операцию. Метод получает ресурсы
@@ -154,7 +157,7 @@ macro_rules! protocol {
     ) => {
         $crate::protocol!(@params
             ctx = $ctx done = [$($done)*] rest = [$($rest)*]
-            head = [cast $op [$(#[$doc])*] [()] [] []]
+            head = [cast $op [$(#[$doc])*] [()] [] [] []]
             acc = [] owned = [] names = [__Owned1 __Owned2 __Owned3 __Owned4]
             id = $crate::wire::FIELD_ID_MIN;
             $($params)*
@@ -188,11 +191,35 @@ macro_rules! protocol {
     };
 
     (@call ctx = $ctx:tt done = [$($done:tt)*] docs = $docs:tt op = $op:ident
+        params = [$($params:tt)*] defer = $defer:tt rest = [-> own Result < $ok:ty , $err:ty > ; $($rest:tt)*]
+    ) => {
+        $crate::protocol!(@params
+            ctx = $ctx done = [$($done)*] rest = [$($rest)*]
+            head = [call $op $docs [::core::result::Result<$ok, $err>] [own] $defer [$ok , $err]]
+            acc = [] owned = [] names = [__Owned1 __Owned2 __Owned3 __Owned4]
+            id = $crate::wire::FIELD_ID_MIN;
+            $($params)*
+        );
+    };
+
+    (@call ctx = $ctx:tt done = [$($done:tt)*] docs = $docs:tt op = $op:ident
+        params = [$($params:tt)*] defer = $defer:tt rest = [-> Result < $ok:ty , $err:ty > ; $($rest:tt)*]
+    ) => {
+        $crate::protocol!(@params
+            ctx = $ctx done = [$($done)*] rest = [$($rest)*]
+            head = [call $op $docs [::core::result::Result<$ok, $err>] [] $defer [$ok , $err]]
+            acc = [] owned = [] names = [__Owned1 __Owned2 __Owned3 __Owned4]
+            id = $crate::wire::FIELD_ID_MIN;
+            $($params)*
+        );
+    };
+
+    (@call ctx = $ctx:tt done = [$($done:tt)*] docs = $docs:tt op = $op:ident
         params = [$($params:tt)*] defer = $defer:tt rest = [-> own $ret:ty ; $($rest:tt)*]
     ) => {
         $crate::protocol!(@params
             ctx = $ctx done = [$($done)*] rest = [$($rest)*]
-            head = [call $op $docs [$ret] [own] $defer]
+            head = [call $op $docs [$ret] [own] $defer []]
             acc = [] owned = [] names = [__Owned1 __Owned2 __Owned3 __Owned4]
             id = $crate::wire::FIELD_ID_MIN;
             $($params)*
@@ -204,7 +231,7 @@ macro_rules! protocol {
     ) => {
         $crate::protocol!(@params
             ctx = $ctx done = [$($done)*] rest = [$($rest)*]
-            head = [call $op $docs [$ret] [] $defer]
+            head = [call $op $docs [$ret] [] $defer []]
             acc = [] owned = [] names = [__Owned1 __Owned2 __Owned3 __Owned4]
             id = $crate::wire::FIELD_ID_MIN;
             $($params)*
@@ -262,7 +289,7 @@ macro_rules! protocol {
 
     (@emit
         [[$(#[$attr:meta])*] $vis:vis $name:ident $proto:literal]
-        [$( { $kind:ident $op:ident $docs:tt $ret:tt $ret_own:tt $defer:tt $params:tt $owned:tt } )*]
+        [$( { $kind:ident $op:ident $docs:tt $ret:tt $ret_own:tt $defer:tt $flat:tt $params:tt $owned:tt } )*]
     ) => {
         $(#[$attr])*
         $vis mod $name {
@@ -316,7 +343,7 @@ macro_rules! protocol {
                 }
 
                 $(
-                    $crate::__protocol_client_method! { $kind $op $docs $ret $params $owned }
+                    $crate::__protocol_client_method! { $kind $op $docs $ret $flat $params $owned }
                 )*
             }
 
@@ -540,7 +567,7 @@ macro_rules! __protocol_write_params {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __protocol_client_method {
-    (cast $op:ident [$(#[$doc:meta])*] $ret:tt
+    (cast $op:ident [$(#[$doc:meta])*] $ret:tt $flat:tt
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*] []) => {
         $(#[$doc])*
         pub fn $op(&self $(, $param: $sig_ty)*)
@@ -561,7 +588,7 @@ macro_rules! __protocol_client_method {
 
     // Отказ отдаёт единственный владеющий параметр сам, а несколько - кортежем в порядке
     // объявления.
-    (cast $op:ident $docs:tt $ret:tt $params:tt
+    (cast $op:ident $docs:tt $ret:tt $flat:tt $params:tt
      [{ $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty }]) => {
         $crate::__protocol_client_method! {
             @owned_cast $op $docs $params [{ $owned_id , $generic , $owned , $owned_ty }]
@@ -569,7 +596,7 @@ macro_rules! __protocol_client_method {
         }
     };
 
-    (cast $op:ident $docs:tt $ret:tt $params:tt
+    (cast $op:ident $docs:tt $ret:tt $flat:tt $params:tt
      [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )+]) => {
         $crate::__protocol_client_method! {
             @owned_cast $op $docs $params [$( { $owned_id , $generic , $owned , $owned_ty } )+]
@@ -602,7 +629,32 @@ macro_rules! __protocol_client_method {
         }
     };
 
-    (call $op:ident [$(#[$doc:meta])*] [$read:ty]
+    (call $op:ident [$(#[$doc:meta])*] [$read:ty] [$ok:ty , $err:ty]
+     [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]
+     [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )*]) => {
+        $(#[$doc])*
+        pub fn $op<$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),*>(
+            &self $(, $param: $sig_ty)*
+        ) -> ::core::result::Result<
+            $crate::Received<$ok, C::Resources>,
+            $crate::CallError<$crate::Received<$err, C::Resources>>,
+        > {
+            let mut frame = $crate::wire::MessageBuf::new();
+            let answered = $crate::__protocol_call(
+                &self.channel,
+                $op::ORDINAL,
+                self.wait,
+                &mut frame,
+                $crate::__protocol_write_params!(
+                    [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
+                ),
+            );
+            $crate::__protocol_answer::<$read, _>($op::ORDINAL, answered?)?
+                .map_err($crate::CallError::Remote)
+        }
+    };
+
+    (call $op:ident [$(#[$doc:meta])*] [$read:ty] []
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]
      [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )*]) => {
         $(#[$doc])*

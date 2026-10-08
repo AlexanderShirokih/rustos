@@ -12,7 +12,7 @@ use core::{
 
 use bootstrap_abi::{bootstrap, hardware};
 use ipc::{
-    Listener as _,
+    CallError, Listener as _,
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Error, MemoryRegion, Port, Reply, Result, kind};
@@ -272,7 +272,6 @@ fn kernel_server_closes_the_capabilities_of_a_discarded_frame() {
     crate::hardware_session()
         .client()
         .acquire_irq_control()
-        .expect("acquire_irq_control call")
         .expect("vend ok");
 }
 
@@ -434,7 +433,6 @@ fn kernel_server_serves_past_frames_it_refuses() {
 
     let image = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()))
         .acquire_userland_image()
-        .expect("acquire_userland_image call")
         .expect("vend ok");
     drop(MemoryRegion::from(image));
 }
@@ -473,10 +471,10 @@ fn each_role_refuses_the_operations_of_the_other() {
 
     test_harness::check_eq!(
         as_bootstrap.acquire_userland_image().err(),
-        Some(IpcError::PeerClosed)
+        Some(CallError::Ipc(IpcError::PeerClosed))
     );
     test_harness::check_eq!(
         as_hardware.acquire_irq_control().err(),
-        Some(IpcError::PeerClosed)
+        Some(CallError::Ipc(IpcError::PeerClosed))
     );
 }

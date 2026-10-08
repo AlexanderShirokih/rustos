@@ -30,6 +30,7 @@
 extern crate std;
 
 mod aggregate;
+mod call_error;
 mod codec;
 mod enumeration;
 mod ordinal;
@@ -40,6 +41,7 @@ pub mod schema;
 pub mod transport;
 pub mod wire;
 
+pub use call_error::CallError;
 pub use codec::{IntoWireValue, WireTyped, WireValue};
 pub use ordinal::ordinal_of;
 pub use protocol::Protocol;

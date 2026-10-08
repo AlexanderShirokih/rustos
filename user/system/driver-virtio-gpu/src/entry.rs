@@ -191,14 +191,11 @@ pub(crate) extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 }
 
 fn run(parent: Handle<kind::Port>) {
-    let requirements = match VirtioGpuStartup::request(parent) {
-        Ok(requirements) => requirements,
+    let requirements = VirtioGpuStartup::from_parent(parent);
+    let bus = match requirements.virtio.open() {
+        Ok(bus) => bus.client().with_wait(BUS_CALL_TIMEOUT),
         Err(error) => return log_fmt(format_args!("{error}")),
     };
-    let Some(bus) = requirements.virtio else {
-        return log_line("virtio-mmio session not granted");
-    };
-    let bus = bus.client().with_wait(BUS_CALL_TIMEOUT);
     let Ok(service) = Port::create() else {
         return log_line("service port refused");
     };

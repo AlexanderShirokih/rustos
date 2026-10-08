@@ -12,6 +12,7 @@ use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind,
     OpenFlags, file_system,
 };
+use ipc::CallError;
 use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
 use runtime::UserMemFlags;
 
@@ -68,8 +69,13 @@ struct Run {
 }
 
 impl Mismatch {
-    fn refused(operation: &'static str) -> impl FnOnce(FileSystemError) -> Self {
-        move |error| Self::Refused(operation, error)
+    fn refused(operation: &'static str) -> impl FnOnce(CallError<FileSystemError>) -> Self {
+        move |error| {
+            error.fold(
+                |_| Self::Call(operation),
+                |error| Self::Refused(operation, error),
+            )
+        }
     }
 }
 
@@ -90,7 +96,6 @@ impl Session {
         let client = connect(session_for(STRESS_MOUNT));
         let granted = client
             .acquire_buffer(BUFFER_SIZE)
-            .map_err(|_| Mismatch::Call("acquire_buffer"))?
             .map_err(Mismatch::refused("acquire_buffer"))?;
         let region = MemoryRegion::from(granted);
         let buffer = region
@@ -134,7 +139,6 @@ impl Run {
                     AccessMode::Read,
                     OpenFlags::CREATE | OpenFlags::DIRECTORY,
                 )
-                .map_err(|_| Mismatch::Call("open"))?
                 .map_err(Mismatch::refused("open of a directory"))?;
         }
         Ok(run)
@@ -170,7 +174,6 @@ impl Run {
             .session
             .client
             .open(path(&text), AccessMode::ReadWrite, OpenFlags::CREATE)
-            .map_err(|_| Mismatch::Call("open"))?
             .map_err(Mismatch::refused("open with CREATE"))?;
         expect(opened.kind == NodeKind::File, "opened node is not a file")?;
         expect(
@@ -189,18 +192,14 @@ impl Run {
     fn open_exclusive(&mut self) -> Step {
         let text = self.file_path();
         let known = self.files.contains_key(&text);
-        let opened = self
-            .session
-            .client
-            .open(
-                path(&text),
-                AccessMode::ReadWrite,
-                OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
-            )
-            .map_err(|_| Mismatch::Call("open"))?;
+        let opened = self.session.client.open(
+            path(&text),
+            AccessMode::ReadWrite,
+            OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
+        );
         if known {
             return expect(
-                opened == Err(FileSystemError::AlreadyExists),
+                opened == Err(CallError::Remote(FileSystemError::AlreadyExists)),
                 "occupied name is opened exclusively",
             );
         }
@@ -221,11 +220,10 @@ impl Run {
         let opened = self
             .session
             .client
-            .open(path(&text), AccessMode::Read, OpenFlags::NONE)
-            .map_err(|_| Mismatch::Call("open"))?;
+            .open(path(&text), AccessMode::Read, OpenFlags::NONE);
         let Some(size) = expected else {
             return expect(
-                opened == Err(FileSystemError::NotFound),
+                opened == Err(CallError::Remote(FileSystemError::NotFound)),
                 "missing name is opened without CREATE",
             );
         };
@@ -252,7 +250,6 @@ impl Run {
             .session
             .client
             .write(fd, offset, payload.len() as u32)
-            .map_err(|_| Mismatch::Call("write"))?
             .map_err(Mismatch::refused("write"))?;
         expect(written.offset == offset, "write landed at another offset")?;
         expect(
@@ -277,7 +274,6 @@ impl Run {
             .session
             .client
             .write(fd, APPEND_OFFSET, payload.len() as u32)
-            .map_err(|_| Mismatch::Call("write"))?
             .map_err(Mismatch::refused("append"))?;
         expect(written.offset == end, "append landed before the end")?;
         expect(
@@ -301,7 +297,6 @@ impl Run {
             .session
             .client
             .read(fd, offset, len as u32)
-            .map_err(|_| Mismatch::Call("read"))?
             .map_err(Mismatch::refused("read"))?;
         let tail = content.get(offset as usize..).unwrap_or_default();
         let expected = tail.len().min(len);
@@ -323,7 +318,6 @@ impl Run {
         self.session
             .client
             .set_size(fd, size)
-            .map_err(|_| Mismatch::Call("set_size"))?
             .map_err(Mismatch::refused("set_size"))?;
         self.file_mut(&text)?.resize(size as usize, 0);
         Ok(())
@@ -339,7 +333,6 @@ impl Run {
             .session
             .client
             .stat(fd)
-            .map_err(|_| Mismatch::Call("stat"))?
             .map_err(Mismatch::refused("stat"))?;
         expect(
             info.kind == NodeKind::File,
@@ -354,14 +347,10 @@ impl Run {
     fn unlink(&mut self) -> Step {
         let text = self.file_path();
         let known = self.files.remove(&text);
-        let removed = self
-            .session
-            .client
-            .unlink(path(&text), NodeKind::File)
-            .map_err(|_| Mismatch::Call("unlink"))?;
+        let removed = self.session.client.unlink(path(&text), NodeKind::File);
         let Some(content) = known else {
             return expect(
-                removed == Err(FileSystemError::NotFound),
+                removed == Err(CallError::Remote(FileSystemError::NotFound)),
                 "missing name is unlinked",
             );
         };
@@ -373,14 +362,10 @@ impl Run {
     fn rename(&mut self) -> Step {
         let from = self.file_path();
         let to = self.file_path();
-        let renamed = self
-            .session
-            .client
-            .rename(path(&from), path(&to))
-            .map_err(|_| Mismatch::Call("rename"))?;
+        let renamed = self.session.client.rename(path(&from), path(&to));
         let Some(content) = self.files.remove(&from) else {
             return expect(
-                renamed == Err(FileSystemError::NotFound),
+                renamed == Err(CallError::Remote(FileSystemError::NotFound)),
                 "missing name is renamed",
             );
         };
@@ -415,15 +400,10 @@ impl Run {
         self.session
             .client
             .close(descriptor.fd)
-            .map_err(|_| Mismatch::Call("close"))?
             .map_err(Mismatch::refused("close"))?;
-        let stale = self
-            .session
-            .client
-            .stat(descriptor.fd)
-            .map_err(|_| Mismatch::Call("stat"))?;
+        let stale = self.session.client.stat(descriptor.fd);
         expect(
-            stale == Err(FileSystemError::BadDescriptor),
+            stale == Err(CallError::Remote(FileSystemError::BadDescriptor)),
             "closed descriptor still reaches its node",
         )
     }
@@ -438,7 +418,6 @@ impl Run {
                 .session
                 .client
                 .open(path(&text), AccessMode::Read, OpenFlags::NONE)
-                .map_err(|_| Mismatch::Call("open"))?
                 .map_err(Mismatch::refused(
                     "open of a node that outlived the session",
                 ))?;
@@ -446,7 +425,6 @@ impl Run {
             self.session
                 .client
                 .close(opened.fd)
-                .map_err(|_| Mismatch::Call("close"))?
                 .map_err(Mismatch::refused("close"))?;
         }
         Ok(())
@@ -457,13 +435,9 @@ impl Run {
             return Ok(());
         };
         let fd = self.descriptors[index].fd;
-        let refused = self
-            .session
-            .client
-            .write(fd, 0, 1)
-            .map_err(|_| Mismatch::Call("write"))?;
+        let refused = self.session.client.write(fd, 0, 1);
         expect(
-            refused == Err(FileSystemError::WrongMode),
+            refused == Err(CallError::Remote(FileSystemError::WrongMode)),
             "read-only descriptor takes a write",
         )
     }
@@ -473,13 +447,9 @@ impl Run {
             return Ok(());
         };
         let fd = self.descriptors[index].fd;
-        let refused = self
-            .session
-            .client
-            .read(fd, 0, BUFFER_SIZE + 1)
-            .map_err(|_| Mismatch::Call("read"))?;
+        let refused = self.session.client.read(fd, 0, BUFFER_SIZE + 1);
         expect(
-            refused == Err(FileSystemError::BufferTooSmall),
+            refused == Err(CallError::Remote(FileSystemError::BufferTooSmall)),
             "read past the buffer is served",
         )
     }
@@ -496,7 +466,6 @@ impl Run {
                 .session
                 .client
                 .open(path(&text), AccessMode::Read, OpenFlags::NONE)
-                .map_err(|_| Mismatch::Call("open"))?
                 .map_err(Mismatch::refused("open of a node of the tree"))?;
             expect(
                 opened.size == content.len() as u64,
@@ -506,7 +475,6 @@ impl Run {
                 .session
                 .client
                 .read(opened.fd, 0, content.len() as u32)
-                .map_err(|_| Mismatch::Call("read"))?
                 .map_err(Mismatch::refused("read"))?;
             expect(
                 count as usize == content.len(),
@@ -517,7 +485,6 @@ impl Run {
             self.session
                 .client
                 .close(opened.fd)
-                .map_err(|_| Mismatch::Call("close"))?
                 .map_err(Mismatch::refused("close"))?;
         }
         self.assert_listing("/")?;
@@ -537,7 +504,6 @@ impl Run {
             self.session
                 .client
                 .unlink(path(text), expected)
-                .map_err(|_| Mismatch::Call("unlink"))?
                 .map_err(Mismatch::refused("unlink of the window"))?;
         }
         Ok(())
@@ -548,13 +514,11 @@ impl Run {
             .session
             .client
             .open(path(text), AccessMode::Read, OpenFlags::DIRECTORY)
-            .map_err(|_| Mismatch::Call("open"))?
             .map_err(Mismatch::refused("open of a directory"))?;
         let mut listed = self.walk(opened.fd)?;
         self.session
             .client
             .close(opened.fd)
-            .map_err(|_| Mismatch::Call("close"))?
             .map_err(Mismatch::refused("close"))?;
         let mut expected = self.children(text);
         listed.sort_unstable();
@@ -570,7 +534,6 @@ impl Run {
                 .session
                 .client
                 .list(fd, from)
-                .map_err(|_| Mismatch::Call("list"))?
                 .map_err(Mismatch::refused("list"))?;
             let bytes = self.session.take(BUFFER_SIZE as usize)?;
             let mut offset = 0;
@@ -648,7 +611,6 @@ impl Run {
             self.session
                 .client
                 .close(oldest.fd)
-                .map_err(|_| Mismatch::Call("close"))?
                 .map_err(Mismatch::refused("close"))?;
         }
         self.descriptors.push(descriptor);

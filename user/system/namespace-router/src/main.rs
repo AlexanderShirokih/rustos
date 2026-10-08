@@ -18,16 +18,14 @@ use component_startup::{
 };
 use filesystem_abi::{file_system_mount, namespace};
 use ipc::{Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{Delivery, Port};
+use kernel_objects::{Delivery, Port, Result};
 use runtime::{
     PortTransport, Priority, log_fmt, log_line, process_exit, spawn_owned, start_component,
 };
 use syscall::{Handle, Timeout, kind};
 
-mod error;
 mod router;
 
-use error::Result;
 use router::{Router, mount_gone, open_mount, open_view, view_gone};
 
 const LOG_TAG: &str = "router";
@@ -51,7 +49,7 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 
 fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     start_component(parent, LOG_TAG);
-    let requirements = RouterStartup::request(parent)?;
+    let requirements = RouterStartup::from_parent(parent);
     let views: &'static Port = Box::leak(Box::new(Port::create()?));
     let mounts: &'static Port = Box::leak(Box::new(Port::create()?));
 

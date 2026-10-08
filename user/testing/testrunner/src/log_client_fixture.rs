@@ -17,10 +17,10 @@ fixture_start!(probe);
 
 fn probe(log: &Port) -> Result<(), Failed> {
     let bootstrap = bootstrap::Client::new(PortTransport::new(log.borrow()));
-    if let Ok(Ok(_)) = bootstrap.acquire_hardware() {
+    if bootstrap.acquire_hardware().is_ok() {
         return Err(Failed);
     }
-    if let Ok(Ok(_)) = bootstrap.acquire_userland_image() {
+    if bootstrap.acquire_userland_image().is_ok() {
         return Err(Failed);
     }
 

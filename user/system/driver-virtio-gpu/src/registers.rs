@@ -31,16 +31,14 @@ impl Registers for RemoteRegisters {
         let offset = u16::try_from(offset).map_err(|_| SlotFailure::Offset(offset))?;
         self.slot
             .read(offset)
-            .map_err(SlotFailure::Ipc)?
-            .map_err(SlotFailure::Slot)
+            .map_err(|error| error.fold(SlotFailure::Ipc, SlotFailure::Slot))
     }
 
     fn write(&mut self, offset: usize, value: u32) -> Result<(), SlotFailure> {
         let offset = u16::try_from(offset).map_err(|_| SlotFailure::Offset(offset))?;
         self.slot
             .write(offset, value)
-            .map_err(SlotFailure::Ipc)?
-            .map_err(SlotFailure::Slot)
+            .map_err(|error| error.fold(SlotFailure::Ipc, SlotFailure::Slot))
     }
 
     fn barrier(&mut self) {

@@ -21,10 +21,7 @@ const PRIVATE_IRQ_MAX: u16 = SPI_BASE - 1;
 fn acquire_irq_control_and_mint_line() {
     let client = crate::hardware_session().client();
 
-    let cap = client
-        .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
+    let cap = client.acquire_irq_control().expect("vend ok");
     let control = IrqControl::from(cap);
 
     let line = control
@@ -37,10 +34,7 @@ fn acquire_irq_control_and_mint_line() {
 #[test_harness::test]
 fn minting_a_line_twice_names_the_taken_line() {
     let client = crate::hardware_session().client();
-    let cap = client
-        .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
+    let cap = client.acquire_irq_control().expect("vend ok");
     let control = IrqControl::from(cap);
     let line = control
         .mint(SPARE_IRQ, IrqTrigger::Level)
@@ -58,10 +52,7 @@ fn minting_a_line_twice_names_the_taken_line() {
 #[test_harness::test]
 fn closing_the_minted_line_frees_it_under_a_live_copy() {
     let client = crate::hardware_session().client();
-    let cap = client
-        .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
+    let cap = client.acquire_irq_control().expect("vend ok");
     let control = IrqControl::from(cap);
     let line = control
         .mint(SPARE_IRQ, IrqTrigger::Level)
@@ -85,10 +76,7 @@ fn closing_the_minted_line_frees_it_under_a_live_copy() {
 #[test_harness::test]
 fn closing_a_copy_keeps_the_line_bound() {
     let client = crate::hardware_session().client();
-    let cap = client
-        .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
+    let cap = client.acquire_irq_control().expect("vend ok");
     let control = IrqControl::from(cap);
     let line = control
         .mint(SPARE_IRQ, IrqTrigger::Level)
@@ -125,10 +113,7 @@ fn first_line_outside(control: &IrqControl) -> u16 {
 #[test_harness::test]
 fn irq_band_ends_at_the_platform_line_count() {
     let client = crate::hardware_session().client();
-    let cap = client
-        .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
+    let cap = client.acquire_irq_control().expect("vend ok");
     let control = IrqControl::from(cap);
 
     let outside = first_line_outside(&control);
@@ -144,10 +129,7 @@ fn irq_band_ends_at_the_platform_line_count() {
 #[test_harness::test]
 fn irq_band_starts_above_the_private_lines() {
     let client = crate::hardware_session().client();
-    let cap = client
-        .acquire_irq_control()
-        .expect("acquire_irq_control call")
-        .expect("vend ok");
+    let cap = client.acquire_irq_control().expect("vend ok");
     let control = IrqControl::from(cap);
 
     test_harness::check_eq!(

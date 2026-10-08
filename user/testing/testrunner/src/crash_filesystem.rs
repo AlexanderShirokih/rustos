@@ -6,10 +6,10 @@ extern crate alloc;
 
 use core::convert::Infallible;
 
-use component_startup::{Requirements as _, component_manifest};
+use component_startup::component_manifest;
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system};
-use filesystem_server::{Error, Result as ServerResult, serve};
+use filesystem_server::{Result as ServerResult, serve};
 use kernel_objects::Port;
 use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, USER_VA_END, kind};
@@ -23,10 +23,7 @@ const LOG_TAG: &str = "crashfs";
 const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
-    struct CrashFileSystemStartup {
-        requirements: {},
-        exports: [file_system::Protocol],
-    }
+    exports: [file_system::Protocol],
 }
 
 struct CrashingFileSystem {
@@ -155,7 +152,6 @@ fn run(parent: &Port) -> Result<(), Failed> {
 
 fn serve_crashing(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
     start_component(parent, LOG_TAG);
-    let _requirements = CrashFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
     let backend = |_| {
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),

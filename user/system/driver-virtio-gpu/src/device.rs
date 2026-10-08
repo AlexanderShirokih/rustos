@@ -186,8 +186,7 @@ impl Device {
         let slot = open_slot(bus)?.client().with_wait(SLOT_CALL_TIMEOUT);
         let line = slot
             .irq()
-            .map_err(BindRefusal::BusCall)?
-            .map_err(BindRefusal::Line)?;
+            .map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Line))?;
         let transport = Transport::probe(RemoteRegisters::new(slot), DeviceType::Gpu)
             .map_err(BindRefusal::Transport)?;
         let queue_memory = DmaRegion::new(QUEUE_REGION_BYTES as u64)?;
@@ -379,14 +378,13 @@ fn open_slot(
     let mut attempts = BUSY_ATTEMPTS;
     loop {
         match bus.open(DeviceType::Gpu as u32) {
-            Ok(Err(VirtioMmioError::Busy)) if attempts > 1 => {
+            Err(ipc::CallError::Remote(VirtioMmioError::Busy)) if attempts > 1 => {
                 attempts -= 1;
                 let _ = Signal::create().map(|pause| pause.wait(SIGNALED, BUSY_PAUSE));
             }
             opened => {
-                let slot = opened
-                    .map_err(BindRefusal::BusCall)?
-                    .map_err(BindRefusal::Bus)?;
+                let slot =
+                    opened.map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Bus))?;
                 return Ok(kernel_objects::Session::from_session(slot));
             }
         }

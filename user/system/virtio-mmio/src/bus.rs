@@ -67,7 +67,7 @@ enum Refusal {
 
 impl Bus {
     pub(crate) fn take(platform: &platform::Client<SessionTransport>) -> Option<Self> {
-        let description = platform.description().ok()?.ok()?;
+        let description = platform.description().ok()?;
         // Регион описания нужен только на время обхода узлов.
         let region = MemoryRegion::from(description.region);
         let mapping = region.map_full_read_only().ok()?;
@@ -134,12 +134,10 @@ impl Transport {
     fn take(platform: &platform::Client<SessionTransport>, id: &DeviceId) -> Result<Self, Refusal> {
         let line = platform
             .irq(id.as_wire(), 0)
-            .map_err(|_| Refusal::Call)?
-            .map_err(Refusal::Platform)?;
+            .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
         let window = platform
             .mmio(id.as_wire(), 0)
-            .map_err(|_| Refusal::Call)?
-            .map_err(Refusal::Platform)?;
+            .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
         let window = MmioWindow {
             region: MemoryRegion::from(window.region),
             offset: window.offset,

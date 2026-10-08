@@ -18,12 +18,10 @@ component_manifest! {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let requirements = components::requirements::<FilesStartup>()?;
-    println!("started");
-
-    let namespace = requirements
+    let namespace = components::requirements::<FilesStartup>()?
         .namespace
-        .ok_or("namespace provider is unavailable")?;
+        .open()?;
+    println!("started");
 
     let mut files = FileSystem::new(namespace);
 

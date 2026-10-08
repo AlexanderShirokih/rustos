@@ -31,8 +31,10 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = RefusalProbeStartup::request(parent.as_raw()).map_err(|_| Failed)?;
-    let _probe = requirements.probe.ok_or(Failed)?;
+    let _probe = RefusalProbeStartup::from_parent(parent.as_raw())
+        .probe
+        .open()
+        .map_err(|_| Failed)?;
 
     let client = startup_contract::Client::new(PortTransport::new(parent)).with_wait(CALL_TIMEOUT);
     let outside = session::<probe::Protocol>(

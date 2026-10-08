@@ -9,12 +9,12 @@ use component_abi::{
     SessionError, SessionRequirement, attributes_len, component_startup as startup_contract,
     encode_attributes_into,
 };
-use component_startup::{Attributes, Found, RequestError, accept, session};
+use component_startup::{Attributes, Found, accept, session};
 use filesystem_abi::{
     AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, file_system_mount, namespace,
 };
 use ipc::{
-    Protocol,
+    CallError, Protocol,
     wire::{Bytes, IpcError, Str},
 };
 use kernel_objects::{Error, IrqLine, MemoryRegion, Port, Session, SessionTransport};
@@ -41,7 +41,7 @@ use crate::{
         ScenarioLogSessions, await_component_lines, await_component_sources, start_component_relay,
         stop_component_relay,
     },
-    probe_protocol::probe,
+    probe_protocol::{Pairs, probe},
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -81,7 +81,6 @@ const RTC_REPLY_TIMEOUT: Timeout = Timeout::from_secs(15);
 const POLL_INTERVAL: Timeout = Timeout::from_millis(10);
 const RESOLVE_TIMEOUT: Timeout = Timeout::from_secs(5);
 const FREED_PREFIX_TIMEOUT: Timeout = Timeout::from_millis(100);
-const FEATURE_WAIT_TIMEOUT: Timeout = Timeout::from_millis(500);
 
 const POLL_ATTEMPTS: usize = 300;
 const SEARCH_CYCLES: usize = 300;
@@ -220,6 +219,11 @@ const FEATURED: ComponentSpec<'static> =
 const PUBLISHER: ComponentSpec<'static> =
     fixture("/feature-publisher-fixture", "feature-publisher-fixture");
 
+const FEATURE_HOLDER: ComponentSpec<'static> = ComponentSpec {
+    restarts: 1,
+    ..fixture("/feature-holder-fixture", "feature-holder-fixture")
+};
+
 const FEATURED_QUERY: &[Attribute<'static>] = &[pair("kind", "featured")];
 
 const SCOPE_CONSUMER: ComponentSpec<'static> = ComponentSpec {
@@ -253,7 +257,11 @@ pub(crate) fn scenario(components: &[ComponentSpec<'_>]) -> Composition {
 }
 
 pub(crate) fn with_drivers() -> Composition {
-    started(&[PARENT, PLATFORM], image_index()).0
+    let composition = started(&[PARENT, PLATFORM], image_index()).0;
+    // Запрос к драйверу отвечает по уже опубликованным признакам, а строку запуска `platform`
+    // пишет после публикации.
+    await_component_lines(PLATFORM.name, 1);
+    composition
 }
 
 pub(crate) fn indexed(components: &[ComponentSpec<'_>]) -> (Composition, ComponentNames) {
@@ -363,20 +371,6 @@ pub(crate) fn query(pairs: &[Attribute<'_>]) -> Vec<u8> {
     bytes
 }
 
-fn text(attributes: Attributes<'_>) -> String {
-    attributes
-        .iter()
-        .map(|pair| {
-            format!(
-                "{}={}",
-                core::str::from_utf8(pair.key).expect("utf-8 key"),
-                core::str::from_utf8(pair.value).expect("utf-8 value")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 fn probes_found(importer: &Importer, pairs: &[Attribute<'_>]) -> Vec<Found> {
     let bytes = query(pairs);
     importer
@@ -386,7 +380,7 @@ fn probes_found(importer: &Importer, pairs: &[Attribute<'_>]) -> Vec<Found> {
 fn filters_found(importer: &Importer, pairs: &[Attribute<'_>]) -> Vec<String> {
     probes_found(importer, pairs)
         .iter()
-        .map(|found| text(found.filter.as_attributes()))
+        .map(|found| format!("{}", Pairs(found.filter.as_attributes())))
         .collect()
 }
 
@@ -405,7 +399,7 @@ fn requested<P: Protocol>(
     importer: &Importer,
     requirement: &str,
     wait: Timeout,
-) -> Result<(), RequestError> {
+) -> Result<(), CallError<SessionError>> {
     request::<P>(importer.handle(), requirement, wait).map(drop)
 }
 
@@ -416,7 +410,9 @@ const fn rtc_of(name: &'static str) -> crate::composition::Import {
     }
 }
 
-fn rtc_session(importer: &Importer) -> Result<rtc::Client<SessionTransport>, RequestError> {
+fn rtc_session(
+    importer: &Importer,
+) -> Result<rtc::Client<SessionTransport>, CallError<SessionError>> {
     request::<rtc::Protocol>(importer.handle(), RTC_REQUIREMENT, RTC_REPLY_TIMEOUT)
         .map(|session| session.client().with_wait(RTC_REPLY_TIMEOUT))
 }
@@ -435,7 +431,10 @@ const fn featured_of(name: &'static str) -> crate::composition::Import {
     }
 }
 
-fn featured_session(importer: Handle<kind::Port>, wait: Timeout) -> Result<u64, RequestError> {
+fn featured_session(
+    importer: Handle<kind::Port>,
+    wait: Timeout,
+) -> Result<u64, CallError<SessionError>> {
     let bytes = query(FEATURED_QUERY);
     let session = session::<probe::Protocol>(
         importer,
@@ -484,20 +483,18 @@ pub(crate) fn platform_session(
 fn line(
     session: &platform::Client<SessionTransport>,
     device: &str,
-) -> Result<IrqLine, PlatformError> {
+) -> Result<IrqLine, CallError<PlatformError>> {
     session
         .irq(Str::new(device).expect("device fits"), 0)
-        .expect("irq call")
         .map(IrqLine::from)
 }
 
 fn window(
     session: &platform::Client<SessionTransport>,
     device: &str,
-) -> Result<MmioWindow<MemoryRegion>, PlatformError> {
+) -> Result<MmioWindow<MemoryRegion>, CallError<PlatformError>> {
     session
         .mmio(Str::new(device).expect("device fits"), 0)
-        .expect("mmio call")
         .map(|window| MmioWindow {
             region: MemoryRegion::from(window.region),
             offset: window.offset,
@@ -507,10 +504,9 @@ fn window(
 
 fn description(
     session: &platform::Client<SessionTransport>,
-) -> Result<(MemoryRegion, u64), PlatformError> {
+) -> Result<(MemoryRegion, u64), CallError<PlatformError>> {
     session
         .description()
-        .expect("description call")
         .map(|description| (MemoryRegion::from(description.region), description.offset))
 }
 
@@ -553,8 +549,8 @@ fn held_request(found: Found, wait: Timeout) -> JoinHandle {
     spawn_owned(
         move || match component_startup::open::<probe::Protocol>(&found, wait) {
             Ok(_) => GRANTED,
-            Err(RequestError::Parent(SessionError::Unavailable)) => UNAVAILABLE,
-            Err(RequestError::Ipc(IpcError::Timeout)) => TIMED_OUT,
+            Err(CallError::Remote(SessionError::Unavailable)) => UNAVAILABLE,
+            Err(CallError::Ipc(IpcError::Timeout)) => TIMED_OUT,
             _ => OTHER,
         },
         REQUEST_STACK_SIZE,
@@ -585,19 +581,15 @@ fn resolve(
     view: &Port,
     text: &str,
     wait: Timeout,
-) -> Result<Result<Session<file_system::Protocol>, FileSystemError>, IpcError> {
+) -> Result<Session<file_system::Protocol>, CallError<FileSystemError>> {
     namespace::Client::new(PortTransport::new(view))
         .with_wait(wait)
         .resolve(path(text))
-        .map(|answer| answer.map(Session::from_session))
+        .map(Session::from_session)
 }
 
 fn resolved(view: &Port, text: &str) -> file_system::Client<SessionTransport> {
-    connect(
-        resolve(view, text, RESOLVE_TIMEOUT)
-            .expect("resolve call")
-            .expect("path is covered by a mount"),
-    )
+    connect(resolve(view, text, RESOLVE_TIMEOUT).expect("path is covered by a mount"))
 }
 
 fn write(client: &file_system::Client<SessionTransport>) {
@@ -609,18 +601,15 @@ fn write(client: &file_system::Client<SessionTransport>) {
     );
 }
 
-fn resolution(
-    view: &Port,
-    text: &str,
-    wait: Timeout,
-) -> Result<Result<(), FileSystemError>, IpcError> {
-    resolve(view, text, wait).map(|answer| answer.map(drop))
+fn resolution(view: &Port, text: &str, wait: Timeout) -> Result<(), CallError<FileSystemError>> {
+    resolve(view, text, wait).map(drop)
 }
 
-fn written(client: &file_system::Client<SessionTransport>) -> Result<NodeKind, FileSystemError> {
+fn written(
+    client: &file_system::Client<SessionTransport>,
+) -> Result<NodeKind, CallError<FileSystemError>> {
     client
         .open(path(WRITTEN_PATH), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call")
         .map(|opened| opened.kind)
 }
 
@@ -709,7 +698,7 @@ fn a_requirement_outside_the_record_of_the_caller_is_refused_at_once() {
     test_harness::check!(
         lines
             .iter()
-            .any(|line| line == "outside Err(Parent(Refused))")
+            .any(|line| line == "outside Err(Remote(Refused))")
     );
 }
 
@@ -720,7 +709,7 @@ fn a_session_requirement_of_another_protocol_is_refused_at_once() {
     test_harness::check!(
         lines
             .iter()
-            .any(|line| line == "protocol Err(Parent(Refused))")
+            .any(|line| line == "protocol Err(Remote(Refused))")
     );
 }
 
@@ -731,7 +720,7 @@ fn an_accept_of_an_export_outside_the_record_is_refused_at_once() {
     test_harness::check!(
         lines
             .iter()
-            .any(|line| line == "accept Err(Parent(Refused))")
+            .any(|line| line == "accept Err(Remote(Refused))")
     );
 }
 
@@ -739,7 +728,7 @@ fn an_accept_of_an_export_outside_the_record_is_refused_at_once() {
 fn a_log_requirement_of_another_protocol_is_refused_at_once() {
     let lines = refusals();
 
-    test_harness::check!(lines.iter().any(|line| line == "log Err(Parent(Refused))"));
+    test_harness::check!(lines.iter().any(|line| line == "log Err(Remote(Refused))"));
 }
 
 #[test_harness::test]
@@ -756,7 +745,7 @@ fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
 
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
 
-    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Refused)));
     finish(composition);
 }
 
@@ -777,8 +766,8 @@ fn an_importer_cannot_take_the_requests_of_a_child_export() {
     .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    test_harness::check_eq!(taken, Err(RequestError::Parent(AcceptError::Refused)));
-    test_harness::check_eq!(log, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(taken, Err(CallError::Remote(AcceptError::Refused)));
+    test_harness::check_eq!(log, Err(CallError::Remote(SessionError::Refused)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -792,7 +781,7 @@ fn an_importer_stays_waiting_while_its_provider_lives_without_accept() {
     let waited = requested::<probe::Protocol>(&importer, PROBE, IDLE_PROVIDER_REQUEST_TIMEOUT);
 
     test_harness::check_eq!(started, ["started"]);
-    test_harness::check_eq!(waited, Err(RequestError::Ipc(IpcError::Timeout)));
+    test_harness::check_eq!(waited, Err(CallError::Ipc(IpcError::Timeout)));
     finish(composition);
 }
 
@@ -847,7 +836,7 @@ fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
 
     test_harness::check_eq!(started, ["started"]);
     test_harness::check_eq!(held_answer, UNAVAILABLE);
-    test_harness::check_eq!(again, Err(RequestError::Parent(SessionError::Unavailable)));
+    test_harness::check_eq!(again, Err(CallError::Remote(SessionError::Unavailable)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -869,8 +858,8 @@ fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
     let lines = await_component_lines(EXPORT.name, 2);
 
     test_harness::check_eq!(started, ["started"]);
-    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Unavailable)));
-    test_harness::check_eq!(again, Err(RequestError::Parent(SessionError::Unbound)));
+    test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Unavailable)));
+    test_harness::check_eq!(again, Err(CallError::Remote(SessionError::Unbound)));
     test_harness::check_eq!(lines, ["started"]);
     finish(composition);
 }
@@ -978,10 +967,7 @@ fn a_component_out_of_restarts_does_not_stop_the_root() {
 
     test_harness::check_eq!(started, ["started"]);
     test_harness::check_eq!(restarted.len(), 2);
-    test_harness::check_eq!(
-        refused,
-        Err(RequestError::Parent(SessionError::Unavailable))
-    );
+    test_harness::check_eq!(refused, Err(CallError::Remote(SessionError::Unavailable)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -995,8 +981,7 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
         component_startup::open::<probe::Protocol>(found, SERVED_CHILD_REPLY_TIMEOUT).map(drop)
     });
     let removed = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/")
-        .unlink(path(HELD_PATH), NodeKind::File)
-        .expect("unlink call");
+        .unlink(path(HELD_PATH), NodeKind::File);
     let pinged = ping_found(&first_found::<probe::Protocol>(&importer, HELD));
 
     test_harness::check_eq!(served, Some(Ok(())));
@@ -1016,7 +1001,7 @@ fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
     .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    test_harness::check_eq!(held, Err(RequestError::Parent(SessionError::Unavailable)));
+    test_harness::check_eq!(held, Err(CallError::Remote(SessionError::Unavailable)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -1068,44 +1053,39 @@ fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
 }
 
 #[test_harness::test]
-fn a_session_waits_for_a_feature_and_opens_after_its_publication() {
+fn a_session_to_a_hidden_export_is_unbound_until_the_feature_is_published() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
-    let handle = importer.handle();
-    let request = spawn_owned(
-        move || match featured_session(handle, Timeout::INFINITE) {
-            Ok(PING) => GRANTED,
-            _ => OTHER,
-        },
-        REQUEST_STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("request thread starts");
 
-    let waiting = request.wait(REQUEST_DELIVERY_PAUSE).is_err();
+    let hidden = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
     registered(&composition, &names, PUBLISHER).expect("publisher added");
-    let answer = answered(request);
     let published = await_component_lines(PUBLISHER.name, 1);
+    let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
 
-    test_harness::check!(waiting);
-    test_harness::check_eq!(answer, GRANTED);
-    test_harness::check_eq!(published, ["published Ok(Ok(())) Ok(Ok(()))"]);
+    test_harness::check_eq!(hidden, Err(CallError::Remote(SessionError::Unbound)));
+    test_harness::check_eq!(published, ["published Ok(()) Ok(())"]);
+    test_harness::check_eq!(opened, Ok(PING));
     finish(composition);
 }
 
 #[test_harness::test]
-fn a_session_waiting_for_a_feature_times_out_and_its_retry_waits_again() {
-    let (composition, names) = indexed(&[]);
-    let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
+fn a_record_waits_for_a_restarted_publisher_and_starts_once_it_is_removed() {
+    let (composition, names) = started(&[PARENT, FEATURE_HOLDER], ExportIndex::EMPTY);
+    let holding = await_component_lines(FEATURE_HOLDER.name, 1);
 
-    let first = featured_session(importer.handle(), FEATURE_WAIT_TIMEOUT);
-    let retry = featured_session(importer.handle(), FEATURE_WAIT_TIMEOUT);
-    registered(&composition, &names, PUBLISHER).expect("publisher added");
-    let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
+    registered(&composition, &names, EXPORT).expect("record added");
+    let held = await_component_lines(EXPORT.name, 1);
+    composition.terminate(FEATURE_HOLDER.name, TERMINATE_EXIT_CODE);
+    let restarted = await_component_lines(FEATURE_HOLDER.name, 2);
+    let held_after_restart = await_component_lines(EXPORT.name, 1);
+    composition.terminate(FEATURE_HOLDER.name, TERMINATE_EXIT_CODE);
+    let released = await_component_lines(EXPORT.name, 1);
 
-    test_harness::check_eq!(first, Err(RequestError::Ipc(IpcError::Timeout)));
-    test_harness::check_eq!(retry, Err(RequestError::Ipc(IpcError::Timeout)));
-    test_harness::check_eq!(opened, Ok(PING));
+    test_harness::check_eq!(holding, ["started"]);
+    test_harness::check!(held.is_empty());
+    test_harness::check_eq!(restarted, ["started", "started"]);
+    test_harness::check!(held_after_restart.is_empty());
+    test_harness::check_eq!(released, ["started"]);
     finish(composition);
 }
 
@@ -1141,9 +1121,10 @@ fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
     let (composition, names) = indexed(&[]);
     let importer = composition.importer(&[featured_of(FEATURED_REQUIREMENT)]);
     registered(&composition, &names, PUBLISHER).expect("publisher added");
+    await_component_lines(PUBLISHER.name, 1);
 
     let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
-    let lines = await_component_lines(FEATURED.name, 4);
+    let lines = await_component_lines(FEATURED.name, 5);
 
     test_harness::check_eq!(opened, Ok(PING));
     test_harness::check_eq!(
@@ -1151,8 +1132,9 @@ fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
         [
             "hardware Ok(())",
             "image Ok(())",
-            "features Err(Session(Refused))",
-            "started"
+            "features Err(Refused)",
+            "started",
+            "request kind=featured"
         ]
     );
     finish(composition);
@@ -1184,9 +1166,18 @@ fn a_device_outside_the_platform_description_is_not_described() {
     let absent_window = window(&session, ABSENT).map(drop);
     let relative_line = line(&session, RELATIVE).map(drop);
 
-    test_harness::check_eq!(absent_line, Err(PlatformError::NotDescribed));
-    test_harness::check_eq!(absent_window, Err(PlatformError::NotDescribed));
-    test_harness::check_eq!(relative_line, Err(PlatformError::NotDescribed));
+    test_harness::check_eq!(
+        absent_line,
+        Err(CallError::Remote(PlatformError::NotDescribed))
+    );
+    test_harness::check_eq!(
+        absent_window,
+        Err(CallError::Remote(PlatformError::NotDescribed))
+    );
+    test_harness::check_eq!(
+        relative_line,
+        Err(CallError::Remote(PlatformError::NotDescribed))
+    );
     drop(session);
     finish(composition);
 }
@@ -1212,8 +1203,11 @@ fn a_line_and_a_region_taken_by_a_session_are_granted_to_another_after_it_closes
     let granted_line = line(&second, PL031).map(drop);
     let granted_window = window(&second, PL031).map(drop);
 
-    test_harness::check_eq!(contested_line, Err(PlatformError::Taken));
-    test_harness::check_eq!(contested_window, Err(PlatformError::Taken));
+    test_harness::check_eq!(contested_line, Err(CallError::Remote(PlatformError::Taken)));
+    test_harness::check_eq!(
+        contested_window,
+        Err(CallError::Remote(PlatformError::Taken))
+    );
     test_harness::check!(region_revoked);
     test_harness::check!(line_revoked);
     test_harness::check_eq!(granted_line, Ok(()));
@@ -1236,7 +1230,7 @@ fn a_window_in_the_region_of_another_session_is_taken() {
 
     let contested = window(&second, SECOND_VIRTIO).map(drop);
 
-    test_harness::check_eq!(contested, Err(PlatformError::Taken));
+    test_harness::check_eq!(contested, Err(CallError::Remote(PlatformError::Taken)));
     drop((first, second, taken));
     finish(composition);
 }
@@ -1384,12 +1378,7 @@ fn the_image_region_of_an_image_file_system_incarnation_is_revoked_when_it_ends(
         IMAGE_MOUNT,
     );
     let opened = open(&files, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
-    let window = MemoryRegion::from(
-        files
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("window granted"),
-    );
+    let window = MemoryRegion::from(files.backing_memory(opened.fd).expect("window granted"));
     let granted = window.inspect().is_ok();
 
     composition.terminate(IMAGE_FS.name, TERMINATE_EXIT_CODE);
@@ -1418,9 +1407,8 @@ fn a_directory_session_is_opened_anew_for_every_incarnation() {
         admin("area-admin"),
     ]);
     let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
-    let directory = resolve(&root, AREA_SCOPE, RESOLVE_TIMEOUT)
-        .expect("resolve call")
-        .expect("component directory exists");
+    let directory =
+        resolve(&root, AREA_SCOPE, RESOLVE_TIMEOUT).expect("component directory exists");
     let mounted = Mounted::new(&importer, AREA, directory);
 
     let lines = await_component_lines(SCOPE_CONSUMER.name, 2);
@@ -1442,8 +1430,8 @@ fn a_component_that_faults_is_restarted() {
     let restarted = resolved(&filesystem, "/");
     let rewritten = written(&restarted);
 
-    test_harness::check!(renamed.is_err());
-    test_harness::check_eq!(rewritten, Err(FileSystemError::NotFound));
+    test_harness::check!(matches!(renamed, Err(CallError::Ipc(_))));
+    test_harness::check_eq!(rewritten, Err(CallError::Remote(FileSystemError::NotFound)));
     finish(composition);
 }
 
@@ -1465,7 +1453,7 @@ fn a_restarted_file_system_serves_its_prefix_again_without_restarting_the_router
     let rewritten = written(&resolved(&tmp, "/"));
 
     test_harness::check_eq!(restarted, ["started", "started"]);
-    test_harness::check_eq!(rewritten, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(rewritten, Err(CallError::Remote(FileSystemError::NotFound)));
     finish(composition);
 }
 
@@ -1490,9 +1478,9 @@ fn a_restarted_router_is_mounted_again_by_every_file_system() {
     });
     let stale = resolution(&before, IMAGE_MOUNT, STALE_VIEW_TIMEOUT);
 
-    test_harness::check_eq!(mounted, Ok(Ok(())));
-    test_harness::check_eq!(renewed, [Ok(Ok(())), Ok(Ok(()))]);
-    test_harness::check!(stale.is_err());
+    test_harness::check_eq!(mounted, Ok(()));
+    test_harness::check_eq!(renewed, [Ok(()), Ok(())]);
+    test_harness::check!(matches!(stale, Err(CallError::Ipc(_))));
     finish(composition);
 }
 
@@ -1532,9 +1520,9 @@ fn a_removed_file_system_frees_its_prefix() {
     let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
     let nested = resolution(&root, NESTED_SPARE_PATH, RESOLVE_TIMEOUT);
 
-    test_harness::check_eq!(mounted, Ok(Ok(())));
-    test_harness::check_eq!(freed, Err(IpcError::Timeout));
-    test_harness::check_eq!(nested, Ok(Err(FileSystemError::NotFound)));
+    test_harness::check_eq!(mounted, Ok(()));
+    test_harness::check_eq!(freed, Err(CallError::Ipc(IpcError::Timeout)));
+    test_harness::check_eq!(nested, Err(CallError::Remote(FileSystemError::NotFound)));
     finish(composition);
 }
 
@@ -1555,7 +1543,6 @@ fn a_mount_ends_when_its_file_system_closes_its_port() {
                 "/",
                 RESOLVE_TIMEOUT,
             )
-            .expect("resolve call")
             .expect("spare mounted"),
         ),
     );
@@ -1565,7 +1552,7 @@ fn a_mount_ends_when_its_file_system_closes_its_port() {
     let freed = resolution(&other, "/", FREED_PREFIX_TIMEOUT);
     let ended = mounted.ended(COMPONENT_REPLY_TIMEOUT);
 
-    test_harness::check_eq!(freed, Err(IpcError::Timeout));
+    test_harness::check_eq!(freed, Err(CallError::Ipc(IpcError::Timeout)));
     test_harness::check!(ended);
     drop(mounted);
     finish(composition);
@@ -1711,7 +1698,10 @@ fn two_instances_of_one_program_keep_their_mounts_separate() {
     let second_written = written(&second);
 
     test_harness::check_eq!(first_written, Ok(NodeKind::File));
-    test_harness::check_eq!(second_written, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(
+        second_written,
+        Err(CallError::Remote(FileSystemError::NotFound))
+    );
     finish(composition);
 }
 
@@ -1739,7 +1729,7 @@ fn an_enumeration_by_a_session_requirement_is_refused() {
         .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Refused)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -1752,7 +1742,7 @@ fn a_session_with_two_matching_exports_is_refused() {
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let found_count = importer.found::<probe::Protocol>(PROBE).len();
 
-    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Refused)));
     test_harness::check_eq!(found_count, 2);
     finish(composition);
 }
@@ -1765,7 +1755,7 @@ fn a_session_matching_a_record_and_an_image_program_is_refused() {
     let answer = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
     let found_count = importer.found::<probe::Protocol>(PROBE).len();
 
-    test_harness::check_eq!(answer, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Refused)));
     test_harness::check!(found_count > 1);
     finish(composition);
 }
@@ -1782,8 +1772,8 @@ fn a_found_export_opens_only_as_its_protocol() {
         .map(drop);
     let pinged = ping_found(&found);
 
-    test_harness::check_eq!(other, Err(RequestError::Parent(SessionError::Refused)));
-    test_harness::check_eq!(all, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(other, Err(CallError::Remote(SessionError::Refused)));
+    test_harness::check_eq!(all, Err(CallError::Remote(SessionError::Refused)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -1842,6 +1832,44 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
 }
 
 #[test_harness::test]
+fn a_session_request_carries_pairs_outside_the_matched_filter() {
+    let composition = scenario(&[FILTERED]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let bytes = query(&[pair("kind", "a"), pair("extra", "x")]);
+
+    let pinged = session::<probe::Protocol>(
+        importer.handle(),
+        PROBE,
+        Attributes::decode(&bytes).expect("query decodes"),
+        COMPONENT_REPLY_TIMEOUT,
+    )
+    .expect("the filter kind=a matches")
+    .client()
+    .with_wait(COMPONENT_REPLY_TIMEOUT)
+    .ping(PING);
+    let lines = await_component_lines(FILTERED.name, 2);
+
+    test_harness::check_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(lines, ["started", "request kind=a,extra=x"]);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn an_opened_search_result_carries_the_attributes_of_its_search() {
+    let composition = scenario(&[FILTERED]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+
+    let found = probes_found(&importer, &[pair("role", "c")]);
+    let pinged = found.first().map(ping_found);
+    let lines = await_component_lines(FILTERED.name, 2);
+
+    test_harness::check_eq!(found.len(), 1);
+    test_harness::check_eq!(pinged, Some(Ok(PING)));
+    test_harness::check_eq!(lines, ["started", "request role=c"]);
+    finish(composition);
+}
+
+#[test_harness::test]
 fn a_query_with_a_repeated_key_is_refused_and_the_next_one_is_served() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1854,10 +1882,10 @@ fn a_query_with_a_repeated_key_is_refused_and_the_next_one_is_served() {
     let answer = startup_contract::Client::new(PortTransport::new(importer.handle()))
         .with_wait(COMPONENT_REPLY_TIMEOUT)
         .session(requirement, Bytes::new(&bytes).expect("query fits"))
-        .map(|answer| answer.map(drop));
+        .map(drop);
     let pinged = ping(&importer, PROBE);
 
-    test_harness::check_eq!(answer, Ok(Err(SessionError::Refused)));
+    test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Refused)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
@@ -1878,11 +1906,8 @@ fn an_importer_finds_a_root_export_but_cannot_open_it() {
         requested::<hardware::Protocol>(&importer, HARDWARE_REQUIREMENT, COMPONENT_REPLY_TIMEOUT);
 
     test_harness::check_eq!(found.len(), 1);
-    test_harness::check_eq!(
-        opened,
-        Some(Err(RequestError::Parent(SessionError::Refused)))
-    );
-    test_harness::check_eq!(direct, Err(RequestError::Parent(SessionError::Refused)));
+    test_harness::check_eq!(opened, Some(Err(CallError::Remote(SessionError::Refused))));
+    test_harness::check_eq!(direct, Err(CallError::Remote(SessionError::Refused)));
     finish(composition);
 }
 

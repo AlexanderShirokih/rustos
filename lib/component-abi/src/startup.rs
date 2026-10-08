@@ -138,6 +138,9 @@ ipc::wire_value! {
     pub struct SessionRequest<R = ipc::Reply<Result<ipc::wire::Cap<kind::Port>, SessionError>>> {
         /// Ответ на операцию `session` либо `open` импортёра.
         pub reply: R,
+        /// Атрибуты запроса импортёра, включая пары вне совпавшего фильтра. Для `open` -
+        /// атрибуты запроса `all`, нашедшего экспорт. Запрос без атрибутов даёт пустой набор.
+        pub attributes: AttributeSet,
     }
 }
 
@@ -180,10 +183,10 @@ ipc::protocol! {
         name = "ComponentStartup";
 
         /// Открывает сессию единственного экспорта протокола `requirement.protocol`, совпавшего с
-        /// `attributes`. Без совпадений ответ `Unbound`, при нескольких - `Refused`. Совпадения,
-        /// скрытые до публикации признака машины, ждут её, если других нет. Повтор
-        /// запроса того же экспорта по тому же требованию заменяет ожидающую заявку импортёра и
-        /// отвечает на прежнюю `NoSpace`.
+        /// `attributes`. Экспорт, скрытый до публикации признака машины, не совпадает. Без
+        /// совпадений ответ `Unbound`, при нескольких - `Refused`. Повтор запроса того же
+        /// экспорта по тому же требованию заменяет ожидающую заявку импортёра и отвечает на
+        /// прежнюю `NoSpace`.
         call(defer) fn session(
             requirement: SessionRequirement,
             attributes: QueryAttributes,
@@ -246,7 +249,7 @@ mod tests {
     struct Parent {
         requirements: Vec<RequestedSession>,
         exports: Vec<String>,
-        waiting: Option<component_startup::session::Reply<MockReply>>,
+        waiting: Option<(component_startup::session::Reply<MockReply>, AttributeSet)>,
         filter: Vec<u8>,
     }
 
@@ -263,7 +266,12 @@ mod tests {
                 protocol: requirement.protocol.as_str().into(),
                 attributes: attributes.as_bytes().into(),
             });
-            self.waiting = Some(reply);
+            match Attributes::decode(attributes.as_bytes()) {
+                Some(attributes) => self.waiting = Some((reply, AttributeSet::new(attributes))),
+                None => {
+                    let _ = reply.send(Err::<MockHandle<kind::Port>, _>(SessionError::Refused));
+                }
+            }
         }
 
         fn accept(
@@ -273,7 +281,7 @@ mod tests {
             reply: component_startup::accept::Reply<MockReply>,
         ) {
             self.exports.push(export.as_str().into());
-            let Some(debt) = self.waiting.take() else {
+            let Some((debt, attributes)) = self.waiting.take() else {
                 let _ = reply.send(Err::<
                     SessionRequest<component_startup::session::Reply<MockReply>>,
                     _,
@@ -281,7 +289,10 @@ mod tests {
                 return;
             };
             reply
-                .send(Ok::<_, AcceptError>(SessionRequest { reply: debt }))
+                .send(Ok::<_, AcceptError>(SessionRequest {
+                    reply: debt,
+                    attributes,
+                }))
                 .expect("the parent answers accept");
         }
 
@@ -355,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn an_accept_response_carries_the_reply_of_the_request() {
+    fn an_accept_response_carries_the_reply_and_attributes_of_the_request() {
         let (importer_end, importer_listener) = ipc_test::pair();
         let (provider_end, provider_listener) = ipc_test::pair();
         let mut parent = Parent::default();
@@ -389,8 +400,8 @@ mod tests {
             let request = provider
                 .join()
                 .expect("provider joins")
-                .expect("accept call")
                 .expect("a request arrives");
+            assert_eq!(request.attributes.as_attributes().as_bytes(), attributes);
             let reply: ipc::Reply<Result<Cap<kind::Port>, SessionError>, MockReply> = request.reply;
             reply
                 .send(Ok::<_, SessionError>(SESSION_CAP))
@@ -398,7 +409,7 @@ mod tests {
             importer.join().expect("importer joins")
         });
 
-        assert_eq!(answer, Ok(Ok(SESSION_CAP)));
+        assert_eq!(answer, Ok(SESSION_CAP));
         assert_eq!(
             parent.requirements,
             [RequestedSession {
@@ -426,10 +437,7 @@ mod tests {
             enumeration.join().expect("client joins")
         });
 
-        let found = found
-            .expect("next call")
-            .expect("a result")
-            .expect("not the end");
+        let found = found.expect("a result").expect("not the end");
 
         assert_eq!(found.session, FOUND_CAP);
         assert_eq!(found.protocol.as_str(), "P".repeat(PROTOCOL_ID_MAX));
@@ -457,7 +465,7 @@ mod tests {
                 importer.join().expect("importer joins")
             });
 
-            assert_eq!(answer, Err(IpcError::PeerClosed));
+            assert_eq!(answer, Err(ipc::CallError::Ipc(IpcError::PeerClosed)));
             assert!(parent.requirements.is_empty());
         }
     }

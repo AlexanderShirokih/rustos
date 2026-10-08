@@ -6,7 +6,6 @@ runtime::process_heap!();
 
 use core::panic::PanicInfo;
 
-use component_startup::{Requirements as _, component_manifest};
 use kernel_objects::Port;
 use runtime::{Priority, Timeout, process_exit, spawn_owned};
 use syscall::{Handle, kind};
@@ -19,15 +18,8 @@ const HELPER_STACK_SIZE: u64 = 0x4000;
 
 const FAILED_EXIT_CODE: u64 = 1;
 
-component_manifest! {
-    struct HelperPanicStartup {}
-}
-
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    if HelperPanicStartup::request(parent).is_err() {
-        process_exit(FAILED_EXIT_CODE)
-    }
+pub extern "C" fn _start(_parent: Handle<kind::Port>) -> ! {
     let Ok(own) = Port::create() else {
         process_exit(FAILED_EXIT_CODE)
     };

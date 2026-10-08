@@ -19,7 +19,8 @@ use core::{panic::PanicInfo, sync::atomic::AtomicU64};
 
 use bootstrap_abi::{features, hardware};
 use component_startup::{
-    MintedSession, Requirements as _, SessionError, component_manifest, mint_session, serve_export,
+    MintedSession, Requirements as _, SessionError, StartupError, component_manifest, mint_session,
+    serve_export,
 };
 use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
 use fdt::devicetree::DeviceTree;
@@ -73,12 +74,15 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 }
 
 fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
-    let requirements = PlatformStartup::request(parent)
-        .inspect_err(|error| log_fmt(format_args!("{error}")))
-        .ok()?;
-    let hardware = requirements.hardware?.client();
-    let lines = IrqControl::from(hardware.acquire_irq_control().ok()?.ok()?);
-    let fdt = hardware.acquire_boot_fdt().ok()?.ok()?;
+    let requirements = PlatformStartup::from_parent(parent);
+    let hardware = requirements
+        .hardware
+        .open()
+        .inspect_err(log_error)
+        .ok()?
+        .client();
+    let lines = IrqControl::from(hardware.acquire_irq_control().ok()?);
+    let fdt = hardware.acquire_boot_fdt().ok()?;
     let offset = usize::try_from(fdt.offset).ok()?;
     let region: &'static MemoryRegion = Box::leak(Box::new(MemoryRegion::from(fdt.region)));
     let mapping = Box::leak(Box::new(region.map_full_read_only().ok()?));
@@ -105,13 +109,9 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
     )
     .ok()?;
 
-    match requirements.features {
-        Some(features) => publish(
-            &features.client(),
-            &Description::new(mapping.as_bytes(), u64::from(fdt.offset)).ok()?,
-        ),
-        None => log_line("features session not granted"),
-    }
+    let description = Description::new(mapping.as_bytes(), u64::from(fdt.offset)).ok()?;
+    let features = requirements.features.open().inspect_err(log_error).ok()?;
+    publish(&features.client(), &description);
 
     Some((
         &shared.service,
@@ -128,6 +128,10 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
     ))
 }
 
+fn log_error(error: &StartupError) {
+    log_fmt(format_args!("{error}"));
+}
+
 fn publish(features: &features::Client<SessionTransport>, description: &Description<'_>) {
     let mut published: Vec<&str> = Vec::new();
     for device in description.devices().filter_map(Result::ok) {
@@ -142,7 +146,7 @@ fn publish(features: &features::Client<SessionTransport>, description: &Descript
             };
 
             match features.publish(feature) {
-                Ok(Ok(())) => published.push(compatible),
+                Ok(()) => published.push(compatible),
 
                 failure => {
                     log_fmt(format_args!(

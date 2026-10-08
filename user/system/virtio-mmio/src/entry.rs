@@ -37,13 +37,11 @@ pub(crate) extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 }
 
 fn run(parent: Handle<kind::Port>) {
-    let requirements = match VirtioMmioStartup::request(parent) {
-        Ok(requirements) => requirements,
-        Err(error) => return log_fmt(format_args!("{error}")),
-    };
+    let requirements = VirtioMmioStartup::from_parent(parent);
     // Сессия `Platform` держит окна и линии транспортов до конца процесса.
-    let Some(platform) = requirements.platform.map(ipc::wire::Session::client) else {
-        return log_line("platform session not granted");
+    let platform = match requirements.platform.open() {
+        Ok(platform) => platform.client(),
+        Err(error) => return log_fmt(format_args!("{error}")),
     };
     let Some(mut bus) = Bus::take(&platform) else {
         return log_line("platform description refused");

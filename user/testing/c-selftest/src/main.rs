@@ -36,7 +36,7 @@ fn check(passed: bool, what: &CStr) {
 fn install_root() {
     let root = c_library::requirements::<Startup>()
         .ok()
-        .and_then(|startup| startup.namespace);
+        .and_then(|startup| startup.namespace.open().ok());
     let again = c_library::requirements::<Startup>().err();
     check(
         again

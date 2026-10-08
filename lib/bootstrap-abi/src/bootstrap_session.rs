@@ -116,12 +116,10 @@ mod tests {
                         .expect("dispatch ok");
                 }
             });
-            assert_eq!(client.acquire_userland_image(), Ok(Ok(cap(0x88))));
+            assert_eq!(client.acquire_userland_image(), Ok(cap(0x88)));
             assert_eq!(
-                client
-                    .acquire_hardware()
-                    .map(|session| session.map(Session::into_handle)),
-                Ok(Ok(cap(0x55)))
+                client.acquire_hardware().map(Session::into_handle),
+                Ok(cap(0x55))
             );
         });
     }

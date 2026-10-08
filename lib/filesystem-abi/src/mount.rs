@@ -79,9 +79,7 @@ mod tests {
 
             let client = file_system_mount::Client::new(client_end);
             assert_eq!(
-                client
-                    .mount(ipc::wire::Str::new("/boot").expect("path fits"), SESSION)
-                    .expect("call"),
+                client.mount(ipc::wire::Str::new("/boot").expect("path fits"), SESSION),
                 Ok(MountEnded::Replaced)
             );
             server.join().expect("server joins");

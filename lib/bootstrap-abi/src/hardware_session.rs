@@ -92,16 +92,19 @@ mod tests {
                         .expect("dispatch ok");
                 }
             });
-            assert_eq!(client.acquire_irq_control(), Ok(Ok(cap(0x77))));
+            assert_eq!(client.acquire_irq_control(), Ok(cap(0x77)));
             assert_eq!(
                 client.acquire_boot_fdt(),
-                Ok(Ok(BootFdt {
+                Ok(BootFdt {
                     region: cap(0x99),
                     offset: 0x600,
-                }))
+                })
             );
-            assert_eq!(client.acquire_device_memory(1), Ok(Ok(cap(0x91))));
-            assert_eq!(client.acquire_device_memory(9), Ok(Err(7)));
+            assert_eq!(client.acquire_device_memory(1), Ok(cap(0x91)));
+            assert_eq!(
+                client.acquire_device_memory(9),
+                Err(ipc::CallError::Remote(7))
+            );
         });
     }
 }

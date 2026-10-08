@@ -36,12 +36,14 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 
 fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     start_component(parent, LOG_TAG);
-    let requirements = ImageFileSystemStartup::request(parent).map_err(|_| Error::Start)?;
-    let image = requirements.image.ok_or(Error::Start)?.client();
+    let image = ImageFileSystemStartup::from_parent(parent)
+        .image
+        .open()
+        .map_err(|_| Error::Start)?
+        .client();
     let region = image
         .region()
         .ok()
-        .and_then(core::result::Result::ok)
         .map(MemoryRegion::from)
         .ok_or(Error::Start)?;
     serve(parent, Some(region), |backing| {

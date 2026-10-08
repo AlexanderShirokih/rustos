@@ -14,7 +14,10 @@ use filesystem_abi::{
     FileSystemError, MountEnded, PATH_MAX, Path, ResolvedPair, common_directory, file_system,
     file_system_mount, namespace, rebase,
 };
-use ipc::wire::{IpcError, Session, Str};
+use ipc::{
+    CallError,
+    wire::{IpcError, Session, Str},
+};
 use kernel_objects::{Delivery, IssuedHandle, Port, SessionTransport, kind};
 use runtime::{Mutex, Timeout, log_fmt};
 
@@ -245,19 +248,20 @@ fn answer(view: u64, request: Pending) {
 
         let opened = match Str::new(&tail) {
             Some(tail) => filesystem.lock().open_root(tail),
-            None => Ok(Err(FileSystemError::InvalidPath)),
+            None => Err(CallError::Remote(FileSystemError::InvalidPath)),
         };
         match opened {
-            Ok(opened) => return request.reply(opened.map(|session| (session, root_len))),
+            Ok(session) => return request.reply(Ok((session, root_len))),
+            Err(CallError::Remote(error)) => return request.reply(Err(error)),
             // Монтирование с закрытым портом снимается, и запрос ждёт следующего.
-            Err(IpcError::PeerClosed) => {
+            Err(CallError::Ipc(IpcError::PeerClosed)) => {
                 remove_mount(|mount| mount.id == id, MountEnded::FileSystemGone);
             }
             // Ресурс исчерпан у самого маршрутизатора, не у файловой системы.
-            Err(IpcError::ResourceExhausted) => {
+            Err(CallError::Ipc(IpcError::ResourceExhausted)) => {
                 return request.reply(Err(FileSystemError::NoSpace));
             }
-            Err(_) => return request.reply(Err(FileSystemError::Unresponsive)),
+            Err(CallError::Ipc(_)) => return request.reply(Err(FileSystemError::Unresponsive)),
         }
     }
 }

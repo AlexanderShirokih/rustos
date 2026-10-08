@@ -24,8 +24,10 @@ fixture_start!(run);
 
 fn run(parent: &Port) -> Result<(), Failed> {
     start_component(parent.as_raw(), LOG_TAG);
-    let requirements = ImporterStartup::request(parent.as_raw()).map_err(|_| Failed)?;
-    let _session = requirements.probe.ok_or(Failed)?;
+    let _session = ImporterStartup::from_parent(parent.as_raw())
+        .probe
+        .open()
+        .map_err(|_| Failed)?;
     log_line("started");
 
     let own = Port::create().map_err(|_| Failed)?;

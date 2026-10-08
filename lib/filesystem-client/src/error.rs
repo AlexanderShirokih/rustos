@@ -46,3 +46,12 @@ impl From<IpcError> for Failure {
         Self::Transport(error)
     }
 }
+
+impl From<ipc::CallError<FileSystemError>> for Failure {
+    fn from(error: ipc::CallError<FileSystemError>) -> Self {
+        match error {
+            ipc::CallError::Remote(error) => Self::FileSystem(error),
+            ipc::CallError::Ipc(error) => Self::Transport(error),
+        }
+    }
+}

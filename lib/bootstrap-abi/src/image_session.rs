@@ -57,7 +57,7 @@ mod tests {
                     .serve(|frame| image::dispatch(&mut Sink, frame))
                     .expect("dispatch ok");
             });
-            assert_eq!(client.region(), Ok(Ok(MockHandle::new(0x66))));
+            assert_eq!(client.region(), Ok(MockHandle::new(0x66)));
         });
     }
 }

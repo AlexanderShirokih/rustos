@@ -23,15 +23,11 @@ fixture_start!(populate_session);
 fn populate_session(service: &Port) -> Result<(), Failed> {
     let client = file_system::Client::new(PortTransport::new(service)).with_wait(CALL_TIMEOUT);
 
-    let _buffer = client
-        .acquire_buffer(BUFFER_SIZE)
-        .map_err(|_| Failed)?
-        .map_err(|_| Failed)?;
+    let _buffer = client.acquire_buffer(BUFFER_SIZE).map_err(|_| Failed)?;
 
     let path = Str::new(PATH).ok_or(Failed)?;
     client
         .open(path, AccessMode::ReadWrite, OpenFlags::CREATE)
-        .map_err(|_| Failed)?
         .map_err(|_| Failed)?;
     Ok(())
 }

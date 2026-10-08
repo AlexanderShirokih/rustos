@@ -143,8 +143,7 @@ impl Attacher {
         let window = self
             .platform
             .mmio(id.as_wire(), 0)
-            .map_err(|_| OpenRefusal::PlatformCall)?
-            .map_err(OpenRefusal::Platform)?;
+            .map_err(|error| error.fold(|_| OpenRefusal::PlatformCall, OpenRefusal::Platform))?;
         framebuffer
             .fits(window.size)
             .map_err(OpenRefusal::Framebuffer)?;
@@ -265,11 +264,14 @@ pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
 }
 
 fn start(parent: Handle<kind::Port>) -> Option<&'static Shared> {
-    let requirements = SimplefbStartup::request(parent)
+    let requirements = SimplefbStartup::from_parent(parent);
+    let platform = requirements
+        .platform
+        .open()
         .inspect_err(|error| log_fmt(format_args!("{error}")))
-        .ok()?;
-    let platform = requirements.platform?.client();
-    let description = platform.description().ok()?.ok()?;
+        .ok()?
+        .client();
+    let description = platform.description().ok()?;
     let description_offset = description.offset;
     // Драйвер держит регион описания до выхода, и закрытие хендла региона сняло бы отображение.
     let description_region = MemoryRegion::from(description.region);

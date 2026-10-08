@@ -30,5 +30,5 @@ fn import<P: ipc::Protocol>(
 
     let requests = component_startup::Client::new(PortTransport::new(parent))
         .with_wait(STARTUP_REQUEST_TIMEOUT);
-    requests.session(requirement, attributes).ok()?.ok()
+    requests.session(requirement, attributes).ok()
 }

@@ -28,7 +28,7 @@ impl<E: Environment> Session<E> {
 
     pub(crate) fn over(environment: &E, transport: E::Transport, wait: Timeout) -> Result<Self> {
         let client = file_system::Client::new(transport).with_wait(wait);
-        let received = client.acquire_buffer(BUFFER_SIZE)??;
+        let received = client.acquire_buffer(BUFFER_SIZE)?;
         let region = environment.map(received)?;
         let capacity = u32::try_from(region.size())
             .unwrap_or(u32::MAX)

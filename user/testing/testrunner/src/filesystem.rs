@@ -8,7 +8,7 @@ use filesystem_abi::{
 };
 use filesystem_client::{Failure, FileSystem};
 use ipc::{
-    Channel, Incoming, Outgoing, Unsent,
+    CallError, Channel, Incoming, Outgoing, Unsent,
     wire::{
         FieldCursor, HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str, TERMINATOR,
     },
@@ -144,7 +144,6 @@ fn resolved(importer: &Importer, requirement: &str, text: &str) -> Session<file_
     let view = importer.port::<namespace::Protocol>(requirement);
     let session = namespace_client(&view)
         .resolve(path(text))
-        .expect("resolve call")
         .expect("path is covered by a mount");
     Session::from_session(session)
 }
@@ -168,10 +167,7 @@ pub(crate) fn mount_ram_window(requirement: &str, scope: &str) -> Mounted {
             OpenFlags::CREATE | OpenFlags::DIRECTORY,
         ),
     );
-    let window = client
-        .open_root(path(scope))
-        .expect("open_root call")
-        .expect("window granted");
+    let window = client.open_root(path(scope)).expect("window granted");
     Mounted::new(importer(), requirement, Session::from_session(window))
 }
 
@@ -186,7 +182,6 @@ pub(crate) fn root_view() -> Port {
 pub(crate) fn remove_ram_directory(text: &str) {
     connect(ram_session())
         .unlink(path(text), NodeKind::Directory)
-        .expect("unlink call")
         .expect("unlink of an emptied directory");
 }
 
@@ -316,10 +311,7 @@ fn connect_without_reply(
 }
 
 pub(crate) fn acquire_buffer(client: &file_system::Client<SessionTransport>) -> MemoryRegion {
-    let cap = client
-        .acquire_buffer(BUFFER_SIZE)
-        .expect("acquire_buffer call")
-        .expect("buffer granted");
+    let cap = client.acquire_buffer(BUFFER_SIZE).expect("buffer granted");
     MemoryRegion::from(cap)
 }
 
@@ -333,17 +325,11 @@ pub(crate) fn open(
     mode: AccessMode,
     flags: OpenFlags,
 ) -> Opened {
-    client
-        .open(path(text), mode, flags)
-        .expect("open call")
-        .expect("open ok")
+    client.open(path(text), mode, flags).expect("open ok")
 }
 
 fn close(client: &file_system::Client<SessionTransport>, opened: &Opened) {
-    client
-        .close(opened.fd)
-        .expect("close call")
-        .expect("close ok");
+    client.close(opened.fd).expect("close ok");
 }
 
 pub(crate) fn write_all(
@@ -356,7 +342,6 @@ pub(crate) fn write_all(
     buffer.copy_in(payload).expect("payload into the buffer");
     let written = client
         .write(opened.fd, offset, payload.len() as u32)
-        .expect("write call")
         .expect("write ok");
     written.count
 }
@@ -395,7 +380,7 @@ pub(crate) fn walk_directory(
     let mut names = Vec::new();
     let mut from = DirCursor::START;
     loop {
-        let listed = client.list(fd, from).expect("list call").expect("list ok");
+        let listed = client.list(fd, from).expect("list ok");
         collect_entries(&buffer_bytes(buffer), listed.count, &mut names);
         if listed.end {
             return names;
@@ -426,17 +411,18 @@ fn filesystem_creates_and_writes_a_file() {
     let count = write_all(&client, &buffer, &opened, 0, payload);
     test_harness::check_eq!(count, payload.len() as u32);
 
-    let info = client.stat(opened.fd).expect("stat call").expect("stat ok");
+    let info = client.stat(opened.fd).expect("stat ok");
     test_harness::check_eq!(info.size, payload.len() as u64);
 
-    let again = client
-        .open(
-            path("/created"),
-            AccessMode::Read,
-            OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
-        )
-        .expect("open call");
-    test_harness::check_eq!(again, Err(FileSystemError::AlreadyExists));
+    let again = client.open(
+        path("/created"),
+        AccessMode::Read,
+        OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
+    );
+    test_harness::check_eq!(
+        again,
+        Err(CallError::Remote(FileSystemError::AlreadyExists))
+    );
 }
 
 #[test_harness::test]
@@ -454,16 +440,12 @@ fn filesystem_reads_at_offset() {
         .copy_in(&vec![0; payload.len()])
         .expect("clear the buffer");
 
-    let count = client
-        .read(opened.fd, 4, 6)
-        .expect("read call")
-        .expect("read ok");
+    let count = client.read(opened.fd, 4, 6).expect("read ok");
     test_harness::check_eq!(count, 6);
     test_harness::check_eq!(buffer_head(&buffer, 6), b"456789");
 
     let tail = client
         .read(opened.fd, payload.len() as u64, 4)
-        .expect("read call")
         .expect("read ok");
     test_harness::check_eq!(tail, 0);
 }
@@ -493,14 +475,11 @@ fn filesystem_stats_file_and_directory() {
     );
     write_all(&client, &buffer, &file, 0, b"stat");
 
-    let file_info = client.stat(file.fd).expect("stat call").expect("stat ok");
+    let file_info = client.stat(file.fd).expect("stat ok");
     test_harness::check_eq!(file_info.kind, NodeKind::File);
     test_harness::check_eq!(file_info.size, 4);
 
-    let directory_info = client
-        .stat(directory.fd)
-        .expect("stat call")
-        .expect("stat ok");
+    let directory_info = client.stat(directory.fd).expect("stat ok");
     test_harness::check_eq!(directory_info.kind, NodeKind::Directory);
     test_harness::check_eq!(directory_info.size, 1);
 }
@@ -533,10 +512,7 @@ fn filesystem_lists_directory_across_batches() {
     let mut batches = 0;
     let mut from = DirCursor::START;
     loop {
-        let listed = client
-            .list(directory.fd, from)
-            .expect("list call")
-            .expect("list ok");
+        let listed = client.list(directory.fd, from).expect("list ok");
         batches += 1;
         collect_entries(&buffer_bytes(&buffer), listed.count, &mut names);
         if listed.end {
@@ -565,17 +541,12 @@ fn filesystem_unlinks_a_file() {
     close(&client, &opened);
     client
         .unlink(path("/removed"), NodeKind::File)
-        .expect("unlink call")
         .expect("unlink ok");
 
-    let reopened = client
-        .open(path("/removed"), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
-    test_harness::check_eq!(reopened, Err(FileSystemError::NotFound));
-    let again = client
-        .unlink(path("/removed"), NodeKind::File)
-        .expect("unlink call");
-    test_harness::check_eq!(again, Err(FileSystemError::NotFound));
+    let reopened = client.open(path("/removed"), AccessMode::Read, OpenFlags::NONE);
+    test_harness::check_eq!(reopened, Err(CallError::Remote(FileSystemError::NotFound)));
+    let again = client.unlink(path("/removed"), NodeKind::File);
+    test_harness::check_eq!(again, Err(CallError::Remote(FileSystemError::NotFound)));
 }
 
 #[test_harness::test]
@@ -589,18 +560,17 @@ fn filesystem_rejects_write_through_a_read_only_descriptor() {
     let opened = open(&client, "/read-only", AccessMode::Read, OpenFlags::CREATE);
     let payload = b"deny";
     buffer.copy_in(payload).expect("payload into the buffer");
-    let written = client
-        .write(opened.fd, 0, payload.len() as u32)
-        .expect("write call");
-    test_harness::check_eq!(written, Err(FileSystemError::WrongMode));
+    let written = client.write(opened.fd, 0, payload.len() as u32);
+    test_harness::check_eq!(written, Err(CallError::Remote(FileSystemError::WrongMode)));
 
-    let resized = client.set_size(opened.fd, 16).expect("set_size call");
-    test_harness::check_eq!(resized, Err(FileSystemError::WrongMode));
+    let resized = client.set_size(opened.fd, 16);
+    test_harness::check_eq!(resized, Err(CallError::Remote(FileSystemError::WrongMode)));
 
-    let truncated = client
-        .open(path("/read-only"), AccessMode::Read, OpenFlags::TRUNCATE)
-        .expect("open call");
-    test_harness::check_eq!(truncated, Err(FileSystemError::WrongMode));
+    let truncated = client.open(path("/read-only"), AccessMode::Read, OpenFlags::TRUNCATE);
+    test_harness::check_eq!(
+        truncated,
+        Err(CallError::Remote(FileSystemError::WrongMode))
+    );
 }
 
 #[test_harness::test]
@@ -609,7 +579,7 @@ fn a_view_does_not_resolve_outside_its_scope() {
     let outside = namespace::Client::new(PortTransport::new(&uncovered))
         .with_wait(OUT_OF_SCOPE_RESOLVE_TIMEOUT)
         .resolve(path(Path::ROOT.as_str()));
-    test_harness::check_eq!(outside.err(), Some(IpcError::Timeout));
+    test_harness::check_eq!(outside.err(), Some(CallError::Ipc(IpcError::Timeout)));
 }
 
 #[test_harness::test]
@@ -627,7 +597,6 @@ fn a_view_counts_paths_and_the_pair_root_from_its_scope() {
 
     let pair = namespace_client(&view_of(RAM_VIEW))
         .resolve_pair(path("/a/x"), path("/a/y"))
-        .expect("resolve_pair call")
         .expect("the mount of the scope covers the pair");
     test_harness::check_eq!(pair.root_len, 2);
 }
@@ -635,8 +604,11 @@ fn a_view_counts_paths_and_the_pair_root_from_its_scope() {
 #[test_harness::test]
 fn a_session_mounts_once() {
     let mounted = Mounted::new(importer(), "other", ram_session());
-    let again = mounted.mount(ram_session()).expect("mount call");
-    test_harness::check_eq!(again, Err(FileSystemError::AlreadyExists));
+    let again = mounted.mount(ram_session());
+    test_harness::check_eq!(
+        again,
+        Err(CallError::Remote(FileSystemError::AlreadyExists))
+    );
 }
 
 const REPLACED_VIEW: &str = "replaced";
@@ -681,7 +653,6 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
 
     let image = namespace
         .resolve(path(IMAGE_MOUNT))
-        .expect("resolve call")
         .expect("image mount covers the path");
     drop(image);
 
@@ -691,12 +662,10 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
             AccessMode::ReadWrite,
             OpenFlags::CREATE | OpenFlags::DIRECTORY,
         )
-        .expect("create directory call")
         .expect("directory created");
 
     let ram = namespace
         .resolve(path("/tmp/inner"))
-        .expect("resolve call")
         .expect("ram mount covers the path");
     drop(ram);
 }
@@ -723,10 +692,9 @@ fn namespace_grafts_the_session_it_is_handed() {
     );
     test_harness::check_eq!(opened.kind, NodeKind::File);
 
-    let absent = connect(image_session())
-        .open(path(GRAFT_ENTRY), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
-    test_harness::check_eq!(absent, Err(FileSystemError::NotFound));
+    let absent =
+        connect(image_session()).open(path(GRAFT_ENTRY), AccessMode::Read, OpenFlags::NONE);
+    test_harness::check_eq!(absent, Err(CallError::Remote(FileSystemError::NotFound)));
 }
 
 #[test_harness::test]
@@ -735,21 +703,21 @@ fn namespace_rejects_admin_operations_on_the_service_port() {
     let refused = file_system_mount::Client::new(PortTransport::new(&capability))
         .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
         .mount(path("/invalid"), Session::from_handle(ram_port()));
-    test_harness::check_eq!(refused.err(), Some(IpcError::PeerClosed));
+    test_harness::check_eq!(refused.err(), Some(CallError::Ipc(IpcError::PeerClosed)));
 
     let mounted = namespace_client(&view_of(ROOT_VIEW))
         .resolve(path(IMAGE_MOUNT))
-        .expect("resolve call")
         .expect("image mount survives the rejected frame");
     drop(mounted);
 }
 
 #[test_harness::test]
 fn namespace_reports_an_unresponsive_mount() {
-    let resolved = namespace_client(&view_of(STUCK_VIEW))
-        .resolve(path(Path::ROOT.as_str()))
-        .expect("resolve call");
-    test_harness::check_eq!(resolved.err(), Some(FileSystemError::Unresponsive));
+    let resolved = namespace_client(&view_of(STUCK_VIEW)).resolve(path(Path::ROOT.as_str()));
+    test_harness::check_eq!(
+        resolved.err(),
+        Some(CallError::Remote(FileSystemError::Unresponsive))
+    );
 }
 
 #[test_harness::test]
@@ -778,7 +746,6 @@ fn namespace_resolves_a_pair_to_the_session_of_their_common_directory() {
     let namespace = namespace_client(&capability);
     let pair = namespace
         .resolve_pair(path("/tmp/pair-left/first"), path("/tmp/pair-right/second"))
-        .expect("resolve_pair call")
         .expect("one mount covers the pair");
     test_harness::check_eq!(pair.root_len, RAM_MOUNT.len() as u32);
     let opened = open(
@@ -794,7 +761,6 @@ fn namespace_resolves_a_pair_to_the_session_of_their_common_directory() {
 fn namespace_keeps_the_pair_scope_inside_the_mount_root() {
     let pair = namespace_client(&view_of(ROOT_VIEW))
         .resolve_pair(path(RAM_MOUNT), path("/tmp/inside"))
-        .expect("resolve_pair call")
         .expect("one mount covers the pair");
     test_harness::check_eq!(pair.root_len, RAM_MOUNT.len() as u32);
 }
@@ -812,14 +778,12 @@ fn namespace_reports_a_pair_under_different_mounts() {
 
     let across = namespace
         .resolve_pair(path("/tmp/first"), path("/paired-second/second"))
-        .expect("resolve_pair call")
         .map(|pair| pair.root_len);
-    test_harness::check_eq!(across, Err(FileSystemError::CrossMount));
+    test_harness::check_eq!(across, Err(CallError::Remote(FileSystemError::CrossMount)));
 
     drop(
         namespace
             .resolve(path("/paired-second/second"))
-            .expect("resolve call")
             .expect("second mount covers the path"),
     );
 }
@@ -839,9 +803,7 @@ fn namespace_opens_no_session_for_a_call_without_a_reply_channel() {
         let _ = without_reply.resolve_pair(path("/tmp/first"), path("/tmp/second"));
     }
 
-    let covered = namespace_client(&view_of(ROOT_VIEW))
-        .resolve(path(RAM_MOUNT))
-        .expect("resolve call");
+    let covered = namespace_client(&view_of(ROOT_VIEW)).resolve(path(RAM_MOUNT));
     test_harness::check!(covered.is_ok());
     let client = connect(ram_session());
     close(
@@ -863,7 +825,6 @@ fn namespace_pair_scope_survives_a_table_change() {
             path("/paired-detached/first"),
             path("/paired-detached/second"),
         )
-        .expect("resolve_pair call")
         .expect("fixture covers the pair");
     let scope = Session::from_session(pair.session);
 
@@ -876,7 +837,6 @@ fn namespace_pair_scope_survives_a_table_change() {
     );
     client
         .rename(path("/first"), path("/second"))
-        .expect("rename call")
         .expect("rename inside the issued scope");
 }
 
@@ -900,8 +860,8 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
                     let client = namespace::Client::new(PortTransport::new(raw))
                         .with_wait(QUEUED_RESOLVE_TIMEOUT);
                     match client.resolve(path(Path::ROOT.as_str())) {
-                        Ok(Ok(_)) => QUEUE_CALLER_ANSWERED,
-                        Ok(Err(FileSystemError::NoSpace)) => QUEUE_CALLER_EVICTED,
+                        Ok(_) => QUEUE_CALLER_ANSWERED,
+                        Err(CallError::Remote(FileSystemError::NoSpace)) => QUEUE_CALLER_EVICTED,
                         _ => QUEUE_CALLER_FAILED,
                     }
                 },
@@ -970,9 +930,11 @@ fn the_facade_reaches_a_mount_point_without_a_mount_above_it() {
 #[test_harness::test]
 fn a_pair_with_a_side_above_a_mount_is_not_found() {
     let pair = namespace_client(&view_of(ROOT_VIEW))
-        .resolve_pair(path(Path::ROOT.as_str()), path(IMAGE_FILE_IN_MOUNT))
-        .expect("resolve_pair call");
-    test_harness::check_eq!(pair.err(), Some(FileSystemError::NotFound));
+        .resolve_pair(path(Path::ROOT.as_str()), path(IMAGE_FILE_IN_MOUNT));
+    test_harness::check_eq!(
+        pair.err(),
+        Some(CallError::Remote(FileSystemError::NotFound))
+    );
 }
 
 #[test_harness::test]
@@ -984,7 +946,7 @@ fn a_waiting_request_fails_once_a_mount_appears_below_its_path() {
             let client =
                 namespace::Client::new(PortTransport::new(raw)).with_wait(NAMESPACE_REPLY_TIMEOUT);
             match client.resolve(path(Path::ROOT.as_str())) {
-                Ok(Err(FileSystemError::NotFound)) => WAITING_CALLER_NOT_FOUND,
+                Err(CallError::Remote(FileSystemError::NotFound)) => WAITING_CALLER_NOT_FOUND,
                 _ => WAITING_CALLER_FAILED,
             }
         },
@@ -1007,7 +969,7 @@ fn a_mount_with_an_empty_path_is_refused() {
     let answer = file_system_mount::Client::new(PortTransport::new(&port))
         .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
         .mount(Str::new("").expect("empty fits"), ram_session());
-    test_harness::check_eq!(answer, Ok(Err(FileSystemError::InvalidPath)));
+    test_harness::check_eq!(answer, Err(CallError::Remote(FileSystemError::InvalidPath)));
 }
 
 #[test_harness::test]
@@ -1020,7 +982,6 @@ fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
 
     let opened = connect(window)
         .open(path(Path::ROOT.as_str()), AccessMode::Read, OpenFlags::NONE)
-        .expect("issued window still answers")
         .expect("issued window keeps its root");
     test_harness::check_eq!(opened.kind, NodeKind::Directory);
     let rerouted = session_for(SHADOW_MOUNT);
@@ -1045,10 +1006,7 @@ fn filesystem_reads_a_file_from_the_image() {
     test_harness::check_eq!(opened.kind, NodeKind::File);
     test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
 
-    let count = client
-        .read(opened.fd, 0, BUFFER_SIZE)
-        .expect("read call")
-        .expect("read ok");
+    let count = client.read(opened.fd, 0, BUFFER_SIZE).expect("read ok");
     test_harness::check_eq!(count, IMAGE_FILE_BODY.len() as u32);
     test_harness::check_eq!(buffer_head(&buffer, count as usize), IMAGE_FILE_BODY);
 }
@@ -1099,14 +1057,10 @@ fn filesystem_mounts_hold_separate_trees() {
         OpenFlags::CREATE,
     );
 
-    let absent = image
-        .open(path("/only-in-ram"), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
-    test_harness::check_eq!(absent, Err(FileSystemError::NotFound));
-    let foreign = ram
-        .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call");
-    test_harness::check_eq!(foreign, Err(FileSystemError::NotFound));
+    let absent = image.open(path("/only-in-ram"), AccessMode::Read, OpenFlags::NONE);
+    test_harness::check_eq!(absent, Err(CallError::Remote(FileSystemError::NotFound)));
+    let foreign = ram.open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE);
+    test_harness::check_eq!(foreign, Err(CallError::Remote(FileSystemError::NotFound)));
 }
 
 #[test_harness::test]
@@ -1118,17 +1072,9 @@ fn filesystem_hands_out_the_backing_window_of_an_image_file() {
         .expect("map data buffer");
 
     let opened = open(&client, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
-    let count = client
-        .read(opened.fd, 0, BUFFER_SIZE)
-        .expect("read call")
-        .expect("read ok");
+    let count = client.read(opened.fd, 0, BUFFER_SIZE).expect("read ok");
 
-    let window = MemoryRegion::from(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("window granted"),
-    );
+    let window = MemoryRegion::from(client.backing_memory(opened.fd).expect("window granted"));
     let mapped = window
         .map_full(UserMemFlags::ReadOnly)
         .expect("map backing window");
@@ -1150,20 +1096,18 @@ fn filesystem_serves_an_empty_file_from_the_image() {
     test_harness::check_eq!(opened.kind, NodeKind::File);
     test_harness::check_eq!(opened.size, 0);
 
-    let info = client.stat(opened.fd).expect("stat call").expect("stat ok");
+    let info = client.stat(opened.fd).expect("stat ok");
     test_harness::check_eq!(info.kind, NodeKind::File);
     test_harness::check_eq!(info.size, 0);
 
-    let count = client
-        .read(opened.fd, 0, BUFFER_SIZE)
-        .expect("read call")
-        .expect("read ok");
+    let count = client.read(opened.fd, 0, BUFFER_SIZE).expect("read ok");
     test_harness::check_eq!(count, 0);
 
-    let refused = client
-        .backing_memory(opened.fd)
-        .expect("backing_memory call");
-    test_harness::check_eq!(refused.err(), Some(FileSystemError::NotSupported));
+    let refused = client.backing_memory(opened.fd);
+    test_harness::check_eq!(
+        refused.err(),
+        Some(CallError::Remote(FileSystemError::NotSupported))
+    );
 }
 
 #[test_harness::test]
@@ -1176,10 +1120,11 @@ fn filesystem_has_no_backing_window_for_an_empty_ramfs_file() {
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    let refused = client
-        .backing_memory(opened.fd)
-        .expect("backing_memory call");
-    test_harness::check_eq!(refused.err(), Some(FileSystemError::NotSupported));
+    let refused = client.backing_memory(opened.fd);
+    test_harness::check_eq!(
+        refused.err(),
+        Some(CallError::Remote(FileSystemError::NotSupported))
+    );
 }
 
 #[test_harness::test]
@@ -1197,20 +1142,12 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     );
     write_all(&client, &data, &opened, 0, b"before");
 
-    let backing = MemoryRegion::from(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let backing = MemoryRegion::from(client.backing_memory(opened.fd).expect("backing granted"));
     let mapped = backing
         .map_full(UserMemFlags::ReadWrite)
         .expect("map ramfs backing");
     mapped.copy_in(b"mapped").expect("write through mapping");
-    let count = client
-        .read(opened.fd, 0, 6)
-        .expect("read call")
-        .expect("read ok");
+    let count = client.read(opened.fd, 0, 6).expect("read ok");
     test_harness::check_eq!(count, 6);
     test_harness::check_eq!(buffer_head(&data, 6), b"mapped");
 
@@ -1218,10 +1155,8 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     test_harness::check_eq!(buffer_head(&mapped, 6), b"server");
 
     data.copy_in(b"x").expect("payload into data buffer");
-    let beyond = client
-        .write(opened.fd, mapped.size_bytes(), 1)
-        .expect("write call");
-    test_harness::check_eq!(beyond, Err(FileSystemError::NoSpace));
+    let beyond = client.write(opened.fd, mapped.size_bytes(), 1);
+    test_harness::check_eq!(beyond, Err(CallError::Remote(FileSystemError::NoSpace)));
 
     let growing = open(
         &client,
@@ -1231,7 +1166,6 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     );
     let written = client
         .write(growing.fd, mapped.size_bytes(), 1)
-        .expect("write call")
         .expect("unmapped file grows");
     test_harness::check_eq!(written.count, 1);
 }
@@ -1246,12 +1180,7 @@ fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
     let opened = open(&client, "/sparse", AccessMode::ReadWrite, OpenFlags::CREATE);
     write_all(&client, &data, &opened, 0, b"head");
 
-    let backing = MemoryRegion::from(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let backing = MemoryRegion::from(client.backing_memory(opened.fd).expect("backing granted"));
     let mapped = backing
         .map_full(UserMemFlags::ReadWrite)
         .expect("map ramfs backing");
@@ -1260,14 +1189,10 @@ fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
     data.copy_in(b"tail").expect("payload into data buffer");
     let written = client
         .write(opened.fd, 16, 4)
-        .expect("write call")
         .expect("sparse write within capacity");
     test_harness::check_eq!(written.count, 4);
 
-    let count = client
-        .read(opened.fd, 0, 20)
-        .expect("read call")
-        .expect("read ok");
+    let count = client.read(opened.fd, 0, 20).expect("read ok");
     test_harness::check_eq!(count, 20);
     test_harness::check_eq!(buffer_head(&data, 20), b"head\0\0\0\0\0\0\0\0\0\0\0\0tail");
 }
@@ -1285,7 +1210,6 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
     mapped.copy_in(b"client").expect("initialize region");
     creator
         .create_backed(path("/client-region"), region, 6)
-        .expect("create_backed call")
         .expect("create backed file");
 
     let reader = connect(ram_session());
@@ -1299,30 +1223,19 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
         AccessMode::ReadWrite,
         OpenFlags::NONE,
     );
-    let count = reader
-        .read(opened.fd, 0, 6)
-        .expect("read call")
-        .expect("read ok");
+    let count = reader.read(opened.fd, 0, 6).expect("read ok");
     test_harness::check_eq!(count, 6);
     test_harness::check_eq!(buffer_head(&data, 6), b"client");
 
     mapped.copy_in(b"mapped").expect("change client mapping");
-    let count = reader
-        .read(opened.fd, 0, 6)
-        .expect("read call")
-        .expect("read ok");
+    let count = reader.read(opened.fd, 0, 6).expect("read ok");
     test_harness::check_eq!(count, 6);
     test_harness::check_eq!(buffer_head(&data, 6), b"mapped");
 
     write_all(&reader, &data, &opened, 0, b"server");
     test_harness::check_eq!(buffer_head(&mapped, 6), b"server");
 
-    let shared = MemoryRegion::from(
-        reader
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let shared = MemoryRegion::from(reader.backing_memory(opened.fd).expect("backing granted"));
     test_harness::check!(
         shared
             .duplicate(Rights::READ | Rights::TRANSFER, None)
@@ -1349,16 +1262,14 @@ fn occupy_mapping_slots(
     let mut occupied = Vec::new();
     for name in names {
         let opened = open(client, name, AccessMode::ReadWrite, OpenFlags::NONE);
-        let backed = client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call");
+        let backed = client.backing_memory(opened.fd);
         close(client, &opened);
         match backed {
             Ok(_) => {
                 occupied.push(name.clone());
             }
             Err(error) => {
-                test_harness::check_eq!(error, FileSystemError::NoSpace);
+                test_harness::check_eq!(error, CallError::Remote(FileSystemError::NoSpace));
                 break;
             }
         }
@@ -1373,10 +1284,7 @@ fn buffered_sessions(
     (0..count)
         .map(|_| {
             let client = connect(resolved(importer(), requirement, Path::ROOT.as_str()));
-            let granted = client
-                .acquire_buffer(BUFFER_SIZE)
-                .expect("acquire_buffer call");
-            granted.expect("buffer granted");
+            client.acquire_buffer(BUFFER_SIZE).expect("buffer granted");
             client
         })
         .collect()
@@ -1425,14 +1333,13 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
             region_carrying(PAYLOAD),
             PAYLOAD.len() as u64,
         )
-        .expect("create_backed call")
         .expect("registration outlives the refused mapping");
 
     let imported = open(&client, IMPORTED, AccessMode::ReadWrite, OpenFlags::NONE);
     let length = PAYLOAD.len() as u32;
     test_harness::check_eq!(
-        client.read(imported.fd, 0, length).expect("read call"),
-        Err(FileSystemError::NoSpace)
+        client.read(imported.fd, 0, length),
+        Err(CallError::Remote(FileSystemError::NoSpace))
     );
     let resident = open(
         &client,
@@ -1442,20 +1349,19 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     );
     let count = client
         .read(resident.fd, 0, 1)
-        .expect("read call")
         .expect("resident store reads");
     test_harness::check_eq!(count, 1);
     close(&client, &resident);
 
     drop(spare_sessions);
     let turn = Signal::create().expect("signal create");
-    let mut read = client.read(imported.fd, 0, length).expect("read call");
+    let mut read = client.read(imported.fd, 0, length);
     for _ in 0..REAP_ATTEMPTS {
         if read.is_ok() {
             break;
         }
         let _ = turn.wait(syscall::SIGNALED, REAP_SIGNAL_TIMEOUT);
-        read = client.read(imported.fd, 0, length).expect("read call");
+        read = client.read(imported.fd, 0, length);
     }
 
     let count = read.expect("degraded store maps on demand");
@@ -1467,35 +1373,29 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
 fn filesystem_refuses_to_change_the_image() {
     let client = connect(image_session());
 
-    let writable = client
-        .open(path(IMAGE_FILE), AccessMode::ReadWrite, OpenFlags::NONE)
-        .expect("open call");
-    test_harness::check_eq!(writable, Err(FileSystemError::ReadOnly));
+    let writable = client.open(path(IMAGE_FILE), AccessMode::ReadWrite, OpenFlags::NONE);
+    test_harness::check_eq!(writable, Err(CallError::Remote(FileSystemError::ReadOnly)));
 
-    let truncated = client
-        .open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::TRUNCATE)
-        .expect("open call");
-    test_harness::check_eq!(truncated, Err(FileSystemError::WrongMode));
+    let truncated = client.open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::TRUNCATE);
+    test_harness::check_eq!(
+        truncated,
+        Err(CallError::Remote(FileSystemError::WrongMode))
+    );
 
-    let created = client
-        .open(path("/fresh"), AccessMode::Write, OpenFlags::CREATE)
-        .expect("open call");
-    test_harness::check_eq!(created, Err(FileSystemError::ReadOnly));
+    let created = client.open(path("/fresh"), AccessMode::Write, OpenFlags::CREATE);
+    test_harness::check_eq!(created, Err(CallError::Remote(FileSystemError::ReadOnly)));
 
-    let removed = client
-        .unlink(path(IMAGE_FILE), NodeKind::File)
-        .expect("unlink call");
-    test_harness::check_eq!(removed, Err(FileSystemError::ReadOnly));
+    let removed = client.unlink(path(IMAGE_FILE), NodeKind::File);
+    test_harness::check_eq!(removed, Err(CallError::Remote(FileSystemError::ReadOnly)));
 
-    let absent = client
-        .unlink(path("/absent"), NodeKind::File)
-        .expect("unlink call");
-    test_harness::check_eq!(absent, Err(FileSystemError::NotFound));
+    let absent = client.unlink(path("/absent"), NodeKind::File);
+    test_harness::check_eq!(absent, Err(CallError::Remote(FileSystemError::NotFound)));
 
-    let through_a_file = client
-        .unlink(path("/testrunner/sample/inner"), NodeKind::File)
-        .expect("unlink call");
-    test_harness::check_eq!(through_a_file, Err(FileSystemError::NotADirectory));
+    let through_a_file = client.unlink(path("/testrunner/sample/inner"), NodeKind::File);
+    test_harness::check_eq!(
+        through_a_file,
+        Err(CallError::Remote(FileSystemError::NotADirectory))
+    );
 }
 
 #[test_harness::test]
@@ -1511,16 +1411,17 @@ fn filesystem_holds_a_descriptor_to_its_mode() {
     let count = write_all(&client, &buffer, &opened, 0, payload);
     test_harness::check_eq!(count, payload.len() as u32);
 
-    let read = client.read(opened.fd, 0, 4).expect("read call");
-    test_harness::check_eq!(read, Err(FileSystemError::WrongMode));
+    let read = client.read(opened.fd, 0, 4);
+    test_harness::check_eq!(read, Err(CallError::Remote(FileSystemError::WrongMode)));
 
-    let stated = client.stat(opened.fd).expect("stat call");
-    test_harness::check_eq!(stated, Err(FileSystemError::WrongMode));
+    let stated = client.stat(opened.fd);
+    test_harness::check_eq!(stated, Err(CallError::Remote(FileSystemError::WrongMode)));
 
-    let window = client
-        .backing_memory(opened.fd)
-        .expect("backing_memory call");
-    test_harness::check_eq!(window.err(), Some(FileSystemError::WrongMode));
+    let window = client.backing_memory(opened.fd);
+    test_harness::check_eq!(
+        window.err(),
+        Some(CallError::Remote(FileSystemError::WrongMode))
+    );
 
     let directory = open(
         &client,
@@ -1528,10 +1429,8 @@ fn filesystem_holds_a_descriptor_to_its_mode() {
         AccessMode::Write,
         OpenFlags::CREATE | OpenFlags::DIRECTORY,
     );
-    let listed = client
-        .list(directory.fd, DirCursor::START)
-        .expect("list call");
-    test_harness::check_eq!(listed, Err(FileSystemError::WrongMode));
+    let listed = client.list(directory.fd, DirCursor::START);
+    test_harness::check_eq!(listed, Err(CallError::Remote(FileSystemError::WrongMode)));
 }
 
 #[test_harness::test]
@@ -1555,12 +1454,11 @@ fn filesystem_appends_to_the_end_of_a_file() {
     buffer.copy_in(tail).expect("tail into the buffer");
     let written = client
         .write(opened.fd, APPEND_OFFSET, tail.len() as u32)
-        .expect("write call")
         .expect("write ok");
     test_harness::check_eq!(written.offset, head.len() as u64);
     test_harness::check_eq!(written.count, tail.len() as u32);
 
-    let info = client.stat(opened.fd).expect("stat call").expect("stat ok");
+    let info = client.stat(opened.fd).expect("stat ok");
     test_harness::check_eq!(info.size, (head.len() + tail.len()) as u64);
 }
 
@@ -1582,9 +1480,12 @@ fn filesystem_rejects_a_stale_descriptor_after_slot_reuse() {
         OpenFlags::CREATE,
     );
 
-    let refused = client.stat(stale.fd).expect("stat call");
-    test_harness::check_eq!(refused.err(), Some(FileSystemError::BadDescriptor));
-    let alive = client.stat(fresh.fd).expect("stat call").expect("stat ok");
+    let refused = client.stat(stale.fd);
+    test_harness::check_eq!(
+        refused.err(),
+        Some(CallError::Remote(FileSystemError::BadDescriptor))
+    );
+    let alive = client.stat(fresh.fd).expect("stat ok");
     test_harness::check_eq!(alive.kind, NodeKind::File);
 }
 
@@ -1599,11 +1500,14 @@ fn filesystem_isolates_descriptors_between_sessions() {
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    let mine = owner.stat(opened.fd).expect("stat call").expect("stat ok");
+    let mine = owner.stat(opened.fd).expect("stat ok");
     test_harness::check_eq!(mine.kind, NodeKind::File);
 
-    let foreign = stranger.stat(opened.fd).expect("stat call");
-    test_harness::check_eq!(foreign, Err(FileSystemError::BadDescriptor));
+    let foreign = stranger.stat(opened.fd);
+    test_harness::check_eq!(
+        foreign,
+        Err(CallError::Remote(FileSystemError::BadDescriptor))
+    );
 }
 
 #[test_harness::test]
@@ -1618,7 +1522,6 @@ fn filesystem_creates_nothing_for_a_call_without_a_reply_channel() {
     let client = connect(ram_session());
     let missing = client
         .open(path(UNANSWERED_PATH), AccessMode::Read, OpenFlags::NONE)
-        .expect("open call")
         .map(|opened| opened.kind);
     let created = open(
         &client,
@@ -1627,7 +1530,7 @@ fn filesystem_creates_nothing_for_a_call_without_a_reply_channel() {
         OpenFlags::CREATE,
     );
 
-    test_harness::check_eq!(missing, Err(FileSystemError::NotFound));
+    test_harness::check_eq!(missing, Err(CallError::Remote(FileSystemError::NotFound)));
     test_harness::check_eq!(created.kind, NodeKind::File);
 }
 
@@ -1641,7 +1544,7 @@ fn filesystem_serves_on_after_an_unknown_ordinal() {
         },
     );
     let refused = bogus.stat(NodeDescriptor::from_raw(0));
-    test_harness::check_eq!(refused.err(), Some(IpcError::PeerClosed));
+    test_harness::check_eq!(refused.err(), Some(CallError::Ipc(IpcError::PeerClosed)));
 
     let client = connect(ram_session());
     let opened = open(
@@ -1663,7 +1566,7 @@ fn filesystem_releases_the_reply_of_an_unparsed_frame() {
         },
     );
     let refused = malformed.stat(NodeDescriptor::from_raw(0));
-    test_harness::check_eq!(refused.err(), Some(IpcError::PeerClosed));
+    test_harness::check_eq!(refused.err(), Some(CallError::Ipc(IpcError::PeerClosed)));
 }
 
 fn send_unparsed_frame_with_capability<K: kernel_objects::ObjectKind>(
@@ -1723,35 +1626,25 @@ fn filesystem_does_not_pin_a_backing_for_a_call_without_a_reply_channel() {
     data.copy_in(b"x").expect("payload into data buffer");
     let grown = client
         .write(opened.fd, USERLAND_PAGE_SIZE, 1)
-        .expect("write call")
         .expect("a call without a reply channel does not pin");
     test_harness::check_eq!(grown.count, 1);
 
-    let backing = MemoryRegion::from(
-        client
-            .backing_memory(opened.fd)
-            .expect("backing_memory call")
-            .expect("backing granted"),
-    );
+    let backing = MemoryRegion::from(client.backing_memory(opened.fd).expect("backing granted"));
     let capacity = backing.inspect().expect("inspect backing").size_bytes;
     data.copy_in(b"y").expect("payload into data buffer");
-    let pinned = client.write(opened.fd, capacity, 1).expect("write call");
-    test_harness::check_eq!(pinned, Err(FileSystemError::NoSpace));
+    let pinned = client.write(opened.fd, capacity, 1);
+    test_harness::check_eq!(pinned, Err(CallError::Remote(FileSystemError::NoSpace)));
 }
 
 fn vends_a_buffer() -> bool {
     let client = connect(image_session());
-    let Ok(granted) = client.acquire_buffer(BUFFER_SIZE) else {
-        return false;
-    };
-    granted.is_ok()
+    client.acquire_buffer(BUFFER_SIZE).is_ok()
 }
 
 fn take_and_drop_session() {
     let client = connect(ram_session());
     let buffer = client
         .acquire_buffer(REAP_BUFFER_SIZE)
-        .expect("acquire_buffer call")
         .expect("buffer granted");
     drop(MemoryRegion::from(buffer));
 }
@@ -1788,11 +1681,12 @@ fn filesystem_reaps_only_the_session_of_the_gone_badge() {
         take_and_drop_session();
     }
 
-    let mine = keeper.stat(kept.fd).expect("stat call").expect("stat ok");
+    let mine = keeper.stat(kept.fd).expect("stat ok");
     test_harness::check_eq!(mine.kind, NodeKind::File);
-    let occupied = keeper
-        .acquire_buffer(BUFFER_SIZE)
-        .expect("acquire_buffer call");
-    test_harness::check_eq!(occupied.err(), Some(FileSystemError::AlreadyExists));
+    let occupied = keeper.acquire_buffer(BUFFER_SIZE);
+    test_harness::check_eq!(
+        occupied.err(),
+        Some(CallError::Remote(FileSystemError::AlreadyExists))
+    );
     drop(keeper_buffer);
 }

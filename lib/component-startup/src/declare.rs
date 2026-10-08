@@ -1,11 +1,9 @@
 use core::fmt;
 
-use component_abi::{Attributes, STARTUP_REQUEST_TIMEOUT, SessionError, component_startup};
-use ipc::wire::IpcError;
-use kernel_objects::{PortTransport, Session, kind};
+use component_abi::{SessionError, component_startup};
+use ipc::{CallError, wire::IpcError};
+use kernel_objects::{PortTransport, kind};
 use syscall::Handle;
-
-use crate::request::{RequestError, session};
 
 /// Требование, запрос которого завершился отказом, и причина отказа.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,11 +12,17 @@ pub struct StartupError {
     pub failure: StartupFailure,
 }
 
-/// Причина, по которой `request` не получил требование.
+/// Причина, по которой требование не получено.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupFailure {
-    /// Отказ в сессии требования.
-    Session(component_abi::SessionError),
+    /// Ни один экспорт не совпал с запросом.
+    Unbound,
+    /// Требование не объявлено, запрос недопустим либо совпало несколько экспортов.
+    Refused,
+    /// Провайдер экспорта снят навсегда.
+    Unavailable,
+    /// Повтор запроса заменил заявку либо у родителя не хватило ресурса.
+    NoSpace,
     /// Отказ транспорта либо истечение [`STARTUP_REQUEST_TIMEOUT`](crate::STARTUP_REQUEST_TIMEOUT).
     Ipc(IpcError),
     /// Стартового handle нет: его уже выдали, либо процесс запущен без него. Поле
@@ -27,9 +31,9 @@ pub enum StartupFailure {
 }
 
 /// Требования компонента, объявленные через `component_manifest!`.
-/// `request` получает их по стартовой сессии родителя.
-pub trait Requirements: Sized {
-    fn request(parent: Handle<kind::Port>) -> Result<Self, StartupError>;
+pub trait Requirements {
+    /// Строит требования по стартовой сессии `parent` без запросов к родителю.
+    fn from_parent(parent: Handle<kind::Port>) -> Self;
 }
 
 impl fmt::Display for StartupError {
@@ -47,15 +51,26 @@ impl fmt::Display for StartupError {
 
 impl core::error::Error for StartupError {}
 
+impl From<SessionError> for StartupFailure {
+    fn from(error: SessionError) -> Self {
+        match error {
+            SessionError::Unbound => Self::Unbound,
+            SessionError::Refused => Self::Refused,
+            SessionError::Unavailable => Self::Unavailable,
+            SessionError::NoSpace => Self::NoSpace,
+        }
+    }
+}
+
 /// Объявляет манифест компонента: требования и экспортируемые протоколы.
 ///
 /// Раскрытие даёт структуру с полем `parent` и полем на каждое требование, реализацию
 /// [`Requirements`] и запись манифеста в секции `.component.manifest`. Протокол назван типом,
 /// который порождает [`ipc::protocol!`].
 ///
-/// `session(P)` даёт поле `Option<Session<P>>`, `all(P)` - [`Providers<P>`](crate::Providers).
-/// Функция `request` запрашивает `session` без атрибутов, принимает `Unbound` как `None` и не
-/// запрашивает `all`.
+/// `session(P)` даёт поле [`Import<P>`](crate::Import), `all(P)` -
+/// [`Providers<P>`](crate::Providers). Построение структуры не обращается к родителю, сессию
+/// требования открывает вызов поля.
 ///
 /// `features: ["arm,pl031"]` называет признаки машины. Экспорты компонента доступны поиску, когда
 /// все его признаки опубликованы.
@@ -114,20 +129,13 @@ macro_rules! component_manifest {
         }
 
         impl $crate::Requirements for $name {
-            /// Запрашивает у родителя требования в порядке объявления.
-            fn request(
-                parent: $crate::Handle<$crate::kind::Port>,
-            ) -> ::core::result::Result<Self, $crate::StartupError> {
-                $($(
-                    let $requirement = $crate::component_manifest!(
-                        @request parent $requirement $kind($protocol)
-                    )?;
-                )*)?
-
-                ::core::result::Result::Ok(Self {
+            fn from_parent(parent: $crate::Handle<$crate::kind::Port>) -> Self {
+                Self {
                     parent: $crate::start_parent(parent),
-                    $($($requirement,)*)?
-                })
+                    $($($requirement: $crate::component_manifest!(
+                        @new parent $requirement $kind($protocol)
+                    ),)*)?
+                }
             }
         }
 
@@ -137,15 +145,13 @@ macro_rules! component_manifest {
             features [$($($feature),*)?]
         }
     };
-    (@field session($protocol:path)) => { ::core::option::Option<$crate::Session<$protocol>> };
+    (@field session($protocol:path)) => { $crate::Import<$protocol> };
     (@field all($protocol:path)) => { $crate::Providers<$protocol> };
-    (@request $parent:ident $requirement:ident session($protocol:path)) => {
-        $crate::start_session::<$protocol>($parent, stringify!($requirement))
+    (@new $parent:ident $requirement:ident session($protocol:path)) => {
+        $crate::Import::<$protocol>::new($parent, stringify!($requirement))
     };
-    (@request $parent:ident $requirement:ident all($protocol:path)) => {
-        ::core::result::Result::<_, $crate::StartupError>::Ok(
-            $crate::Providers::<$protocol>::new($parent, stringify!($requirement))
-        )
+    (@new $parent:ident $requirement:ident all($protocol:path)) => {
+        $crate::Providers::<$protocol>::new($parent, stringify!($requirement))
     };
 }
 
@@ -154,34 +160,13 @@ pub fn start_parent(parent: Handle<kind::Port>) -> component_startup::Client<Por
     component_startup::Client::new(PortTransport::new(parent))
 }
 
-#[doc(hidden)]
-pub fn start_session<P: ipc::Protocol>(
-    parent: Handle<kind::Port>,
-    requirement: &'static str,
-) -> Result<Option<Session<P>>, StartupError> {
-    match request_session(requirement, || {
-        session::<P>(
-            parent,
-            requirement,
-            Attributes::empty(),
-            STARTUP_REQUEST_TIMEOUT,
-        )
-    }) {
-        Err(StartupError {
-            failure: StartupFailure::Session(SessionError::Unbound),
-            ..
-        }) => Ok(None),
-        result => result.map(Some),
-    }
-}
-
 pub(crate) fn request_session<T>(
     requirement: &'static str,
-    mut request: impl FnMut() -> Result<T, RequestError>,
+    mut request: impl FnMut() -> Result<T, CallError<SessionError>>,
 ) -> Result<T, StartupError> {
     loop {
         match request() {
-            Err(RequestError::Ipc(IpcError::PeerClosed)) => {}
+            Err(CallError::Ipc(IpcError::PeerClosed)) => {}
             answer => return answered(requirement, answer),
         }
     }
@@ -189,31 +174,20 @@ pub(crate) fn request_session<T>(
 
 pub(crate) fn answered<T>(
     requirement: &'static str,
-    answer: Result<T, RequestError>,
+    answer: Result<T, CallError<SessionError>>,
 ) -> Result<T, StartupError> {
-    answer.map_err(|error| {
-        let failure = match error {
-            RequestError::Parent(error) => StartupFailure::Session(error),
-            RequestError::Ipc(error) => StartupFailure::Ipc(error),
-        };
-        failed(requirement, failure)
-    })
-}
-
-const fn failed(requirement: &'static str, failure: StartupFailure) -> StartupError {
-    StartupError {
+    answer.map_err(|error| StartupError {
         requirement,
-        failure,
-    }
+        failure: error.fold(StartupFailure::Ipc, StartupFailure::from),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use component_abi::SessionError;
-    use ipc::wire::IpcError;
+    use ipc::{CallError, wire::IpcError};
 
     use super::{StartupError, StartupFailure, request_session};
-    use crate::RequestError;
 
     #[test]
     fn only_peer_closed_retries_a_session_request() {
@@ -221,7 +195,7 @@ mod tests {
         let result = request_session("clocks", || {
             calls += 1;
             if calls == 1 {
-                Err(RequestError::Ipc(IpcError::PeerClosed))
+                Err(CallError::Ipc(IpcError::PeerClosed))
             } else {
                 Ok(42)
             }
@@ -231,13 +205,13 @@ mod tests {
         let mut calls = 0;
         let result = request_session::<u16>("clocks", || {
             calls += 1;
-            Err(RequestError::Parent(SessionError::Unbound))
+            Err(CallError::Remote(SessionError::Unbound))
         });
         assert_eq!(
             result,
             Err(StartupError {
                 requirement: "clocks",
-                failure: StartupFailure::Session(SessionError::Unbound)
+                failure: StartupFailure::Unbound
             })
         );
         assert_eq!(calls, 1);

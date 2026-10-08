@@ -39,18 +39,12 @@ fn nanos_per_op(rounds: u64, mut operation: impl FnMut()) -> u64 {
 }
 
 fn acquire(client: &file_system::Client<SessionTransport>) -> MemoryRegion {
-    let cap = client
-        .acquire_buffer(BENCH_BUFFER)
-        .expect("acquire_buffer call")
-        .expect("buffer granted");
+    let cap = client.acquire_buffer(BENCH_BUFFER).expect("buffer granted");
     MemoryRegion::from(cap)
 }
 
 fn fill(client: &file_system::Client<SessionTransport>, opened: &Opened, size: usize) {
-    let written = client
-        .write(opened.fd, 0, size as u32)
-        .expect("write call")
-        .expect("write ok");
+    let written = client.write(opened.fd, 0, size as u32).expect("write ok");
     test_harness::check_eq!(written.count, size as u32);
 }
 
@@ -64,18 +58,12 @@ fn measure_frame_plane(
     let len = size as u32;
 
     let read = nanos_per_op(rounds, || {
-        client
-            .read(opened.fd, 0, len)
-            .expect("read call")
-            .expect("read ok");
+        client.read(opened.fd, 0, len).expect("read ok");
     });
     test_harness::report!("fs {plane} read bytes={size} ns_per_op={read}");
 
     let write = nanos_per_op(rounds, || {
-        client
-            .write(opened.fd, 0, len)
-            .expect("write call")
-            .expect("write ok");
+        client.write(opened.fd, 0, len).expect("write ok");
     });
     test_harness::report!("fs {plane} write bytes={size} ns_per_op={write}");
 }
@@ -100,7 +88,7 @@ fn bench_call_floor() {
     );
 
     let stat = nanos_per_op(rounds_for(PROBE), || {
-        client.stat(opened.fd).expect("stat call").expect("stat ok");
+        client.stat(opened.fd).expect("stat ok");
     });
     test_harness::report!("fs call stat ns_per_op={stat}");
 }
@@ -159,12 +147,8 @@ fn bench_ramfs_promoted_plane() {
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::CREATE);
         // Ёмкость закрепляется по длине на момент выдачи. Файл наполняется до неё заранее.
         fill(&client, &opened, size);
-        let backing = MemoryRegion::from(
-            client
-                .backing_memory(opened.fd)
-                .expect("backing_memory call")
-                .expect("backing granted"),
-        );
+        let backing =
+            MemoryRegion::from(client.backing_memory(opened.fd).expect("backing granted"));
         let mapped = backing
             .map_full(UserMemFlags::ReadWrite)
             .expect("map promoted backing");
@@ -199,7 +183,6 @@ fn bench_ramfs_imported_plane() {
             .expect("create imported region");
         client
             .create_backed(path(name), region, size as u64)
-            .expect("create_backed call")
             .expect("create backed file");
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::NONE);
         measure_frame_plane(&client, &opened, "imported", size);
@@ -222,15 +205,11 @@ fn bench_ramfs_imported_scales_with_region() {
             .expect("create imported region");
         client
             .create_backed(path(name), region, PROBE as u64)
-            .expect("create_backed call")
             .expect("create backed file");
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::NONE);
 
         let read = nanos_per_op(rounds_for(PROBE), || {
-            client
-                .read(opened.fd, 0, PROBE as u32)
-                .expect("read call")
-                .expect("read ok");
+            client.read(opened.fd, 0, PROBE as u32).expect("read ok");
         });
         test_harness::report!(
             "fs imported read bytes={PROBE} region_pages={pages} ns_per_op={read}"

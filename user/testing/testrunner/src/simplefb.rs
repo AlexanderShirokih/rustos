@@ -8,7 +8,7 @@ use component_startup::Found;
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 use fdt_test::Token;
-use ipc::Protocol;
+use ipc::{CallError, Protocol};
 use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
 use platform_abi::{Description, DeviceId};
 use runtime::{Timeout, UserMemFlags};
@@ -392,12 +392,7 @@ fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
     for found in &framebuffers {
         let screen = opened(found);
         let dimension = screen.dimension().expect("dimension call");
-        let region = MemoryRegion::from(
-            screen
-                .acquire_surface()
-                .expect("acquire_surface call")
-                .expect("surface granted"),
-        );
+        let region = MemoryRegion::from(screen.acquire_surface().expect("surface granted"));
         let surface = region
             .map_full(UserMemFlags::ReadWrite)
             .expect("surface maps");
@@ -412,9 +407,9 @@ fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
             (channel(x, dimension.width) << SURFACE_RED_SHIFT)
                 | (channel(y, dimension.height) << SURFACE_GREEN_SHIFT)
         });
-        let gradient = screen.present(whole(dimension)).expect("present call");
+        let gradient = screen.present(whole(dimension));
         fill(&surface, dimension, rectangle, |_, _| RECTANGLE_COLOR);
-        let shown = screen.present(rectangle).expect("present call");
+        let shown = screen.present(rectangle);
 
         test_harness::check_eq!(gradient, Ok(()));
         test_harness::check_eq!(shown, Ok(()));
@@ -439,8 +434,8 @@ fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions(
         let refusal = (0..=SIMPLEFB_MEMORY / USERLAND_PAGE_SIZE).find_map(|_| {
             let screen = opened(found);
             let before = screen.present(whole(screen.dimension().expect("dimension call")));
-            test_harness::check_eq!(before, Ok(Err(DisplayError::NoSurface)));
-            match screen.acquire_surface().expect("acquire_surface call") {
+            test_harness::check_eq!(before, Err(CallError::Remote(DisplayError::NoSurface)));
+            match screen.acquire_surface() {
                 Ok(region) => {
                     screens.push((screen, MemoryRegion::from(region)));
                     None
@@ -451,12 +446,9 @@ fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions(
         let held = screens.len();
         drop(screens);
         let reopened = opened(found);
-        let regained = reopened
-            .acquire_surface()
-            .expect("acquire_surface call")
-            .map(drop);
+        let regained = reopened.acquire_surface().map(drop);
 
-        test_harness::check_eq!(refusal, Some(DisplayError::NoSpace));
+        test_harness::check_eq!(refusal, Some(CallError::Remote(DisplayError::NoSpace)));
         test_harness::check!(held >= 1);
         test_harness::check_eq!(regained, Ok(()));
         test_harness::report!("the framebuffer held {} surfaces", held);
