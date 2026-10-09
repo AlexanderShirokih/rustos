@@ -1,18 +1,30 @@
-//! Монотонные часы процесса.
+//! Монотонные часы процесса и снимок часов реального времени.
 //!
 //! Показания идут по тому же источнику и от той же точки отсчёта, что и дедлайны `timeout_ns`
 //! блокирующих операций, и разность двух замеров сравнима с переданным тайм-аутом.
 
 use core::{
     arch::asm,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{
+        AtomicU32, AtomicU64,
+        Ordering::{Acquire, Relaxed, Release},
+    },
+    time::Duration,
 };
 
 use syscall::Timeout;
 
 const NS_PER_SEC: u128 = 1_000_000_000;
 
+const REALTIME_EMPTY: u32 = 0;
+const REALTIME_WRITING: u32 = 1;
+const REALTIME_READY: u32 = 2;
+
 static CACHED_FREQUENCY: AtomicU64 = AtomicU64::new(0);
+
+static REALTIME_STATE: AtomicU32 = AtomicU32::new(REALTIME_EMPTY);
+static REALTIME_SECONDS: AtomicU64 = AtomicU64::new(0);
+static REALTIME_TAKEN: AtomicU64 = AtomicU64::new(0);
 
 /// Момент монотонных часов.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,6 +45,47 @@ impl Instant {
     pub const fn since(self, earlier: Self) -> Timeout {
         Timeout::from_ns(self.0.saturating_sub(earlier.0))
     }
+
+    /// Период счётчика часов, округлённый вверх до наносекунды.
+    pub fn resolution() -> Duration {
+        let period = NS_PER_SEC.div_ceil(u128::from(frequency().max(1)));
+        Duration::from_nanos(u64::try_from(period).unwrap_or(u64::MAX))
+    }
+
+    pub(crate) fn checked_add(self, duration: Duration) -> Option<Self> {
+        let ns = u64::try_from(duration.as_nanos()).ok()?;
+        self.0.checked_add(ns).map(Self)
+    }
+}
+
+/// Записывает снимок часов реального времени: `seconds` от эпохи Unix в текущий момент
+/// монотонных часов. `false` - снимок уже записан.
+pub fn install_realtime(seconds: u64) -> bool {
+    let taken = Instant::now();
+    if REALTIME_STATE
+        .compare_exchange(REALTIME_EMPTY, REALTIME_WRITING, Acquire, Relaxed)
+        .is_err()
+    {
+        return false;
+    }
+
+    REALTIME_SECONDS.store(seconds, Relaxed);
+    REALTIME_TAKEN.store(taken.0, Relaxed);
+    REALTIME_STATE.store(REALTIME_READY, Release);
+    true
+}
+
+/// Время от эпохи Unix, отсчитанное по монотонным часам от снимка [`install_realtime`].
+/// `None` - снимок не записан.
+pub fn realtime() -> Option<Duration> {
+    if REALTIME_STATE.load(Acquire) != REALTIME_READY {
+        return None;
+    }
+
+    let seconds = Duration::from_secs(REALTIME_SECONDS.load(Relaxed));
+    let taken = Instant(REALTIME_TAKEN.load(Relaxed));
+    let elapsed = Duration::from_nanos(Instant::now().since(taken).raw());
+    Some(seconds.saturating_add(elapsed))
 }
 
 const fn ticks_to_ns(ticks: u64, frequency: u64) -> u64 {
@@ -47,12 +100,12 @@ const fn ticks_to_ns(ticks: u64, frequency: u64) -> u64 {
 fn frequency() -> u64 {
     // Частота задана платформой на всё время работы, поэтому гонка на заполнении кэша
     // безобидна. Обе стороны пишут одно значение.
-    let cached = CACHED_FREQUENCY.load(Ordering::Relaxed);
+    let cached = CACHED_FREQUENCY.load(Relaxed);
     if cached != 0 {
         return cached;
     }
     let value = read_frequency();
-    CACHED_FREQUENCY.store(value, Ordering::Relaxed);
+    CACHED_FREQUENCY.store(value, Relaxed);
     value
 }
 

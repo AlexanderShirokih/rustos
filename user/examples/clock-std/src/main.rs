@@ -1,11 +1,15 @@
-//! Компонент композиции на стандартной библиотеке спрашивает время у драйвера RTC.
-//!
-//! Программа запрашивает сессию `rtc` у родителя тем же объявлением, что и программа без
-//! стандартной библиотеки.
+//! Программа на стандартной библиотеке устанавливает часы реального времени процесса по
+//! сессии `Rtc` и выводит время суток `SystemTime`.
+
+#![feature(molecular_ext)]
 
 use core::error::Error;
+use std::{
+    os::molecular,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use components::component_manifest;
+use components::{component_manifest, into_std_handle};
 use rtc_abi::rtc;
 
 component_manifest! {
@@ -16,7 +20,9 @@ component_manifest! {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let rtc = components::requirements::<ClockStartup>()?.rtc.open()?;
-    let seconds = rtc.client().now()?;
-    println!("rtc reads {seconds}");
+    molecular::install_realtime_clock(into_std_handle(rtc.into_handle()))?;
+
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    println!("system time {seconds}");
     Ok(())
 }

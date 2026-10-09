@@ -1,7 +1,7 @@
 diff -ruN a/std/Cargo.toml b/std/Cargo.toml
 --- a/std/Cargo.toml	2026-08-07 22:42:11.982085856 +0000
-+++ b/std/Cargo.toml	2026-08-10 18:37:47.249202613 +0000
-@@ -70,6 +70,13 @@
++++ b/std/Cargo.toml	2026-10-10 01:14:20.646696626 +0000
+@@ -70,6 +70,14 @@
      'rustc-dep-of-std',
  ], public = true }
  
@@ -11,6 +11,7 @@ diff -ruN a/std/Cargo.toml b/std/Cargo.toml
 +filesystem-abi = { path = "../../../../lib/filesystem-abi", features = ['rustc-dep-of-std'] }
 +filesystem-client = { path = "../../../../lib/filesystem-client", features = ['rustc-dep-of-std'] }
 +kernel-objects = { path = "../../../../lib/kernel-objects", features = ['rustc-dep-of-std'] }
++rtc-abi = { path = "../../../../lib/rtc-abi", features = ['rustc-dep-of-std'] }
 +
  [target.'cfg(target_os = "motor")'.dependencies]
  moto-rt = { version = "0.16", features = ['rustc-dep-of-std'], public = true }
@@ -40,8 +41,8 @@ diff -ruN a/std/src/os/mod.rs b/std/src/os/mod.rs
  #[cfg(target_os = "netbsd")]
 diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 --- a/std/src/os/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/os/molecular/mod.rs	2026-08-10 18:37:47.249314886 +0000
-@@ -0,0 +1,82 @@
++++ b/std/src/os/molecular/mod.rs	2026-10-10 01:28:01.966430401 +0000
+@@ -0,0 +1,92 @@
 +//! RustOS-specific definitions.
 +//!
 +//! Процесс получает ресурсы системы стартовым набором capability, который композиция выдаёт
@@ -114,6 +115,16 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +/// Установленный корень не заменяется, и повторный вызов возвращает `root` в `Err`.
 +pub fn install_filesystem_root(root: OwnedHandle) -> Result<(), OwnedHandle> {
 +    crate::sys::fs::install_root(root)
++}
++
++/// Устанавливает часы реального времени процесса по времени сессии `Rtc`, которое должно
++/// отсчитываться в секундах от эпохи Unix. До установки `SystemTime::now()` паникует.
++///
++/// Отказы:
++/// - `AlreadyExists` - часы уже установлены;
++/// - вид отказа IPC-транспорта - сессия не ответила за две секунды.
++pub fn install_realtime_clock(rtc: OwnedHandle) -> crate::io::Result<()> {
++    crate::sys::time::install_realtime_clock(rtc)
 +}
 +
 +/// Направляет `stdout` и `stderr` процесса в лог-сессию `session`.
@@ -197,8 +208,8 @@ diff -ruN a/std/src/sys/fs/mod.rs b/std/src/sys/fs/mod.rs
          use motor as imp;
 diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 --- a/std/src/sys/fs/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/fs/molecular.rs	2026-09-27 19:23:48.863214000 +0000
-@@ -0,0 +1,594 @@
++++ b/std/src/sys/fs/molecular.rs	2026-10-10 01:13:59.735573737 +0000
+@@ -0,0 +1,580 @@
 +//! Файловая поверхность RustOS поверх `filesystem-client`.
 +//!
 +//! Корень процесса - сессия маршрутизатора имён, которую программа один раз передаёт
@@ -211,7 +222,6 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags};
 +use filesystem_client::{Failure, FileSystem, FileSystemEnvironment, Listing, OpenNode};
 +use kernel_objects::{Port, Session};
-+use syscall_user::ipc::wire::IpcError;
 +
 +use crate::ffi::OsString;
 +use crate::fmt;
@@ -224,7 +234,7 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +use crate::sync::nonpoison::Mutex;
 +pub use crate::sys::fs::common::{Dir, exists};
 +use crate::sys::time::SystemTime;
-+use crate::sys::{unsupported, unsupported_err};
++use crate::sys::{transport_error, unsupported, unsupported_err};
 +
 +type Root = FileSystem<FileSystemEnvironment>;
 +
@@ -681,19 +691,6 @@ diff -ruN a/std/src/sys/fs/molecular.rs b/std/src/sys/fs/molecular.rs
 +    })
 +}
 +
-+fn transport_error(error: IpcError) -> io::Error {
-+    io::Error::from(match error {
-+        IpcError::Truncated
-+        | IpcError::FieldOrder
-+        | IpcError::MissingField
-+        | IpcError::InvalidValue => ErrorKind::InvalidData,
-+        IpcError::FrameOverflow | IpcError::TooManyHandles => ErrorKind::InvalidInput,
-+        IpcError::PeerClosed => ErrorKind::BrokenPipe,
-+        IpcError::Timeout => ErrorKind::TimedOut,
-+        IpcError::ResourceExhausted => ErrorKind::OutOfMemory,
-+    })
-+}
-+
 +pub fn readdir(p: &Path) -> io::Result<ReadDir> {
 +    let path = abi_path(p)?;
 +    let listing = with_root(|root| root.read_directory(path))?;
@@ -902,18 +899,20 @@ diff -ruN a/std/src/sys/pal/mod.rs b/std/src/sys/pal/mod.rs
          pub use self::motor::*;
 diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 --- a/std/src/sys/pal/molecular/mod.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/pal/molecular/mod.rs	2026-08-10 18:37:47.249510846 +0000
-@@ -0,0 +1,61 @@
++++ b/std/src/sys/pal/molecular/mod.rs	2026-10-10 01:14:10.995610749 +0000
+@@ -0,0 +1,77 @@
 +//! Платформенный слой RustOS.
 +//!
 +//! Работу выполняет крейт `runtime`: он же обслуживает userspace-программы вне `std`.
-+//! Здесь только точка входа и перенос futex наружу, где его ждут реализации синхронизации.
++//! Здесь точка входа, перенос futex наружу, где его ждут реализации синхронизации, и
++//! отображение отказов на `io::Error`, общее для подсистем.
 +
 +#![allow(unsafe_op_in_unsafe_fn)]
 +
 +pub use runtime::futex;
++use syscall_user::ipc::wire::IpcError;
 +
-+use crate::io;
++use crate::io::{self, ErrorKind};
 +
 +/// Точка входа программы: ядро передаёт handle стартового порта в `x0`.
 +#[cfg(not(test))]
@@ -960,6 +959,20 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +
 +pub fn unsupported_err() -> io::Error {
 +    io::Error::UNSUPPORTED_PLATFORM
++}
++
++/// `io::Error` вида, который соответствует отказу IPC-транспорта.
++pub fn transport_error(error: IpcError) -> io::Error {
++    io::Error::from(match error {
++        IpcError::Truncated
++        | IpcError::FieldOrder
++        | IpcError::MissingField
++        | IpcError::InvalidValue => ErrorKind::InvalidData,
++        IpcError::FrameOverflow | IpcError::TooManyHandles => ErrorKind::InvalidInput,
++        IpcError::PeerClosed => ErrorKind::BrokenPipe,
++        IpcError::Timeout => ErrorKind::TimedOut,
++        IpcError::ResourceExhausted => ErrorKind::OutOfMemory,
++    })
 +}
 +
 +pub fn abort_internal() -> ! {
@@ -1025,13 +1038,13 @@ diff -ruN a/std/src/sys/stdio/mod.rs b/std/src/sys/stdio/mod.rs
          pub use motor::*;
 diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 --- a/std/src/sys/stdio/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/stdio/molecular.rs	2026-08-10 18:37:47.249583975 +0000
-@@ -0,0 +1,136 @@
++++ b/std/src/sys/stdio/molecular.rs	2026-10-10 01:14:10.996278578 +0000
+@@ -0,0 +1,122 @@
 +use runtime::log;
-+use syscall_user::ipc::wire::IpcError;
 +
 +use crate::io::{self, BorrowedCursor};
 +use crate::str;
++use crate::sys::transport_error;
 +
 +pub struct Stdin;
 +pub struct Stdout;
@@ -1073,7 +1086,7 @@ diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 +    }
 +
 +    fn flush(&mut self) -> io::Result<()> {
-+        STDOUT.flush().map_err(map_ipc_error)
++        STDOUT.flush().map_err(transport_error)
 +    }
 +}
 +
@@ -1089,7 +1102,7 @@ diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 +    }
 +
 +    fn flush(&mut self) -> io::Result<()> {
-+        STDERR.flush().map_err(map_ipc_error)
++        STDERR.flush().map_err(transport_error)
 +    }
 +}
 +
@@ -1102,7 +1115,7 @@ diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 +impl io::Write for PanicOutput {
 +    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 +        let text = valid_prefix(buf)?;
-+        log::write(text).map_err(map_ipc_error)?;
++        log::write(text).map_err(transport_error)?;
 +        Ok(text.len())
 +    }
 +
@@ -1113,7 +1126,7 @@ diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 +
 +fn write_to(stream: &log::Stream, buf: &[u8]) -> io::Result<usize> {
 +    let text = valid_prefix(buf)?;
-+    stream.write(text).map_err(map_ipc_error)?;
++    stream.write(text).map_err(transport_error)?;
 +    Ok(text.len())
 +}
 +
@@ -1129,20 +1142,6 @@ diff -ruN a/std/src/sys/stdio/molecular.rs b/std/src/sys/stdio/molecular.rs
 +            "stream did not contain valid UTF-8",
 +        )),
 +    }
-+}
-+
-+fn map_ipc_error(error: IpcError) -> io::Error {
-+    let kind = match error {
-+        IpcError::PeerClosed => io::ErrorKind::BrokenPipe,
-+        IpcError::Timeout => io::ErrorKind::TimedOut,
-+        IpcError::ResourceExhausted | IpcError::TooManyHandles => io::ErrorKind::QuotaExceeded,
-+        IpcError::FrameOverflow => io::ErrorKind::InvalidInput,
-+        IpcError::Truncated
-+        | IpcError::FieldOrder
-+        | IpcError::MissingField
-+        | IpcError::InvalidValue => io::ErrorKind::InvalidData,
-+    };
-+    io::Error::from(kind)
 +}
 +
 +pub const STDIN_BUF_SIZE: usize = 0;
@@ -1240,7 +1239,7 @@ diff -ruN a/std/src/sys/thread/mod.rs b/std/src/sys/thread/mod.rs
 diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 --- a/std/src/sys/thread/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/thread/molecular.rs	2026-08-10 19:14:46.640556524 +0000
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,85 @@
 +use crate::io;
 +use crate::ptr::NonNull;
 +use crate::thread::ThreadInit;
@@ -1324,20 +1323,7 @@ diff -ruN a/std/src/sys/thread/molecular.rs b/std/src/sys/thread/molecular.rs
 +}
 +
 +pub fn sleep(dur: Duration) {
-+    // Адрес futex локален вызову, и разбудить по нему некому: ожидание истекает сроком.
-+    // Ложное пробуждение возвращает управление раньше, поэтому срок досчитывается.
-+    let idle = runtime::Futex::new(0);
-+    let started = runtime::Instant::now();
-+    let mut remaining = dur;
-+    while runtime::futex_wait(&idle, 0, Some(remaining)) {
-+        let elapsed = Duration::from_nanos(runtime::Instant::now().as_nanos().wrapping_sub(
-+            started.as_nanos(),
-+        ));
-+        let Some(left) = dur.checked_sub(elapsed) else {
-+            return;
-+        };
-+        remaining = left;
-+    }
++    runtime::sleep(dur);
 +}
 diff -ruN a/std/src/sys/thread_local/key/molecular.rs b/std/src/sys/thread_local/key/molecular.rs
 --- a/std/src/sys/thread_local/key/molecular.rs	1970-01-01 00:00:00.000000000 +0000
@@ -1391,36 +1377,53 @@ diff -ruN a/std/src/sys/thread_local/mod.rs b/std/src/sys/thread_local/mod.rs
              mod tests;
 diff -ruN a/std/src/sys/time/mod.rs b/std/src/sys/time/mod.rs
 --- a/std/src/sys/time/mod.rs	2026-08-07 22:42:12.142085866 +0000
-+++ b/std/src/sys/time/mod.rs	2026-08-10 18:37:47.249583975 +0000
-@@ -3,6 +3,18 @@
++++ b/std/src/sys/time/mod.rs	2026-10-10 01:13:46.318695367 +0000
+@@ -3,6 +3,13 @@
          mod hermit;
          use hermit as imp;
      }
 +    target_os = "molecular" => {
 +        mod molecular;
-+        // Стенных часов процессу система не выдаёт: время суток держит драйвер RTC, и берётся
-+        // оно сессией его контракта, а не платформенным слоем.
-+        #[expect(unused)]
-+        mod unsupported;
-+
-+        mod imp {
-+            pub use super::molecular::Instant;
-+            pub use super::unsupported::{SystemTime, UNIX_EPOCH};
-+        }
++        use molecular as imp;
++        // Время суток отсчитывается от часов процесса, которые программа устанавливает по
++        // времени сессии `Rtc`.
++        pub use molecular::install_realtime_clock;
 +    }
      target_os = "motor" => {
          use moto_rt::time as imp;
      }
 diff -ruN a/std/src/sys/time/molecular.rs b/std/src/sys/time/molecular.rs
 --- a/std/src/sys/time/molecular.rs	1970-01-01 00:00:00.000000000 +0000
-+++ b/std/src/sys/time/molecular.rs	2026-08-10 18:37:47.249780906 +0000
-@@ -0,0 +1,26 @@
++++ b/std/src/sys/time/molecular.rs	2026-10-10 01:28:01.965850626 +0000
+@@ -0,0 +1,96 @@
++//! Часы `std` поверх часов процесса в `runtime`: монотонные часы и время суток.
++
++use kernel_objects::{Port, Session};
++use rtc_abi::rtc;
++use runtime::Timeout;
++
++use crate::io::{self, ErrorKind};
++use crate::os::molecular::OwnedHandle;
++use crate::sys::transport_error;
 +use crate::time::Duration;
++
++const NOW_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
++
++const ALREADY_INSTALLED: io::Error = io::const_error!(
++    ErrorKind::AlreadyExists,
++    "the process realtime clock is already installed"
++);
 +
 +/// Монотонные часы: тот же источник и та же точка отсчёта, что у сроков блокирующих
 +/// операций ядра.
 +#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 +pub struct Instant(Duration);
++
++/// Время суток: длительность от эпохи Unix.
++#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
++pub struct SystemTime(Duration);
++
++pub const UNIX_EPOCH: SystemTime = SystemTime(Duration::from_secs(0));
 +
 +impl Instant {
 +    pub fn now() -> Instant {
@@ -1439,5 +1442,53 @@ diff -ruN a/std/src/sys/time/molecular.rs b/std/src/sys/time/molecular.rs
 +
 +    pub fn checked_sub_duration(&self, other: &Duration) -> Option<Instant> {
 +        Some(Instant(self.0.checked_sub(*other)?))
++    }
++}
++
++impl SystemTime {
++    pub const MAX: SystemTime = SystemTime(Duration::MAX);
++
++    pub const MIN: SystemTime = SystemTime(Duration::ZERO);
++
++    /// Время по часам реального времени процесса. До их установки `install_realtime_clock`
++    /// вызов паникует.
++    pub fn now() -> SystemTime {
++        match runtime::realtime() {
++            Some(time) => SystemTime(time),
++            None => panic!("the process realtime clock is not installed"),
++        }
++    }
++
++    pub fn sub_time(&self, other: &SystemTime) -> Result<Duration, Duration> {
++        self.0.checked_sub(other.0).ok_or_else(|| other.0 - self.0)
++    }
++
++    pub fn checked_add_duration(&self, other: &Duration) -> Option<SystemTime> {
++        Some(SystemTime(self.0.checked_add(*other)?))
++    }
++
++    pub fn checked_sub_duration(&self, other: &Duration) -> Option<SystemTime> {
++        Some(SystemTime(self.0.checked_sub(*other)?))
++    }
++}
++
++/// Устанавливает часы реального времени процесса по времени сессии `Rtc`. Установленные часы
++/// не заменяются, и повторный вызов отвечает `AlreadyExists`.
++pub fn install_realtime_clock(rtc: OwnedHandle) -> io::Result<()> {
++    if runtime::realtime().is_some() {
++        return Err(ALREADY_INSTALLED);
++    }
++
++    let port = Port::from(rtc.into_issued().assume_kind());
++    let seconds = Session::<rtc::Protocol>::from_handle(port)
++        .client()
++        .with_wait(NOW_REPLY_TIMEOUT)
++        .now()
++        .map_err(transport_error)?;
++
++    if runtime::install_realtime(seconds) {
++        Ok(())
++    } else {
++        Err(ALREADY_INSTALLED)
 +    }
 +}

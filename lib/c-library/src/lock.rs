@@ -12,6 +12,7 @@ use alloc::boxed::Box;
 use core::{
     ptr,
     sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed},
+    time::Duration,
 };
 
 use runtime::RawMutex;
@@ -44,6 +45,16 @@ impl Lock {
 
     pub(crate) fn try_acquire(&self) -> bool {
         let acquired = self.mutex.try_lock();
+
+        if acquired {
+            self.take(1);
+        }
+
+        acquired
+    }
+
+    pub(crate) fn acquire_timeout(&self, timeout: Duration) -> bool {
+        let acquired = self.mutex.lock_timeout(timeout);
 
         if acquired {
             self.take(1);

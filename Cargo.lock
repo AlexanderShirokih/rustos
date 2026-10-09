@@ -338,6 +338,7 @@ name = "rtc-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "rustc-std-workspace-core",
 ]
 
 [[package]]

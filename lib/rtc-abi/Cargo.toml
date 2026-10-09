@@ -5,8 +5,12 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+rustc-dep-of-std = ["dep:core", "ipc/rustc-dep-of-std"]
+
 [dependencies]
 ipc = { workspace = true }
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 
 [lints]
 workspace = true

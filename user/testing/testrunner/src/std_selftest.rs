@@ -1,8 +1,9 @@
 //! Прогон стенда стандартной библиотеки.
 //!
 //! Тестовый родитель запускает программу на `std`, как любого ребёнка, со своей стартовой
-//! сессией и журналом. Программа сообщает итог проверок кодом выхода, а подробности провала
-//! уходят в журнал сообщением паники.
+//! сессией, журналом и портом `Rtc`, на котором поток теста отвечает заданным временем.
+//! Программа сообщает итог проверок кодом выхода, время суток после установки часов - строкой
+//! `time N`, а подробности провала уходят в журнал сообщением паники.
 
 use alloc::string::String;
 
@@ -21,6 +22,7 @@ use crate::{
         start_component_relay, stop_component_relay,
     },
     parent::{Answer, Child, Parent},
+    selftest_clock::{RTC_REQUIREMENT, SelftestClock, printed_time},
 };
 
 const SELFTEST_ENTRY: &str = "/std-selftest/exec";
@@ -42,6 +44,7 @@ fn std_selftest_program_passes_its_checks() {
         .session(SELFTEST_BADGE)
         .expect("selftest log session");
     let budget = process_bytes(&program(SELFTEST_ENTRY)) + HEAP_SLACK_BYTES;
+    let clock = SelftestClock::start(PROCESS_TIMEOUT);
     let parent = Parent::start();
 
     let selftest = parent.add(
@@ -54,6 +57,7 @@ fn std_selftest_program_passes_its_checks() {
                     source: Some(root_view()),
                 },
             )
+            .requirement(RTC_REQUIREMENT, clock.answer())
             .budget(budget),
     );
 
@@ -65,10 +69,14 @@ fn std_selftest_program_passes_its_checks() {
         })
     );
 
-    let lines = await_component_lines(INSTANCE_NAME, 3);
+    let times = clock.finish();
+
+    let lines = await_component_lines(INSTANCE_NAME, 4);
     stop_component_relay();
     test_harness::check_eq!(lines.first().map(String::as_str), Some("selftest started"));
     test_harness::check_eq!(lines.last().map(String::as_str), Some("checks passed"));
+    let time = lines.iter().find_map(|line| printed_time(line));
+    test_harness::check!(time.is_some_and(|time| times.contains(&time)));
 
     drop(failing);
 }

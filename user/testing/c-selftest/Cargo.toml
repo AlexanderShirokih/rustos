@@ -19,6 +19,7 @@ bench = false
 c-library = { workspace = true }
 component-startup = { workspace = true }
 filesystem-abi = { workspace = true }
+rtc-abi = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

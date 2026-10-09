@@ -71,9 +71,9 @@ struct Parked<'a> {
     expected: Primitive,
 }
 
-enum Deadline {
+pub(crate) enum Deadline {
     Infinite,
-    Bounded { start: Instant, budget: u64 },
+    Until(Instant),
 }
 
 static TABLE: [Bucket; BUCKETS] = [const { Bucket::new() }; BUCKETS];
@@ -128,23 +128,19 @@ impl Bucket {
 }
 
 impl Deadline {
-    fn new(timeout: Option<Duration>) -> Self {
-        match timeout {
-            None => Self::Infinite,
-            Some(limit) => Self::Bounded {
-                start: Instant::now(),
-                budget: u64::try_from(limit.as_nanos()).unwrap_or(u64::MAX),
-            },
-        }
+    pub(crate) fn after(timeout: Option<Duration>) -> Self {
+        timeout
+            .and_then(|limit| Instant::now().checked_add(limit))
+            .map_or(Self::Infinite, Self::Until)
     }
 
     fn remaining(&self) -> Option<Timeout> {
         match *self {
             Self::Infinite => Some(Timeout::INFINITE),
-            Self::Bounded { start, budget } => budget
-                .checked_sub(Instant::now().since(start).raw())
-                .filter(|left| *left > 0)
-                .map(Timeout::from_ns),
+            Self::Until(end) => {
+                let left = end.since(Instant::now());
+                (left.raw() > 0).then_some(left)
+            }
         }
     }
 }
@@ -153,7 +149,11 @@ impl Deadline {
 /// пробуждение по его адресу. `None` - ждать бессрочно. `false` - истёк
 /// `timeout`, `true` - любой другой исход (в том числе ложное пробуждение).
 pub fn futex_wait(futex: &Futex, expected: Primitive, timeout: Option<Duration>) -> bool {
-    wait_until(futex, expected, &Deadline::new(timeout), || {})
+    wait_until(futex, expected, &Deadline::after(timeout), || {})
+}
+
+pub(crate) fn wait_deadline(futex: &Futex, expected: Primitive, deadline: &Deadline) -> bool {
+    wait_until(futex, expected, deadline, || {})
 }
 
 /// Тестовый разрез [`futex_wait`]: `between` вызывается в окне между проверкой
@@ -165,7 +165,7 @@ pub fn futex_wait_interleaved(
     timeout: Option<Duration>,
     between: impl FnOnce(),
 ) -> bool {
-    wait_until(futex, expected, &Deadline::new(timeout), between)
+    wait_until(futex, expected, &Deadline::after(timeout), between)
 }
 
 /// Тестовый разрез [`futex_wait`]: ожидание без слота в бакете - путь, на
@@ -177,7 +177,7 @@ pub fn futex_wait_without_slot(
     timeout: Option<Duration>,
 ) -> bool {
     let bucket = bucket_for(address_of(futex));
-    let deadline = Deadline::new(timeout);
+    let deadline = Deadline::after(timeout);
 
     loop {
         if let Some(outcome) = slotless_round(futex, expected, bucket, &deadline) {

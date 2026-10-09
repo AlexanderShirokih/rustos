@@ -6,7 +6,9 @@
 //! Sysroot должна подготовить `cargo xtask libc-src` до сборки пакета.
 
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -15,70 +17,126 @@ use crate::{Error, error::cargo_variable};
 
 pub(crate) const SYSROOT_VARIABLE: &str = "MOLECULAR_LIBC_SYSROOT";
 
-/// Компилирует C-исходники пакета в статическую библиотеку `name` и передаёт её компоновщику.
+/// C-исходники пакета, которые компилируются в его статическую библиотеку.
 ///
-/// Пути `sources` берутся от каталога пакета. Уровень оптимизации и отладочная информация
-/// следуют профилю cargo.
-pub fn compile_c(name: &str, sources: &[&str]) -> Result<(), Error> {
-    let arch = ArchSysroot::from_env()?;
-    let out_dir = PathBuf::from(cargo_variable("OUT_DIR")?);
-    let opt_level = cargo_variable("OPT_LEVEL")?;
-    let debug = env::var("DEBUG").is_ok_and(|value| value != "false" && value != "0");
-
-    let mut objects = Vec::new();
-    for source in sources {
-        println!("cargo:rerun-if-changed={source}");
-        let stem = Path::new(source)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| Error::SourceName((*source).to_string()))?;
-        let object = out_dir.join(format!("{name}-{stem}.o"));
-        let mut clang = Command::new("clang");
-        clang
-            .args(&arch.cflags)
-            .arg("-nostdlibinc")
-            .arg("-isystem")
-            .arg(arch.dir.join("include"))
-            .arg(format!("-O{opt_level}"))
-            .args(["-ffunction-sections", "-fdata-sections", "-Wall", "-Werror"])
-            .args(debug.then_some("-g"))
-            .arg("-c")
-            .arg(source)
-            .arg("-o")
-            .arg(&object);
-        run(&mut clang, format!("clang {source}"))?;
-        objects.push(object);
-    }
-
-    let archive = out_dir.join(format!("lib{name}.a"));
-    // Архив собирается заново: `ar` дописывает члены в существующий.
-    let _ = fs::remove_file(&archive);
-    let mut ar = Command::new(&arch.archiver);
-    ar.arg("crs").arg(&archive).args(&objects);
-    run(&mut ar, format!("ar lib{name}.a"))?;
-
-    println!("cargo:rustc-link-search=native={}", out_dir.display());
-    println!("cargo:rustc-link-lib=static={name}");
-    Ok(())
-}
-
-/// Передаёт компоновщику `libc.a` библиотеки C.
-///
-/// Компоновщик берёт библиотеку из sysroot при сборке программы, в rlib пакета она не входит.
-pub fn link_libc() -> Result<(), Error> {
-    let arch = ArchSysroot::from_env()?;
-    println!(
-        "cargo:rustc-link-search=native={}",
-        arch.dir.join("lib").display()
-    );
-    println!("cargo:rustc-link-lib=static:-bundle=c");
-    Ok(())
+/// Исходники компилируются с флагами архитектуры из sysroot и заголовками библиотеки C.
+/// Уровень оптимизации и отладочная информация следуют профилю cargo. Пути исходников и
+/// каталогов заголовков берутся от каталога пакета.
+pub struct CSources<'a> {
+    name: &'a str,
+    sources: &'a [&'a str],
+    definitions: Vec<&'a str>,
+    include_dirs: Vec<PathBuf>,
+    foreign: bool,
 }
 
 struct ArchSysroot {
     dir: PathBuf,
     cflags: Vec<String>,
     archiver: String,
+}
+
+impl<'a> CSources<'a> {
+    /// Библиотека `name` из исходников `sources` собственного кода пакета.
+    ///
+    /// Предупреждение компилятора в собственном коде останавливает сборку.
+    pub fn new(name: &'a str, sources: &'a [&'a str]) -> Self {
+        Self {
+            name,
+            sources,
+            definitions: Vec::new(),
+            include_dirs: Vec::new(),
+            foreign: false,
+        }
+    }
+
+    /// Определяет макрос во всех исходниках библиотеки.
+    ///
+    /// `definition` имеет форму аргумента `-D` у `clang`: `NAME` или `NAME=value`.
+    pub fn define(mut self, definition: &'a str) -> Self {
+        self.definitions.push(definition);
+        self
+    }
+
+    /// Добавляет каталог поиска заголовков перед заголовками библиотеки C.
+    ///
+    /// Изменение файла в каталоге пересобирает библиотеку.
+    pub fn include_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.include_dirs.push(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Отмечает исходники как сторонний код, предупреждения в котором сборку не останавливают.
+    pub fn foreign(mut self) -> Self {
+        self.foreign = true;
+        self
+    }
+
+    /// Компилирует исходники в статическую библиотеку и передаёт её компоновщику.
+    pub fn compile(self) -> Result<(), Error> {
+        let name = self.name;
+        let arch = ArchSysroot::from_env()?;
+        let out_dir = PathBuf::from(cargo_variable("OUT_DIR")?);
+        let opt_level = cargo_variable("OPT_LEVEL")?;
+        let debug = env::var("DEBUG").is_ok_and(|value| value != "false" && value != "0");
+
+        let warnings: &[&str] = if self.foreign {
+            &["-w"]
+        } else {
+            &["-Wall", "-Werror"]
+        };
+
+        for dir in &self.include_dirs {
+            println!("cargo:rerun-if-changed={}", dir.display());
+        }
+
+        let mut objects = Vec::new();
+        for source in self.sources {
+            println!("cargo:rerun-if-changed={source}");
+            let stem = Path::new(source)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| Error::SourceName((*source).to_string()))?;
+            let object = out_dir.join(format!("{name}-{stem}.o"));
+            let mut clang = Command::new("clang");
+            clang
+                .args(&arch.cflags)
+                .arg("-nostdlibinc")
+                .args(
+                    self.include_dirs
+                        .iter()
+                        .flat_map(|dir| [OsStr::new("-I"), dir.as_os_str()]),
+                )
+                .arg("-isystem")
+                .arg(arch.dir.join("include"))
+                .args(
+                    self.definitions
+                        .iter()
+                        .map(|definition| format!("-D{definition}")),
+                )
+                .arg(format!("-O{opt_level}"))
+                .args(["-ffunction-sections", "-fdata-sections"])
+                .args(warnings)
+                .args(debug.then_some("-g"))
+                .arg("-c")
+                .arg(source)
+                .arg("-o")
+                .arg(&object);
+            run(&mut clang, format!("clang {source}"))?;
+            objects.push(object);
+        }
+
+        let archive = out_dir.join(format!("lib{name}.a"));
+        // Архив собирается заново: `ar` дописывает члены в существующий.
+        let _ = fs::remove_file(&archive);
+        let mut ar = Command::new(&arch.archiver);
+        ar.arg("crs").arg(&archive).args(&objects);
+        run(&mut ar, format!("ar lib{name}.a"))?;
+
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-lib=static={name}");
+        Ok(())
+    }
 }
 
 impl ArchSysroot {
@@ -99,6 +157,19 @@ impl ArchSysroot {
             archiver: archiver.trim().to_string(),
         })
     }
+}
+
+/// Подключает `libc.a` из sysroot к компоновке каждой программы, зависящей от пакета.
+///
+/// Архив не копируется в rlib пакета.
+pub fn link_libc() -> Result<(), Error> {
+    let arch = ArchSysroot::from_env()?;
+    println!(
+        "cargo:rustc-link-search=native={}",
+        arch.dir.join("lib").display()
+    );
+    println!("cargo:rustc-link-lib=static:-bundle=c");
+    Ok(())
 }
 
 fn read_sysroot_file(path: PathBuf) -> Result<String, Error> {

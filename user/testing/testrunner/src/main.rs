@@ -72,6 +72,7 @@ mod resource_exhaustion;
 mod resource_split;
 mod ring_transport;
 mod rootkeeper_system;
+mod selftest_clock;
 mod signal;
 #[cfg(target_arch = "aarch64")]
 mod simd_state;

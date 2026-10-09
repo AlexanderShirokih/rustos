@@ -22,15 +22,17 @@
 
 use std::{
     cell::Cell,
+    io::ErrorKind,
     os::molecular,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use components::{StartupError, component_manifest, into_std_handle};
 use filesystem_abi::namespace;
-use kernel_objects::Signal;
+use kernel_objects::{Port, Signal};
+use rtc_abi::rtc;
 use syscall::{SIGNALED, SyscallError, WakeCount};
 
 mod filesystem;
@@ -39,6 +41,7 @@ component_manifest! {
     struct SelftestStartup {
         requirements: {
             namespace: session(namespace::Protocol),
+            rtc: session(rtc::Protocol),
         },
     }
 }
@@ -57,9 +60,9 @@ mod local {
 
 fn main() -> Result<(), StartupError> {
     println!("selftest started");
-    let namespace = components::requirements::<SelftestStartup>()?
-        .namespace
-        .open()?;
+    let requirements = components::requirements::<SelftestStartup>()?;
+    let namespace = requirements.namespace.open()?;
+    let rtc = requirements.rtc.open()?;
     the_start_handle_is_handed_out_once();
     filesystem::a_path_before_the_root_is_not_connected();
     filesystem::the_root_is_installed(namespace.into_handle());
@@ -67,6 +70,9 @@ fn main() -> Result<(), StartupError> {
     an_owned_handle_closes_its_capability();
     heap_serves_growing_collections();
     monotonic_clock_moves_forward();
+    the_realtime_clock_is_installed(rtc.into_handle());
+    a_second_realtime_clock_is_refused();
+    system_time_follows_the_monotonic_clock();
     mutex_hands_out_exclusive_access();
     threads_share_state_under_a_mutex();
     a_thread_hands_back_its_value();
@@ -142,6 +148,40 @@ fn monotonic_clock_moves_forward() {
         "duration arithmetic disagrees with the clock"
     );
     println!("monotonic clock advanced by {elapsed:?}");
+}
+
+fn the_realtime_clock_is_installed(rtc: Port) {
+    molecular::install_realtime_clock(into_std_handle(rtc))
+        .expect("the first realtime clock is installed");
+}
+
+fn a_second_realtime_clock_is_refused() {
+    let spare = into_std_handle(Port::create().expect("the port is created"));
+
+    assert_eq!(
+        molecular::install_realtime_clock(spare).map_err(|error| error.kind()),
+        Err(ErrorKind::AlreadyExists),
+        "a second realtime clock replaces the first"
+    );
+}
+
+fn system_time_follows_the_monotonic_clock() {
+    const NAP: Duration = Duration::from_millis(20);
+
+    let before = SystemTime::now();
+    thread::sleep(NAP);
+    let after = SystemTime::now();
+    assert!(
+        after
+            .duration_since(before)
+            .is_ok_and(|passed| passed >= NAP),
+        "system time advanced by less than the nap"
+    );
+
+    let since_epoch = after
+        .duration_since(UNIX_EPOCH)
+        .expect("system time follows the epoch");
+    println!("time {}", since_epoch.as_secs());
 }
 
 fn mutex_hands_out_exclusive_access() {

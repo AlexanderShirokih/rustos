@@ -1,6 +1,6 @@
 //! Платформенный слой процесса userspace: куча, futex и синхронизация, локальные данные
-//! потока, запуск потоков, монотонные часы, стартовый handle, неявные импорты компонента и
-//! журнал.
+//! потока, запуск и сон потоков, монотонные часы и снимок часов реального времени, стартовый
+//! handle, неявные импорты компонента и журнал.
 //!
 //! Каждый из этих механизмов держит состояние процесса и существует в процессе в единственном
 //! экземпляре. Программа со стандартной библиотекой получает их через неё, программа без неё -
@@ -28,7 +28,7 @@ pub mod thread;
 pub mod tls;
 
 pub(crate) use atomic_handle::restore;
-pub use clock::Instant;
+pub use clock::{Instant, install_realtime, realtime};
 pub use futex::{
     Futex, futex_bucket, futex_wait, futex_wait_interleaved, futex_wait_without_slot, futex_wake,
     futex_wake_all,
@@ -54,4 +54,4 @@ pub use syscall_user::{
     signal_create, signal_set, signal_wait_many, signal_wait_one, thread_create, thread_exit,
     thread_exit_code, thread_self, thread_terminate, thread_yield,
 };
-pub use thread::{JoinHandle, spawn, spawn_owned};
+pub use thread::{JoinHandle, sleep, spawn, spawn_owned};

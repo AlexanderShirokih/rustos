@@ -1,4 +1,5 @@
 //! Запуск потока в текущем процессе: стек отдельным регионом и вход по трамплину вызывающего.
+//! Сон потока по монотонным часам.
 //!
 //! Стек - анонимный регион `MemoryAllocate`, и под его нижней границей ядро оставляет
 //! неотображённую страницу. Запись в эту страницу завершает процесс отказом доступа. Rust-код
@@ -9,7 +10,7 @@
 //! снимают с вызывающего передачу состояния через сырой указатель.
 
 use alloc::boxed::Box;
-use core::ptr::NonNull;
+use core::{ptr::NonNull, time::Duration};
 
 use syscall::{
     Handle, MEMORY_ALLOCATE_GUARD_PAGE, PAGE_SIZE, Priority, SIGNALED, SyscallError, Timeout,
@@ -17,6 +18,7 @@ use syscall::{
 };
 
 use crate::{
+    futex::{Deadline, Futex, wait_deadline},
     process::metering_handle,
     svc::{
         IssuedHandle, memory_allocate, memory_free, process_self, signal_wait_one, thread_create,
@@ -260,6 +262,15 @@ extern "C" fn run_owned(payload: usize) -> u32 {
 /// `entry(arg)` и завершается её кодом возврата.
 pub fn spawn(entry: extern "C" fn(usize) -> u32, arg: usize) -> Result<JoinHandle, SyscallError> {
     Builder::new().spawn(entry, arg)
+}
+
+/// Приостанавливает вызывающий поток не меньше чем на `duration` по монотонным часам.
+pub fn sleep(duration: Duration) {
+    // Адрес futex локален вызову, и ожидание истекает сроком. Ложное пробуждение возвращает
+    // управление раньше, и ожидание продолжается до того же срока.
+    let idle = Futex::new(0);
+    let deadline = Deadline::after(Some(duration));
+    while wait_deadline(&idle, 0, &deadline) {}
 }
 
 /// Дескриптор запущенного потока владеет его хэндлом и стеком.

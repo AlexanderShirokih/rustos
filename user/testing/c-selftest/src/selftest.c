@@ -1,4 +1,5 @@
-#define _POSIX_C_SOURCE 200809L
+/* Заголовки picolibc объявляют CLOCK_MONOTONIC под _GNU_SOURCE. */
+#define _GNU_SOURCE
 
 #include <dirent.h>
 #include <errno.h>
@@ -13,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Код выхода после всех проверок: отличим от успеха `main` и от провала. */
@@ -46,6 +49,14 @@
 #define FILE_BLOCKS      8
 #define FILE_BLOCK_BYTES 512u
 #define FILE_LINES       32
+
+/* Часы: наносекунды в секунде и наибольшее допустимое разрешение. */
+#define NS_PER_SEC        1000000000L
+#define MAX_RESOLUTION_NS 1000000L
+
+/* Короткий срок, который истекает, и далёкий срок, до которого приходит уведомление. */
+#define SHORT_WAIT_NS     (50L * 1000L * 1000L)
+#define LONG_WAIT_SECONDS 5
 
 _Static_assert(PTHREAD_KEYS_MAX >= _POSIX_THREAD_KEYS_MAX, "pthread.h offers the POSIX minimum of keys");
 
@@ -101,6 +112,13 @@ static atomic_int     once_calls;
 static int            once_result;
 
 static FILE *shared_stream;
+
+/* Условная переменная со сроком и условие, которое меняет уведомляющий поток. */
+struct timed_condition {
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+    int             changed;
+};
 
 static const struct refusal refusals[] = {
     { "NotFound", ENOENT },
@@ -950,6 +968,202 @@ static void check_threads(void)
     check_key_exhaustion();
 }
 
+static int64_t nanoseconds_of(const struct timespec *time)
+{
+    return (int64_t)time->tv_sec * NS_PER_SEC + time->tv_nsec;
+}
+
+/* Срок по часам `clock` через `seconds` и `nanoseconds`, меньшие секунды, от текущего момента. */
+static struct timespec deadline_after(clockid_t clock, time_t seconds, long nanoseconds)
+{
+    struct timespec deadline = { 0 };
+
+    clock_gettime(clock, &deadline);
+    deadline.tv_sec += seconds;
+    deadline.tv_nsec += nanoseconds;
+    if (deadline.tv_nsec >= NS_PER_SEC) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= NS_PER_SEC;
+    }
+
+    return deadline;
+}
+
+static int passed(clockid_t clock, const struct timespec *deadline)
+{
+    struct timespec now = { 0 };
+
+    return clock_gettime(clock, &now) == 0 && nanoseconds_of(&now) >= nanoseconds_of(deadline);
+}
+
+static void check_monotonic_clock(void)
+{
+    struct timespec first = { 0 };
+    struct timespec second = { 0 };
+
+    check(clock_gettime(CLOCK_MONOTONIC, &first) == 0 && clock_gettime(CLOCK_MONOTONIC, &second) == 0 &&
+              nanoseconds_of(&second) >= nanoseconds_of(&first),
+          "CLOCK_MONOTONIC does not go back");
+
+    struct timespec monotonic = { 0 };
+    struct timespec realtime = { 0 };
+
+    check(clock_getres(CLOCK_MONOTONIC, &monotonic) == 0 && clock_getres(CLOCK_REALTIME, &realtime) == 0 &&
+              nanoseconds_of(&monotonic) == nanoseconds_of(&realtime) && nanoseconds_of(&monotonic) >= 1 &&
+              nanoseconds_of(&monotonic) <= MAX_RESOLUTION_NS,
+          "both clocks share a resolution from 1 ns to 1 ms");
+
+    errno = 0;
+    check(fails_with(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &first), EINVAL),
+          "clock_gettime of an unknown clock fails with EINVAL");
+}
+
+static void check_sleep(void)
+{
+    struct timespec interval = { .tv_sec = 0, .tv_nsec = SHORT_WAIT_NS };
+    struct timespec deadline = deadline_after(CLOCK_MONOTONIC, 0, SHORT_WAIT_NS);
+
+    check(nanosleep(&interval, NULL) == 0 && passed(CLOCK_MONOTONIC, &deadline), "nanosleep waits out its interval");
+
+    interval.tv_nsec = NS_PER_SEC;
+    errno = 0;
+    check(fails_with(nanosleep(&interval, NULL), EINVAL), "nanosleep with tv_nsec of a whole second fails with EINVAL");
+    check(sleep(0) == 0, "sleep of zero seconds returns");
+}
+
+static void check_realtime_before_clock(void)
+{
+    struct timespec now = { 0 };
+    struct timeval  day = { 0 };
+
+    errno = 0;
+    check(fails_with(clock_gettime(CLOCK_REALTIME, &now), ENOTCONN),
+          "CLOCK_REALTIME before the clock fails with ENOTCONN");
+    errno = 0;
+    check(fails_with(gettimeofday(&day, NULL), ENOTCONN), "gettimeofday before the clock fails with ENOTCONN");
+    check(time(NULL) == (time_t)-1, "time before the clock returns -1");
+    check(timespec_get(&now, TIME_UTC) == 0, "timespec_get before the clock fails");
+
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t  cond = PTHREAD_COND_INITIALIZER;
+    struct timespec past = { 0 };
+
+    check(pthread_mutex_timedlock(&mutex, &past) == EINVAL, "pthread_mutex_timedlock before the clock fails with EINVAL");
+    check(pthread_mutex_lock(&mutex) == 0 && pthread_cond_timedwait(&cond, &mutex, &past) == EINVAL &&
+              pthread_mutex_unlock(&mutex) == 0,
+          "PTHREAD_COND_INITIALIZER counts deadlines by CLOCK_REALTIME and fails with EINVAL before the clock");
+}
+
+static void *change_condition(void *arg)
+{
+    struct timed_condition *condition = arg;
+
+    pthread_mutex_lock(&condition->mutex);
+    condition->changed = 1;
+    pthread_cond_signal(&condition->cond);
+    pthread_mutex_unlock(&condition->mutex);
+
+    return NULL;
+}
+
+static void check_timed_conditions(void)
+{
+    struct timed_condition condition = { .changed = 0 };
+    pthread_condattr_t     attr;
+    clockid_t              clock = CLOCK_MONOTONIC;
+
+    check(pthread_condattr_init(&attr) == 0 && pthread_condattr_getclock(&attr, &clock) == 0 && clock == CLOCK_REALTIME,
+          "condition attributes count deadlines by CLOCK_REALTIME by default");
+    check(pthread_condattr_setclock(&attr, CLOCK_PROCESS_CPUTIME_ID) == EINVAL,
+          "pthread_condattr_setclock rejects an unknown clock");
+    check(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0 && pthread_condattr_getclock(&attr, &clock) == 0 &&
+              clock == CLOCK_MONOTONIC && pthread_cond_init(&condition.cond, &attr) == 0 &&
+              init_kind(&condition.mutex, PTHREAD_MUTEX_ERRORCHECK),
+          "pthread_condattr_setclock selects CLOCK_MONOTONIC");
+    pthread_condattr_destroy(&attr);
+
+    struct timespec deadline = deadline_after(CLOCK_MONOTONIC, 0, SHORT_WAIT_NS);
+
+    pthread_mutex_lock(&condition.mutex);
+    check(pthread_cond_timedwait(&condition.cond, &condition.mutex, &deadline) == ETIMEDOUT &&
+              passed(CLOCK_MONOTONIC, &deadline) && pthread_mutex_unlock(&condition.mutex) == 0,
+          "pthread_cond_timedwait by CLOCK_MONOTONIC times out holding the mutex");
+
+    pthread_t notifier;
+    int       result = 0;
+
+    deadline = deadline_after(CLOCK_MONOTONIC, LONG_WAIT_SECONDS, 0);
+    pthread_mutex_lock(&condition.mutex);
+    int created = pthread_create(&notifier, NULL, change_condition, &condition) == 0;
+
+    while (created && !condition.changed && result == 0) {
+        result = pthread_cond_timedwait(&condition.cond, &condition.mutex, &deadline);
+    }
+
+    int changed = condition.changed;
+    int early = !passed(CLOCK_MONOTONIC, &deadline);
+
+    pthread_mutex_unlock(&condition.mutex);
+    check(created && joined_with(notifier, NULL) && result == 0 && changed && early,
+          "pthread_cond_timedwait returns on a signal before its deadline");
+    pthread_cond_destroy(&condition.cond);
+    pthread_mutex_destroy(&condition.mutex);
+}
+
+void selftest_before_clock(void)
+{
+    check_monotonic_clock();
+    check_sleep();
+    check_realtime_before_clock();
+    check_timed_conditions();
+}
+
+/* `pthread_mutex_timedlock` из чужого потока со сроком через SHORT_WAIT_NS. Отказ по сроку раньше
+ * срока даёт -1. */
+static void *timedlock_foreign(void *arg)
+{
+    struct timespec deadline = deadline_after(CLOCK_REALTIME, 0, SHORT_WAIT_NS);
+    int             result = pthread_mutex_timedlock(arg, &deadline);
+
+    if (result == 0) {
+        pthread_mutex_unlock(arg);
+    }
+
+    if (result == ETIMEDOUT && !passed(CLOCK_REALTIME, &deadline)) {
+        result = -1;
+    }
+
+    return (void *)(intptr_t)result;
+}
+
+/* Время суток и pthread_mutex_timedlock после установки часов реального времени. Строка
+ * `time N` выводит показание time. */
+static void check_realtime_clock(void)
+{
+    struct timespec realtime = { 0 };
+    struct timespec utc = { 0 };
+    struct timeval  day = { 0 };
+    time_t          now = time(NULL);
+
+    check(now != (time_t)-1 && clock_gettime(CLOCK_REALTIME, &realtime) == 0 && realtime.tv_sec >= now &&
+              gettimeofday(&day, NULL) == 0 && day.tv_sec >= realtime.tv_sec &&
+              timespec_get(&utc, TIME_UTC) == TIME_UTC && utc.tv_sec >= day.tv_sec,
+          "time, CLOCK_REALTIME, gettimeofday and timespec_get read one realtime clock");
+    printf("time %lld\n", (long long)now);
+    fflush(stdout);
+
+    pthread_mutex_t mutex;
+    struct timespec invalid = { .tv_sec = 0, .tv_nsec = NS_PER_SEC };
+    struct timespec past = { 0 };
+
+    check(init_kind(&mutex, PTHREAD_MUTEX_ERRORCHECK) && pthread_mutex_timedlock(&mutex, &invalid) == EINVAL,
+          "pthread_mutex_timedlock with tv_nsec of a whole second fails with EINVAL");
+    check(pthread_mutex_timedlock(&mutex, &past) == 0, "pthread_mutex_timedlock with a past deadline takes a free mutex");
+    check(foreign(timedlock_foreign, &mutex, ETIMEDOUT) && pthread_mutex_unlock(&mutex) == 0,
+          "pthread_mutex_timedlock times out on a mutex another thread holds");
+    pthread_mutex_destroy(&mutex);
+}
+
 static void write_marker(const char *marker)
 {
     write(2, marker, strlen(marker));
@@ -973,6 +1187,7 @@ int selftest_main(int argc, char **argv)
     check_unaligned_buffers();
     check_files();
     check_threads();
+    check_realtime_clock();
     if (failures != 0) {
         exit(1);
     }

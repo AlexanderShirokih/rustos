@@ -19,6 +19,7 @@ bench = false
 components = { workspace = true }
 filesystem-abi = { workspace = true }
 kernel-objects = { workspace = true }
+rtc-abi = { workspace = true }
 syscall = { workspace = true }
 syscall-user = { workspace = true }
 

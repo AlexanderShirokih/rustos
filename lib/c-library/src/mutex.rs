@@ -5,7 +5,11 @@
 
 use core::{ffi::c_int, mem::MaybeUninit};
 
-use crate::{errno::Errno, lock::Lock};
+use crate::{
+    clock::{self, Clock},
+    errno::Errno,
+    lock::Lock,
+};
 
 // Значения определены в `pthread.c` константами и не меняются.
 unsafe extern "C" {
@@ -39,6 +43,18 @@ impl Mutex {
 
     fn recursive(&self) -> bool {
         self.kind == c_library_pthread_mutex_recursive
+    }
+
+    fn relock(&self) -> Option<c_int> {
+        if !self.checks_owner() || !self.lock.owned() {
+            return None;
+        }
+
+        if !self.recursive() {
+            return Some(Errno::Deadlock.code());
+        }
+
+        Some(reenter(self))
     }
 }
 
@@ -77,16 +93,38 @@ extern "C" fn pthread_mutex_lock(mutex: Option<&Mutex>) -> c_int {
         return Errno::InvalidArgument.code();
     };
 
-    if mutex.checks_owner() && mutex.lock.owned() {
-        if !mutex.recursive() {
-            return Errno::Deadlock.code();
-        }
-
-        return reenter(mutex);
+    if let Some(status) = mutex.relock() {
+        return status;
     }
 
     mutex.lock.acquire();
     0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn c_library_mutex_timedlock(
+    mutex: Option<&Mutex>,
+    seconds: i64,
+    nanoseconds: i64,
+) -> c_int {
+    let Some(mutex) = mutex else {
+        return Errno::InvalidArgument.code();
+    };
+
+    let timeout = match clock::remaining(Clock::Realtime, seconds, nanoseconds) {
+        Ok(timeout) => timeout,
+        Err(error) => return error.code(),
+    };
+
+    if let Some(status) = mutex.relock() {
+        return status;
+    }
+
+    if mutex.lock.acquire_timeout(timeout) {
+        0
+    } else {
+        Errno::TimedOut.code()
+    }
 }
 
 #[unsafe(no_mangle)]

@@ -23,9 +23,10 @@ use core::{
         AtomicU32,
         Ordering::{Acquire, Relaxed, Release},
     },
+    time::Duration,
 };
 
-use crate::futex::{futex_wait, futex_wake, futex_wake_all};
+use crate::futex::{Deadline, futex_wait, futex_wake, futex_wake_all, wait_deadline};
 
 /// Взаимоисключение потоков на одном слове без защищаемого значения.
 ///
@@ -84,7 +85,14 @@ impl RawMutex {
             return;
         }
 
-        self.lock_contended();
+        self.lock_contended(&Deadline::Infinite);
+    }
+
+    /// Блокирует до захвата мьютекса вызывающим потоком не дольше `timeout`. `false` - мьютекс
+    /// не освободился до срока.
+    pub fn lock_timeout(&self, timeout: Duration) -> bool {
+        self.state.compare_exchange(0, 1, Acquire, Relaxed).is_ok()
+            || self.lock_contended(&Deadline::after(Some(timeout)))
     }
 
     /// Захватывает свободный мьютекс без ожидания. `false` - мьютекс занят.
@@ -103,12 +111,14 @@ impl RawMutex {
         }
     }
 
-    fn lock_contended(&self) {
+    fn lock_contended(&self, deadline: &Deadline) -> bool {
         loop {
             if self.state.swap(2, Acquire) == 0 {
-                return;
+                return true;
             }
-            futex_wait(&self.state, 2, None);
+            if !wait_deadline(&self.state, 2, deadline) {
+                return false;
+            }
         }
     }
 }
@@ -186,18 +196,44 @@ impl RawCondvar {
     /// Вызывающий поток держит `mutex`, захваченный [`RawMutex::lock`].
     pub unsafe fn wait(&self, mutex: &RawMutex) {
         // SAFETY: контракт передан вызывающему.
-        unsafe { self.wait_interleaved(mutex, || {}) }
+        unsafe { self.wait_deadline(mutex, &Deadline::Infinite, || {}) };
     }
 
-    /// Тестовый разрез [`Self::wait`]: `between` вызывается в окне между
+    /// Ждёт, как [`Self::wait`], не дольше `timeout`. `mutex` захвачен снова при любом
+    /// исходе. `false` - истёк срок.
+    ///
+    /// # Safety
+    ///
+    /// См. [`Self::wait`].
+    pub unsafe fn wait_timeout(&self, mutex: &RawMutex, timeout: Duration) -> bool {
+        // SAFETY: контракт передан вызывающему.
+        unsafe { self.wait_deadline(mutex, &Deadline::after(Some(timeout)), || {}) }
+    }
+
+    /// Тестовый разрез [`Self::wait_timeout`]: `between` вызывается в окне между
     /// отпусканием мьютекса и парковкой - там, где waiter уже снял счётчик
-    /// уведомлений, но ещё не спит.
+    /// уведомлений, но ещё не спит. `None` - ждать бессрочно.
     ///
     /// # Safety
     ///
     /// См. [`Self::wait`].
     #[doc(hidden)]
-    pub unsafe fn wait_interleaved(&self, mutex: &RawMutex, between: impl FnOnce()) {
+    pub unsafe fn wait_interleaved(
+        &self,
+        mutex: &RawMutex,
+        timeout: Option<Duration>,
+        between: impl FnOnce(),
+    ) -> bool {
+        // SAFETY: контракт передан вызывающему.
+        unsafe { self.wait_deadline(mutex, &Deadline::after(timeout), between) }
+    }
+
+    unsafe fn wait_deadline(
+        &self,
+        mutex: &RawMutex,
+        deadline: &Deadline,
+        between: impl FnOnce(),
+    ) -> bool {
         self.waiters.fetch_add(1, Relaxed);
         // Счётчик снимается под мьютексом, под которым меняется и условие.
         let expected = self.notifications.load(Relaxed);
@@ -205,7 +241,7 @@ impl RawCondvar {
         // SAFETY: вызывающий держит `mutex` по контракту функции.
         unsafe { mutex.unlock() };
         between();
-        futex_wait(&self.notifications, expected, None);
+        let notified = wait_deadline(&self.notifications, expected, deadline);
 
         // Последнее обращение к памяти переменной, после него `destroy` может её освободить.
         if self.waiters.fetch_sub(1, Release) == DESTROYING | 1 {
@@ -213,6 +249,7 @@ impl RawCondvar {
         }
 
         mutex.lock();
+        notified
     }
 
     /// Снимает с ожидания waiter, припаркованный на момент вызова.
@@ -276,7 +313,7 @@ impl Condvar {
         // Мьютекс освобождает ожидание вместо `Drop` у guard.
         mem::forget(guard);
         // SAFETY: guard удерживал `mutex.raw`.
-        unsafe { self.raw.wait_interleaved(&mutex.raw, between) };
+        unsafe { self.raw.wait_interleaved(&mutex.raw, None, between) };
 
         MutexGuard {
             mutex,

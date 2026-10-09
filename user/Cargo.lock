@@ -18,6 +18,7 @@ dependencies = [
  "filesystem-abi",
  "filesystem-client",
  "log-abi",
+ "rtc-abi",
  "runtime",
  "syscall",
  "userland-build",
@@ -30,6 +31,7 @@ dependencies = [
  "c-library",
  "component-startup",
  "filesystem-abi",
+ "rtc-abi",
  "userland-build",
 ]
 
@@ -504,6 +506,7 @@ dependencies = [
  "components",
  "filesystem-abi",
  "kernel-objects",
+ "rtc-abi",
  "syscall",
  "syscall-user",
  "userland-build",

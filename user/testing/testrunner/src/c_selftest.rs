@@ -1,8 +1,9 @@
 //! Прогон стенда библиотеки C.
 //!
 //! Тестовый родитель запускает C-программу, как любого ребёнка, со своей стартовой сессией,
-//! журналом и корнем пространства имён, под которым смонтирована отказывающая файловая система.
-//! Стенд сообщает итог проверок кодом выхода, а путь `exit` - маркерами
+//! журналом, корнем пространства имён, под которым смонтирована отказывающая файловая система, и
+//! портом `Rtc`, на котором поток теста отвечает заданным временем. Стенд сообщает итог проверок
+//! кодом выхода, время суток после установки часов - строкой `time N`, а путь `exit` - маркерами
 //! обработчиков `atexit` в обратном порядке регистрации и последней строкой вывода, которую
 //! выталкивает завершение процесса. Строки, которые потоки стенда пишут одновременно, приходят
 //! раньше маркеров в любом порядке, но каждая целиком. Запас кучи сверх образа меньше запроса,
@@ -25,6 +26,7 @@ use crate::{
         start_component_relay, stop_component_relay,
     },
     parent::{Answer, Child, Parent},
+    selftest_clock::{RTC_REQUIREMENT, SelftestClock, printed_time},
 };
 
 const SELFTEST_ENTRY: &str = "/c-selftest/exec";
@@ -54,6 +56,7 @@ fn c_selftest_program_passes_its_checks_and_exits_through_atexit() {
         .session(C_SELFTEST_BADGE)
         .expect("selftest log session");
     let budget = process_bytes(&program(SELFTEST_ENTRY)) + HEAP_SLACK_BYTES;
+    let clock = SelftestClock::start(PROCESS_TIMEOUT);
     let parent = Parent::start();
 
     let selftest = parent.add(
@@ -66,6 +69,7 @@ fn c_selftest_program_passes_its_checks_and_exits_through_atexit() {
                     source: Some(root_view()),
                 },
             )
+            .requirement(RTC_REQUIREMENT, clock.answer())
             .budget(budget),
     );
 
@@ -76,18 +80,22 @@ fn c_selftest_program_passes_its_checks_and_exits_through_atexit() {
             outcome: Outcome::Exit(PASSED_EXIT_CODE),
         })
     );
+    let times = clock.finish();
 
     let mut expected: Vec<String> = (0..PRINTING_THREADS)
         .flat_map(|thread| {
             (0..PRINTED_LINES).map(move |line| format!("thread {thread} line {line}"))
         })
         .collect();
-    let mut lines = await_component_lines(INSTANCE_NAME, expected.len() + EXIT_LINES.len());
+    let mut lines = await_component_lines(INSTANCE_NAME, expected.len() + 1 + EXIT_LINES.len());
     stop_component_relay();
-    let exit_lines = lines.split_off(expected.len().min(lines.len()));
+    let mut tail = lines.split_off(expected.len().min(lines.len())).into_iter();
     lines.sort();
     expected.sort();
     test_harness::check_eq!(lines, expected);
+    let time = tail.next().as_deref().and_then(printed_time);
+    test_harness::check!(time.is_some_and(|time| times.contains(&time)));
+    let exit_lines: Vec<String> = tail.collect();
     let exit_lines: Vec<&str> = exit_lines.iter().map(String::as_str).collect();
     test_harness::check_eq!(exit_lines, EXIT_LINES);
 

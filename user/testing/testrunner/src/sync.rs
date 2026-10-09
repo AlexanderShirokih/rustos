@@ -1,10 +1,13 @@
 //! E2E проверка userspace `Mutex`/`Condvar` под контенцией из EL0:
 //! рабочие потоки спавнятся через `spawn` в текущем процессе.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::{
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    time::Duration,
+};
 
 use kernel_objects::Signal;
-use runtime::{Condvar, Instant, Mutex, RawCondvar, RawMutex, Timeout, spawn};
+use runtime::{Condvar, Instant, Mutex, RawCondvar, RawMutex, Timeout, sleep, spawn};
 use syscall::{SIGNALED, WakeCount};
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -317,7 +320,7 @@ extern "C" fn teardown_waiter(arg: usize) -> u32 {
     shared.mutex.lock();
     // SAFETY: поток держит `shared.mutex`.
     unsafe {
-        shared.condvar.wait_interleaved(&shared.mutex, || {
+        shared.condvar.wait_interleaved(&shared.mutex, None, || {
             shared.in_window.notify_all().expect("report the window");
             let _ = shared.notified.wait(SIGNALED, JOIN_TIMEOUT);
             let _ = shared.pause.wait(SIGNALED, STEAL_WINDOW);
@@ -366,4 +369,131 @@ fn raw_condvar_destroy_waits_for_notified_waiter() {
         .expect("waiter joins before timeout");
 
     test_harness::check!(!shared.destroyed_in_window.load(Ordering::Acquire));
+}
+
+const SHORT_WAIT: Duration = Duration::from_millis(50);
+const LONG_WAIT: Duration = Duration::from_secs(5);
+
+const HOLD_PAUSE: Duration = Duration::from_millis(20);
+
+struct Timed {
+    mutex: RawMutex,
+    condvar: RawCondvar,
+    waiting: Signal,
+    done: AtomicBool,
+}
+
+impl Timed {
+    fn new() -> Self {
+        Self {
+            mutex: RawMutex::new(),
+            condvar: RawCondvar::new(),
+            waiting: Signal::create().expect("create waiting"),
+            done: AtomicBool::new(false),
+        }
+    }
+}
+
+fn waited_at_least(start: Instant, duration: Duration) -> bool {
+    u128::from(Instant::now().since(start).raw()) >= duration.as_nanos()
+}
+
+extern "C" fn timed_locker(arg: usize) -> u32 {
+    // SAFETY: arg - адрес Timed в кадре спавнящего потока, живой до завершения
+    // join, который выполняется до выхода из кадра.
+    let shared = unsafe { &*(arg as *const Timed) };
+
+    shared.waiting.notify_all().expect("report the wait");
+    if shared.mutex.lock_timeout(LONG_WAIT) {
+        shared.done.store(true, Ordering::Release);
+        // SAFETY: мьютекс захвачен `lock_timeout` этим потоком.
+        unsafe { shared.mutex.unlock() };
+    }
+    0
+}
+
+extern "C" fn timed_notifier(arg: usize) -> u32 {
+    // SAFETY: см. timed_locker.
+    let shared = unsafe { &*(arg as *const Timed) };
+
+    shared.mutex.lock();
+    shared.done.store(true, Ordering::Release);
+    shared.condvar.notify_one();
+    // SAFETY: мьютекс захвачен `lock` этим потоком.
+    unsafe { shared.mutex.unlock() };
+    0
+}
+
+#[test_harness::test]
+fn raw_mutex_lock_timeout_expires_while_the_mutex_is_held() {
+    let mutex = RawMutex::new();
+    mutex.lock();
+
+    let start = Instant::now();
+    test_harness::check!(!mutex.lock_timeout(SHORT_WAIT));
+    test_harness::check!(waited_at_least(start, SHORT_WAIT));
+    test_harness::check!(!mutex.try_lock());
+
+    // SAFETY: мьютекс захвачен `lock` этим потоком.
+    unsafe { mutex.unlock() };
+}
+
+#[test_harness::test]
+fn raw_mutex_lock_timeout_takes_the_mutex_released_before_the_deadline() {
+    let shared = Timed::new();
+    shared.mutex.lock();
+    let arg = (&raw const shared) as usize;
+    let locker = spawn(timed_locker, arg).expect("spawn locker");
+
+    shared
+        .waiting
+        .wait(SIGNALED, JOIN_TIMEOUT)
+        .expect("locker starts waiting");
+    sleep(HOLD_PAUSE);
+    // SAFETY: мьютекс захвачен `lock` этим потоком.
+    unsafe { shared.mutex.unlock() };
+
+    locker
+        .join(JOIN_TIMEOUT)
+        .expect("locker joins before timeout");
+    test_harness::check!(shared.done.load(Ordering::Acquire));
+}
+
+#[test_harness::test]
+fn raw_condvar_wait_timeout_expires_without_a_notification() {
+    let shared = Timed::new();
+    shared.mutex.lock();
+
+    let start = Instant::now();
+    // SAFETY: поток держит `shared.mutex`.
+    let notified = unsafe { shared.condvar.wait_timeout(&shared.mutex, SHORT_WAIT) };
+    test_harness::check!(!notified);
+    test_harness::check!(waited_at_least(start, SHORT_WAIT));
+    test_harness::check!(!shared.mutex.try_lock());
+
+    // SAFETY: ожидание вернуло мьютекс захваченным.
+    unsafe { shared.mutex.unlock() };
+}
+
+#[test_harness::test]
+fn raw_condvar_wait_timeout_returns_on_a_notification_before_the_deadline() {
+    let shared = Timed::new();
+    shared.mutex.lock();
+    let arg = (&raw const shared) as usize;
+    let notifier = spawn(timed_notifier, arg).expect("spawn notifier");
+
+    let start = Instant::now();
+    let mut woken = true;
+    while woken && !shared.done.load(Ordering::Acquire) {
+        // SAFETY: поток держит `shared.mutex`.
+        woken = unsafe { shared.condvar.wait_timeout(&shared.mutex, LONG_WAIT) };
+    }
+    test_harness::check!(woken);
+    test_harness::check!(!waited_at_least(start, LONG_WAIT));
+
+    // SAFETY: ожидание вернуло мьютекс захваченным.
+    unsafe { shared.mutex.unlock() };
+    notifier
+        .join(JOIN_TIMEOUT)
+        .expect("notifier joins before timeout");
 }

@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <sys/cdefs.h>
+#include <time.h>
 
 _BEGIN_STD_C
 
@@ -48,12 +49,12 @@ typedef struct {
 } pthread_mutexattr_t;
 
 typedef union {
-    unsigned char __bytes[8];
+    unsigned char __bytes[12];
     unsigned int  __align;
 } pthread_cond_t;
 
 typedef struct {
-    int __reserved;
+    int __clock;
 } pthread_condattr_t;
 
 typedef int pthread_once_t;
@@ -63,7 +64,7 @@ _Static_assert(sizeof(pthread_attr_t) == 16 && _Alignof(pthread_attr_t) == 8,
                "pthread_attr_t layout is shared with c-library");
 _Static_assert(sizeof(pthread_mutex_t) == 32 && _Alignof(pthread_mutex_t) == 8,
                "pthread_mutex_t layout is shared with c-library");
-_Static_assert(sizeof(pthread_cond_t) == 8 && _Alignof(pthread_cond_t) == 4,
+_Static_assert(sizeof(pthread_cond_t) == 12 && _Alignof(pthread_cond_t) == 4,
                "pthread_cond_t layout is shared with c-library");
 #endif
 
@@ -95,6 +96,8 @@ int pthread_mutex_init(pthread_mutex_t *__restrict mutex,
 int pthread_mutex_destroy(pthread_mutex_t *mutex);
 int pthread_mutex_lock(pthread_mutex_t *mutex);
 int pthread_mutex_trylock(pthread_mutex_t *mutex);
+int pthread_mutex_timedlock(pthread_mutex_t *__restrict mutex,
+                            const struct timespec *__restrict abstime);
 int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr);
@@ -105,11 +108,16 @@ int pthread_mutexattr_gettype(const pthread_mutexattr_t *__restrict attr, int *_
 int pthread_cond_init(pthread_cond_t *__restrict cond, const pthread_condattr_t *__restrict attr);
 int pthread_cond_destroy(pthread_cond_t *cond);
 int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex);
+int pthread_cond_timedwait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex,
+                           const struct timespec *__restrict abstime);
 int pthread_cond_signal(pthread_cond_t *cond);
 int pthread_cond_broadcast(pthread_cond_t *cond);
 
 int pthread_condattr_init(pthread_condattr_t *attr);
 int pthread_condattr_destroy(pthread_condattr_t *attr);
+int pthread_condattr_setclock(pthread_condattr_t *attr, clockid_t clock);
+int pthread_condattr_getclock(const pthread_condattr_t *__restrict attr,
+                              clockid_t *__restrict clock);
 
 int pthread_once(pthread_once_t *once, void (*init)(void));
 
