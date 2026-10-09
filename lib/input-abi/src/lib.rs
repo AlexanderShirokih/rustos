@@ -13,6 +13,7 @@
 //!
 //! Протокол [`input_inject`] принимает от источников дескрипторы устройств и их команды, протокол
 //! [`input`] отдаёт потребителю очередь кадров всех устройств и дескриптор устройства по номеру.
+//! Протокол [`input_source`] передаёт источнику сессию `InputInject`.
 #![cfg_attr(not(test), no_std)]
 
 mod command;
@@ -28,7 +29,10 @@ pub use descriptor::{
     AXES_MAX, AXIS_DECL_SIZE, AxisDecl, AxisList, AxisMode, Binding, CONTACTS_MAX, DEVICE_NAME_MAX,
     DescriptorError, DeviceDescriptor, DeviceLayout, KEYS_MAX, KeyList,
 };
-pub use protocol::{DeclareError, DescribeError, NextError, UpdateError, input, input_inject};
+pub use protocol::{
+    AttachError, DeclareError, DescribeError, NextError, UpdateError, input, input_inject,
+    input_source,
+};
 pub use record::{
     CANCEL, Kind, MESSAGE_RECORDS_MAX, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records,
     RecordsError,

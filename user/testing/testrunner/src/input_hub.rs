@@ -1,5 +1,5 @@
 //! Хаб ввода `input-hub`: протоколы `InputInject` и `Input` с ленивым запуском хаба из индекса
-//! образа.
+//! образа и подключение источников `InputSource` под признаком публикатора.
 
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 
@@ -15,11 +15,16 @@ use runtime::{JoinHandle, Mutex, PortTransport, Timeout, spawn_owned};
 
 use crate::{
     composition::{Composition, Import, Importer, pause, request},
-    rootkeeper_system::{finish, indexed},
+    log_relay::await_component_lines,
+    rootkeeper_system::{PUBLISHER, finish, indexed, registered},
+    source_fixture::{SLOW_DEVICE, SOURCE_DEVICE, with_descriptor},
 };
 
 const SOURCE: &str = "source";
 const INPUT: &str = "input";
+
+const HUB: &str = "input-hub";
+const REFUSED_LINE: &str = "source attach failed: Remote(Refused)";
 
 const REQUIREMENTS: &[Import] = &[
     Import {
@@ -33,6 +38,8 @@ const REQUIREMENTS: &[Import] = &[
 ];
 
 const CALL_WAIT: Timeout = Timeout::from_secs(2);
+
+const SOURCE_WAIT: Timeout = Timeout::from_secs(15);
 
 const HUB_SETTLE_WAIT: Timeout = Timeout::from_millis(100);
 
@@ -113,6 +120,14 @@ impl PendingNext {
 
 fn hub() -> (Composition, Importer) {
     let (composition, _) = indexed(&[]);
+    let importer = composition.importer(REQUIREMENTS);
+    (composition, importer)
+}
+
+fn published() -> (Composition, Importer) {
+    let (composition, names) = indexed(&[]);
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+    await_component_lines(PUBLISHER.name, 1);
     let importer = composition.importer(REQUIREMENTS);
     (composition, importer)
 }
@@ -205,6 +220,24 @@ fn read_until(consumer: &Consumer, last: Record) -> Vec<Record> {
         records.extend(read(consumer).expect("next answers"));
     }
     records
+}
+
+fn attached(input: &Session<input::Protocol>, name: &str) -> bool {
+    let expected = with_descriptor(name, |descriptor| descriptor.layout())
+        .expect("name fits")
+        .expect("descriptor is valid");
+    let consumer =
+        input::Client::new(PortTransport::new(input.handle().as_raw())).with_wait(SOURCE_WAIT);
+    while let Ok(records) = read(&consumer) {
+        let added = records.iter().any(|record| {
+            record.kind == Kind::DeviceAdded
+                && consumer.describe(record.device).as_ref() == Ok(&expected)
+        });
+        if added {
+            return true;
+        }
+    }
+    false
 }
 
 fn pressed_keys(records: &[Record], device: u16) -> Vec<u16> {
@@ -520,5 +553,47 @@ fn a_session_beyond_the_limit_is_refused_until_one_closes() {
     test_harness::check_eq!(refused, Err(CallError::Remote(SessionError::NoSpace)));
     test_harness::check_eq!(granted, Ok(()));
     drop(sessions);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_published_source_is_attached_and_a_refusing_one_is_logged() {
+    let (composition, importer) = published();
+    let input = importer.session::<input::Protocol>(INPUT);
+
+    let added = attached(&input, SOURCE_DEVICE);
+    let lines = await_component_lines(HUB, 1);
+
+    test_harness::check!(added);
+    test_harness::check!(lines.iter().any(|line| line == REFUSED_LINE));
+    drop(input);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_source_published_after_the_hub_started_is_attached() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(REQUIREMENTS);
+    let input = importer.session::<input::Protocol>(INPUT);
+    let started = read(&consumer(&input));
+
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+    let added = attached(&input, SOURCE_DEVICE);
+
+    test_harness::check_eq!(started, Ok(vec![Record::resync()]));
+    test_harness::check!(added);
+    drop(input);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_source_accepting_after_the_open_timeout_is_attached_on_retry() {
+    let (composition, importer) = published();
+    let input = importer.session::<input::Protocol>(INPUT);
+
+    let added = attached(&input, SLOW_DEVICE);
+
+    test_harness::check!(added);
+    drop(input);
     finish(composition);
 }

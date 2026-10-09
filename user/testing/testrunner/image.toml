@@ -197,6 +197,21 @@ package = "filesystem-imagefs"
 path = "/filesystem-imagefs"
 
 [[programs]]
+package = "testrunner"
+bin = "input-source-fixture"
+path = "/input-source-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "refusing-input-source-fixture"
+path = "/refusing-input-source-fixture"
+
+[[programs]]
+package = "testrunner"
+bin = "slow-input-source-fixture"
+path = "/slow-input-source-fixture"
+
+[[programs]]
 package = "input-hub"
 path = "/input-hub"
 

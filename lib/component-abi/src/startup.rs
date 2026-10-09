@@ -179,9 +179,9 @@ const _: () = assert!(
 ipc::protocol! {
     /// Стартовая сессия ребёнка к родителю.
     ///
-    /// Стартовая сессия допускает `session`, `all` и `accept`, сессия импортёра - `session` и
-    /// `all`, сессия перечисления - `next`, сессия результата поиска - `open`.
-    /// Остальные операции получают `Refused`.
+    /// Стартовая сессия допускает `session`, `all`, `watch` и `accept`, сессия импортёра -
+    /// `session`, `all` и `watch`, сессии перечисления и наблюдения - `next`, сессия результата
+    /// поиска - `open`. Остальные операции получают `Refused`.
     pub mod component_startup {
         name = "ComponentStartup";
 
@@ -209,8 +209,24 @@ ipc::protocol! {
             attributes: QueryAttributes,
         ) -> own Result<ipc::wire::Cap<kind::Port>, SessionError>;
 
+        /// Выдаёт сессию наблюдения за экспортами протокола `requirement.protocol`, совпавшими с
+        /// `attributes`. Требование должно быть объявлено видом `all`. Наблюдение выдаёт
+        /// совпавший экспорт, когда тот становится видимым. Каждый экспорт выдаётся один раз за
+        /// жизнь наблюдения, в том числе после скрытия и повторного появления. Перезапущенный
+        /// провайдер выдаётся снова. Экспорт программы образа и запись, созданная из неё по
+        /// заявке, - один экспорт.
+        call fn watch(
+            requirement: SessionRequirement,
+            attributes: QueryAttributes,
+        ) -> own Result<ipc::wire::Cap<kind::Port>, SessionError>;
+
         /// Выдаёт следующий результат перечисления либо `None` в его конце. Экспорт, снятый
         /// навсегда до выдачи, пропускается.
+        ///
+        /// На сессии наблюдения выдаёт экспорт, ещё не выданный этим наблюдением, и ждёт, пока
+        /// такой экспорт появится. Наблюдение держит один
+        /// ожидающий `next`: новый вызов заменяет его, и заменённый получает `Refused`. Экспорт,
+        /// ответ с которым не доставлен импортёру, остаётся невыданным.
         call(defer) fn next() -> own Result<Option<Found>, SessionError>;
 
         /// Открывает сессию найденного экспорта и ждёт ответа провайдера. Окончательно удалённый
@@ -300,6 +316,16 @@ mod tests {
         }
 
         fn all(
+            &mut self,
+            _frame: &MockResources,
+            _requirement: SessionRequirement<'_>,
+            _attributes: QueryAttributes<'_>,
+        ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::Port>, SessionError>>
+        {
+            Err::<MockHandle<kind::Port>, _>(SessionError::Refused)
+        }
+
+        fn watch(
             &mut self,
             _frame: &MockResources,
             _requirement: SessionRequirement<'_>,

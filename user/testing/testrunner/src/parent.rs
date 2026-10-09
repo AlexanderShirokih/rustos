@@ -445,6 +445,15 @@ impl startup_contract::Service<Delivery> for State {
         Err::<Port, _>(SessionError::Refused)
     }
 
+    fn watch(
+        &mut self,
+        _frame: &Delivery,
+        _requirement: SessionRequirement<'_>,
+        _attributes: QueryAttributes<'_>,
+    ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Cap<kind::Port>, SessionError>> {
+        Err::<Port, _>(SessionError::Refused)
+    }
+
     fn next(&mut self, _frame: &Delivery, reply: startup_contract::next::Reply<Debt>) {
         let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
     }

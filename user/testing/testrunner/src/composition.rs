@@ -215,9 +215,15 @@ impl Importer {
         requirement: &str,
         attributes: Attributes<'_>,
     ) -> Result<Session<startup_contract::Protocol>, CallError<SessionError>> {
-        let parent = startup_contract::Client::new(PortTransport::new(self.handle()))
-            .with_wait(IMPORTER_WAIT);
-        component_startup::all::<P>(&parent, requirement, attributes)
+        component_startup::all::<P>(&self.parent(), requirement, attributes)
+    }
+
+    pub(crate) fn watch<P: Protocol>(
+        &self,
+        requirement: &str,
+        attributes: Attributes<'_>,
+    ) -> Result<Session<startup_contract::Protocol>, CallError<SessionError>> {
+        component_startup::watch::<P>(&self.parent(), requirement, attributes)
     }
 
     pub(crate) fn port<P: Protocol>(&self, requirement: &str) -> Port {
@@ -226,6 +232,10 @@ impl Importer {
 
     pub(crate) fn handle(&self) -> Handle<kind::Port> {
         self.port.as_raw()
+    }
+
+    fn parent(&self) -> startup_contract::Client<PortTransport> {
+        startup_contract::Client::new(PortTransport::new(self.handle())).with_wait(IMPORTER_WAIT)
     }
 }
 

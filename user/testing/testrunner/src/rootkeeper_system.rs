@@ -82,6 +82,7 @@ const SERVED_CHILD_REPLY_TIMEOUT: Timeout = Timeout::from_millis(200);
 const REQUEST_ACROSS_EXIT_TIMEOUT: Timeout = Timeout::from_secs(3);
 const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(8);
 const HELD_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(15);
+const WATCH_WAIT_TIMEOUT: Timeout = Timeout::from_millis(300);
 const RTC_REPLY_TIMEOUT: Timeout = Timeout::from_secs(15);
 pub(crate) const POLL_INTERVAL: Timeout = Timeout::from_millis(10);
 const RESOLVE_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -96,6 +97,7 @@ const GRANTED: u32 = 0;
 const UNAVAILABLE: u32 = 1;
 const TIMED_OUT: u32 = 2;
 const OTHER: u32 = 3;
+const REFUSED: u32 = 4;
 
 const PING: u64 = 0x5A;
 
@@ -195,7 +197,7 @@ const CRASH_FS: ComponentSpec<'static> = ComponentSpec {
 const FEATURED: ComponentSpec<'static> =
     fixture("/featured-export-fixture", "featured-export-fixture");
 
-const PUBLISHER: ComponentSpec<'static> =
+pub(crate) const PUBLISHER: ComponentSpec<'static> =
     fixture("/feature-publisher-fixture", "feature-publisher-fixture");
 
 const FEATURE_HOLDER: ComponentSpec<'static> = ComponentSpec {
@@ -540,6 +542,39 @@ fn held_request(found: Found, wait: Timeout) -> JoinHandle {
         },
     )
     .expect("request thread starts")
+}
+
+fn watched(importer: &Importer, pairs: &[Attribute<'_>]) -> Session<startup_contract::Protocol> {
+    let bytes = query(pairs);
+    importer
+        .watch::<probe::Protocol>(PROBE, Attributes::decode(&bytes).expect("query decodes"))
+        .expect("watch granted")
+}
+
+fn held_next(watch: &Session<startup_contract::Protocol>) -> JoinHandle {
+    let raw = watch.handle().as_raw();
+    let thread = spawn_owned(move || {
+        let answer = startup_contract::Client::new(PortTransport::new(raw))
+            .with_wait(HELD_REQUEST_TIMEOUT)
+            .next();
+        match answer {
+            Ok(Some(_)) => GRANTED,
+            Err(CallError::Remote(SessionError::Refused)) => REFUSED,
+            Err(CallError::Ipc(IpcError::Timeout)) => TIMED_OUT,
+            _ => OTHER,
+        }
+    })
+    .expect("next thread starts");
+    pause(REQUEST_DELIVERY_PAUSE);
+    thread
+}
+
+fn watch_next(watch: &Session<startup_contract::Protocol>, wait: Timeout) -> Option<Found> {
+    match component_startup::next(watch, wait) {
+        Ok(found) => found,
+        Err(CallError::Ipc(IpcError::Timeout)) => None,
+        Err(error) => panic!("watch next answers: {error:?}"),
+    }
 }
 
 fn answered(request: JoinHandle) -> u32 {
@@ -1795,7 +1830,7 @@ fn a_requirement_without_providers_enumerates_nothing() {
 }
 
 #[test_harness::test]
-fn an_enumeration_by_a_session_requirement_is_refused() {
+fn an_enumeration_and_a_watch_by_a_session_requirement_are_refused() {
     let composition = scenario(&[EXPORT]);
     let importer = composition.importer(&[crate::composition::Import {
         declaration: RequirementDeclaration::session(PROBE, probe::Protocol::ID),
@@ -1805,10 +1840,127 @@ fn an_enumeration_by_a_session_requirement_is_refused() {
     let answer = importer
         .enumeration::<probe::Protocol>(PROBE, Attributes::empty())
         .map(drop);
+    let watch = importer
+        .watch::<probe::Protocol>(PROBE, Attributes::empty())
+        .map(drop);
     let pinged = ping(&importer, PROBE);
 
     test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Refused)));
+    test_harness::check_eq!(watch, Err(CallError::Remote(SessionError::Refused)));
     test_harness::check_eq!(pinged, Ok(PING));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_watch_delivers_an_export_whose_feature_is_published_later() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let watch = watched(&importer, FEATURED_QUERY);
+
+    let pending = held_next(&watch);
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+
+    test_harness::check_eq!(answered(pending), GRANTED);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_watch_delivers_each_visible_export_and_then_waits() {
+    let composition = scenario(&[EXPORT, NEIGHBOUR]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let watch = watched(&importer, &[]);
+
+    let first = watch_next(&watch, COMPONENT_REPLY_TIMEOUT).expect("first export found");
+    let second = watch_next(&watch, COMPONENT_REPLY_TIMEOUT).expect("second export found");
+    let third = watch_next(&watch, WATCH_WAIT_TIMEOUT);
+
+    test_harness::check_eq!(ping_found(&first), Ok(PING));
+    test_harness::check_eq!(ping_found(&second), Ok(PING));
+    test_harness::check!(third.is_none());
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_watch_does_not_deliver_an_image_program_again_after_its_record_starts() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+    await_component_lines(PUBLISHER.name, 1);
+    let watch = watched(&importer, FEATURED_QUERY);
+
+    let found = watch_next(&watch, COMPONENT_REPLY_TIMEOUT).expect("featured export found");
+    let pinged = ping_found(&found);
+    let again = watch_next(&watch, WATCH_WAIT_TIMEOUT);
+
+    test_harness::check_eq!(pinged, Ok(PING));
+    test_harness::check!(again.is_none());
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_second_next_of_a_watch_refuses_the_waiting_one() {
+    let composition = scenario(&[]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let watch = watched(&importer, &[]);
+
+    let pending = held_next(&watch);
+    let second = component_startup::next(&watch, WATCH_WAIT_TIMEOUT).map(|found| found.is_some());
+
+    test_harness::check_eq!(answered(pending), REFUSED);
+    test_harness::check_eq!(second, Err(CallError::Ipc(IpcError::Timeout)));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_watch_next_that_timed_out_leaves_the_export_for_the_next_call() {
+    let (composition, names) = indexed(&[]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let watch = watched(&importer, FEATURED_QUERY);
+
+    let hidden = watch_next(&watch, WATCH_WAIT_TIMEOUT);
+    registered(&composition, &names, PUBLISHER).expect("publisher added");
+    await_component_lines(PUBLISHER.name, 1);
+    let found = watch_next(&watch, COMPONENT_REPLY_TIMEOUT);
+
+    test_harness::check!(hidden.is_none());
+    test_harness::check_eq!(found.as_ref().map(ping_found), Some(Ok(PING)));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_new_watch_delivers_the_exports_of_a_closed_one_again() {
+    let composition = scenario(&[EXPORT]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let closed = watched(&importer, &[]);
+    watch_next(&closed, COMPONENT_REPLY_TIMEOUT).expect("export found");
+    let waiting = watch_next(&closed, WATCH_WAIT_TIMEOUT);
+
+    drop(closed);
+    let watch = watched(&importer, &[]);
+    let found = watch_next(&watch, COMPONENT_REPLY_TIMEOUT);
+
+    test_harness::check!(waiting.is_none());
+    test_harness::check_eq!(found.as_ref().map(ping_found), Some(Ok(PING)));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_watch_delivers_a_restarted_provider_again() {
+    let composition = scenario(&[ComponentSpec {
+        restarts: 1,
+        ..EXPORT
+    }]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let watch = watched(&importer, &[]);
+    watch_next(&watch, COMPONENT_REPLY_TIMEOUT).expect("export found");
+    let waiting = watch_next(&watch, WATCH_WAIT_TIMEOUT);
+
+    composition.terminate(EXPORT.name, TERMINATE_EXIT_CODE);
+    let restarted = watch_next(&watch, HELD_REQUEST_TIMEOUT);
+    await_component_lines(EXPORT.name, 2);
+
+    test_harness::check!(waiting.is_none());
+    test_harness::check_eq!(restarted.as_ref().map(ping_found), Some(Ok(PING)));
     finish(composition);
 }
 

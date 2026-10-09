@@ -1,6 +1,7 @@
 //! Хаб ввода держит устройства источников и раздаёт их кадры. Протокол `InputInject` объявляет
 //! устройства и применяет их команды, протокол `Input` отдаёт сессии очередь кадров всех
-//! устройств и дескриптор устройства по номеру.
+//! устройств и дескриптор устройства по номеру. Каждому видимому экспорту `InputSource` хаб
+//! передаёт новую сессию `InputInject`.
 
 #![no_std]
 #![no_main]
@@ -14,7 +15,7 @@ use component_startup::{
     Requirements as _, SessionError, component_manifest, component_startup as startup_contract,
     serve_export,
 };
-use input_abi::{input, input_inject};
+use input_abi::{input, input_inject, input_source};
 use ipc::{Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Port};
 use runtime::{FAILED_EXIT_CODE, PortTransport, exit, log_fmt, log_line, spawn_owned};
@@ -22,12 +23,14 @@ use syscall::{Handle, SyscallError, Timeout, kind};
 
 mod hub;
 mod queue;
+mod sources;
 
 use hub::{Consumer, Source, input_gone, open_input, open_source, source_gone};
+use sources::attach_sources;
 
 component_manifest! {
     struct HubStartup {
-        requirements: {},
+        requirements: { sources: all(input_source::Protocol) },
         exports: [input_inject::Protocol, input::Protocol],
     }
 }
@@ -65,8 +68,9 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let sources: &'static Port = Box::leak(Box::new(Port::create()?));
     let consumers: &'static Port = Box::leak(Box::new(Port::create()?));
 
-    // Потоки источников и экспортов работают до конца процесса.
+    // Потоки источников, экспортов и подключения работают до конца процесса.
     let consumers_parent = requirements.parent;
+    let watched = requirements.sources;
     let sources_parent = startup_contract::Client::new(PortTransport::new(parent));
     let _ = spawn_owned(move || {
         listen(sources, source_gone, |frame| {
@@ -80,6 +84,11 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     })?;
     let _ =
         spawn_owned(move || export::<input::Protocol>(&consumers_parent, consumers, open_input))?;
+    let _ = spawn_owned(move || {
+        let failure = attach_sources(&watched, sources);
+        log_fmt(format_args!("source watch stopped: {failure}"));
+        exit(FAILED_EXIT_CODE)
+    })?;
 
     listen(consumers, input_gone, |frame| {
         let _ = input::dispatch(&mut Consumer, frame);

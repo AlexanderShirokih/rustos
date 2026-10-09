@@ -78,6 +78,7 @@ mod signal;
 mod simd_state;
 mod simplefb;
 mod smp_stress;
+mod source_fixture;
 mod spawn_from_image;
 mod spmi;
 mod startup_exit_protocol;

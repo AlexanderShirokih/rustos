@@ -45,8 +45,20 @@ pub fn all<P: ipc::Protocol>(
         .map(|port| Session::from_handle(Port::from(port)))
 }
 
-/// Забирает следующий результат перечисления `enumeration`, ожидая ответ не дольше `wait`.
-/// `None` - конец перечисления.
+/// Запрашивает наблюдение за экспортами протокола `P`, совпавшими с `attributes`, по требованию
+/// `requirement` вида `all`. Результаты наблюдения выдаёт [`next`].
+pub fn watch<P: ipc::Protocol>(
+    parent: &component_startup::Client<PortTransport>,
+    requirement: &str,
+    attributes: Attributes<'_>,
+) -> Result<Session<component_startup::Protocol>, CallError<SessionError>> {
+    parent
+        .watch(query::<P>(requirement), attributes.as_bytes())
+        .map(|port| Session::from_handle(Port::from(port)))
+}
+
+/// Забирает следующий результат перечисления либо наблюдения `enumeration`, ожидая ответ не
+/// дольше `wait`. `None` - конец перечисления.
 pub fn next(
     enumeration: &Session<component_startup::Protocol>,
     wait: Timeout,

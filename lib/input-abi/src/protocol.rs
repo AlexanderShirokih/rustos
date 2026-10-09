@@ -1,4 +1,5 @@
-//! Протоколы хаба ввода: [`input_inject`] для источников и [`input`] для потребителей.
+//! Протоколы хаба ввода [`input_inject`] для источников и [`input`] для потребителей, протокол
+//! источника [`input_source`].
 
 use ipc::{WireTyped, schema::max_body_len, wire::BODY_MAX};
 
@@ -57,6 +58,17 @@ ipc::wire_enum! {
     pub enum DescribeError {
         /// Номер не принадлежит объявленному устройству.
         UnknownDevice = 1,
+    }
+}
+
+ipc::wire_enum! {
+    /// Отказ подключения источника.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AttachError {
+        /// Источник уже подключён.
+        Busy = 1,
+        /// Источник не может обслуживать свои устройства.
+        Refused = 2,
     }
 }
 
@@ -126,5 +138,19 @@ ipc::protocol! {
 
         /// Отдаёт дескриптор объявленного устройства `device`.
         call fn describe(device: u16) -> Result<DeviceLayout, DescribeError>;
+    }
+}
+
+ipc::protocol! {
+    /// Источник ввода. Источник объявляет свои устройства по переданной ему сессии
+    /// `InputInject`.
+    pub mod input_source {
+        name = "InputSource";
+
+        /// Передаёт источнику сессию `inject`. Источник объявляет по ней свои устройства и
+        /// держит её, пока обслуживает их.
+        call fn attach(
+            own inject: ipc::wire::Session<input_inject::Protocol>,
+        ) -> Result<(), AttachError>;
     }
 }

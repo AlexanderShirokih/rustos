@@ -156,7 +156,20 @@ struct Search<'a> {
 
 enum SearchState<'a> {
     Enumeration(VecDeque<Export<'a>>),
+    Watch(Watch<'a>),
     Found(Export<'a>),
+}
+
+struct Watch<'a> {
+    protocol: String,
+    delivered: Vec<ExportKey<'a>>,
+    waiting: Option<component_startup::next::Reply<Debt>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportKey<'a> {
+    Record { record: u16, restarts: u32 },
+    Program(&'a str),
 }
 
 /// Родитель зарегистрированных компонентов. Поток обслуживает записи повтором [`turn`].
@@ -658,6 +671,178 @@ impl<'a> RootSystem<'a> {
         );
     }
 
+    fn all_query<'q>(
+        &self,
+        badge: u64,
+        requirement: SessionRequirement<'_>,
+        attributes: QueryAttributes<'q>,
+    ) -> Result<Attributes<'q>, SessionError> {
+        let attributes = Attributes::decode(attributes).ok_or(SessionError::Refused)?;
+        let mode = self.declared(
+            self.children.caller(badge),
+            requirement.name,
+            requirement.protocol,
+        )?;
+        if mode != RequirementMode::All {
+            return Err(SessionError::Refused);
+        }
+        Ok(attributes)
+    }
+
+    fn key(&self, export: &Export<'a>) -> ExportKey<'a> {
+        match export.provider {
+            Provider::Record(record) => match self.records.get(usize::from(record)) {
+                Some(indexed) if indexed.origin == Origin::Index => {
+                    ExportKey::Program(indexed.executable)
+                }
+                // Перезапущенный провайдер - новый экспорт: сессия к прежнему экземпляру мертва.
+                _ => ExportKey::Record {
+                    record,
+                    restarts: self
+                        .restarts_used
+                        .get(usize::from(record))
+                        .copied()
+                        .unwrap_or(0),
+                },
+            },
+            Provider::Program { executable, .. } => ExportKey::Program(executable),
+        }
+    }
+
+    fn undelivered(&self, watch: &Watch<'a>, attributes: Attributes<'_>) -> Option<Export<'a>> {
+        let mut first = None;
+        let _ = self.matches(&watch.protocol, attributes, &mut |export| {
+            if watch.delivered.contains(&self.key(&export)) {
+                return ControlFlow::Continue(());
+            }
+            first = Some(export);
+            ControlFlow::Break(())
+        });
+        first
+    }
+
+    fn answer_watch(&mut self, index: usize) {
+        let Some(Search {
+            attributes,
+            state: SearchState::Watch(watch),
+            ..
+        }) = self.searches.get(index)
+        else {
+            return;
+        };
+        if watch.waiting.is_none() {
+            return;
+        }
+        let Some(export) = self.undelivered(watch, attributes.as_attributes()) else {
+            return;
+        };
+        let key = self.key(&export);
+
+        let Some(Search {
+            state: SearchState::Watch(watch),
+            ..
+        }) = self.searches.get_mut(index)
+        else {
+            return;
+        };
+        let Some(reply) = watch.waiting.take() else {
+            return;
+        };
+        if watch.delivered.try_reserve(1).is_err() {
+            let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::NoSpace));
+            return;
+        }
+
+        let delivered = match self.found(index, export) {
+            Ok(found) => reply.send(Ok::<_, SessionError>(Some(found))).is_ok(),
+            Err(error) => {
+                let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
+                false
+            }
+        };
+
+        // Недоставленный результат закрыт вместе с кадром, и экспорт остаётся невыданным.
+        if delivered
+            && let Some(Search {
+                state: SearchState::Watch(watch),
+                ..
+            }) = self.searches.get_mut(index)
+        {
+            watch.delivered.push(key);
+        }
+    }
+
+    fn answer_watches(&mut self) {
+        for index in 0..self.searches.len() {
+            if let Some(Search {
+                state:
+                    SearchState::Watch(Watch {
+                        waiting: Some(_), ..
+                    }),
+                ..
+            }) = self.searches.get(index)
+            {
+                self.answer_watch(index);
+            }
+        }
+    }
+
+    fn found(&mut self, index: usize, export: Export<'a>) -> Result<Found<Port>, SessionError> {
+        let search = self.searches.get(index).ok_or(SessionError::Refused)?;
+        let (owner, requirement, attributes) = (
+            search.owner,
+            search.requirement.clone(),
+            search.attributes.clone(),
+        );
+        let session =
+            self.issue_search(owner, requirement, attributes, SearchState::Found(export))?;
+
+        Ok(Found {
+            session,
+            protocol: ProtocolName::new(export.protocol).ok_or(SessionError::Refused)?,
+            filter: AttributeSet::new(export.filter),
+        })
+    }
+
+    fn enumerate(&mut self, index: usize, reply: component_startup::next::Reply<Debt>) {
+        let export = loop {
+            let Some(Search {
+                state: SearchState::Enumeration(snapshot),
+                ..
+            }) = self.searches.get_mut(index)
+            else {
+                let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
+                return;
+            };
+            let Some(export) = snapshot.pop_front() else {
+                *snapshot = VecDeque::new();
+                let _ = reply.send(Ok::<Option<Found<Port>>, SessionError>(None));
+                return;
+            };
+            if self.reachable(&export) {
+                break export;
+            }
+        };
+
+        let delivered = match self.found(index, export) {
+            Ok(found) => reply.send(Ok::<_, SessionError>(Some(found))).is_ok(),
+            Err(error) => {
+                let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
+                false
+            }
+        };
+
+        // Недоставленная выдача закрыта вместе с кадром, и позиция snapshot возвращается.
+        if !delivered
+            && let Some(Search {
+                state: SearchState::Enumeration(snapshot),
+                ..
+            }) = self.searches.get_mut(index)
+        {
+            snapshot.push_front(export);
+        }
+    }
+
     fn search(&self, holder: Option<Holder>) -> Option<usize> {
         let Some(Holder::Search(id)) = holder else {
             return None;
@@ -856,16 +1041,10 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         requirement: SessionRequirement<'_>,
         attributes: QueryAttributes<'_>,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
-        let name = requirement.name;
-        let protocol = requirement.protocol;
-        let attributes = Attributes::decode(attributes).ok_or(SessionError::Refused)?;
-        let mode = self.declared(self.children.caller(frame.badge), name, protocol)?;
-        if mode != RequirementMode::All {
-            return Err(SessionError::Refused);
-        }
+        let attributes = self.all_query(frame.badge, requirement, attributes)?;
 
         let mut snapshot = VecDeque::new();
-        let listed = self.matches(protocol, attributes, &mut |export| {
+        let listed = self.matches(requirement.protocol, attributes, &mut |export| {
             if snapshot.try_reserve(1).is_err() {
                 return ControlFlow::Break(());
             }
@@ -880,71 +1059,46 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
 
         self.issue_search(
             frame.badge,
-            String::from(name),
+            String::from(requirement.name),
             AttributeSet::new(attributes),
             SearchState::Enumeration(snapshot),
         )
     }
 
+    fn watch(
+        &mut self,
+        frame: &Delivery,
+        requirement: SessionRequirement<'_>,
+        attributes: QueryAttributes<'_>,
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
+        let attributes = self.all_query(frame.badge, requirement, attributes)?;
+        let watch = Watch {
+            protocol: String::from(requirement.protocol),
+            delivered: Vec::new(),
+            waiting: None,
+        };
+
+        self.issue_search(
+            frame.badge,
+            String::from(requirement.name),
+            AttributeSet::new(attributes),
+            SearchState::Watch(watch),
+        )
+    }
+
     fn next(&mut self, frame: &Delivery, reply: component_startup::next::Reply<Debt>) {
-        let Some(index) = self.search(self.children.caller(frame.badge)) else {
-            let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
-            return;
-        };
-
-        let export = loop {
-            let Some(Search {
-                state: SearchState::Enumeration(snapshot),
-                ..
-            }) = self.searches.get_mut(index)
-            else {
+        let index = self.search(self.children.caller(frame.badge));
+        match index.and_then(|index| Some((index, &mut self.searches.get_mut(index)?.state))) {
+            Some((index, SearchState::Watch(watch))) => {
+                if let Some(replaced) = watch.waiting.replace(reply) {
+                    let _ = replaced.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
+                }
+                self.answer_watch(index);
+            }
+            Some((index, SearchState::Enumeration(_))) => self.enumerate(index, reply),
+            _ => {
                 let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
-                return;
-            };
-            let Some(export) = snapshot.pop_front() else {
-                *snapshot = VecDeque::new();
-                let _ = reply.send(Ok::<Option<Found<Port>>, SessionError>(None));
-                return;
-            };
-            if self.reachable(&export) {
-                break export;
             }
-        };
-
-        let Some(search) = self.searches.get(index) else {
-            return;
-        };
-        let (owner, requirement, attributes) = (
-            search.owner,
-            search.requirement.clone(),
-            search.attributes.clone(),
-        );
-        let found = self
-            .issue_search(owner, requirement, attributes, SearchState::Found(export))
-            .and_then(|session| {
-                Ok(Found {
-                    session,
-                    protocol: ProtocolName::new(export.protocol).ok_or(SessionError::Refused)?,
-                    filter: AttributeSet::new(export.filter),
-                })
-            });
-
-        let delivered = match found {
-            Ok(found) => reply.send(Ok::<_, SessionError>(Some(found))).is_ok(),
-            Err(error) => {
-                let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
-                false
-            }
-        };
-
-        // Недоставленная выдача закрыта вместе с кадром, и позиция snapshot возвращается.
-        if !delivered
-            && let Some(Search {
-                state: SearchState::Enumeration(snapshot),
-                ..
-            }) = self.searches.get_mut(index)
-        {
-            snapshot.push_front(export);
         }
     }
 
@@ -1066,6 +1220,8 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
         Err(RecvError::Timeout | RecvError::Discarded) => {}
         Err(RecvError::Closed) => return ControlFlow::Break(()),
     }
+    // Видимость меняют кадры, уходы и записи, добавленные другими потоками.
+    system.lock().answer_watches();
     ControlFlow::Continue(())
 }
 

@@ -130,6 +130,24 @@ test = false
 bench = false
 
 [[bin]]
+name = "input-source-fixture"
+path = "src/input_source_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "refusing-input-source-fixture"
+path = "src/refusing_input_source_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "slow-input-source-fixture"
+path = "src/slow_input_source_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "feature-holder-fixture"
 path = "src/feature_holder_fixture.rs"
 test = false

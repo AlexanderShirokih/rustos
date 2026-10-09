@@ -1,13 +1,14 @@
 use core::marker::PhantomData;
 
 use component_abi::{Attributes, STARTUP_REQUEST_TIMEOUT, component_startup};
+use ipc::Timeout;
 use kernel_objects::{Session, kind};
 use syscall::Handle;
 
 use crate::{
-    StartupError,
+    StartupError, StartupFailure,
     declare::{answered, request_session, start_parent},
-    request::{Found, all, next, open},
+    request::{Found, all, next, open, watch},
 };
 
 /// Провайдеры требования `all`. Стартовый handle принадлежит процессу до его завершения.
@@ -21,6 +22,13 @@ pub struct Providers<P> {
 /// последним элементом перебора.
 pub struct ProviderSessions {
     enumeration: Option<Session<component_startup::Protocol>>,
+    requirement: &'static str,
+}
+
+/// Наблюдение за экспортами требования `all`. Наблюдение выдаёт совпавший экспорт, когда тот
+/// становится видимым, по одному разу на экспорт и снова после перезапуска провайдера.
+pub struct ProviderWatch {
+    watch: Session<component_startup::Protocol>,
     requirement: &'static str,
 }
 
@@ -50,11 +58,44 @@ impl<P: ipc::Protocol> Providers<P> {
         })
     }
 
+    /// Запрашивает наблюдение за экспортами протокола `P`, совпавшими с `attributes`. Запрос
+    /// ждёт ответ не дольше `STARTUP_REQUEST_TIMEOUT`.
+    pub fn watch(&self, attributes: Attributes<'_>) -> Result<ProviderWatch, StartupError> {
+        let parent = start_parent(self.parent).with_wait(STARTUP_REQUEST_TIMEOUT);
+        let watch = answered(
+            self.requirement,
+            watch::<P>(&parent, self.requirement, attributes),
+        )?;
+
+        Ok(ProviderWatch {
+            watch,
+            requirement: self.requirement,
+        })
+    }
+
     /// Открывает сессию экспорта результата `found`. Каждый запрос ждёт ответ не дольше
     /// `STARTUP_REQUEST_TIMEOUT` и повторяется при `IpcError::PeerClosed`.
     pub fn open(&self, found: &Found) -> Result<Session<P>, StartupError> {
         request_session(self.requirement, || {
             open::<P>(found, STARTUP_REQUEST_TIMEOUT)
+        })
+    }
+}
+
+impl ProviderWatch {
+    /// Ждёт не дольше `wait` экспорт, ещё не выданный этим наблюдением.
+    ///
+    /// Отказы:
+    /// - `Ipc(IpcError::Timeout)` - срок истёк. Экспорт, ставший видимым позже, выдаст
+    ///   следующий вызов;
+    /// - `Refused` - вызов заменён вызовом из другого потока либо родитель ответил концом
+    ///   перечисления;
+    /// - `NoSpace` - у родителя не хватило ресурса на результат;
+    /// - `Ipc` - другой отказ транспорта.
+    pub fn next(&self, wait: Timeout) -> Result<Found, StartupError> {
+        answered(self.requirement, next(&self.watch, wait))?.ok_or(StartupError {
+            requirement: self.requirement,
+            failure: StartupFailure::Refused,
         })
     }
 }
