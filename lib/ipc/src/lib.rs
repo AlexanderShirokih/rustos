@@ -46,7 +46,7 @@ pub use codec::{IntoWireValue, WireTyped, WireValue};
 pub use ordinal::ordinal_of;
 pub use protocol::Protocol;
 #[doc(hidden)]
-pub use protocol::{__protocol_answer, __protocol_call, __protocol_send};
+pub use protocol::{__protocol_answer, __protocol_call, __protocol_outcome, __protocol_send};
 pub use reply::Reply;
 pub use resources::{Received, ReceivedResources};
 #[doc(hidden)]

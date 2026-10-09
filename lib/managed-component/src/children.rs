@@ -16,6 +16,9 @@ use userland_loader::load_program;
 
 const SESSION_CLOSED_EXIT_CODE: u32 = 0xFFFF_FFFD;
 
+/// Предел ожидающих заявок одного импортёра на один экспорт по одному требованию.
+pub const IMPORTER_REQUESTS_PER_EXPORT_MAX: usize = 16;
+
 type ImporterDebt = component_startup::session::Reply<IssuedHandle<kind::Reply>>;
 type AcceptDebt = component_startup::accept::Reply<IssuedHandle<kind::Reply>>;
 
@@ -120,13 +123,13 @@ struct Importer<C> {
     owner: Option<u64>,
 }
 
-struct PendingRequest<C, R = ImporterDebt> {
+struct PendingRequest<C> {
     provider: C,
     protocol: String,
     importer: u64,
     requirement: String,
     attributes: AttributeSet,
-    reply: R,
+    reply: ImporterDebt,
 }
 
 struct PendingAccept<C> {
@@ -248,9 +251,10 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     }
 
     /// Ставит заявку импортёра со значком `importer` и атрибутами его запроса `attributes` по
-    /// требованию `requirement` на экспорт `protocol` записи `provider`. Заявка сохраняется при
-    /// перезапуске. Повтор заявки того же импортёра на тот же экспорт по тому же требованию
-    /// заменяет прежнюю и отвечает на неё `SessionError::NoSpace`.
+    /// требованию `requirement` на экспорт `protocol` записи `provider`. Заявки выдаются
+    /// провайдеру в порядке поступления и сохраняются при перезапуске. Заявка сверх
+    /// [`IMPORTER_REQUESTS_PER_EXPORT_MAX`] вытесняет самую давнюю, и та получает
+    /// `SessionError::NoSpace`.
     pub fn request(
         &mut self,
         provider: C,
@@ -640,56 +644,25 @@ fn outcome_of(process: &Process) -> Outcome {
     }
 }
 
-fn queue_request<C: PartialEq, R>(
-    requests: &mut Vec<PendingRequest<C, R>>,
-    request: PendingRequest<C, R>,
-) -> Option<PendingRequest<C, R>> {
-    if let Some(pending) = requests.iter_mut().find(|pending| {
+fn queue_request<C: PartialEq>(
+    requests: &mut Vec<PendingRequest<C>>,
+    request: PendingRequest<C>,
+) -> Option<PendingRequest<C>> {
+    let same_key = |pending: &PendingRequest<C>| {
         pending.importer == request.importer
             && pending.requirement == request.requirement
             && pending.provider == request.provider
             && pending.protocol == request.protocol
-    }) {
-        Some(core::mem::replace(pending, request))
-    } else {
-        requests.push(request);
-        None
-    }
-}
+    };
+    let waiting = requests.iter().filter(|pending| same_key(pending)).count();
+    let oldest = requests.iter().position(same_key);
 
-#[cfg(test)]
-mod tests {
-    use component_abi::{AttributeSet, Attributes};
-
-    use super::{PendingRequest, String, Vec, queue_request};
-
-    fn request(importer: u64, provider: u16, reply: u16) -> PendingRequest<u16, u16> {
-        PendingRequest {
-            provider,
-            protocol: String::from("Clock"),
-            importer,
-            requirement: String::from("clocks"),
-            attributes: AttributeSet::new(Attributes::empty()),
-            reply,
+    let evicted = match oldest {
+        Some(oldest) if waiting >= IMPORTER_REQUESTS_PER_EXPORT_MAX => {
+            Some(requests.remove(oldest))
         }
-    }
-
-    #[test]
-    fn requests_for_different_exports_wait_together_and_only_the_same_export_is_replaced() {
-        let mut pending = Vec::new();
-        assert!(queue_request(&mut pending, request(10, 1, 1)).is_none());
-        assert!(queue_request(&mut pending, request(10, 2, 2)).is_none());
-        assert!(queue_request(&mut pending, request(11, 1, 3)).is_none());
-
-        let replaced = queue_request(&mut pending, request(10, 1, 4)).expect("same key replaces");
-
-        assert_eq!(replaced.reply, 1);
-        assert_eq!(
-            pending
-                .iter()
-                .map(|request| (request.importer, request.provider, request.reply))
-                .collect::<Vec<_>>(),
-            [(10, 1, 4), (10, 2, 2), (11, 1, 3)]
-        );
-    }
+        _ => None,
+    };
+    requests.push(request);
+    evicted
 }

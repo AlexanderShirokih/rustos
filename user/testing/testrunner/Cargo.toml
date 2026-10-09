@@ -7,7 +7,7 @@ publish.workspace = true
 build = "build.rs"
 
 [package.metadata.userland]
-stack_size = 131072
+stack_size = 65536
 
 [[bin]]
 name = "testrunner"

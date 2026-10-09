@@ -15,7 +15,7 @@ use syscall::{Handle, kind};
 component_manifest! {
     struct ImageFileSystemStartup {
         requirements: { image: session(image::Protocol) },
-        exports: [file_system::Protocol],
+        exports: [file_system::Protocol => [{ fs = "image" }]],
     }
 }
 

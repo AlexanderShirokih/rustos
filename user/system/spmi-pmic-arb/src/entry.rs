@@ -79,7 +79,7 @@ fn run(requirements: SpmiStartup) -> Result<(), Stopped> {
 
     let exporter = requirements.parent;
     let export = spawn_owned(move || {
-        let failure = serve_export::<spmi::Protocol>(&exporter, || {
+        let failure = serve_export::<spmi::Protocol>(&exporter, |_| {
             mint_session(&sessions.service, &sessions.next_badge)
                 .map(|minted| minted.port)
                 .map_err(|_| SessionError::NoSpace)

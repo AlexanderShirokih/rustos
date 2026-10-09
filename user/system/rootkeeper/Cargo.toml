@@ -26,7 +26,6 @@ bootstrap-abi = { workspace = true }
 component-abi = { workspace = true }
 component-startup = { workspace = true }
 ipc = { workspace = true }
-filesystem-abi = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
 managed-component = { workspace = true }

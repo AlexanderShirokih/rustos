@@ -20,8 +20,6 @@ pub(super) struct ComponentEntry {
     pub(super) memory_limit: String,
     #[serde(default)]
     pub(super) restarts: u32,
-    #[serde(default)]
-    pub(super) mountpoint: Option<String>,
 }
 
 fn default_plan_version() -> u16 {

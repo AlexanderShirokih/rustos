@@ -164,23 +164,17 @@ macro_rules! wire_value {
             while let ::core::option::Option::Some(entry) = cursor.next_field()? {
                 $(
                     if entry.id == $id {
-                        $field = ::core::option::Option::Some(
-                            <$ty as $crate::WireValue<$lt, __Frame>>::from_field(entry.data, frame)?,
-                        );
+                        $field = ::core::option::Option::Some(entry.data);
                     }
                 )*
             }
+            $(
+                let ::core::option::Option::Some($field) = $field else {
+                    return ::core::result::Result::Err($crate::wire::IpcError::MissingField);
+                };
+            )*
             ::core::result::Result::Ok($name {
-                $(
-                    $field: match $field {
-                        ::core::option::Option::Some(value) => value,
-                        ::core::option::Option::None => {
-                            return ::core::result::Result::Err(
-                                $crate::wire::IpcError::MissingField,
-                            );
-                        }
-                    },
-                )*
+                $( $field: <$ty as $crate::WireValue<$lt, __Frame>>::from_field($field, frame)?, )*
             })
         }
     };

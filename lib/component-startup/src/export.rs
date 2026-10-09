@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use component_abi::{AcceptError, SessionError, component_startup};
+use component_abi::{AcceptError, Attributes, SessionError, component_startup};
 use ipc::CallError;
 use kernel_objects::{Error, Port, PortTransport};
 use syscall::Rights;
@@ -20,15 +20,15 @@ pub struct MintedSession {
 }
 
 /// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`. `open`
-/// строит порт сессии либо отказывает. Возвращает отказ `accept`.
+/// строит порт сессии по атрибутам запроса импортёра либо отказывает. Возвращает отказ `accept`.
 pub fn serve_export<P: ipc::Protocol>(
     parent: &component_startup::Client<PortTransport>,
-    mut open: impl FnMut() -> Result<Port, SessionError>,
+    mut open: impl FnMut(Attributes<'_>) -> Result<Port, SessionError>,
 ) -> CallError<AcceptError> {
     loop {
         match accept::<P>(parent) {
             Ok(request) => {
-                let session = open();
+                let session = open(request.attributes.as_attributes());
                 let _ = request.reply.send(session);
             }
             Err(error) => return error,
@@ -36,11 +36,14 @@ pub fn serve_export<P: ipc::Protocol>(
     }
 }
 
-/// Обработчик [`serve_export`], выдающий порт `export` под новым значком.
-pub fn whole_export(export: &Port) -> impl FnMut() -> Result<Port, SessionError> + '_ {
+/// Обработчик [`serve_export`], выдающий порт `export` под новым значком при любых атрибутах
+/// запроса.
+pub fn whole_export(
+    export: &Port,
+) -> impl FnMut(Attributes<'_>) -> Result<Port, SessionError> + '_ {
     let next_badge = AtomicU64::new(0);
 
-    move || {
+    move |_| {
         mint_session(export, &next_badge)
             .map(|minted| minted.port)
             .map_err(|_| SessionError::NoSpace)

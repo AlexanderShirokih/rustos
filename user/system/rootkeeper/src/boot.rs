@@ -156,7 +156,6 @@ impl<'a> RootSystem<'a> {
                     }
                 })?;
         }
-        crate::mount::start(&mut system, plan, kernel)?;
         Ok(system)
     }
 }

@@ -7,8 +7,6 @@ use crate::plan::{BOOT_PLAN_MAGIC, BOOT_PLAN_VERSION, PLAN_HEADER_SIZE};
 pub struct ComponentSpec<'a> {
     pub executable: &'a str,
     pub name: &'a str,
-    /// Путь монтирования экспорта `FileSystem` при загрузке.
-    pub mountpoint: Option<&'a str>,
     pub memory_limit: u64,
     /// Число перезапусков после первого запуска.
     pub restarts: u32,
@@ -16,7 +14,7 @@ pub struct ComponentSpec<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanEncodeError {
-    /// В плане нет записи 0 либо у неё монтирование, ненулевые предел памяти или перезапуски.
+    /// В плане нет записи 0 либо у неё ненулевые предел памяти или перезапуски.
     BootRecord,
     /// Строка поля пуста.
     EmptyString,
@@ -29,13 +27,13 @@ pub enum PlanEncodeError {
 }
 
 /// Кодирует план загрузочной композиции. Первым элементом `components` идёт запись 0 -
-/// загрузочная программа без монтирования, предела памяти и перезапусков.
+/// загрузочная программа без предела памяти и перезапусков.
 pub fn encode_plan(components: &[ComponentSpec<'_>]) -> Result<Vec<u8>, PlanEncodeError> {
     let count = u16::try_from(components.len()).map_err(|_| PlanEncodeError::TooManyEntries)?;
     let (boot, composition) = components
         .split_first()
         .ok_or(PlanEncodeError::BootRecord)?;
-    if boot.memory_limit != 0 || boot.restarts != 0 || boot.mountpoint.is_some() {
+    if boot.memory_limit != 0 || boot.restarts != 0 {
         return Err(PlanEncodeError::BootRecord);
     }
     if composition
@@ -62,24 +60,14 @@ fn encode_component(
 ) -> Result<(), PlanEncodeError> {
     let executable_len = string_len(component.executable)?;
     let name_len = string_len(component.name)?;
-    let mount_len = component
-        .mountpoint
-        .map(string_len)
-        .transpose()?
-        .unwrap_or(0);
 
     // Поля заголовка идут подряд в порядке смещений `COMPONENT_*` из `plan.rs`.
     bytes.extend_from_slice(&component.restarts.to_le_bytes());
     bytes.extend_from_slice(&executable_len.to_le_bytes());
     bytes.extend_from_slice(&name_len.to_le_bytes());
-    bytes.extend_from_slice(&mount_len.to_le_bytes());
     bytes.extend_from_slice(&component.memory_limit.to_le_bytes());
     bytes.extend_from_slice(component.executable.as_bytes());
     bytes.extend_from_slice(component.name.as_bytes());
-
-    if let Some(path) = component.mountpoint {
-        bytes.extend_from_slice(path.as_bytes());
-    }
     Ok(())
 }
 

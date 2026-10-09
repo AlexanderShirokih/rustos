@@ -1011,7 +1011,7 @@ fn filesystem_lists_the_image_directory() {
 
     let names = walk_directory(&client, &buffer, directory.fd);
 
-    for expected in ["testrunner", "namespace-router"] {
+    for expected in ["testrunner", "mounts"] {
         test_harness::check!(names.iter().any(|name| name.as_str() == expected));
     }
 
@@ -1345,6 +1345,14 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     let count = read.expect("degraded store maps on demand");
     test_harness::check_eq!(count, length);
     test_harness::check_eq!(buffer_head(&data, PAYLOAD.len()), PAYLOAD);
+
+    // Том `/spare` делит слоты отображений процесса с `/tmp`, и узлы теста их освобождают.
+    close(&client, &imported);
+    for name in names.iter().map(String::as_str).chain([IMPORTED]) {
+        client
+            .unlink(name, NodeKind::File)
+            .expect("unlink of a test node");
+    }
 }
 
 #[test_harness::test]

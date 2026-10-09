@@ -18,7 +18,8 @@ pub type Found = component_abi::Found<Session<component_startup::Protocol>>;
 /// покрывает `accept` провайдера и его ответ.
 ///
 /// Отказы:
-/// - `Ipc(IpcError::Timeout)` - срок истёк, заявка остаётся у родителя до повтора требования;
+/// - `Ipc(IpcError::Timeout)` - срок истёк, заявка остаётся у родителя до выдачи провайдеру
+///   либо до вытеснения сверх предела заявок, повтор ждёт следом за ней;
 /// - `Remote` - отказ родителя.
 pub fn session<P: ipc::Protocol>(
     parent: Handle<kind::Port>,

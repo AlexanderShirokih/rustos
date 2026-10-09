@@ -23,9 +23,7 @@ use fdt::devicetree::DeviceTree;
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqControl, MemoryRegion, Port, SessionTransport};
 use platform_abi::{Description, platform};
-use runtime::{
-    FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, log_line, spawn_owned,
-};
+use runtime::{FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, spawn_owned};
 
 mod sessions;
 
@@ -73,7 +71,6 @@ impl fmt::Display for Stopped {
 #[program_entry::component]
 fn run(requirements: PlatformStartup) -> Result<(), Stopped> {
     let (service, platform) = start(requirements)?;
-    log_line("started");
     serve(service, platform);
     Err(Stopped::ServicePortClosed)
 }
@@ -112,7 +109,7 @@ fn start(requirements: PlatformStartup) -> Result<(&'static Port, Platform), Sto
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
     let _ = spawn_owned(move || {
-        let failure = serve_export::<platform::Protocol>(&exporter, || open(shared));
+        let failure = serve_export::<platform::Protocol>(&exporter, |_| open(shared));
         log_fmt(format_args!("export stopped: {failure:?}"));
         exit(FAILED_EXIT_CODE)
     })

@@ -13,7 +13,7 @@ use failed::Failed;
 component_manifest! {
     struct UnresponsiveFileSystemStartup {
         requirements: {},
-        exports: [file_system::Protocol],
+        exports: [file_system::Protocol => [{ fs = "unresponsive" }]],
     }
 }
 

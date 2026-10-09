@@ -306,8 +306,12 @@ impl<'a, R: ReceivedResources> WireValue<'a, R> for RecordBuf {
     type Owned = Self;
 
     fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
-        let records = Packed::from_bytes(data).ok_or(IpcError::InvalidValue)?;
-        Ok(Self { records })
+        let mut buf = Self::new();
+        if buf.records.fill(data) {
+            Ok(buf)
+        } else {
+            Err(IpcError::InvalidValue)
+        }
     }
 }
 

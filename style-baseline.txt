@@ -39,10 +39,6 @@ code_in_crate_root|lib/fdt-test/src/lib.rs|push_prop|379add87
 code_in_crate_root|lib/fdt-test/src/lib.rs|push_u32|f46387f4
 code_in_crate_root|lib/fdt-test/src/lib.rs|tree|511eb395
 code_in_crate_root|lib/fdt-test/src/lib.rs|wrap|d04f72c5
-code_in_crate_root|lib/filesystem-server/src/lib.rs|IMAGE|5870b63a
-code_in_crate_root|lib/filesystem-server/src/lib.rs|Shared|c213e3d4
-code_in_crate_root|lib/filesystem-server/src/lib.rs|serve_sessions|319c6740
-code_in_crate_root|lib/filesystem-server/src/lib.rs|serve|8be24894
 code_in_crate_root|lib/ipc-test/src/lib.rs|<Entry as Drop>|76c9b637
 code_in_crate_root|lib/ipc-test/src/lib.rs|<MockChannel as Channel>|76c9b637
 code_in_crate_root|lib/ipc-test/src/lib.rs|<MockChannel as Clone>|76c9b637

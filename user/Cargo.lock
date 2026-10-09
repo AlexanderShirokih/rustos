@@ -352,9 +352,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "namespace-router"
+name = "mounts"
 version = "0.1.0"
 dependencies = [
+ "bootstrap-abi",
+ "component-abi",
  "component-startup",
  "filesystem-abi",
  "ipc",
@@ -363,6 +365,7 @@ dependencies = [
  "runtime",
  "syscall",
  "userland-build",
+ "userland-image",
 ]
 
 [[package]]
@@ -425,7 +428,6 @@ dependencies = [
  "bootstrap-abi",
  "component-abi",
  "component-startup",
- "filesystem-abi",
  "ipc",
  "kernel-objects",
  "log-abi",

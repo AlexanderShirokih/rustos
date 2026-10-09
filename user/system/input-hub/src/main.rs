@@ -80,7 +80,6 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     })?;
     let _ =
         spawn_owned(move || export::<input::Protocol>(&consumers_parent, consumers, open_input))?;
-    log_line("started");
 
     listen(consumers, input_gone, |frame| {
         let _ = input::dispatch(&mut Consumer, frame);
@@ -107,7 +106,7 @@ fn export<P: ipc::Protocol>(
     port: &Port,
     open: fn(&Port) -> Result<Port, SessionError>,
 ) -> u32 {
-    let failure = serve_export::<P>(parent, || open(port));
+    let failure = serve_export::<P>(parent, |_| open(port));
     log_fmt(format_args!("export stopped: {failure:?}"));
     exit(FAILED_EXIT_CODE)
 }

@@ -185,8 +185,8 @@ package = "platform"
 path = "/platform"
 
 [[programs]]
-package = "namespace-router"
-path = "/namespace-router"
+package = "mounts"
+path = "/mounts"
 
 [[programs]]
 package = "filesystem-ramfs"
@@ -211,6 +211,10 @@ source = "user/testing/testrunner/assets/empty.txt"
 [[files]]
 path = "/scope-consumer-fixture/sample"
 source = "user/testing/testrunner/assets/area.txt"
+
+[[files]]
+path = "/mounts/table"
+source = "user/testing/testrunner/assets/mounts"
 
 [[programs]]
 package = "std-selftest"

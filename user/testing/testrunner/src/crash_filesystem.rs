@@ -11,7 +11,7 @@ use runtime::{FAILED_EXIT_CODE, exit};
 use syscall::{Handle, USER_VA_END, kind};
 
 component_manifest! {
-    exports: [file_system::Protocol],
+    exports: [file_system::Protocol => [{ fs = "crash" }]],
 }
 
 struct CrashingFileSystem {

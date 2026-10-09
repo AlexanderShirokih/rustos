@@ -1,27 +1,18 @@
 version = 1
 
 [[components]]
-executable = "namespace-router"
+executable = "mounts"
 memory_limit = "2M"
 restarts = 2
 
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-mountpoint = "/boot"
 
 [[components]]
 executable = "unresponsive-filesystem"
 memory_limit = "1M"
-mountpoint = "/stuck"
 
 [[components]]
 executable = "filesystem-ramfs"
-name = "spare-filesystem"
-memory_limit = "4M"
-mountpoint = "/spare"
-
-[[components]]
-executable = "filesystem-ramfs"
-memory_limit = "4M"
-mountpoint = "/tmp"
+memory_limit = "8M"

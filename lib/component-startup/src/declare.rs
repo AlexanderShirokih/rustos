@@ -21,7 +21,7 @@ pub enum StartupFailure {
     Refused,
     /// Провайдер экспорта снят навсегда.
     Unavailable,
-    /// Повтор запроса заменил заявку либо у родителя не хватило ресурса.
+    /// Заявку вытеснили сверх предела либо у родителя не хватило ресурса.
     NoSpace,
     /// Отказ транспорта либо истечение [`STARTUP_REQUEST_TIMEOUT`](crate::STARTUP_REQUEST_TIMEOUT).
     Ipc(IpcError),

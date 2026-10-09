@@ -1,19 +1,17 @@
 version = 1
 
 [[components]]
-executable = "namespace-router"
+executable = "mounts"
 memory_limit = "2M"
 restarts = 2
 
 [[components]]
 executable = "filesystem-imagefs"
 memory_limit = "4M"
-mountpoint = "/boot"
 
 [[components]]
 executable = "filesystem-ramfs"
 memory_limit = "4M"
-mountpoint = "/tmp"
 
 [[components]]
 executable = "platform"

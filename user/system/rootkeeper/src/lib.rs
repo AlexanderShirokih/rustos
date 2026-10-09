@@ -8,7 +8,6 @@ extern crate alloc;
 
 mod boot;
 mod component;
-mod mount;
 pub mod relay;
 mod system;
 

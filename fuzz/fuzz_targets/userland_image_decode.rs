@@ -32,7 +32,6 @@ fuzz_target!(|data: &[u8]| {
                     component.executable(),
                     component.memory_limit(),
                     component.restarts(),
-                    component.mountpoint(),
                 );
             }
         }

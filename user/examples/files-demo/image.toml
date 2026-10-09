@@ -9,8 +9,8 @@ path = "/rootkeeper"
 boot = true
 
 [[programs]]
-package = "namespace-router"
-path = "/namespace-router"
+package = "mounts"
+path = "/mounts"
 
 [[programs]]
 package = "filesystem-imagefs"
@@ -23,6 +23,10 @@ path = "/filesystem-ramfs"
 [[programs]]
 package = "files-demo"
 path = "/files-demo"
+
+[[files]]
+path = "/mounts/table"
+source = "user/system/rootkeeper/mounts"
 
 [[files]]
 path = "/files-demo/greeting.txt"

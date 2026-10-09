@@ -15,7 +15,7 @@ members = [
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
     "system/input-hub",
-    "system/namespace-router",
+    "system/mounts",
     "system/platform",
     "system/rootkeeper",
     "system/spmi-pmic-arb",

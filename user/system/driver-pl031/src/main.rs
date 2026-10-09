@@ -169,13 +169,12 @@ fn run(requirements: RtcStartup) -> Result<()> {
     spawn_owned(move || {
         let next_badge = AtomicU64::new(0);
         let failure =
-            serve_export::<rtc::Protocol>(&exporter, || shared.open(&platform, &next_badge));
+            serve_export::<rtc::Protocol>(&exporter, |_| shared.open(&platform, &next_badge));
         log_fmt(format_args!("export stopped: {failure:?}"));
         exit(FAILED_EXIT_CODE)
     })
     .map_err(|_| Error::Runtime)?;
 
-    log_line("started");
     shared.serve();
     Err(Error::Ipc)
 }

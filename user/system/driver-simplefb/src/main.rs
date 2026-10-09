@@ -27,7 +27,7 @@ use kernel_objects::{
 use platform_abi::{Description, DeviceId, PlatformError, platform};
 use runtime::{
     FAILED_EXIT_CODE, MemoryAccess, Mutex, PortTransport, Timeout, UserMemFlags, exit, log_fmt,
-    log_line, spawn_owned,
+    spawn_owned,
 };
 use syscall::{PAGE_SIZE, Rights, kind};
 
@@ -274,7 +274,6 @@ impl display::Service<Delivery> for Session {
 #[program_entry::component]
 fn run(requirements: SimplefbStartup) -> Result<(), Stopped> {
     let shared = start(requirements)?;
-    log_line("started");
     shared.serve();
     Err(Stopped::ServicePortClosed)
 }
@@ -308,7 +307,7 @@ fn start(requirements: SimplefbStartup) -> Result<&'static Shared, Stopped> {
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
     let _ = spawn_owned(move || {
-        let failure = serve_export::<display::Protocol>(&exporter, || attacher.open(shared));
+        let failure = serve_export::<display::Protocol>(&exporter, |_| attacher.open(shared));
         log_fmt(format_args!("export stopped: {failure:?}"));
         exit(FAILED_EXIT_CODE)
     })

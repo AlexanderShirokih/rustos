@@ -35,8 +35,8 @@ use crate::{
     },
     filesystem::{IMAGE_FILE, connect, open},
     log_relay::{
-        ScenarioLogSessions, await_component_lines, await_component_sources, start_component_relay,
-        stop_component_relay,
+        ScenarioLogSessions, await_component_lines, await_component_lines_with_prefix,
+        await_component_sources, start_component_relay, stop_component_relay,
     },
     probe_protocol::{Pairs, probe},
 };
@@ -54,6 +54,8 @@ const AREA: &str = "area";
 const SPARE_VIEW: &str = "spare";
 const TMP_VIEW: &str = "tmp";
 const OTHER_VIEW: &str = "other";
+const BOOT_VIEW: &str = "boot";
+const NESTED_VIEW: &str = "nested";
 const HARDWARE_REQUIREMENT: &str = "hardware";
 const FEATURED_REQUIREMENT: &str = "featured";
 
@@ -67,6 +69,9 @@ const AREA_SCOPE: &str = "/boot/scope-consumer-fixture";
 
 const STOPPED_LINE: &str = "stopped: failed";
 const DUPLICATE_REFUSED_LINES: [&str; 2] = ["Err(Syscall(AccessDenied))", STOPPED_LINE];
+const BOOT_REFUSAL: &str = "mount table line 2 /boot: filesystem refused: Remote(Unbound)";
+const TMP_MOUNT: &str = "mount /tmp";
+const TMP_ENDED: &str = "mount /tmp ended";
 
 const COMPONENT_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 const PARENT_REFUSAL_TIMEOUT: Timeout = Timeout::from_secs(1);
@@ -109,7 +114,6 @@ const VIRTIO_MAGIC: u32 = 0x7472_6976;
 const PARENT: ComponentSpec<'static> = ComponentSpec {
     executable: "/testrunner",
     name: "testrunner",
-    mountpoint: None,
     memory_limit: 0,
     restarts: 0,
 };
@@ -122,31 +126,23 @@ const IDLE_EXPORT: ComponentSpec<'static> = fixture("/idle-export-fixture", "idl
 const FILTERED: ComponentSpec<'static> =
     fixture("/filtered-export-fixture", "filtered-export-fixture");
 
-const REFUSAL_PROBE: ComponentSpec<'static> = ComponentSpec {
-    mountpoint: None,
-    ..fixture("/refusal-probe-fixture", "refusal-probe-fixture")
-};
+const REFUSAL_PROBE: ComponentSpec<'static> =
+    fixture("/refusal-probe-fixture", "refusal-probe-fixture");
 
-const LOG_DUPLICATE: ComponentSpec<'static> = ComponentSpec {
-    ..fixture("/log-duplicate-fixture", "log-duplicate-fixture")
-};
+const LOG_DUPLICATE: ComponentSpec<'static> =
+    fixture("/log-duplicate-fixture", "log-duplicate-fixture");
 
 const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
     name: "neighbour",
     ..EXPORT
 };
 
-const CLOSED: ComponentSpec<'static> = ComponentSpec {
-    ..fixture("/managed-startup-closed", "managed-startup-closed")
-};
+const CLOSED: ComponentSpec<'static> = fixture("/managed-startup-closed", "managed-startup-closed");
 
-const PROBE_IMPORTER: ComponentSpec<'static> = ComponentSpec {
-    mountpoint: None,
-    ..fixture("/probe-importer-fixture", "probe-importer-fixture")
-};
+const PROBE_IMPORTER: ComponentSpec<'static> =
+    fixture("/probe-importer-fixture", "probe-importer-fixture");
 
 const HOLDER: ComponentSpec<'static> = ComponentSpec {
-    mountpoint: None,
     memory_limit: 2 * MIB,
     restarts: 1,
     ..fixture("/budget-holder-fixture", "budget-holder-fixture")
@@ -155,7 +151,6 @@ const HOLDER: ComponentSpec<'static> = ComponentSpec {
 pub(crate) const PLATFORM: ComponentSpec<'static> = ComponentSpec {
     executable: "/platform",
     name: "platform",
-    mountpoint: None,
     memory_limit: MIB,
     restarts: 1,
 };
@@ -166,15 +161,13 @@ const CLOCK_DRIVERS: [(&str, &str); 2] = [
 ];
 
 const IRQ: ComponentSpec<'static> = ComponentSpec {
-    mountpoint: None,
     restarts: 1,
     ..fixture("/irq-fixture", "irq-fixture")
 };
 
 const ROUTER: ComponentSpec<'static> = ComponentSpec {
-    executable: "/namespace-router",
+    executable: "/mounts",
     name: ROUTER_NAME,
-    mountpoint: None,
     memory_limit: 2 * MIB,
     restarts: 0,
 };
@@ -182,7 +175,6 @@ const ROUTER: ComponentSpec<'static> = ComponentSpec {
 const RAM_FS: ComponentSpec<'static> = ComponentSpec {
     executable: "/filesystem-ramfs",
     name: "filesystem-ramfs",
-    mountpoint: Some("/tmp"),
     memory_limit: 4 * MIB,
     restarts: 0,
 };
@@ -190,26 +182,12 @@ const RAM_FS: ComponentSpec<'static> = ComponentSpec {
 const IMAGE_FS: ComponentSpec<'static> = ComponentSpec {
     executable: "/filesystem-imagefs",
     name: "filesystem-imagefs",
-    mountpoint: Some(IMAGE_MOUNT),
     ..RAM_FS
-};
-
-const SPARE_FS: ComponentSpec<'static> = ComponentSpec {
-    executable: "/filesystem-ramfs",
-    name: "spare-filesystem",
-    mountpoint: Some("/spare"),
-    ..RAM_FS
-};
-
-const NESTED_SPARE_FS: ComponentSpec<'static> = ComponentSpec {
-    mountpoint: Some(NESTED_SPARE_MOUNT),
-    ..SPARE_FS
 };
 
 const CRASH_FS: ComponentSpec<'static> = ComponentSpec {
     executable: "/crash-filesystem",
     name: "crash-filesystem",
-    mountpoint: Some("/crash"),
     restarts: 1,
     ..RAM_FS
 };
@@ -227,10 +205,8 @@ const FEATURE_HOLDER: ComponentSpec<'static> = ComponentSpec {
 
 const FEATURED_QUERY: &[Attribute<'static>] = &[pair("kind", "featured")];
 
-const SCOPE_CONSUMER: ComponentSpec<'static> = ComponentSpec {
-    mountpoint: None,
-    ..fixture("/scope-consumer-fixture", "scope-consumer-fixture")
-};
+const SCOPE_CONSUMER: ComponentSpec<'static> =
+    fixture("/scope-consumer-fixture", "scope-consumer-fixture");
 
 pub(crate) const fn fixture(
     executable: &'static str,
@@ -239,7 +215,6 @@ pub(crate) const fn fixture(
     ComponentSpec {
         executable,
         name,
-        mountpoint: None,
         memory_limit: MIB,
         restarts: 0,
     }
@@ -259,9 +234,11 @@ pub(crate) fn scenario(components: &[ComponentSpec<'_>]) -> Composition {
 
 pub(crate) fn with_drivers() -> Composition {
     let composition = started(&[PARENT, PLATFORM], image_index()).0;
-    // Запрос к драйверу отвечает по уже опубликованным признакам, а строку запуска `platform`
-    // пишет после публикации.
-    await_component_lines(PLATFORM.name, 1);
+    // `platform` отвечает на сессии после публикации признаков, и запрос к драйверу их учитывает.
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
+    platform_session(&importer, PLATFORM_REQUIREMENT)
+        .description()
+        .expect("platform description");
     composition
 }
 
@@ -419,10 +396,7 @@ fn rtc_session(
 }
 
 fn binding_lines(driver: &str, count: usize) -> Vec<String> {
-    let mut lines = await_component_lines(driver, count);
-    // Поток экспорта драйвера может записать привязку раньше строки запуска.
-    lines.retain(|line| line != "started");
-    lines
+    await_component_lines(driver, count)
 }
 
 const fn featured_of(name: &'static str) -> crate::composition::Import {
@@ -626,6 +600,10 @@ fn written(
         .map(|opened| opened.kind)
 }
 
+fn logged(lines: &[String], expected: &str) -> usize {
+    lines.iter().filter(|line| *line == expected).count()
+}
+
 fn refusals() -> Vec<String> {
     let composition = scenario(&[EXPORT, REFUSAL_PROBE]);
     let lines = await_component_lines(REFUSAL_PROBE.name, 5);
@@ -659,12 +637,11 @@ fn compiled_plan_carries_the_boot_composition() {
         .expect("compiled plan decodes");
 
     let file_systems = [
-        ("filesystem-imagefs", IMAGE_MOUNT),
-        ("unresponsive-filesystem", "/stuck"),
-        ("spare-filesystem", "/spare"),
-        ("filesystem-ramfs", "/tmp"),
+        "filesystem-imagefs",
+        "unresponsive-filesystem",
+        "filesystem-ramfs",
     ]
-    .map(|(name, scope)| {
+    .map(|name| {
         let component = plan
             .components()
             .find(|component| component.name() == name)
@@ -675,18 +652,18 @@ fn compiled_plan_carries_the_boot_composition() {
             .expect("decode program");
         let manifest = component_abi::decode_manifest(userland::ProgramView::manifest(&program))
             .expect("manifest");
-        let serves = manifest
-            .exports()
-            .any(|export| export.protocol() == file_system::Protocol::ID);
+        let serves_by_kind = manifest.exports().any(|export| {
+            export.protocol() == file_system::Protocol::ID
+                && export.filters().any(|filter| filter.value(b"fs").is_some())
+        });
         let mounts_nothing = manifest
             .requirements()
             .all(|requirement| requirement.protocol() != file_system_mount::Protocol::ID);
-        (scope, component.mountpoint(), serves, mounts_nothing)
+        (serves_by_kind, mounts_nothing)
     });
 
-    for (scope, mountpoint, serves, mounts_nothing) in file_systems {
-        test_harness::check_eq!(mountpoint, Some(scope));
-        test_harness::check!(serves);
+    for (serves_by_kind, mounts_nothing) in file_systems {
+        test_harness::check!(serves_by_kind);
         test_harness::check!(mounts_nothing);
     }
 }
@@ -968,18 +945,25 @@ fn a_component_out_of_restarts_does_not_stop_the_root() {
         NEIGHBOUR,
     ]);
     let importer = composition.importer(&[view(ROOT_VIEW, ""), probe_of(PROBE)]);
-    let started = await_component_lines(ROUTER_NAME, 1);
+    // Без файловых систем каждое воплощение маршрутизатора пишет отказ строки `/boot`.
+    let started = logged(
+        &await_component_lines_with_prefix(ROUTER_NAME, BOOT_REFUSAL, 1),
+        BOOT_REFUSAL,
+    );
     let router = first_found::<namespace::Protocol>(&importer, ROOT_VIEW);
 
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
-    let restarted = await_component_lines(ROUTER_NAME, 2);
+    let restarted = logged(
+        &await_component_lines_with_prefix(ROUTER_NAME, BOOT_REFUSAL, 2),
+        BOOT_REFUSAL,
+    );
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
     let refused =
         component_startup::open::<namespace::Protocol>(&router, COMPONENT_REPLY_TIMEOUT).map(drop);
     let pinged = ping(&importer, PROBE);
 
-    test_harness::check_eq!(started, ["started"]);
-    test_harness::check_eq!(restarted.len(), 2);
+    test_harness::check_eq!(started, 1);
+    test_harness::check_eq!(restarted, 2);
     test_harness::check_eq!(refused, Err(CallError::Remote(SessionError::Unavailable)));
     test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
@@ -1463,16 +1447,18 @@ fn a_restarted_file_system_serves_its_prefix_again_without_restarting_the_router
     write(&resolved(&tmp, "/"));
 
     composition.terminate(RAM_FS.name, TERMINATE_EXIT_CODE);
-    let restarted = await_component_lines(RAM_FS.name, 2);
+    // После конца монтирования разрешение ждёт монтирования новым воплощением.
+    await_component_lines_with_prefix(ROUTER_NAME, TMP_ENDED, 1);
     let rewritten = written(&resolved(&tmp, "/"));
+    let router = await_component_lines_with_prefix(ROUTER_NAME, TMP_MOUNT, 3);
 
-    test_harness::check_eq!(restarted, ["started", "started"]);
+    test_harness::check_eq!(logged(&router, TMP_MOUNT), 2);
     test_harness::check_eq!(rewritten, Err(CallError::Remote(FileSystemError::NotFound)));
     finish(composition);
 }
 
 #[test_harness::test]
-fn a_restarted_router_is_mounted_again_by_every_file_system() {
+fn a_restarted_router_mounts_its_table_again() {
     let composition = scenario(&[
         ComponentSpec {
             restarts: 1,
@@ -1507,42 +1493,119 @@ fn router_restart_keeps_file_system_components_and_their_sessions() {
         },
         RAM_FS,
     ]);
-    let importer = composition.importer(&[view(TMP_VIEW, "/tmp")]);
+    let importer = composition.importer(&[view(TMP_VIEW, "/tmp"), view(SPARE_VIEW, "/spare")]);
     let files = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/");
     write(&files);
+    write(&resolved(
+        &importer.port::<namespace::Protocol>(SPARE_VIEW),
+        "/",
+    ));
 
     composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
     let tmp = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/");
     let renewed = written(&tmp);
     let kept = written(&files);
+    let volume = written(&resolved(
+        &importer.port::<namespace::Protocol>(SPARE_VIEW),
+        "/",
+    ));
 
     test_harness::check_eq!(renewed, Ok(NodeKind::File));
     test_harness::check_eq!(kept, Ok(NodeKind::File));
+    test_harness::check_eq!(volume, Ok(NodeKind::File));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn malformed_and_unserved_table_lines_are_logged_while_the_rest_mount() {
+    let composition = scenario(&[ROUTER, RAM_FS]);
+    let importer = composition.importer(&[view(TMP_VIEW, "/tmp"), view(SPARE_VIEW, "/spare")]);
+    let tmp = resolution(
+        &importer.port::<namespace::Protocol>(TMP_VIEW),
+        "/",
+        RESOLVE_TIMEOUT,
+    );
+    let spare = resolution(
+        &importer.port::<namespace::Protocol>(SPARE_VIEW),
+        "/",
+        RESOLVE_TIMEOUT,
+    );
+    // Три отказа разбора, монтирования `/tmp` и `/spare` и отказы строк `/boot`, `/stuck` и
+    // `/crash`. Строка `/boot/spare` ждёт монтирования `/boot`.
+    let router = await_component_lines(ROUTER_NAME, 8);
+    let logged = |prefix: &str| router.iter().any(|line| line.starts_with(prefix));
+
+    test_harness::check_eq!(tmp, Ok(()));
+    test_harness::check_eq!(spare, Ok(()));
+    test_harness::check!(logged("mount table line 12: InvalidPath"));
+    test_harness::check!(logged("mount table line 13: MissingAttributes"));
+    test_harness::check!(logged("mount table line 14: InvalidAttribute"));
+    test_harness::check!(logged("mount table line 2 /boot: filesystem refused"));
+    test_harness::check!(logged("mount table line 9 /crash: filesystem refused"));
     finish(composition);
 }
 
 #[test_harness::test]
 fn a_removed_file_system_frees_its_prefix() {
-    let composition = scenario(&[ROUTER, IMAGE_FS, NESTED_SPARE_FS]);
+    let composition = scenario(&[ROUTER, IMAGE_FS, RAM_FS]);
     let importer =
         composition.importer(&[view(ROOT_VIEW, ""), view(SPARE_VIEW, NESTED_SPARE_MOUNT)]);
     let spare = importer.port::<namespace::Protocol>(SPARE_VIEW);
     let mounted = resolution(&spare, "/", RESOLVE_TIMEOUT);
 
-    composition.terminate(NESTED_SPARE_FS.name, TERMINATE_EXIT_CODE);
+    composition.terminate(RAM_FS.name, TERMINATE_EXIT_CODE);
     let freed = resolution(&spare, "/", FREED_PREFIX_TIMEOUT);
     let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
     let nested = resolution(&root, NESTED_SPARE_PATH, RESOLVE_TIMEOUT);
+    // После снятия `/boot/spare` строка получает отказ `Unbound` либо `Unavailable` в
+    // зависимости от того, снята ли запись к повторному запросу строки.
+    let refusal = "mount table line 5 /boot/spare: filesystem refused";
+    let router = await_component_lines_with_prefix(ROUTER_NAME, refusal, 1);
+    let refused = router.iter().any(|line| line.starts_with(refusal));
 
     test_harness::check_eq!(mounted, Ok(()));
     test_harness::check_eq!(freed, Err(CallError::Ipc(IpcError::Timeout)));
     test_harness::check_eq!(nested, Err(CallError::Remote(FileSystemError::NotFound)));
+    test_harness::check!(refused);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_nested_table_line_mounts_after_a_mount_of_its_parent_path() {
+    let composition = scenario(&[ROUTER, RAM_FS]);
+    let importer = composition.importer(&[
+        view(BOOT_VIEW, IMAGE_MOUNT),
+        admin("boot-admin"),
+        view(SPARE_VIEW, "/spare"),
+        view(NESTED_VIEW, NESTED_SPARE_MOUNT),
+    ]);
+    let spare = resolve(
+        &importer.port::<namespace::Protocol>(SPARE_VIEW),
+        "/",
+        RESOLVE_TIMEOUT,
+    )
+    .expect("spare mounted");
+    let nested = importer.port::<namespace::Protocol>(NESTED_VIEW);
+    let before = resolution(&nested, "/", FREED_PREFIX_TIMEOUT);
+
+    let mounted = Mounted::new(&importer, BOOT_VIEW, Session::from_session(spare));
+    let after = resolution(&nested, "/", RESOLVE_TIMEOUT);
+    let parent = resolution(
+        &importer.port::<namespace::Protocol>(BOOT_VIEW),
+        "/",
+        RESOLVE_TIMEOUT,
+    );
+
+    test_harness::check_eq!(before, Err(CallError::Ipc(IpcError::Timeout)));
+    test_harness::check_eq!(after, Ok(()));
+    test_harness::check_eq!(parent, Ok(()));
+    drop(mounted);
     finish(composition);
 }
 
 #[test_harness::test]
 fn a_mount_ends_when_its_file_system_closes_its_port() {
-    let composition = scenario(&[ROUTER, SPARE_FS]);
+    let composition = scenario(&[ROUTER, RAM_FS]);
     let importer = composition.importer(&[
         view(OTHER_VIEW, "/other"),
         admin("other-admin"),
@@ -1562,7 +1625,7 @@ fn a_mount_ends_when_its_file_system_closes_its_port() {
     );
     let other = importer.port::<namespace::Protocol>(OTHER_VIEW);
 
-    composition.terminate(SPARE_FS.name, TERMINATE_EXIT_CODE);
+    composition.terminate(RAM_FS.name, TERMINATE_EXIT_CODE);
     let freed = resolution(&other, "/", FREED_PREFIX_TIMEOUT);
     let ended = mounted.ended(COMPONENT_REPLY_TIMEOUT);
 
@@ -1701,8 +1764,8 @@ fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
 }
 
 #[test_harness::test]
-fn two_instances_of_one_program_keep_their_mounts_separate() {
-    let composition = scenario(&[ROUTER, RAM_FS, SPARE_FS]);
+fn two_volumes_of_one_file_system_keep_their_trees_separate() {
+    let composition = scenario(&[ROUTER, RAM_FS]);
     let importer = composition.importer(&[view(TMP_VIEW, "/tmp"), view(SPARE_VIEW, "/spare")]);
     let first = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/");
     let second = resolved(&importer.port::<namespace::Protocol>(SPARE_VIEW), "/");

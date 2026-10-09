@@ -8,7 +8,7 @@ use component_startup::{
 };
 use kernel_objects::Port;
 use platform_abi::platform;
-use runtime::{FAILED_EXIT_CODE, exit, log_fmt, log_line, spawn_owned};
+use runtime::{FAILED_EXIT_CODE, exit, log_fmt, spawn_owned};
 use virtio_mmio_abi::virtio_mmio;
 
 use crate::bus::{Bus, Sessions};
@@ -60,7 +60,7 @@ fn run(requirements: VirtioMmioStartup) -> Result<(), Stopped> {
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
     let _ = spawn_owned(move || {
-        let failure = serve_export::<virtio_mmio::Protocol>(&exporter, || {
+        let failure = serve_export::<virtio_mmio::Protocol>(&exporter, |_| {
             mint_session(&sessions.service, &sessions.next_badge)
                 .map(|minted| minted.port)
                 .map_err(|_| SessionError::NoSpace)
@@ -70,7 +70,6 @@ fn run(requirements: VirtioMmioStartup) -> Result<(), Stopped> {
     })
     .map_err(|_| Stopped::ExportThread)?;
 
-    log_line("started");
     bus.serve(sessions);
     Err(Stopped::ServicePortClosed)
 }

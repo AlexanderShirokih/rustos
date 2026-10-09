@@ -181,11 +181,25 @@ pub(crate) fn await_component_sources(names: &[&str]) -> Vec<String> {
 }
 
 pub(crate) fn await_component_lines(name: &str, count: usize) -> Vec<String> {
-    await_records(|records| records.iter().filter(|record| record.of(name)).count() >= count)
-        .into_iter()
-        .filter(|record| record.of(name))
-        .map(|record| record.message)
-        .collect()
+    await_component_lines_with_prefix(name, "", count)
+}
+
+pub(crate) fn await_component_lines_with_prefix(
+    name: &str,
+    prefix: &str,
+    count: usize,
+) -> Vec<String> {
+    await_records(|records| {
+        records
+            .iter()
+            .filter(|record| record.of(name) && record.message.starts_with(prefix))
+            .count()
+            >= count
+    })
+    .into_iter()
+    .filter(|record| record.of(name))
+    .map(|record| record.message)
+    .collect()
 }
 
 fn await_records(complete: impl Fn(&[Record]) -> bool) -> Vec<Record> {

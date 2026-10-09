@@ -12,8 +12,8 @@ use super::{
 };
 use crate::manifest::{ManifestRequirement, ProgramExport, ProgramManifest};
 
-const ROUTER: &str = "namespace-router";
-const TWIN: &str = "namespace-router-twin";
+const ROUTER: &str = "mounts";
+const TWIN: &str = "mounts-twin";
 const DRIVER: &str = "driver-pl031";
 const IMAGE_FS: &str = "filesystem-imagefs";
 const RAM_FS: &str = "filesystem-ramfs";
@@ -36,7 +36,6 @@ struct Component {
     memory_limit: String,
     restarts: Option<u32>,
     name: Option<String>,
-    mountpoint: Option<String>,
 }
 
 impl Component {
@@ -46,7 +45,6 @@ impl Component {
             memory_limit: String::from(DEFAULT_MEMORY_LIMIT),
             restarts: None,
             name: None,
-            mountpoint: None,
         }
     }
 
@@ -70,11 +68,6 @@ impl Component {
         self
     }
 
-    fn mounted(mut self, path: &str) -> Self {
-        self.mountpoint = Some(path.into());
-        self
-    }
-
     fn render(&self) -> String {
         let restarts = match self.restarts {
             Some(restarts) => format!("restarts = {restarts}\n"),
@@ -84,15 +77,11 @@ impl Component {
             Some(name) => format!("name = \"{name}\"\n"),
             None => String::new(),
         };
-        let mountpoint = self
-            .mountpoint
-            .as_ref()
-            .map_or_else(String::new, |path| format!("mountpoint = {path:?}\n"));
         format!(
             "\n[[components]]\n\
              executable = \"{}\"\n\
              memory_limit = \"{}\"\n\
-             {restarts}{name}{mountpoint}",
+             {restarts}{name}",
             self.executable, self.memory_limit
         )
     }
@@ -311,7 +300,6 @@ fn plan_takes_every_requirement_from_the_program_declaration() {
 
     let filesystem = plan.component(1).expect("image filesystem");
     assert_eq!(filesystem.executable(), image_path(IMAGE_FS));
-    assert_eq!(filesystem.mountpoint(), None);
 }
 
 #[test]
@@ -510,7 +498,6 @@ fn one_program_carries_two_named_instances() {
     assert_eq!(first.executable(), second.executable());
     assert_eq!(first.name(), "names-boot");
     assert_eq!(second.name(), "names-spare");
-    assert_eq!(first.mountpoint(), second.mountpoint());
 }
 
 #[test]
@@ -685,7 +672,6 @@ fn a_program_without_a_manifest_declares_nothing() {
     let plan = decoded(&bytes);
     let component = plan.component(1).expect("component");
     assert_eq!(component.executable(), image_path(HELPER));
-    assert_eq!(component.mountpoint(), None);
 }
 
 #[test]
@@ -696,7 +682,6 @@ fn record_zero_preserves_boot_program_and_launch_parameters() {
     assert_eq!(boot.executable(), image_path(ROOTKEEPER));
     assert_eq!(boot.name(), ROOTKEEPER);
 
-    assert_eq!(boot.mountpoint(), None);
     assert_eq!(boot.memory_limit(), 0);
     assert_eq!(boot.restarts(), 0);
 }
@@ -745,10 +730,6 @@ fn record_zero_is_named_by_the_image_path_of_the_boot_program() {
         decoded(&bytes).component(0).expect("record 0").name(),
         "init"
     );
-    assert_eq!(
-        decoded(&bytes).component(1).expect("platform").mountpoint(),
-        None
-    );
 }
 
 #[test]
@@ -779,15 +760,11 @@ fn all_preserves_runtime_selection_instead_of_serializing_initial_exporters() {
             &[NAMESPACE_PROTOCOL],
         ),
     );
-    let bytes = image.compiled(&plan(&[
+    image.compiled(&plan(&[
         router(),
         Component::new("multiplicity-consumer"),
         router().name(TWIN),
     ]));
-    assert_eq!(
-        decoded(&bytes).component(2).expect("consumer").mountpoint(),
-        None
-    );
 }
 
 #[test]
@@ -797,24 +774,7 @@ fn session_and_all_preserve_their_selection_without_initial_exporters() {
             "multiplicity-consumer",
             declaration(vec![requirement("names", mode, NAMESPACE_PROTOCOL)], &[]),
         );
-        let bytes = image.compiled(&plan(&[Component::new("multiplicity-consumer")]));
-        assert_eq!(
-            decoded(&bytes).component(1).expect("consumer").mountpoint(),
-            None
-        );
-    }
-}
-
-#[test]
-fn plan_carries_explicit_mount_paths_and_refuses_non_filesystem_mounts() {
-    let bytes = compiled(&plan(&[router(), ram_filesystem().mounted("/tmp")]));
-    assert_eq!(
-        decoded(&bytes).component(2).expect("ramfs").mountpoint(),
-        Some("/tmp")
-    );
-    assert!(rejected(&plan(&[router().mounted("/tmp")])).contains("must export FileSystem"));
-    for path in ["", "relative", "/../outside"] {
-        assert!(rejected(&plan(&[ram_filesystem().mounted(path)])).contains("mountpoint"));
+        image.compiled(&plan(&[Component::new("multiplicity-consumer")]));
     }
 }
 
@@ -855,8 +815,8 @@ fn the_export_index_holds_each_export_of_each_program() {
         [
             entry(HARDWARE_PROTOCOL, ROOTKEEPER, "/boot/rootkeeper"),
             entry(IMAGE_PROTOCOL, ROOTKEEPER, "/boot/rootkeeper"),
-            entry(NAMESPACE_PROTOCOL, ROUTER, "/boot/namespace-router"),
-            entry(FILE_SYSTEM_MOUNT_PROTOCOL, ROUTER, "/boot/namespace-router"),
+            entry(NAMESPACE_PROTOCOL, ROUTER, "/boot/mounts"),
+            entry(FILE_SYSTEM_MOUNT_PROTOCOL, ROUTER, "/boot/mounts"),
             entry(FILE_SYSTEM_PROTOCOL, IMAGE_FS, "/boot/filesystem-imagefs"),
             entry(FILE_SYSTEM_PROTOCOL, RAM_FS, "/boot/filesystem-ramfs"),
         ]
@@ -932,7 +892,7 @@ fn the_export_index_rejects_a_name_of_another_program_instance() {
     assert_eq!(
         reason(&error),
         "export index name 'helper' of program '/boot/helper' is the name of a boot plan \
-         instance of program '/boot/namespace-router'"
+         instance of program '/boot/mounts'"
     );
 }
 

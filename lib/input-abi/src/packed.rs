@@ -15,18 +15,22 @@ impl<const ITEM: usize, const CAP: usize> Packed<ITEM, CAP> {
     }
 
     pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut packed = Self::new();
+        packed.fill(bytes).then_some(packed)
+    }
+
+    pub(crate) fn fill(&mut self, bytes: &[u8]) -> bool {
         let (items, rest) = bytes.as_chunks();
         if !rest.is_empty() {
-            return None;
+            return false;
         }
 
-        let mut packed = Self::new();
-        for &item in items {
-            if !packed.push(item) {
-                return None;
-            }
-        }
-        Some(packed)
+        let Some(slots) = self.items.get_mut(..items.len()) else {
+            return false;
+        };
+        slots.copy_from_slice(items);
+        self.len = items.len();
+        true
     }
 
     pub(crate) fn push(&mut self, item: [u8; ITEM]) -> bool {

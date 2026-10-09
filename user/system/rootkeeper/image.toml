@@ -37,8 +37,8 @@ package = "driver-virtio-gpu"
 path = "/driver-virtio-gpu"
 
 [[programs]]
-package = "namespace-router"
-path = "/namespace-router"
+package = "mounts"
+path = "/mounts"
 
 [[programs]]
 package = "filesystem-imagefs"
@@ -63,3 +63,7 @@ path = "/hello-c"
 [[programs]]
 package = "clock-std"
 path = "/clock-std"
+
+[[files]]
+path = "/mounts/table"
+source = "user/system/rootkeeper/mounts"

@@ -9,9 +9,8 @@ mod tests;
 
 use std::iter;
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow};
 use component_abi::{ComponentManifest, decode_manifest};
-use ipc::Protocol as _;
 use userland::{ProgramView, decode_program};
 use userland_image::{ComponentSpec, component_name, encode_plan};
 
@@ -63,20 +62,6 @@ pub(crate) fn compile_plan(source: &str, programs: &[PlanProgram<'_>]) -> Result
         .map(|program| program.manifest())
         .collect::<Result<_>>()?;
     validate_composition(&names, &declarations)?;
-    for (entry, declared) in entries.iter().zip(declarations.iter().skip(1)) {
-        if let Some(path) = &entry.mountpoint {
-            ensure!(
-                filesystem_abi::Path::new(path).is_ok(),
-                "mountpoint must be an absolute path within PATH_MAX"
-            );
-            ensure!(
-                declared
-                    .exports()
-                    .any(|export| export.protocol() == filesystem_abi::file_system::Protocol::ID),
-                "component with mountpoint must export FileSystem"
-            );
-        }
-    }
 
     let memory_limits = entries
         .iter()
@@ -90,7 +75,6 @@ pub(crate) fn compile_plan(source: &str, programs: &[PlanProgram<'_>]) -> Result
     let record_zero = ComponentSpec {
         executable: boot.path,
         name: boot_name,
-        mountpoint: None,
         memory_limit: 0,
         restarts: 0,
     };
@@ -105,7 +89,6 @@ pub(crate) fn compile_plan(source: &str, programs: &[PlanProgram<'_>]) -> Result
                 .map(|(((entry, program), name), &memory_limit)| ComponentSpec {
                     executable: program.path,
                     name,
-                    mountpoint: entry.mountpoint.as_deref(),
                     memory_limit,
                     restarts: entry.restarts,
                 }),

@@ -11,7 +11,7 @@ use input_abi::{
 };
 use ipc::{CallError, Protocol};
 use kernel_objects::{Session, SessionTransport};
-use runtime::{JoinHandle, Mutex, PortTransport, Timeout, thread::Builder};
+use runtime::{JoinHandle, Mutex, PortTransport, Timeout, spawn_owned};
 
 use crate::{
     composition::{Composition, Import, Importer, pause, request},
@@ -35,8 +35,6 @@ const REQUIREMENTS: &[Import] = &[
 const CALL_WAIT: Timeout = Timeout::from_secs(2);
 
 const HUB_SETTLE_WAIT: Timeout = Timeout::from_millis(100);
-
-const NEXT_STACK_SIZE: usize = 128 * 1024;
 
 const INPUT_SESSIONS_MAX: usize = 16;
 
@@ -97,14 +95,12 @@ impl PendingNext {
         let port = session.handle().as_raw();
         let answer = Arc::new(Mutex::new(None));
         let slot = Arc::clone(&answer);
-        let thread = Builder::new()
-            .stack_bytes(NEXT_STACK_SIZE)
-            .spawn_owned(move || {
-                let consumer = input::Client::new(PortTransport::new(port)).with_wait(CALL_WAIT);
-                *slot.lock() = Some(read(&consumer));
-                0
-            })
-            .expect("next thread starts");
+        let thread = spawn_owned(move || {
+            let consumer = input::Client::new(PortTransport::new(port)).with_wait(CALL_WAIT);
+            *slot.lock() = Some(read(&consumer));
+            0
+        })
+        .expect("next thread starts");
         pause(HUB_SETTLE_WAIT);
         Self { thread, answer }
     }

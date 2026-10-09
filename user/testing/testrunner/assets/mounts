@@ -1,0 +1,14 @@
+# Монтирования основного плана и сценариев testrunner.
+/boot fs=image
+/tmp fs=ram
+/spare fs=ram,label=spare
+/boot/spare fs=ram,label=spare
+/stuck fs=unresponsive
+
+# Файловую систему `crash` запускает только сценарий, без неё строка пишет отказ в журнал.
+/crash fs=crash
+
+# Некорректные строки пишут отказ в журнал и пропускаются.
+relative fs=ram
+/broken
+/bad fs

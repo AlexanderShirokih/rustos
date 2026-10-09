@@ -24,29 +24,26 @@ pub const BOOT_PLAN_MAGIC: [u8; 8] = *b"RKPLAN\0\0";
 pub const BOOT_PLAN_VERSION: u16 = 1;
 
 pub(crate) const PLAN_HEADER_SIZE: usize = 12;
-pub(crate) const COMPONENT_HEADER_SIZE: usize = 18;
+pub(crate) const COMPONENT_HEADER_SIZE: usize = 16;
 
 pub(crate) const COMPONENT_RESTARTS: usize = 0;
 pub(crate) const COMPONENT_EXECUTABLE_LEN: usize = 4;
 pub(crate) const COMPONENT_NAME_LEN: usize = 6;
-pub(crate) const COMPONENT_MOUNTPOINT_LEN: usize = 8;
-pub(crate) const COMPONENT_MEMORY_LIMIT: usize = 10;
+pub(crate) const COMPONENT_MEMORY_LIMIT: usize = 8;
 
 /// Компонент загрузочной композиции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanComponent<'a> {
     executable: &'a str,
     name: &'a str,
-    mountpoint: Option<&'a str>,
     memory_limit: u64,
     restarts: u32,
 }
 
 /// План загрузочной композиции, разобранный из записи образа.
 ///
-/// Запись 0 - загрузочная программа образа с путём и именем. У неё нет монтирования,
-/// предела памяти и перезапусков, и родитель её не запускает. Записи с номера 1 - компоненты
-/// композиции.
+/// Запись 0 - загрузочная программа образа с путём и именем. У неё нет предела памяти и
+/// перезапусков, и родитель её не запускает. Записи с номера 1 - компоненты композиции.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootPlan<'a> {
     bytes: &'a [u8],
@@ -99,12 +96,6 @@ impl<'a> PlanComponent<'a> {
     #[must_use]
     pub const fn name(&self) -> &'a str {
         self.name
-    }
-
-    /// Путь монтирования экспорта `FileSystem` при загрузке, если он задан.
-    #[must_use]
-    pub const fn mountpoint(&self) -> Option<&'a str> {
-        self.mountpoint
     }
 
     /// Предел памяти компонента в байтах. Родитель отрезает компоненту бюджет не меньше
@@ -177,10 +168,7 @@ impl<'a> BootPlan<'a> {
             let parsed = parse_component(bytes, cursor)?;
             let component = parsed.component;
             if index == 0 {
-                if component.memory_limit != 0
-                    || component.restarts != 0
-                    || component.mountpoint.is_some()
-                {
+                if component.memory_limit != 0 || component.restarts != 0 {
                     return Err(PlanDecodeError::InvalidLayout("boot_record"));
                 }
             } else if component.memory_limit == 0 {
@@ -219,23 +207,15 @@ fn parse_component(bytes: &[u8], at: usize) -> Result<ParsedComponent<'_>, PlanD
     let restarts = read_u32(header, COMPONENT_RESTARTS)?;
     let executable_len = usize::from(read_u16(header, COMPONENT_EXECUTABLE_LEN)?);
     let name_len = usize::from(read_u16(header, COMPONENT_NAME_LEN)?);
-    let mount_len = usize::from(read_u16(header, COMPONENT_MOUNTPOINT_LEN)?);
     let memory_limit = read_u64(header, COMPONENT_MEMORY_LIMIT)?;
 
     let cursor = at + COMPONENT_HEADER_SIZE;
     let (executable, cursor) = parse_str(bytes, cursor, executable_len, "executable")?;
     let (name, cursor) = parse_str(bytes, cursor, name_len, "name")?;
-    let (mountpoint, cursor) = if mount_len == 0 {
-        (None, cursor)
-    } else {
-        let (path, cursor) = parse_str(bytes, cursor, mount_len, "mountpoint")?;
-        (Some(path), cursor)
-    };
 
     let component = PlanComponent {
         executable,
         name,
-        mountpoint,
         memory_limit,
         restarts,
     };
@@ -306,16 +286,14 @@ mod tests {
         ComponentSpec {
             executable: "/rootkeeper",
             name: "rootkeeper",
-            mountpoint: None,
             memory_limit: 0,
             restarts: 0,
         }
     }
     fn router() -> ComponentSpec<'static> {
         ComponentSpec {
-            executable: "/namespace-router",
+            executable: "/mounts",
             name: "router-a",
-            mountpoint: None,
             memory_limit: 8 * 1024 * 1024,
             restarts: 2,
         }
@@ -333,44 +311,19 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_carries_mount_paths_without_requirement_bindings() {
-        let filesystem = ComponentSpec {
-            executable: "/filesystem-ramfs",
-            name: "tmp",
-            mountpoint: Some("/tmp"),
-            memory_limit: 4 * 1024 * 1024,
-            restarts: 1,
-        };
-        let bytes = encode_plan(&[boot(), filesystem]).expect("encode plan");
-        let plan = decode_plan(&bytes).expect("decode plan");
-        assert_eq!(plan.component(0).expect("boot").mountpoint(), None);
-        let mounted = plan.component(1).expect("filesystem");
-        assert_eq!(mounted.executable(), filesystem.executable);
-        assert_eq!(mounted.name(), filesystem.name);
-        assert_eq!(mounted.mountpoint(), Some("/tmp"));
-        assert_eq!(mounted.restarts(), 1);
-    }
-
-    #[test]
-    fn encode_rejects_empty_mount_paths_and_a_boot_mount() {
-        assert_eq!(
-            encode_plan(&[ComponentSpec {
-                mountpoint: Some("/boot"),
-                ..boot()
-            }]),
-            Err(PlanEncodeError::BootRecord)
-        );
+    fn encode_rejects_an_empty_name() {
         assert_eq!(
             encode_plan(&[
                 boot(),
                 ComponentSpec {
-                    mountpoint: Some(""),
+                    name: "",
                     ..router()
                 }
             ]),
             Err(PlanEncodeError::EmptyString)
         );
     }
+
     #[test]
     fn decode_rejects_a_boot_record_with_runtime_properties() {
         let bytes = plan_bytes();
@@ -383,14 +336,6 @@ mod tests {
                 Some(PlanDecodeError::InvalidLayout("boot_record"))
             );
         }
-        let mut mounted = bytes;
-        let at = PLAN_HEADER_SIZE + COMPONENT_MOUNTPOINT_LEN;
-        mounted[at..at + 2].copy_from_slice(&2u16.to_le_bytes());
-        mounted.splice(after_boot()..after_boot(), *b"/x");
-        assert_eq!(
-            decode_plan(&mounted).expect_err("boot cannot mount"),
-            PlanDecodeError::InvalidLayout("boot_record")
-        );
     }
 
     #[test]
@@ -445,11 +390,8 @@ mod tests {
 
     #[test]
     fn a_program_record_is_named_by_the_directory_that_holds_it() {
-        assert_eq!(
-            component_name("/boot/namespace-router/exec"),
-            "namespace-router"
-        );
-        assert_eq!(component_name("/boot/namespace-router/mounts"), "mounts");
+        assert_eq!(component_name("/boot/mounts/exec"), "mounts");
+        assert_eq!(component_name("/boot/mounts/table"), "table");
         assert_eq!(component_name("/boot/rootkeeper"), "rootkeeper");
         assert_eq!(component_name("/exec"), "exec");
         assert_eq!(component_name("exec"), "exec");

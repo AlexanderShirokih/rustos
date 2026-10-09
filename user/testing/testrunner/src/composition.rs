@@ -24,7 +24,7 @@ use userland_image::{BootPlan, ComponentSpec, ExportIndex, decode_plan, encode_p
 
 pub(crate) const BOOT_PLAN_ENTRY: &str = "/testrunner/plan";
 
-pub(crate) const ROUTER_NAME: &str = "namespace-router";
+pub(crate) const ROUTER_NAME: &str = "mounts";
 
 const IMPORTER_WAIT: Timeout = Timeout::from_secs(5);
 

@@ -210,7 +210,7 @@ impl file_system_mount::Service<Delivery> for Router {
     }
 }
 
-fn open(export: &Port, path: &str) -> Result<Port, FileSystemError> {
+pub(crate) fn open(export: &Port, path: &str) -> Result<Port, FileSystemError> {
     let path = Path::new(path)?;
     let MintedSession { badge, port } =
         mint_session(export, &VIEW_BADGES).map_err(|_| FileSystemError::NoSpace)?;

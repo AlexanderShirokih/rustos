@@ -76,7 +76,6 @@ fn image(files: &[ImageRecord<'_>]) -> Result<Vec<u8>> {
     let plan = encode_plan(&[ComponentSpec {
         executable: "/boot/rootkeeper",
         name: "rootkeeper",
-        mountpoint: None,
         memory_limit: 0,
         restarts: 0,
     }])

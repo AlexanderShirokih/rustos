@@ -55,7 +55,7 @@ pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> 
                 log_fmt(format_args!("request {}", Pairs(attributes)));
             }
 
-            let _ = request.reply.send(open());
+            let _ = request.reply.send(open(attributes));
         }
         process_exit(1)
     });

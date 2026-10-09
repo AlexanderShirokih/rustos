@@ -12,7 +12,7 @@ use filesystem_abi::{
 };
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, IssuedHandle, MemoryRegion, OwnedHandle, Port, Resource, kind};
-use runtime::{MemoryAccess, MutexGuard};
+use runtime::MemoryAccess;
 
 use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};
 
@@ -38,7 +38,7 @@ pub(crate) struct Frame {
 }
 
 pub(crate) struct Serving<'a> {
-    pub(crate) state: MutexGuard<'a, FileSystemState>,
+    pub(crate) state: &'a mut FileSystemState,
     pub(crate) frame: &'a mut Frame,
     pub(crate) service: &'a Port,
     pub(crate) next_badge: &'a AtomicU64,
@@ -80,6 +80,10 @@ impl FileSystemState {
             sessions: SessionTable::new(),
             stores: StoreTable::new(resource, backing),
         }
+    }
+
+    pub(crate) fn serves(&self, badge: u64) -> bool {
+        self.sessions.get(ClientId::from_raw(badge)).is_some()
     }
 
     pub(crate) fn open_session(&mut self, badge: u64) -> Result<(), FileSystemError> {

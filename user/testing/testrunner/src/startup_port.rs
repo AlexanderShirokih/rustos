@@ -11,7 +11,7 @@ use ipc::{
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
-use managed_component::{Departure, GrantError, Outcome, Status};
+use managed_component::{Departure, GrantError, IMPORTER_REQUESTS_PER_EXPORT_MAX, Outcome, Status};
 use rootkeeper::relay::LogSessions as _;
 use runtime::{Instant, JoinHandle, PortTransport, Timeout, port_send, spawn_owned};
 use syscall::{MAX_RESOURCE_DEPTH, ProcessName, Rights, SyscallError};
@@ -348,7 +348,7 @@ fn a_dropped_request_ends_the_importer_wait() {
 }
 
 #[test_harness::test]
-fn a_repeated_session_request_takes_the_place_of_the_waiting_one() {
+fn a_request_abandoned_after_its_timeout_waits_ahead_of_the_repeat() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
@@ -366,16 +366,14 @@ fn a_repeated_session_request_takes_the_place_of_the_waiting_one() {
     let repeat = ask(&importer, PROBE_REQUIREMENT);
     test_harness::check!(parent.await_requests(2));
     test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+    test_harness::check_eq!(steps.run(Step::answer_session()), answered(false));
+    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
     test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
     test_harness::check_eq!(finished(repeat), GRANTED);
-    test_harness::check_eq!(
-        steps.run(Step::accept(NO_EVENT_TIMEOUT)),
-        step_failed(IpcError::Timeout)
-    );
 }
 
 #[test_harness::test]
-fn a_session_request_replaced_by_a_repeat_is_answered_with_no_space() {
+fn concurrent_session_requests_of_one_importer_wait_independently() {
     let parent = Parent::start();
     let mut steps = Steps::new();
     let provider = parent.add(steps.child(PROVIDER));
@@ -383,14 +381,40 @@ fn a_session_request_replaced_by_a_repeat_is_answered_with_no_space() {
     let importer = probe_importer(&parent, provider);
 
     let first = ask(&importer, PROBE_REQUIREMENT);
-    test_harness::check!(parent.await_requests(1));
     let second = ask(&importer, PROBE_REQUIREMENT);
     test_harness::check!(parent.await_requests(2));
-    test_harness::check_eq!(finished(first), refused(SessionError::NoSpace));
+    for _ in 0..2 {
+        test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+        test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    }
 
-    test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
-    test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    test_harness::check_eq!(finished(first), GRANTED);
     test_harness::check_eq!(finished(second), GRANTED);
+}
+
+#[test_harness::test]
+fn a_request_beyond_the_limit_evicts_the_oldest_waiting_one_with_no_space() {
+    let parent = Parent::start();
+    let mut steps = Steps::new();
+    let provider = parent.add(steps.child(PROVIDER));
+    test_harness::check_eq!(steps.next(), started(true));
+    let importer = probe_importer(&parent, provider);
+
+    let oldest = ask(&importer, PROBE_REQUIREMENT);
+    test_harness::check!(parent.await_requests(1));
+    let waiting: Vec<JoinHandle> = (0..IMPORTER_REQUESTS_PER_EXPORT_MAX)
+        .map(|_| ask(&importer, PROBE_REQUIREMENT))
+        .collect();
+    test_harness::check!(parent.await_requests(IMPORTER_REQUESTS_PER_EXPORT_MAX + 1));
+    test_harness::check_eq!(finished(oldest), refused(SessionError::NoSpace));
+
+    for _ in 0..IMPORTER_REQUESTS_PER_EXPORT_MAX {
+        test_harness::check_eq!(steps.run(Step::accept(Timeout::INFINITE)), accepted());
+        test_harness::check_eq!(steps.run(Step::answer_session()), answered(true));
+    }
+    for worker in waiting {
+        test_harness::check_eq!(finished(worker), GRANTED);
+    }
 }
 
 #[test_harness::test]

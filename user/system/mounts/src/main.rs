@@ -1,5 +1,6 @@
 //! Маршрутизатор имён разбирает пути клиентов `Namespace` по монтированиям и выдаёт сессии
 //! файловых систем. Держатель `FileSystemMount` задаёт путь и файловую сессию монтирования.
+//! Начальные монтирования задаёт таблица в образе (модуль `table`).
 
 #![no_std]
 #![no_main]
@@ -9,23 +10,28 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::fmt;
 
+use bootstrap_abi::image;
 use component_startup::{
     Requirements as _, SessionError, component_manifest, component_startup as startup_contract,
     serve_export,
 };
-use filesystem_abi::{file_system_mount, namespace};
+use filesystem_abi::{file_system, file_system_mount, namespace};
 use ipc::{Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Port};
 use runtime::{FAILED_EXIT_CODE, PortTransport, exit, log_fmt, log_line, spawn_owned};
 use syscall::{Handle, SyscallError, Timeout, kind};
 
 mod router;
+mod table;
 
 use router::{Router, mount_gone, open_mount, open_view, view_gone};
 
 component_manifest! {
     struct RouterStartup {
-        requirements: {},
+        requirements: {
+            image: session(image::Protocol),
+            filesystem: session(file_system::Protocol),
+        },
         exports: [namespace::Protocol, file_system_mount::Protocol],
     }
 }
@@ -60,6 +66,7 @@ impl From<SyscallError> for Stopped {
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let requirements = RouterStartup::from_parent(parent);
+    let table = table::read(&requirements.image);
     let views: &'static Port = Box::leak(Box::new(Port::create()?));
     let mounts: &'static Port = Box::leak(Box::new(Port::create()?));
 
@@ -79,7 +86,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let _ = spawn_owned(move || {
         export::<file_system_mount::Protocol>(&mount_parent, mounts, open_mount)
     })?;
-    log_line("started");
+    table::start(table, parent, views, mounts);
 
     listen(views, view_gone, |frame| {
         let _ = namespace::dispatch(&mut Router { views }, frame);
@@ -106,7 +113,7 @@ fn export<P: ipc::Protocol>(
     port: &Port,
     open: fn(&Port) -> Result<Port, SessionError>,
 ) -> u32 {
-    let failure = serve_export::<P>(parent, || open(port));
+    let failure = serve_export::<P>(parent, |_| open(port));
     log_fmt(format_args!("export stopped: {failure:?}"));
     exit(FAILED_EXIT_CODE)
 }

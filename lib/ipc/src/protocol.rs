@@ -536,19 +536,18 @@ macro_rules! __protocol_decode_params {
         while let ::core::option::Option::Some(field) = cursor.next_field()? {
             $(
                 if field.id == $field_id {
-                    $param = ::core::option::Option::Some(
-                        <$wire_ty as $crate::WireValue<'_, _>>::from_field(field.data, &mut *$frame)?,
-                    );
+                    $param = ::core::option::Option::Some(field.data);
                 }
             )*
         }
         $(
-            let $param = match $param {
-                ::core::option::Option::Some(value) => value,
-                ::core::option::Option::None => {
-                    return ::core::result::Result::Err($crate::wire::IpcError::MissingField);
-                }
+            let ::core::option::Option::Some($param) = $param else {
+                return ::core::result::Result::Err($crate::wire::IpcError::MissingField);
             };
+        )*
+        $(
+            let $param =
+                <$wire_ty as $crate::WireValue<'_, _>>::from_field($param, &mut *$frame)?;
         )*
     };
 }
@@ -651,8 +650,7 @@ macro_rules! __protocol_client_method {
                     [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
                 ),
             );
-            $crate::__protocol_answer::<$read, _>($op::ORDINAL, answered?)?
-                .map_err($crate::CallError::Remote)
+            $crate::__protocol_outcome::<$ok, $err, _>($op::ORDINAL, answered?)
         }
     };
 
@@ -764,14 +762,26 @@ pub(crate) fn read_answer<'b, V: crate::WireValue<'b, R>, R: crate::ReceivedReso
     body: &'b [u8],
     resources: &mut R,
 ) -> Result<V::Owned, crate::wire::IpcError> {
+    V::from_field(answer_field(body)?, resources)
+}
+
+fn answer_field(body: &[u8]) -> Result<&[u8], crate::wire::IpcError> {
     let mut cursor = crate::wire::FieldCursor::new(body);
     let mut value = None;
     while let Some(field) = cursor.next_field()? {
         if field.id == crate::wire::FIELD_ID_MIN {
-            value = Some(V::from_field(field.data, resources)?);
+            value = Some(field.data);
         }
     }
     value.ok_or(crate::wire::IpcError::MissingField)
+}
+
+fn answer_body(ordinal: u64, bytes: &[u8]) -> Result<&[u8], crate::wire::IpcError> {
+    let crate::wire::FrameParts { header, body } = crate::wire::Header::split(bytes)?;
+    if header.ordinal != ordinal {
+        return Err(crate::wire::IpcError::InvalidValue);
+    }
+    Ok(body)
 }
 
 /// Разбирает кадр ответа операции `ordinal`: значение ответа занимает поле `FIELD_ID_MIN`.
@@ -786,9 +796,33 @@ pub fn __protocol_answer<'b, V: crate::WireValue<'b, R>, R: crate::ReceivedResou
         bytes,
         mut resources,
     } = reply;
-    let crate::wire::FrameParts { header, body } = crate::wire::Header::split(bytes)?;
-    if header.ordinal != ordinal {
-        return Err(crate::wire::IpcError::InvalidValue);
+    read_answer::<V, R>(answer_body(ordinal, bytes)?, &mut resources)
+}
+
+/// Разбирает кадр ответа `Result<T, E>` операции `ordinal` сразу в итог метода клиента.
+/// Значение успеха и отказа строится на месте возврата, без промежуточного `Result`. Отказы
+/// разбора те же, что у [`__protocol_answer`].
+#[doc(hidden)]
+pub fn __protocol_outcome<'b, T, E, R>(
+    ordinal: u64,
+    reply: crate::Incoming<'b, R>,
+) -> Result<T::Owned, crate::CallError<E::Owned>>
+where
+    T: crate::WireValue<'b, R>,
+    E: crate::WireValue<'b, R>,
+    R: crate::ReceivedResources,
+{
+    let crate::Incoming {
+        bytes,
+        mut resources,
+    } = reply;
+    let field = crate::codec::outcome_field(answer_field(answer_body(ordinal, bytes)?)?)?;
+    if field.id == crate::codec::RESULT_OK_FIELD {
+        T::from_field(field.data, &mut resources).map_err(crate::CallError::Ipc)
+    } else {
+        Err(crate::CallError::Remote(E::from_field(
+            field.data,
+            &mut resources,
+        )?))
     }
-    read_answer::<V, R>(body, &mut resources)
 }

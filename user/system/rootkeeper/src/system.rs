@@ -32,7 +32,6 @@ use userland_image::{ExportIndex, IndexedExport, PlanComponent};
 
 use crate::{
     component::{Component, ImporterRequirement, Origin, Record},
-    mount::MountThreads,
     relay::LogSources,
 };
 
@@ -121,7 +120,6 @@ struct ImporterBinding {
     name: String,
     protocol: String,
     mode: RequirementMode,
-    provider: Option<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -176,7 +174,6 @@ pub struct RootSystem<'a> {
     next_search: u64,
     features: Vec<Feature>,
     resource: Resource,
-    pub(crate) mounts: MountThreads,
 }
 
 impl Termination for Stopped {
@@ -224,7 +221,6 @@ impl<'a> RootSystem<'a> {
             next_search: 0,
             features: Vec::new(),
             resource,
-            mounts: MountThreads::default(),
         })
     }
 
@@ -311,37 +307,6 @@ impl<'a> RootSystem<'a> {
         Ok(port)
     }
 
-    pub(crate) fn importer_for(
-        &mut self,
-        requirements: &[ImporterRequirement],
-        requirement: &str,
-        provider: &str,
-    ) -> Result<Port, ImporterRefusal> {
-        let (record, declared) = self
-            .record_named(provider)
-            .ok_or(ImporterRefusal::Requirement(0))?;
-        let binding = requirements
-            .iter()
-            .position(|binding| binding.declaration.name() == requirement)
-            .ok_or(ImporterRefusal::Requirement(0))?;
-        if !requirements.get(binding).is_some_and(|requirement| {
-            declared
-                .export(requirement.declaration.protocol())
-                .is_some()
-        }) {
-            return Err(ImporterRefusal::Requirement(binding));
-        }
-        let port = self.importer(requirements)?;
-        if let Some(binding) = self
-            .importers
-            .last_mut()
-            .and_then(|bindings| bindings.get_mut(binding))
-        {
-            binding.provider = Some(record);
-        }
-        Ok(port)
-    }
-
     /// Завершает процесс работающей записи `name` кодом `code`. Следующий [`turn`] решает,
     /// что делать с записью.
     pub fn terminate(&mut self, name: &str, code: u32) {
@@ -416,7 +381,6 @@ impl<'a> RootSystem<'a> {
             name: String::from(requirement.name()),
             protocol: String::from(requirement.protocol()),
             mode: requirement.mode(),
-            provider: None,
         })
     }
 
@@ -502,14 +466,14 @@ impl<'a> RootSystem<'a> {
         holder: Option<Holder>,
         name: &str,
         protocol: &str,
-    ) -> Result<(RequirementMode, Option<u16>), SessionError> {
+    ) -> Result<RequirementMode, SessionError> {
         match holder {
             Some(Holder::Record(record)) => self
                 .records
                 .get(usize::from(record))
                 .and_then(|record| record.requirement(name))
                 .filter(|requirement| requirement.protocol() == protocol)
-                .map(|requirement| (requirement.mode(), None)),
+                .map(|requirement| requirement.mode()),
             Some(Holder::Importer(importer)) => self
                 .importers
                 .get(importer)
@@ -518,7 +482,7 @@ impl<'a> RootSystem<'a> {
                         .iter()
                         .find(|binding| binding.name == name && binding.protocol == protocol)
                 })
-                .map(|binding| (binding.mode, binding.provider)),
+                .map(|binding| binding.mode),
             _ => None,
         }
         .ok_or(SessionError::Refused)
@@ -635,20 +599,6 @@ impl<'a> RootSystem<'a> {
         attributes: Attributes<'_>,
     ) -> Result<Export<'a>, SessionError> {
         only(|found| self.matches(protocol, attributes, found))
-    }
-
-    fn pinned(&self, provider: u16, protocol: &str) -> Result<Export<'a>, SessionError> {
-        let export = self
-            .records
-            .get(usize::from(provider))
-            .and_then(|record| record.export(protocol))
-            .ok_or(SessionError::Refused)?;
-
-        Ok(Export {
-            provider: Provider::Record(provider),
-            protocol: export.protocol(),
-            filter: Attributes::empty(),
-        })
     }
 
     fn open_export(
@@ -849,10 +799,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
 
         let export = self
             .declared(holder, name, protocol)
-            .and_then(|(_, pinned)| match pinned {
-                Some(provider) => self.pinned(provider, protocol),
-                None => self.only_match(protocol, attributes),
-            });
+            .and_then(|_| self.only_match(protocol, attributes));
         match export {
             Ok(export) => self.open_export(badge, name, export, attributes, reply),
             Err(error) => {
@@ -896,7 +843,7 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         let name = requirement.name;
         let protocol = requirement.protocol;
         let attributes = Attributes::decode(attributes).ok_or(SessionError::Refused)?;
-        let (mode, _) = self.declared(self.children.caller(frame.badge), name, protocol)?;
+        let mode = self.declared(self.children.caller(frame.badge), name, protocol)?;
         if mode != RequirementMode::All {
             return Err(SessionError::Refused);
         }

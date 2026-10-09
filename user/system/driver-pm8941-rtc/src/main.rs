@@ -237,7 +237,7 @@ fn run(requirements: RtcStartup) -> Result<(), Stopped> {
     let exporter = requirements.parent;
     let _ = spawn_owned(move || {
         let next_badge = AtomicU64::new(0);
-        let failure = serve_export::<rtc::Protocol>(&exporter, || shared.open(&bus, &next_badge));
+        let failure = serve_export::<rtc::Protocol>(&exporter, |_| shared.open(&bus, &next_badge));
         log_fmt(format_args!("export stopped: {failure:?}"));
         exit(FAILED_EXIT_CODE)
     })

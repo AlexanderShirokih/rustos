@@ -6,10 +6,10 @@ use syscall::ObjectKind;
 use crate::{
     ReceivedResources,
     schema::{self, WireType},
-    wire::{Cap, FieldCursor, IpcError, MessageBuf, value},
+    wire::{Cap, Field, FieldCursor, IpcError, MessageBuf, value},
 };
 
-const RESULT_OK_FIELD: u8 = 1;
+pub(crate) const RESULT_OK_FIELD: u8 = 1;
 const RESULT_ERR_FIELD: u8 = 2;
 
 /// Тип записи поля, которую получатель читает из кадра с ресурсами `R`.
@@ -22,6 +22,9 @@ pub trait WireValue<'a, R: ReceivedResources>: Sized {
     type Owned;
 
     /// Читает значение из `data` записи поля. Capability поля забираются из `frame`.
+    ///
+    /// Реализация строит владеющее значение сразу в возвращаемом `Result`, без промежуточных
+    /// `Option` и `Result`.
     fn from_field(data: &'a [u8], frame: &mut R) -> Result<Self::Owned, IpcError>;
 }
 
@@ -209,19 +212,12 @@ where
     type Owned = Result<T::Owned, E::Owned>;
 
     fn from_field(data: &'a [u8], frame: &mut R) -> Result<Self::Owned, IpcError> {
-        let mut outcome = None;
-        let mut cursor = FieldCursor::new(data);
-        while let Some(field) = cursor.next_field()? {
-            let decoded = match field.id {
-                RESULT_OK_FIELD => Ok(T::from_field(field.data, frame)?),
-                RESULT_ERR_FIELD => Err(E::from_field(field.data, frame)?),
-                _ => continue,
-            };
-            if outcome.replace(decoded).is_some() {
-                return Err(IpcError::InvalidValue);
-            }
+        let field = outcome_field(data)?;
+        if field.id == RESULT_OK_FIELD {
+            T::from_field(field.data, frame).map(Ok)
+        } else {
+            E::from_field(field.data, frame).map(Err)
         }
-        outcome.ok_or(IpcError::MissingField)
     }
 }
 
@@ -248,6 +244,20 @@ impl<T: WireTyped, E: WireTyped> WireTyped for Result<T, E> {
         ok: &T::WIRE_TYPE,
         err: &E::WIRE_TYPE,
     };
+}
+
+pub(crate) fn outcome_field(data: &[u8]) -> Result<Field<'_>, IpcError> {
+    let mut outcome = None;
+    let mut cursor = FieldCursor::new(data);
+    while let Some(field) = cursor.next_field()? {
+        if field.id != RESULT_OK_FIELD && field.id != RESULT_ERR_FIELD {
+            continue;
+        }
+        if outcome.replace(field).is_some() {
+            return Err(IpcError::InvalidValue);
+        }
+    }
+    outcome.ok_or(IpcError::MissingField)
 }
 
 #[cfg(test)]
