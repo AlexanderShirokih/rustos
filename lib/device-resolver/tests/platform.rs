@@ -25,6 +25,7 @@ const SERIAL: &str = "test,serial";
 const NESTED_CLOCK: &str = "test,soc-clock";
 const BRIDGED_CLOCK: &str = "test,bridged-clock";
 const UNMAPPED_CLOCK: &str = "test,unmapped-clock";
+const ARBITER: &str = "test,arbiter";
 
 fn decode_test_specifier(specifier: InterruptSpecifier<'_>) -> Option<DeviceInterrupt> {
     if specifier.cell_count() != TEST_SPECIFIER_CELLS {
@@ -69,6 +70,34 @@ fn platform_dtb(controller: &str) -> Vec<u8> {
         Strings("status", &["disabled"]),
         Cells("reg", &[0, 0x0904_0000, 0, 0x1000]),
         Cells("interrupts", &[38, 0]),
+        End,
+        Node("arbiter@a000000"),
+        Strings("compatible", &[ARBITER]),
+        Cells(
+            "reg",
+            &[
+                0,
+                0x0a00_0000,
+                0,
+                0x1000,
+                0,
+                0x0a10_0000,
+                0,
+                0x1000,
+                0,
+                0x0a20_0000,
+                0,
+                0x1000,
+                0,
+                0x0a30_0000,
+                0,
+                0x1000,
+                0,
+                0x0a40_0000,
+                0,
+                0x3000,
+            ],
+        ),
         End,
         Node("serial@9000000"),
         Strings("compatible", &[SERIAL]),
@@ -200,6 +229,25 @@ fn a_resource_index_past_the_set_is_named_apart() {
 
     assert_eq!(interrupt, Err(ResolveError::ResourceOutOfRange));
     assert_eq!(mmio, Err(ResolveError::ResourceOutOfRange));
+}
+
+// Арбитр шины описывает пять окон, и резолвер отдаёт каждое.
+#[test]
+fn every_window_of_a_device_is_described() {
+    let arbiter = id("/arbiter@a000000");
+
+    let (last, past) = with_platform(TEST_CONTROLLER, |platform| {
+        (platform.mmio(&arbiter, 4), platform.mmio(&arbiter, 5))
+    });
+
+    assert_eq!(
+        last,
+        Ok(DeviceMmio {
+            base: 0x0a40_0000,
+            size: 0x3000,
+        })
+    );
+    assert_eq!(past, Err(ResolveError::ResourceOutOfRange));
 }
 
 #[test]

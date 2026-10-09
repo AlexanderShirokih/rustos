@@ -32,6 +32,7 @@ members = [
     "lib/filesystem",
     "lib/filesystem-abi",
     "lib/filesystem-client",
+    "lib/spmi-abi",
     "lib/userland",
     "lib/userland-image",
     "lib/virtio",
@@ -119,6 +120,7 @@ userland = { path = "lib/userland" }
 userland-build = { path = "lib/userland-build" }
 userland-image = { path = "lib/userland-image" }
 rtc-abi = { path = "lib/rtc-abi" }
+spmi-abi = { path = "lib/spmi-abi" }
 virtio-mmio-abi = { path = "lib/virtio-mmio-abi" }
 process = { path = "kernel/process" }
 userland-image-tool = { path = "tools/userland-image" }

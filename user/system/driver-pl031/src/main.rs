@@ -18,7 +18,7 @@ use component_startup::{
 use io::mmio::Reg;
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, SessionTransport};
-use platform_abi::{Description, DeviceId, platform};
+use platform_abi::{Description, platform};
 use rtc_abi::rtc;
 use runtime::{
     Mutex, PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned,
@@ -59,7 +59,6 @@ struct Shared {
 }
 
 struct Pl031 {
-    id: DeviceId,
     registers: MmioMapping,
     _window: MmioWindow,
     line: IrqLine,
@@ -78,7 +77,7 @@ impl Shared {
                 log_fmt(format_args!("{COMPATIBLE} not bound: {error:?}"));
                 SessionError::Refused
             })?;
-            log_fmt(format_args!("{} bound", bound.id.as_str()));
+            log_fmt(format_args!("{COMPATIBLE} bound"));
             *device = Some(Box::leak(Box::new(bound)));
         }
 
@@ -122,7 +121,6 @@ impl Pl031 {
             })
             .map(|device| device.id().clone())
             .ok_or(Error::NoDevice)?;
-        let id = &id;
         let line = IrqLine::from(platform.irq(id.as_wire(), 0)?);
         let window = platform.mmio(id.as_wire(), 0)?;
         let window = MmioWindow {
@@ -133,7 +131,6 @@ impl Pl031 {
         // Устройство держит окно до конца процесса, и закрытие окна отзывает выведенные из него
         // страницы.
         Ok(Self {
-            id: id.clone(),
             registers: window.map()?,
             _window: window,
             line,

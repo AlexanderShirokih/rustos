@@ -113,6 +113,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-pm8941-rtc"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "ipc",
+ "kernel-objects",
+ "rtc-abi",
+ "runtime",
+ "spmi-abi",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
 name = "driver-simplefb"
 version = "0.1.0"
 dependencies = [
@@ -421,6 +435,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "spmi-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
+
+[[package]]
+name = "spmi-pmic-arb"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "ipc",
+ "kernel-objects",
+ "platform-abi",
+ "runtime",
+ "spmi-abi",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
 name = "std-selftest"
 version = "0.1.0"
 dependencies = [
@@ -498,6 +534,8 @@ dependencies = [
  "rtc-abi",
  "runtime",
  "spin",
+ "spmi-abi",
+ "spmi-pmic-arb",
  "syscall",
  "test-harness",
  "userland",

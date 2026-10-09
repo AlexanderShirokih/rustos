@@ -80,6 +80,7 @@ mod simd_state;
 mod simplefb;
 mod smp_stress;
 mod spawn_from_image;
+mod spmi;
 mod startup_exit_protocol;
 mod startup_port;
 mod std_rt;

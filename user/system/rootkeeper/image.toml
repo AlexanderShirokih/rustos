@@ -17,12 +17,20 @@ package = "driver-pl031"
 path = "/driver-pl031"
 
 [[programs]]
+package = "driver-pm8941-rtc"
+path = "/driver-pm8941-rtc"
+
+[[programs]]
 package = "driver-simplefb"
 path = "/driver-simplefb"
 
 [[programs]]
 package = "virtio-mmio"
 path = "/virtio-mmio"
+
+[[programs]]
+package = "spmi-pmic-arb"
+path = "/spmi-pmic-arb"
 
 [[programs]]
 package = "driver-virtio-gpu"

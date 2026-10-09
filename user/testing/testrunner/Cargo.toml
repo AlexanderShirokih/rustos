@@ -219,6 +219,8 @@ syscall = { workspace = true }
 managed-component = { workspace = true }
 rootkeeper = { path = "../../system/rootkeeper" }
 rtc-abi = { workspace = true }
+spmi-abi = { workspace = true }
+spmi-pmic-arb = { path = "../../system/spmi-pmic-arb" }
 userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }
 userland-loader = { workspace = true }

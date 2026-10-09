@@ -1,0 +1,31 @@
+[package]
+license = "GPL-3.0-only"
+name = "driver-pm8941-rtc"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 65536
+
+[[bin]]
+name = "driver-pm8941-rtc"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+kernel-objects = { workspace = true }
+component-startup = { workspace = true }
+ipc = { workspace = true }
+rtc-abi = { workspace = true }
+runtime = { workspace = true }
+spmi-abi = { workspace = true }
+syscall = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

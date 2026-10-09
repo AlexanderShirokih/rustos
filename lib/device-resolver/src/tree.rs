@@ -13,8 +13,6 @@ use crate::{
 
 const CELL_SIZE: usize = size_of::<u32>();
 
-const DEVICE_WINDOWS_MAX: usize = 4;
-
 const DESCRIPTION_DEPTH_MAX: usize = 16;
 
 /// Описание платформы поверх device tree.
@@ -94,15 +92,15 @@ impl PlatformDescription for DeviceTreePlatform<'_> {
             .and_then(NodeExt::cells_size)
             .ok_or(ResolveError::Malformed)?;
 
-        let windows = path
+        let reg = path
             .node()
             .prop("reg")
-            .and_then(|reg| reg.try_as_reg_list::<DEVICE_WINDOWS_MAX>(cells))
+            .filter(|reg| !reg.value().is_empty())
             .ok_or(ResolveError::NoMmio)?;
-        let window = windows
-            .get(usize::from(resource))
+        let window = reg
+            .try_as_reg(cells, usize::from(resource))
             .ok_or(ResolveError::ResourceOutOfRange)?;
-        let window = translate_window(buses, *window).ok_or(ResolveError::Untranslatable)?;
+        let window = translate_window(buses, window).ok_or(ResolveError::Untranslatable)?;
 
         Ok(DeviceMmio {
             base: window.offset as u64,

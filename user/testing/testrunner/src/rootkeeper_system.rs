@@ -78,11 +78,11 @@ const REQUEST_ACROSS_EXIT_TIMEOUT: Timeout = Timeout::from_secs(3);
 const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(8);
 const HELD_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(15);
 const RTC_REPLY_TIMEOUT: Timeout = Timeout::from_secs(15);
-const POLL_INTERVAL: Timeout = Timeout::from_millis(10);
+pub(crate) const POLL_INTERVAL: Timeout = Timeout::from_millis(10);
 const RESOLVE_TIMEOUT: Timeout = Timeout::from_secs(5);
 const FREED_PREFIX_TIMEOUT: Timeout = Timeout::from_millis(100);
 
-const POLL_ATTEMPTS: usize = 300;
+pub(crate) const POLL_ATTEMPTS: usize = 300;
 const SEARCH_CYCLES: usize = 300;
 
 const REQUEST_STACK_SIZE: u64 = 0x8000;
@@ -99,7 +99,7 @@ const PING: u64 = 0x5A;
 const STARVED_MEMORY: u64 = 4096;
 
 pub(crate) const PL031: &str = "/pl031@9010000";
-const FIRST_VIRTIO: &str = "/virtio_mmio@a000000";
+pub(crate) const FIRST_VIRTIO: &str = "/virtio_mmio@a000000";
 const SECOND_VIRTIO: &str = "/virtio_mmio@a000200";
 const ABSENT: &str = "/absent@0";
 const RELATIVE: &str = "pl031@9010000";
@@ -162,7 +162,10 @@ pub(crate) const PLATFORM: ComponentSpec<'static> = ComponentSpec {
     restarts: 1,
 };
 
-const RTC: &str = "driver-pl031";
+const CLOCK_DRIVERS: [(&str, &str); 2] = [
+    ("arm,pl031", "driver-pl031"),
+    ("qcom,pm8941-rtc", "driver-pm8941-rtc"),
+];
 
 const IRQ: ComponentSpec<'static> = ComponentSpec {
     mountpoint: None,
@@ -417,8 +420,8 @@ fn rtc_session(
         .map(|session| session.client().with_wait(RTC_REPLY_TIMEOUT))
 }
 
-fn binding_lines(count: usize) -> Vec<String> {
-    let mut lines = await_component_lines(RTC, count);
+fn binding_lines(driver: &str, count: usize) -> Vec<String> {
+    let mut lines = await_component_lines(driver, count);
     // Поток экспорта драйвера может записать привязку раньше строки запуска.
     lines.retain(|line| line != "started");
     lines
@@ -510,25 +513,39 @@ fn description(
         .map(|description| (MemoryRegion::from(description.region), description.offset))
 }
 
-fn platform_describes(device: &str) -> bool {
+pub(crate) fn platform_describes(device: &str) -> bool {
+    with_description(|description| description.find(device).is_some())
+}
+
+fn described_clock() -> Option<(&'static str, &'static str)> {
+    with_description(|description| {
+        description
+            .devices()
+            .filter_map(Result::ok)
+            .find_map(|device| {
+                CLOCK_DRIVERS
+                    .into_iter()
+                    .find(|(compatible, _)| device.compatible().any(|each| each == *compatible))
+            })
+    })
+}
+
+fn with_description<T>(inspect: impl FnOnce(&Description<'_>) -> T) -> T {
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
 
-    let described = {
+    let inspected = {
         let (region, offset) = description(&session).expect("description granted");
         let mapping = region
             .map_full_read_only()
             .expect("description maps read-only");
-        Description::new(mapping.as_bytes(), offset)
-            .expect("description parses")
-            .find(device)
-            .is_some()
+        inspect(&Description::new(mapping.as_bytes(), offset).expect("description parses"))
     };
 
     drop(session);
     finish(composition);
-    described
+    inspected
 }
 
 fn region_base(region: &MemoryRegion) -> u64 {
@@ -1029,10 +1046,10 @@ fn a_launch_short_of_memory_removes_the_child_without_stopping_the_root() {
 }
 
 #[test_harness::test]
-fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
-    if !platform_describes(PL031) {
-        test_harness::skip!("{} is not described", PL031);
-    }
+fn a_clock_driver_serves_time_from_its_described_device() {
+    let Some((compatible, driver)) = described_clock() else {
+        test_harness::skip!("no clock is described");
+    };
 
     let composition = with_drivers();
     let importer = composition.importer(&[rtc_of(RTC_REQUIREMENT)]);
@@ -1044,11 +1061,11 @@ fn a_driver_serves_time_with_the_resources_of_its_platform_session() {
     let renewed = rtc_session(&importer).expect("rtc session after the last one closed");
     let again = renewed.now();
     drop(renewed);
-    let lines = binding_lines(2);
+    let lines = binding_lines(driver, 2);
 
     test_harness::check!(ticked >= now);
     test_harness::check!(again.is_ok());
-    test_harness::check_eq!(lines, ["/pl031@9010000 bound"]);
+    test_harness::check_eq!(lines, [format!("{compatible} bound")]);
     finish(composition);
 }
 

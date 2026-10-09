@@ -373,6 +373,9 @@ pub trait PropExt<'a> {
         cells_size: CellsSize,
     ) -> Option<Vec<AddressSpace, N>>;
 
+    /// Извлекает окно `index` из свойства `reg`. Индекс за концом списка даёт `None`.
+    fn try_as_reg(&self, cells_size: CellsSize, index: usize) -> Option<AddressSpace>;
+
     /// Возвращает строки значения (например, `compatible`). Значение без завершающего нуля и не
     /// в UTF-8 даёт `None`.
     fn into_string_list_iter(self) -> Option<StringList<'a>>;
@@ -408,6 +411,14 @@ impl<'a> PropExt<'a> for Property<'a> {
         }
 
         Some(result)
+    }
+
+    fn try_as_reg(&self, cells_size: CellsSize, index: usize) -> Option<AddressSpace> {
+        if index >= reg_entry_count(self, cells_size) {
+            return None;
+        }
+
+        reg_entry(self, cells_size, index)
     }
 
     fn into_string_list_iter(self) -> Option<StringList<'a>> {

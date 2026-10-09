@@ -9,6 +9,7 @@ members = [
     "examples/hello-c",
     "examples/hello-std",
     "system/driver-pl031",
+    "system/driver-pm8941-rtc",
     "system/driver-simplefb",
     "system/driver-virtio-gpu",
     "system/filesystem-imagefs",
@@ -16,6 +17,7 @@ members = [
     "system/namespace-router",
     "system/platform",
     "system/rootkeeper",
+    "system/spmi-pmic-arb",
     "system/virtio-mmio",
     "testing/c-selftest",
     "testing/std-selftest",
@@ -68,6 +70,7 @@ kernel-objects = { path = "../lib/kernel-objects" }
 log-abi = { path = "../lib/log-abi" }
 platform-abi = { path = "../lib/platform-abi" }
 rtc-abi = { path = "../lib/rtc-abi" }
+spmi-abi = { path = "../lib/spmi-abi" }
 syscall = { path = "../lib/syscall" }
 syscall-user = { path = "../lib/syscall-user" }
 test-harness = { path = "../lib/test-harness" }

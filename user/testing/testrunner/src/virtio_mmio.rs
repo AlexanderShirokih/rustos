@@ -14,7 +14,9 @@ use crate::{
     composition::{Importer, pause, request},
     fixture::{JOIN_TIMEOUT, spawn_entry},
     log_relay::await_component_lines,
-    rootkeeper_system::{finish, with_drivers},
+    rootkeeper_system::{
+        FIRST_VIRTIO, POLL_ATTEMPTS, POLL_INTERVAL, finish, platform_describes, with_drivers,
+    },
 };
 
 const BUS: &str = "virtio-mmio";
@@ -24,9 +26,6 @@ const SLOT_FIXTURE: &str = "/virtio-slot-fixture/exec";
 const QEMU_VIRT_TAKEN: &str = "32 transports taken";
 
 const BUS_REPLY_TIMEOUT: Timeout = Timeout::from_secs(5);
-
-const RELEASE_PAUSE: Timeout = Timeout::from_millis(10);
-const RELEASE_ATTEMPTS: usize = 300;
 
 const GPU: u32 = DeviceType::Gpu as u32;
 const NETWORK: u32 = 1;
@@ -57,9 +56,9 @@ fn client(slot: Session<virtio_slot::Protocol>) -> virtio_slot::Client<SessionTr
 
 fn reopen(bus: &virtio_mmio::Client<SessionTransport>) -> Option<Session<virtio_slot::Protocol>> {
     // Уход клиента шина обрабатывает после его выхода, и до сброса транспорт занят.
-    (0..RELEASE_ATTEMPTS).find_map(|_| match open(bus, GPU) {
+    (0..POLL_ATTEMPTS).find_map(|_| match open(bus, GPU) {
         Err(CallError::Remote(VirtioMmioError::Busy)) => {
-            pause(RELEASE_PAUSE);
+            pause(POLL_INTERVAL);
             None
         }
         opened => Some(opened.expect("gpu slot after the reset")),
@@ -72,6 +71,10 @@ fn offset(register: usize) -> u16 {
 
 #[test_harness::test]
 fn a_gpu_slot_reads_the_gpu_device_id_and_a_second_open_is_busy() {
+    if !platform_describes(FIRST_VIRTIO) {
+        test_harness::skip!("{} is not described", FIRST_VIRTIO);
+    }
+
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
     let bus = bus_session(&importer);
@@ -92,6 +95,10 @@ fn a_gpu_slot_reads_the_gpu_device_id_and_a_second_open_is_busy() {
 
 #[test_harness::test]
 fn an_absent_or_empty_device_type_is_no_device() {
+    if !platform_describes(FIRST_VIRTIO) {
+        test_harness::skip!("{} is not described", FIRST_VIRTIO);
+    }
+
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
     let bus = bus_session(&importer);
@@ -107,6 +114,10 @@ fn an_absent_or_empty_device_type_is_no_device() {
 
 #[test_harness::test]
 fn a_register_past_the_window_or_unaligned_is_out_of_range() {
+    if !platform_describes(FIRST_VIRTIO) {
+        test_harness::skip!("{} is not described", FIRST_VIRTIO);
+    }
+
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
     let bus = bus_session(&importer);
@@ -128,6 +139,10 @@ fn a_register_past_the_window_or_unaligned_is_out_of_range() {
 
 #[test_harness::test]
 fn the_slot_of_a_terminated_client_reopens_with_the_device_reset() {
+    if !platform_describes(FIRST_VIRTIO) {
+        test_harness::skip!("{} is not described", FIRST_VIRTIO);
+    }
+
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
     let bus = bus_session(&importer);
@@ -147,6 +162,10 @@ fn the_slot_of_a_terminated_client_reopens_with_the_device_reset() {
 
 #[test_harness::test]
 fn the_line_of_a_closed_slot_is_revoked() {
+    if !platform_describes(FIRST_VIRTIO) {
+        test_harness::skip!("{} is not described", FIRST_VIRTIO);
+    }
+
     let composition = with_drivers();
     let importer = composition.importer(BUS_IMPORTS);
     let bus = bus_session(&importer);
