@@ -2,6 +2,7 @@
 //! платформой буферы кадра через экспорт `Display` на каждый экран.
 
 use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
 
 use component_abi::RequirementDeclaration;
 use component_startup::Found;
@@ -25,12 +26,10 @@ const SIMPLEFB_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const UNTOUCHED_SCREEN_BYTE: u8 = 0xAA;
 
-const OPAQUE_ALPHA: u8 = 0xFF;
-
 const A8R8G8B8_PIXEL_BYTES: usize = 4;
 const R8G8B8_PIXEL_BYTES: usize = 3;
 
-const SURFACE_FULL_RED_HALF_BLUE: u32 = 0x00FF_0080;
+const SURFACE_FULL_RED_HALF_BLUE_TOP_5A: u32 = 0x5AFF_0080;
 
 const SURFACE_CHANNEL_MAX: u64 = 0xFF;
 const SURFACE_RED_SHIFT: u32 = 16;
@@ -128,6 +127,21 @@ fn framebuffer(path: &str) -> Result<Framebuffer, Refusal> {
     Framebuffer::open(&description, &device)
 }
 
+fn single(format: &str, width: u32, height: u32, stride: u32) -> Framebuffer {
+    let blob = fdt_test::build(&[
+        Token::Node("single@0"),
+        Token::Strings("compatible", &[SIMPLE_FRAMEBUFFER_COMPATIBLE]),
+        Token::Cells("width", &[width]),
+        Token::Cells("height", &[height]),
+        Token::Cells("stride", &[stride]),
+        Token::Strings("format", &[format]),
+        Token::End,
+    ]);
+    let description = Description::new(&blob, 0).expect("tree parses");
+    let device = DeviceId::new("/single@0").expect("absolute path");
+    Framebuffer::open(&description, &device).expect("format accepted")
+}
+
 fn written(framebuffer: &Framebuffer, frame_size: usize, area: Area) -> Vec<usize> {
     let surface =
         alloc::vec![0; framebuffer.dimension().surface_size().expect("surface fits") as usize];
@@ -144,6 +158,13 @@ fn present(
     surface: &[u8],
     screen: &mut [u8],
 ) -> Result<(), DisplayError> {
+    let screen = RefCell::new(screen);
+    let write = |offset: usize, pixels: &[u8]| {
+        let mut screen = screen.borrow_mut();
+        let target = screen.get_mut(offset..offset + pixels.len()).ok_or(())?;
+        target.copy_from_slice(pixels);
+        Ok(())
+    };
     framebuffer.present::<()>(
         area,
         |offset, pixels| {
@@ -151,10 +172,12 @@ fn present(
             pixels.copy_from_slice(source);
             Ok(())
         },
-        |offset, pixels| {
-            let target = screen.get_mut(offset..offset + pixels.len()).ok_or(())?;
-            target.copy_from_slice(pixels);
-            Ok(())
+        write,
+        |surface_offset, screen_offset, len| {
+            let source = surface
+                .get(surface_offset..surface_offset + len)
+                .ok_or(())?;
+            write(screen_offset, source)
         },
     )
 }
@@ -280,15 +303,15 @@ fn each_device_of_one_description_presents_with_its_own_geometry() {
 }
 
 #[test_harness::test]
-fn each_binding_format_encodes_a_surface_pixel_with_an_opaque_alpha() {
+fn each_binding_format_encodes_a_surface_pixel_and_a_surface_layout_keeps_its_top_byte() {
     let encoded: [(&str, &[u8]); 11] = [
         ("r5g6b5", &[0x10, 0xF8]),
         ("r5g5b5a1", &[0x21, 0xF8]),
         ("x1r5g5b5", &[0x10, 0x7C]),
         ("a1r5g5b5", &[0x10, 0xFC]),
         ("r8g8b8", &[0x80, 0x00, 0xFF]),
-        ("x8r8g8b8", &[0x80, 0x00, 0xFF, 0x00]),
-        ("a8r8g8b8", &[0x80, 0x00, 0xFF, 0xFF]),
+        ("x8r8g8b8", &[0x80, 0x00, 0xFF, 0x5A]),
+        ("a8r8g8b8", &[0x80, 0x00, 0xFF, 0x5A]),
         ("x8b8g8r8", &[0xFF, 0x00, 0x80, 0x00]),
         ("a8b8g8r8", &[0xFF, 0x00, 0x80, 0xFF]),
         ("x2r10g10b10", &[0x02, 0x02, 0xF0, 0x3F]),
@@ -302,25 +325,13 @@ fn each_binding_format_encodes_a_surface_pixel_with_an_opaque_alpha() {
     };
 
     for (format, expected) in encoded {
-        let stride = [expected.len() as u32];
-        let blob = fdt_test::build(&[
-            Token::Node("pixel@0"),
-            Token::Strings("compatible", &[SIMPLE_FRAMEBUFFER_COMPATIBLE]),
-            Token::Cells("width", &[1]),
-            Token::Cells("height", &[1]),
-            Token::Cells("stride", &stride),
-            Token::Strings("format", &[format]),
-            Token::End,
-        ]);
-        let description = Description::new(&blob, 0).expect("tree parses");
-        let device = DeviceId::new("/pixel@0").expect("absolute path");
-        let framebuffer = Framebuffer::open(&description, &device).expect("format accepted");
+        let framebuffer = single(format, 1, 1, expected.len() as u32);
         let mut screen = alloc::vec![UNTOUCHED_SCREEN_BYTE; expected.len()];
 
         let presented = present(
             &framebuffer,
             pixel,
-            &SURFACE_FULL_RED_HALF_BLUE.to_le_bytes(),
+            &SURFACE_FULL_RED_HALF_BLUE_TOP_5A.to_le_bytes(),
             &mut screen,
         );
 
@@ -330,39 +341,48 @@ fn each_binding_format_encodes_a_surface_pixel_with_an_opaque_alpha() {
 }
 
 #[test_harness::test]
-fn present_writes_the_area_opaque_and_keeps_the_neighbours_and_the_row_padding() {
-    let padded = framebuffer("/padded@2000").expect("framebuffer accepted");
+fn present_writes_the_area_and_keeps_the_neighbours_and_the_row_padding() {
     let surface: Vec<u8> = (0..70 * 3 * SURFACE_PIXEL_BYTES as usize)
         .map(|byte| byte as u8)
         .collect();
-    let mut screen = alloc::vec![UNTOUCHED_SCREEN_BYTE; 288 * 3];
+    // Ширина больше порции кодирования в 64 пикселя.
     let area = Area {
         x: 1,
         y: 1,
         width: 66,
         height: 1,
     };
+    // Байт пикселя экрана - номер байта пикселя поверхности (B, G, R, старший) либо ноль.
+    let layouts = [
+        ("a8r8g8b8", [Some(0), Some(1), Some(2), Some(3)]),
+        ("x8b8g8r8", [Some(2), Some(1), Some(0), None]),
+    ];
 
-    let presented = present(&padded, area, &surface, &mut screen);
+    for (format, sources) in layouts {
+        let framebuffer = single(format, 70, 3, 288);
+        let mut screen = alloc::vec![UNTOUCHED_SCREEN_BYTE; 288 * 3];
 
-    test_harness::check_eq!(presented, Ok(()));
-    for (offset, &byte) in screen.iter().enumerate() {
-        let (row, column) = (offset / 288, offset % 288);
-        let inside =
-            row == 1 && (A8R8G8B8_PIXEL_BYTES..67 * A8R8G8B8_PIXEL_BYTES).contains(&column);
-        let expected = match (inside, column % A8R8G8B8_PIXEL_BYTES) {
-            (false, _) => UNTOUCHED_SCREEN_BYTE,
-            (true, 3) => OPAQUE_ALPHA,
-            (true, _) => surface[70 * SURFACE_PIXEL_BYTES as usize + column],
-        };
-        test_harness::check_eq!(byte, expected);
+        let presented = present(&framebuffer, area, &surface, &mut screen);
+
+        test_harness::check_eq!(presented, Ok(()));
+        for (offset, &byte) in screen.iter().enumerate() {
+            let (row, column) = (offset / 288, offset % 288);
+            let inside =
+                row == 1 && (A8R8G8B8_PIXEL_BYTES..67 * A8R8G8B8_PIXEL_BYTES).contains(&column);
+            let pixel_start = 70 * SURFACE_PIXEL_BYTES as usize + column / 4 * 4;
+            let expected = match (inside, sources[column % 4]) {
+                (false, _) => UNTOUCHED_SCREEN_BYTE,
+                (true, Some(source)) => surface[pixel_start + source],
+                (true, None) => 0,
+            };
+            test_harness::check_eq!((format, offset, byte), (format, offset, expected));
+        }
     }
 }
 
 #[test_harness::test]
 fn present_of_an_area_past_the_screen_is_out_of_bounds_before_any_copy() {
     let padded = framebuffer("/padded@2000").expect("framebuffer accepted");
-    let mut copies = 0;
     let past_edge = Area {
         x: 66,
         y: 0,
@@ -370,17 +390,25 @@ fn present_of_an_area_past_the_screen_is_out_of_bounds_before_any_copy() {
         height: 1,
     };
 
+    let copies = Cell::new(0);
     let presented = padded.present(
         past_edge,
         |_, _| {
-            copies += 1;
+            copies.set(copies.get() + 1);
             Ok::<_, ()>(())
         },
-        |_, _| Ok(()),
+        |_, _| {
+            copies.set(copies.get() + 1);
+            Ok(())
+        },
+        |_, _, _| {
+            copies.set(copies.get() + 1);
+            Ok(())
+        },
     );
 
     test_harness::check_eq!(presented, Err(DisplayError::OutOfBounds));
-    test_harness::check_eq!(copies, 0);
+    test_harness::check_eq!(copies.get(), 0);
 }
 
 #[test_harness::test]

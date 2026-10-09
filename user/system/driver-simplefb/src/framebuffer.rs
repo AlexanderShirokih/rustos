@@ -6,8 +6,6 @@ pub const SIMPLE_FRAMEBUFFER_COMPATIBLE: &str = "simple-framebuffer";
 
 const SURFACE_PIXEL: usize = SURFACE_PIXEL_BYTES as usize;
 
-const SCREEN_PIXEL_MAX: usize = 4;
-
 const COPY_CHUNK_PIXELS: usize = 64;
 
 const CHANNEL_BITS: u32 = 8;
@@ -139,55 +137,82 @@ impl Framebuffer {
         }
     }
 
-    /// Переводит пиксели поверхности внутри `area` в формат экрана и записывает на экран. Альфа
-    /// формата становится непрозрачной, неиспользуемые биты пикселя - нулевыми. `read` читает
-    /// байты поверхности с заданного смещения, `write` записывает байты на экран с заданного
-    /// смещения. Байты экрана вне `area` не меняются.
+    /// Переносит пиксели поверхности внутри `area` на экран. Байты экрана вне `area` не
+    /// меняются.
+    ///
+    /// Формат с раскладкой пикселя поверхности - четыре байта, красный, зелёный и синий по восемь
+    /// бит со сдвигами 16, 8 и 0 - получает строки поверхности без изменений, и старший байт
+    /// пикселя поверхности становится неиспользуемым байтом либо альфой. Строку переносит
+    /// вызов `copy(surface_offset, screen_offset, len)`.
+    ///
+    /// Остальные форматы получают закодированные пиксели с непрозрачной альфой и нулевыми
+    /// неиспользуемыми битами. `read` читает байты поверхности с заданного смещения, `write`
+    /// записывает байты на экран с заданного смещения.
     ///
     /// Если [`DisplayDimension::check_area`] отвергает `area`, возвращает `OutOfBounds` без
-    /// вызова `read` и `write`. Если `read` или `write` возвращает ошибку, копирование
-    /// прекращается с `OutOfBounds`.
+    /// вызова `read`, `write` и `copy`. Если одно из них возвращает ошибку, перенос прекращается
+    /// с `OutOfBounds`.
     pub fn present<E>(
         &self,
         area: Area,
         mut read: impl FnMut(usize, &mut [u8]) -> Result<(), E>,
         mut write: impl FnMut(usize, &[u8]) -> Result<(), E>,
+        mut copy: impl FnMut(usize, usize, usize) -> Result<(), E>,
     ) -> Result<(), DisplayError> {
         self.dimension.check_area(area)?;
 
         let width = usize::try_from(area.width).map_err(|_| DisplayError::OutOfBounds)?;
-        let mut surface_chunk = [0u8; COPY_CHUNK_PIXELS * SURFACE_PIXEL];
-        let mut screen_chunk = [0u8; COPY_CHUNK_PIXELS * SCREEN_PIXEL_MAX];
+        let surface_layout = self.format.has_surface_layout();
         // `check_area` ограничивает `area.y + area.height` высотой экрана.
         for y in area.y..area.y + area.height {
             let surface_row =
                 row_offset(y, area.x, SURFACE_PIXEL, self.dimension.surface_stride())?;
             let screen_row = row_offset(y, area.x, self.format.bytes, u64::from(self.stride))?;
-
-            for first in (0..width).step_by(COPY_CHUNK_PIXELS) {
-                let count = COPY_CHUNK_PIXELS.min(width - first);
-                let source = surface_chunk
-                    .get_mut(..count * SURFACE_PIXEL)
-                    .ok_or(DisplayError::OutOfBounds)?;
-                let target = screen_chunk
-                    .get_mut(..count * self.format.bytes)
-                    .ok_or(DisplayError::OutOfBounds)?;
-                read(surface_row + first * SURFACE_PIXEL, source)
+            if surface_layout {
+                copy(surface_row, screen_row, width * SURFACE_PIXEL)
                     .map_err(|_| DisplayError::OutOfBounds)?;
-                let pixels = source.as_chunks::<SURFACE_PIXEL>().0;
-                for (pixel, encoded) in pixels
-                    .iter()
-                    .zip(target.chunks_exact_mut(self.format.bytes))
-                {
-                    // Биндинг задаёт пиксель экрана словом в порядке little-endian.
-                    let value = self.format.encode(*pixel).to_le_bytes();
-                    for (byte, value) in encoded.iter_mut().zip(value) {
-                        *byte = value;
-                    }
-                }
-                write(screen_row + first * self.format.bytes, target)
-                    .map_err(|_| DisplayError::OutOfBounds)?;
+                continue;
             }
+            match self.format.bytes {
+                2 => self.encode_row::<2, E>(width, surface_row, screen_row, &mut read, &mut write),
+                3 => self.encode_row::<3, E>(width, surface_row, screen_row, &mut read, &mut write),
+                4 => self.encode_row::<4, E>(width, surface_row, screen_row, &mut read, &mut write),
+                _ => Err(DisplayError::OutOfBounds),
+            }?;
+        }
+        Ok(())
+    }
+
+    fn encode_row<const BYTES: usize, E>(
+        &self,
+        width: usize,
+        surface_row: usize,
+        screen_row: usize,
+        read: &mut impl FnMut(usize, &mut [u8]) -> Result<(), E>,
+        write: &mut impl FnMut(usize, &[u8]) -> Result<(), E>,
+    ) -> Result<(), DisplayError> {
+        let mut surface_chunk = [[0u8; SURFACE_PIXEL]; COPY_CHUNK_PIXELS];
+        let mut screen_chunk = [[0u8; BYTES]; COPY_CHUNK_PIXELS];
+        for first in (0..width).step_by(COPY_CHUNK_PIXELS) {
+            let count = COPY_CHUNK_PIXELS.min(width - first);
+            let source = surface_chunk
+                .get_mut(..count)
+                .ok_or(DisplayError::OutOfBounds)?;
+            let target = screen_chunk
+                .get_mut(..count)
+                .ok_or(DisplayError::OutOfBounds)?;
+            read(
+                surface_row + first * SURFACE_PIXEL,
+                source.as_flattened_mut(),
+            )
+            .map_err(|_| DisplayError::OutOfBounds)?;
+            for (pixel, encoded) in source.iter().zip(target.iter_mut()) {
+                // Биндинг задаёт пиксель экрана словом в порядке little-endian.
+                let value = self.format.encode(*pixel).to_le_bytes();
+                *encoded = *value.first_chunk().ok_or(DisplayError::OutOfBounds)?;
+            }
+            write(screen_row + first * BYTES, target.as_flattened())
+                .map_err(|_| DisplayError::OutOfBounds)?;
         }
         Ok(())
     }
@@ -207,6 +232,13 @@ impl PixelFormat {
             blue: Field::new(blue),
             alpha: Field::new(alpha),
         }
+    }
+
+    fn has_surface_layout(&self) -> bool {
+        self.bytes == SURFACE_PIXEL
+            && self.red == Field::new((16, CHANNEL_BITS))
+            && self.green == Field::new((8, CHANNEL_BITS))
+            && self.blue == Field::new((0, CHANNEL_BITS))
     }
 
     fn encode(&self, surface_pixel: [u8; SURFACE_PIXEL]) -> u32 {

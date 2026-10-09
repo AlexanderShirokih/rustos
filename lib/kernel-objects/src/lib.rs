@@ -26,7 +26,7 @@ pub use handle::{BorrowedHandle, OwnedHandle};
 pub use object::{
     AnonymousMapping, IrqControl, IrqLine, Mapping, MemoryRegion, MmioMapping, MmioWindow, Port,
     Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply, Resource, ServicePort, Signal, Thread,
-    ThreadEntry, wait_any,
+    ThreadEntry, WriteCombiningMapping, wait_any,
 };
 pub use ring_transport::{RingConsumer, RingProducer};
 pub use session_transport::SessionTransport;

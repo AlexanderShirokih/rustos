@@ -23,7 +23,7 @@ const RESPONSE_OK_DISPLAY_INFO: u32 = 0x1101;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Format {
-    /// Байты пикселя B, G, R и неиспользуемый. Слово little-endian имеет вид `0x00RRGGBB`.
+    /// Байты пикселя B, G, R и неиспользуемый. Слово little-endian имеет вид `0xXXRRGGBB`.
     B8G8R8X8Unorm = 2,
 }
 

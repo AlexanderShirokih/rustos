@@ -516,7 +516,7 @@ Virtual-срез не копирует фреймы и своего metering-о�
 одному компоненту ([rootkeeper.md](rootkeeper.md#провижининг-устройств)).
 
 Выбор профиля фреймбуфера реализован в
-[driver-simplefb](../user/system/driver-simplefb/src/framebuffer.rs).
+[driver-simplefb](../user/system/driver-simplefb/src/main.rs).
 
 Запись через `WriteCombining` доходит до устройства пакетами и в
 неопределённом порядке. Драйвер, которому нужен порядок между записями в

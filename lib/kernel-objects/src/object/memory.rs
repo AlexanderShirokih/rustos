@@ -2,15 +2,21 @@
 //! маппингами.
 //!
 //! Страницы маппинга бывают отображены ещё и в чужом адресном пространстве, где их читают и
-//! пишут параллельно. Доступ к маппингу идёт только volatile-операциями. Компилятор не
-//! вправе ни выбросить такую операцию, ни переупорядочить, ни склеить две соседние.
+//! пишут параллельно. Доступ к маппингу идёт volatile-операциями. Компилятор не вправе ни
+//! выбросить такую операцию, ни переупорядочить, ни склеить две соседние.
 //!
-//! Диапазон делится на три части. Голова до ближайшей границы слова и хвост за последним
-//! целым словом передаются побайтно, середина - словами по `u64`. Каждый байт при этом
-//! передаётся ровно один раз. Из другого адресного пространства середина наблюдается
+//! Volatile-операция делит диапазон на три части. Голова до ближайшей границы слова и хвост
+//! за последним целым словом передаются побайтно, середина - словами по `u64`. Каждый байт
+//! при этом передаётся ровно один раз. Из другого адресного пространства середина наблюдается
 //! пословно, голова и хвост - побайтно. Порядок трёх частей между собой ничем не закреплён.
 //! Копия между маппингами передаётся словами, только если начала обоих диапазонов одинаково
 //! смещены относительно границы слова. Иначе она передаётся побайтно целиком.
+//!
+//! Исключение - копия в маппинг профиля `WriteCombining` ([`WriteCombiningMapping::copy_from`]).
+//! Она идёт обычной копией памяти. Ширину и число обращений выбирает реализация копии, а
+//! компилятор вправе склеивать и переупорядочивать её операции. Байты источника, которые
+//! чужое адресное пространство меняет во время такой копии, приходят в произвольной смеси
+//! старых и новых значений.
 
 use core::{mem, ops::Range};
 
@@ -161,6 +167,13 @@ pub struct MmioMapping {
     start: usize,
     head: usize,
     size: usize,
+}
+
+/// Маппинг страниц устройства с профилем [`MemoryProfile::WriteCombining`]. Массовая копия в
+/// устройство идёт обычной копией памяти.
+#[derive(Debug)]
+pub struct WriteCombiningMapping {
+    device: MmioMapping,
 }
 
 /// Маппинг региона, чья маска доступа не допускает запись. Страницы неизменны во всех адресных
@@ -316,8 +329,9 @@ impl MmioWindow {
     /// [`MemoryProfile::WriteCombining`]. Требует `READ`, `WRITE` и `DUPLICATE` на хэндле
     /// региона. Для региона профиля `Cached` и для устройства за концом региона возвращает
     /// `InvalidArgument`.
-    pub fn map_write_combining(&self) -> Result<MmioMapping> {
+    pub fn map_write_combining(&self) -> Result<WriteCombiningMapping> {
         self.map_pages(MEMORY_REGION_WRITE_COMBINING)
+            .map(|device| WriteCombiningMapping { device })
     }
 
     fn map_pages(&self, region_flags: u64) -> Result<MmioMapping> {
@@ -378,6 +392,38 @@ impl MmioMapping {
             return Err(Error::OutOfBounds);
         }
         Ok(self.head + offset)
+    }
+}
+
+impl WriteCombiningMapping {
+    /// MMIO-хэндлер по началу устройства.
+    pub fn mmio(&self) -> Mmio {
+        self.device.mmio()
+    }
+
+    /// Копирует `src` в устройство со смещения `offset` от его начала, как
+    /// [`MmioMapping::copy_in_at`].
+    pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
+        self.device.copy_in_at(offset, src)
+    }
+
+    /// Копирует `len` байт маппинга `source` со смещения `source_offset` в устройство со смещения
+    /// `offset` от его начала обычной копией памяти. Если диапазон выходит за границы области,
+    /// выданной устройству, или за конец `source`, возвращает `OutOfBounds` без копирования.
+    ///
+    /// `source` - маппинг обычной памяти профиля `Cached`, физически не перекрытый с
+    /// устройством. Маппинг устройства в роли источника копия читает обращениями той ширины и в
+    /// том числе, которые выбирает реализация копии. Источник с теми же физическими страницами,
+    /// что и устройство, даёт на устройстве произвольные байты.
+    pub fn copy_from(
+        &self,
+        offset: usize,
+        source: &Mapping,
+        source_offset: usize,
+        len: usize,
+    ) -> Result<()> {
+        let offset = self.device.device_offset(offset, len)?;
+        source.copy_plain_to(source_offset, &self.device.mapping, offset, len)
     }
 }
 
@@ -504,6 +550,30 @@ impl Mapping {
         }
         // SAFETY: хвост `[tail_start, len)` лежит в диапазонах, проверенных `range_ptr`.
         unsafe { copy_bytes(source, target, tail_start, len - tail_start) };
+        Ok(())
+    }
+
+    fn copy_plain_to(
+        &self,
+        offset: usize,
+        destination: &Mapping,
+        destination_offset: usize,
+        len: usize,
+    ) -> Result<()> {
+        let source = self.range_ptr(offset, len)?;
+        let target = destination.range_ptr(destination_offset, len)?;
+        let overlaps = source.addr() < target.addr() + len && target.addr() < source.addr() + len;
+        if overlaps {
+            return Err(Error::Syscall(SyscallError::InvalidArgument));
+        }
+        // SAFETY: оба диапазона проверены `range_ptr` и лежат в маппингах, установленных ядром на
+        // время жизни объектов `Mapping`. Приёмник отображён на запись, потому что обычный
+        // маппинг пишущего и маппинг устройства `map_pages` ставят с `UserMemFlags::ReadWrite`.
+        // Перекрытие по виртуальным адресам исключено проверкой выше. Параллельная запись чужого
+        // адресного пространства в источник даёт в приёмнике смесь старых и новых байт. Такая
+        // смесь допустима, потому что у `u8` нет недопустимых значений, а код процесса
+        // скопированные байты не читает и решений по ним не принимает.
+        unsafe { core::ptr::copy_nonoverlapping(source, target, len) };
         Ok(())
     }
 
@@ -784,6 +854,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn copy_plain_to_moves_exactly_the_range_between_mappings() {
+        let pattern = source_bytes();
+        let mut source = WordAlignedBuffer::untouched();
+        let mut target = WordAlignedBuffer::untouched();
+        let source_mapping = source.mapping();
+        let target_mapping = target.mapping();
+        let bytes = &pattern[1..=LEN_MAX];
+        source_mapping.copy_in_at(3, bytes).unwrap();
+
+        source_mapping
+            .copy_plain_to(3, &target_mapping, 5, LEN_MAX)
+            .unwrap();
+
+        assert_eq!(target.0, untouched_except(5, bytes));
+    }
+
+    #[test]
+    fn copy_plain_to_within_one_mapping_refuses_overlapping_ranges() {
+        let mut buffer = WordAlignedBuffer::untouched();
+        let mapping = buffer.mapping();
+
+        let overlapping = mapping.copy_plain_to(0, &mapping, 1, 8);
+
+        assert_eq!(
+            overlapping,
+            Err(Error::Syscall(SyscallError::InvalidArgument))
+        );
+        assert_eq!(buffer.0, [UNTOUCHED; BUFFER_BYTES]);
+    }
+
+    #[test]
+    fn copy_plain_to_past_either_end_is_out_of_bounds_without_copy() {
+        let mut source = WordAlignedBuffer::untouched();
+        let mut target = WordAlignedBuffer::untouched();
+        let source_mapping = source.mapping();
+        let target_mapping = target.mapping();
+        source_mapping.copy_in_at(0, &[1; BUFFER_BYTES]).unwrap();
+
+        let past_source = source_mapping.copy_plain_to(1, &target_mapping, 0, BUFFER_BYTES);
+        let past_target = source_mapping.copy_plain_to(0, &target_mapping, 1, BUFFER_BYTES);
+
+        assert_eq!(past_source, Err(Error::OutOfBounds));
+        assert_eq!(past_target, Err(Error::OutOfBounds));
+        assert_eq!(target.0, [UNTOUCHED; BUFFER_BYTES]);
     }
 
     #[test]

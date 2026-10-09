@@ -24,8 +24,8 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
-    Delivery, Mapping, MemoryRegion, MmioMapping, MmioWindow, Port, ReadOnlyMapping, Resource,
-    SessionTransport,
+    Delivery, Mapping, MemoryRegion, MmioWindow, Port, ReadOnlyMapping, Resource, SessionTransport,
+    WriteCombiningMapping,
 };
 use platform_abi::{Description, DeviceId, PlatformError, platform};
 use runtime::{
@@ -63,7 +63,7 @@ struct Attacher {
 struct Screen {
     id: DeviceId,
     framebuffer: Framebuffer,
-    pixels: MmioMapping,
+    pixels: WriteCombiningMapping,
     _window: MmioWindow,
 }
 
@@ -231,6 +231,11 @@ impl Session {
             area,
             |offset, pixels| surface.mapping.copy_out_at(offset, pixels),
             |offset, pixels| self.screen.pixels.copy_in_at(offset, pixels),
+            |surface_offset, screen_offset, len| {
+                self.screen
+                    .pixels
+                    .copy_from(screen_offset, &surface.mapping, surface_offset, len)
+            },
         )
     }
 }
