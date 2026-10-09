@@ -10,11 +10,13 @@ use alloc::{sync::Arc, vec::Vec};
 use capability::{Capability, CapabilityTarget, Rights, SIGNALED, install_handle, signal_wait_one};
 use drivers_common::services::interrupts::IrqLineSpan;
 use klog::{info, warn};
-use memory::MemoryRegion;
+use memory::{MemoryRegion, frame_allocator::FrameCount};
 use scheduler::{ArchContext, Bootstrapped, Priority, Scheduler, SchedulerServiceExt, SpawnConfig};
 
 use crate::{
-    bootstrap::{SERVER_STACK_PAGES, drain_bootstrap_port, run_bootstrap, spawn_process},
+    bootstrap::{
+        SERVER_STACK_PAGES, SystemSources, drain_bootstrap_port, run_bootstrap, spawn_process,
+    },
     kernel_context::{BootDtb, KernelContext, UserlandImage},
     power,
     scheduler_bootstrap::KernelTimerSource,
@@ -42,6 +44,7 @@ where
     let dtb = kernel.dtb();
     let device_regions = kernel.device_regions();
     let irq_lines = kernel.assignable_irq_lines();
+    let frames = kernel.frame_count();
     let user_va_end = A::USER_VA_END;
 
     scheduler
@@ -54,6 +57,7 @@ where
                     dtb,
                     device_regions,
                     irq_lines,
+                    frames,
                     user_va_end,
                 )
             },
@@ -67,10 +71,19 @@ fn start_bootstrap_chain(
     dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
     irq_lines: Option<IrqLineSpan>,
+    frames: &'static (dyn FrameCount + Send + Sync),
     user_va_end: usize,
 ) -> ! {
-    let exit_code =
-        bootstrap_chain(launcher, image, dtb, device_regions, irq_lines, user_va_end).unwrap_or(1);
+    let exit_code = bootstrap_chain(
+        launcher,
+        image,
+        dtb,
+        device_regions,
+        irq_lines,
+        frames,
+        user_va_end,
+    )
+    .unwrap_or(1);
     power::system_off(exit_code)
 }
 
@@ -80,20 +93,26 @@ fn bootstrap_chain(
     dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
     irq_lines: Option<IrqLineSpan>,
+    frames: &'static (dyn FrameCount + Send + Sync),
     user_va_end: usize,
 ) -> Result<i32, ()> {
     let image =
         image.ok_or_else(|| warn!("userland blob missing; bootstrap process not started"))?;
     let irq_lines = irq_lines
         .ok_or_else(|| warn!("interrupts service missing; bootstrap process not started"))?;
+    let scheduler = syscall_bridge::scheduler()
+        .ok_or_else(|| warn!("scheduler missing; bootstrap process not started"))?;
 
     let launch = spawn_process(
         launcher,
-        image.bytes,
-        image.phys_base,
+        image,
         dtb,
         device_regions,
         irq_lines,
+        SystemSources {
+            scheduler: scheduler.clone(),
+            frames,
+        },
         user_va_end,
     )
     .map_err(|e| warn!("bootstrap process spawn failed: {:?}", e))?;
@@ -105,8 +124,7 @@ fn bootstrap_chain(
     let receiver = launch.receiver;
     let port = launch.port.clone();
     let resources = launch.resources;
-    syscall_bridge::scheduler()
-        .ok_or_else(|| warn!("scheduler missing; bootstrap-log task not started"))?
+    scheduler
         .spawn(
             SpawnConfig::new("bootstrap-log")
                 .priority(Priority::normal())

@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
 };
 
-use bootstrap_abi::{bootstrap, hardware};
+use bootstrap_abi::{bootstrap, hardware, system_info};
 use ipc::{
     CallError, Listener as _,
     wire::{IpcError, MESSAGE_INLINE_MAX},
@@ -455,7 +455,7 @@ fn a_hardware_session_does_not_receive() {
 }
 
 #[test_harness::test]
-fn each_role_refuses_the_operations_of_the_other() {
+fn each_role_refuses_the_operations_of_other_roles() {
     let session = crate::hardware_session();
     let as_bootstrap = bootstrap::Client::new(PortTransport::new(session.handle().as_raw()));
     let as_hardware = hardware::Client::new(PortTransport::new(crate::bootstrap_handle()));
@@ -468,4 +468,19 @@ fn each_role_refuses_the_operations_of_the_other() {
         as_hardware.acquire_irq_control().err(),
         Some(CallError::Ipc(IpcError::PeerClosed))
     );
+
+    let session = crate::system_info_session();
+    let as_bootstrap = bootstrap::Client::new(PortTransport::new(session.handle().as_raw()));
+    let as_hardware = hardware::Client::new(PortTransport::new(session.handle().as_raw()));
+    let as_system_info = system_info::Client::new(PortTransport::new(crate::bootstrap_handle()));
+
+    test_harness::check_eq!(
+        as_bootstrap.acquire_userland_image().err(),
+        Some(CallError::Ipc(IpcError::PeerClosed))
+    );
+    test_harness::check_eq!(
+        as_hardware.acquire_irq_control().err(),
+        Some(CallError::Ipc(IpcError::PeerClosed))
+    );
+    test_harness::check_eq!(as_system_info.snapshot().err(), Some(IpcError::PeerClosed));
 }

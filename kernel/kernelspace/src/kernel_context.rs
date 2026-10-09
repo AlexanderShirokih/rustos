@@ -7,7 +7,7 @@ use drivers_common::{
 };
 use memory::{
     MemoryRegion,
-    frame_allocator::FrameAllocator,
+    frame_allocator::{FrameAllocator, FrameCount},
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
     page_round_up,
     physical_address::{PageAlignedAddress, PhysicalAddress},
@@ -80,10 +80,18 @@ pub struct KmmioArena {
     pub size: NonZeroUsize,
 }
 
+/// Аллокатор фреймов физической памяти в двух представлениях, выделения фреймов и их счёта.
+#[derive(Clone, Copy)]
+pub struct PhysicalFrames {
+    pub allocator: &'static (dyn FrameAllocator + Send + Sync),
+    pub count: &'static (dyn FrameCount + Send + Sync),
+}
+
 pub struct KernelContext {
     services: BootServices,
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
+    frame_count: &'static (dyn FrameCount + Send + Sync),
     userland_image: Option<UserlandImage>,
     device_regions: Vec<Arc<MemoryRegion>>,
     dtb: BootDtb,
@@ -93,7 +101,7 @@ impl KernelContext {
     pub fn new(
         memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
         address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
-        frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
+        frames: PhysicalFrames,
         mmio_arena: KmmioArena,
         userland_image: Option<UserlandImage>,
         device_regions: Vec<Arc<MemoryRegion>>,
@@ -101,7 +109,7 @@ impl KernelContext {
     ) -> KernelContext {
         // Публикуем глобальные слоты для модулей без KernelContext.
         syscall_bridge::install_address_space_factory(address_space_factory);
-        syscall_bridge::install_frame_allocator(frame_allocator);
+        syscall_bridge::install_frame_allocator(frames.allocator);
 
         let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl::new(
             memory_mapper,
@@ -113,6 +121,7 @@ impl KernelContext {
             services: BootServices::with_mmio(mmio_service),
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
+            frame_count: frames.count,
             userland_image,
             device_regions,
             dtb,
@@ -122,6 +131,11 @@ impl KernelContext {
     /// Фабрика user-AS, переданная в `new`.
     pub fn address_space_factory(&self) -> &'static (dyn AddressSpaceFactory + Send + Sync) {
         self.address_space_factory
+    }
+
+    /// Счёт фреймов аллокатора физической памяти, переданный в `new`.
+    pub fn frame_count(&self) -> &'static (dyn FrameCount + Send + Sync) {
+        self.frame_count
     }
 
     /// Образ userland из initrd, если загрузчик его передал.

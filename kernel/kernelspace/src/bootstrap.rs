@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 use core::{marker::PhantomData, num::NonZeroUsize};
 
-use bootstrap_abi::{BootFdt, bootstrap, hardware};
+use bootstrap_abi::{BootFdt, SystemSnapshot, bootstrap, hardware, system_info};
 use capability::{
     Capability, CapabilityTarget, HandleId, HandleTable, IpcError as KernelIpcError, IrqControl,
     KernelIpcBuffer, MeteringGrant, Port, Reply, Resource, Rights, ThreadTransport, deadline_after,
@@ -20,17 +20,17 @@ use ipc::{
 use kbase::{LockCell, MutexCell};
 use klog::{info, warn};
 use memory::{
-    AccessMask, MemoryRegion, page_round_up,
-    physical_address::{PageAlignedAddress, PhysicalAddress},
+    AccessMask, MemoryRegion, PAGE_SIZE, frame_allocator::FrameCount, page_round_up,
+    physical_address::PageAlignedAddress,
 };
 use process::{UserImageFromModelError, user_image_parts_from_program};
-use scheduler::{Priority, UserProcessLaunch, UserProcessLaunchInfo};
+use scheduler::{Priority, SchedulerService, UserProcessLaunch, UserProcessLaunchInfo};
 use syscall::{IPC_BUFFER_MAX_CAPS, IpcBuffer, ObjectKind, Timeout, decode_tag, encode_tag, kind};
 use userland::{ProgramDecodeError, decode_program};
 use userland_image::{ImageDecodeError, component_name, decode};
 
 use crate::{
-    kernel_context::BootDtb,
+    kernel_context::{BootDtb, UserlandImage},
     user_process::{SpawnUserError, UserProcessLauncher},
 };
 
@@ -39,6 +39,7 @@ const SENDER_PORT_RIGHTS: Rights = Rights::from_bits_truncate(
 );
 
 const HARDWARE_BADGE: u64 = 1;
+const SYSTEM_INFO_BADGE: u64 = 2;
 
 /// Число страниц стека kernel-потока, исполняющего [`run_bootstrap`].
 pub const SERVER_STACK_PAGES: usize = 8;
@@ -53,7 +54,7 @@ pub struct BootstrapLaunch {
     pub resources: BootstrapResources,
 }
 
-/// Capability-ресурсы, которые сервер порта ядра выдаёт по контрактам `Bootstrap` и `Hardware`.
+/// Capability-ресурсы и источники величин, которые сервер порта ядра выдаёт по своим контрактам.
 pub struct BootstrapResources {
     pub irq_control: Arc<IrqControl>,
     pub image_region: Arc<MemoryRegion>,
@@ -63,6 +64,15 @@ pub struct BootstrapResources {
     pub device_regions: Vec<Arc<MemoryRegion>>,
     /// Источник кап сессий `Hardware`.
     pub hardware_root: Capability,
+    /// Источник кап сессий `SystemInfo`.
+    pub system_info_root: Capability,
+    pub system: SystemSources,
+}
+
+/// Владельцы величин снимка `SystemInfo`. Сервер читает их при каждом вызове `snapshot`.
+pub struct SystemSources {
+    pub scheduler: Arc<dyn SchedulerService>,
+    pub frames: &'static (dyn FrameCount + Send + Sync),
 }
 
 /// Ошибки запуска bootstrap-процесса.
@@ -81,17 +91,21 @@ pub enum BootstrapSpawnError {
     InterruptsUnavailable,
 }
 
-/// Разбирает `blob` и спавнит процесс. `image_phys` - физбаза `blob` в initrd,
-/// поверх которой выдаётся read-only регион образа.
+/// Разбирает байты `image` и спавнит процесс. Поверх физбазы `image` выдаётся read-only регион
+/// образа.
 pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
-    blob: &'static [u8],
-    image_phys: PhysicalAddress,
+    image: UserlandImage,
     dtb: BootDtb,
     device_regions: Vec<Arc<MemoryRegion>>,
     irq_lines: IrqLineSpan,
+    system: SystemSources,
     user_va_end: usize,
 ) -> Result<BootstrapLaunch, BootstrapSpawnError> {
+    let UserlandImage {
+        bytes: blob,
+        phys_base: image_phys,
+    } = image;
     let image = decode(blob).map_err(BootstrapSpawnError::Image)?;
     let boot_entry = image.boot_entry();
     let program = decode_program(boot_entry.data()).map_err(BootstrapSpawnError::Program)?;
@@ -106,6 +120,8 @@ pub fn spawn_process(
     let receiver = Capability::new(CapabilityTarget::Port(port.clone()), Rights::READ);
     let peer_handle = Capability::new(CapabilityTarget::Port(port.clone()), SENDER_PORT_RIGHTS);
     let hardware_root = Capability::new(CapabilityTarget::Port(port.clone()), SENDER_PORT_RIGHTS);
+    let system_info_root =
+        Capability::new(CapabilityTarget::Port(port.clone()), SENDER_PORT_RIGHTS);
 
     // Корневой Resource: полномочие на минтинг физпамяти.
     let root_resource = Resource::new(AccessMask::RW, 1 << 20);
@@ -166,15 +182,18 @@ pub fn spawn_process(
             fdt_offset,
             device_regions,
             hardware_root,
+            system_info_root,
+            system,
         },
     })
 }
 
 /// Цикл сервера bootstrap-port: kernel-поток аллоцирует kernel-резидентный
-/// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракты
-/// `Bootstrap` и `Hardware`. На кадр, который не разбирается, сервер отвечает отказом и
-/// продолжает приём. `_receiver` - capability с `READ`, которая держит ядро в множестве
-/// получателей порта, пока сервер работает. Поток поднимается со стеком [`SERVER_STACK_PAGES`].
+/// IPC-буфер, строит kernel-транспорт и в бесконечном цикле обслуживает контракт `Bootstrap` и
+/// контракты ролей, различая роль значком кадра. На кадр, который не разбирается, сервер
+/// отвечает отказом и продолжает приём. `_receiver` - capability с `READ`, которая держит ядро
+/// в множестве получателей порта, пока сервер работает. Поток поднимается со стеком
+/// [`SERVER_STACK_PAGES`].
 pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: BootstrapResources) {
     let Some(table) = runtime().current_handle_table() else {
         warn!("bootstrap: no kernel handle-table; server not started");
@@ -202,10 +221,10 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
             }
         };
         // Вызыватель уже получил отказ разбора либо доставки ответа, и приём продолжается.
-        let _ = if frame.resources.badge == HARDWARE_BADGE {
-            hardware::dispatch(&mut server, frame)
-        } else {
-            bootstrap::dispatch(&mut server, frame)
+        let _ = match frame.resources.badge {
+            HARDWARE_BADGE => hardware::dispatch(&mut server, frame),
+            SYSTEM_INFO_BADGE => system_info::dispatch(&mut server, frame),
+            _ => bootstrap::dispatch(&mut server, frame),
         };
     }
 }
@@ -323,6 +342,19 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
             .and_then(|cap| self.vend::<kind::Port>(cap))
             .map(Session::<hardware::Protocol, _>::from_handle)
     }
+
+    fn acquire_system_info(
+        &mut self,
+        _frame: &BootstrapFrame,
+    ) -> impl IntoWireValue<BootstrapFrame, Read = Result<Session<system_info::Protocol>, u32>>
+    {
+        self.resources
+            .system_info_root
+            .duplicate(SENDER_PORT_RIGHTS, SYSTEM_INFO_BADGE)
+            .map_err(|_| ACQUIRE_FAILED)
+            .and_then(|cap| self.vend::<kind::Port>(cap))
+            .map(Session::<system_info::Protocol, _>::from_handle)
+    }
 }
 
 impl hardware::Service<BootstrapFrame> for BootstrapServer {
@@ -360,6 +392,19 @@ impl hardware::Service<BootstrapFrame> for BootstrapServer {
             .and_then(|region| {
                 self.vend_root::<kind::MemoryRegion>(CapabilityTarget::Memory(region.clone()))
             })
+    }
+}
+
+impl system_info::Service<BootstrapFrame> for BootstrapServer {
+    fn snapshot(&mut self, _frame: &BootstrapFrame) -> SystemSnapshot {
+        let system = &self.resources.system;
+
+        SystemSnapshot {
+            cpus: u32::try_from(system.scheduler.cpu_count()).unwrap_or(u32::MAX),
+            managed_frames: system.frames.managed_frames() as u64,
+            free_frames: system.frames.free_frames() as u64,
+            frame_size: u32::try_from(PAGE_SIZE.get()).unwrap_or(u32::MAX),
+        }
     }
 }
 

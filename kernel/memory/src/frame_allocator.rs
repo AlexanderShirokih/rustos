@@ -63,6 +63,15 @@ pub trait FrameAllocator {
     fn is_allocated(&self, frame: Frame) -> bool;
 }
 
+/// Счёт фреймов физической памяти под управлением аллокатора.
+pub trait FrameCount {
+    /// Число фреймов во всех управляемых регионах, занятых и свободных.
+    fn managed_frames(&self) -> usize;
+
+    /// Число свободных фреймов во всех регионах на момент вызова.
+    fn free_frames(&self) -> usize;
+}
+
 /// Предельное число регионов, которое вмещает [`PhysicalFrameAllocator`]: `new` отказывает
 /// [`FrameAllocatorInitError::TooManyRegions`] на большем числе.
 pub const MAX_REGIONS: usize = 24;
@@ -166,14 +175,6 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
         bitmap.alloc_from(current)
     }
 
-    /// Число свободных фреймов во всех регионах на момент вызова.
-    pub fn free_frames(&self) -> usize {
-        self.regions
-            .iter()
-            .map(|region| region.with_lock(|bitmap| bitmap.remaining()))
-            .sum()
-    }
-
     /// Переносит регионы под стратегию блокировки `M`, потребляя исходный
     /// аллокатор. Смена стратегии допустима только на границе фазы, где
     /// прежний экземпляр перестаёт быть достижимым.
@@ -200,6 +201,22 @@ impl<L: LockCell<FrameBitmap>> PhysicalFrameAllocator<L> {
                 unsafe { bitmap.relocate_ptr_by_offset(offset) };
             });
         }
+    }
+}
+
+impl<L: LockCell<FrameBitmap>> FrameCount for PhysicalFrameAllocator<L> {
+    fn managed_frames(&self) -> usize {
+        self.regions
+            .iter()
+            .map(|region| region.with_lock(|bitmap| bitmap.range().frame_count()))
+            .sum()
+    }
+
+    fn free_frames(&self) -> usize {
+        self.regions
+            .iter()
+            .map(|region| region.with_lock(|bitmap| bitmap.remaining()))
+            .sum()
     }
 }
 

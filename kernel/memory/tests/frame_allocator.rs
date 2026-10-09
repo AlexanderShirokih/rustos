@@ -11,8 +11,8 @@ use memory::{
     FrameBitmap,
     frame::Frame,
     frame_allocator::{
-        FrameAllocator, FrameAllocatorInitError, FrameError, MAX_REGIONS, PhysicalFrameAllocator,
-        ReserveFrameError,
+        FrameAllocator, FrameAllocatorInitError, FrameCount, FrameError, MAX_REGIONS,
+        PhysicalFrameAllocator, ReserveFrameError,
     },
 };
 
@@ -149,6 +149,21 @@ fn allocate_uses_hint_and_wraps_around() {
         found_recycled,
         "allocator should wrap around and find freed frame"
     );
+}
+
+#[test]
+fn allocation_takes_free_frames_and_keeps_managed_ones() {
+    let allocator = multi_region_allocator(&[(0, 32), (100, 64)]);
+    let managed = allocator.managed_frames();
+    let free = allocator.free_frames();
+
+    allocator.allocate_frame().expect("free frame");
+    allocator.allocate_frames(nz(4)).expect("free run");
+
+    assert_eq!(managed, 32 + 64);
+    assert_eq!(free, managed - 1);
+    assert_eq!(allocator.managed_frames(), managed);
+    assert_eq!(allocator.free_frames(), free - 5);
 }
 
 // =============================================================================

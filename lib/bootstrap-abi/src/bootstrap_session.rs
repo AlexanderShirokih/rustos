@@ -2,7 +2,7 @@
 
 use syscall::kind;
 
-use crate::hardware;
+use crate::{hardware, system_info};
 
 ipc::protocol! {
     /// Канал начального процесса к ядру.
@@ -22,6 +22,10 @@ ipc::protocol! {
         /// Выдаёт вызывателю сессию [`hardware`]. Капа сессии разрешает отправку, перенос и
         /// дублирование и не разрешает приём. `Err` - ненулевой код ошибки выдачи.
         call fn acquire_hardware() -> own Result<ipc::wire::Session<hardware::Protocol>, u32>;
+
+        /// Выдаёт вызывателю сессию [`system_info`]. Капа сессии разрешает отправку, перенос и
+        /// дублирование и не разрешает приём. `Err` - ненулевой код ошибки выдачи.
+        call fn acquire_system_info() -> own Result<ipc::wire::Session<system_info::Protocol>, u32>;
     }
 }
 
@@ -37,7 +41,7 @@ mod tests {
     use syscall::{ObjectKind, kind};
 
     use super::bootstrap;
-    use crate::hardware;
+    use crate::{hardware, system_info};
 
     fn cap<K: ObjectKind>(raw: u32) -> MockHandle<K> {
         MockHandle::new(raw)
@@ -72,6 +76,18 @@ mod tests {
                 0x55
             )))
         }
+
+        fn acquire_system_info(
+            &mut self,
+            _frame: &MockResources,
+        ) -> impl IntoWireValue<MockResources, Read = Result<Session<system_info::Protocol>, u32>>
+        {
+            Ok::<_, u32>(Session::<system_info::Protocol, _>::from_handle(cap::<
+                kind::Port,
+            >(
+                0x66
+            )))
+        }
     }
 
     #[test]
@@ -93,7 +109,7 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
-                for _ in 0..2 {
+                for _ in 0..3 {
                     server_end
                         .serve(|frame| bootstrap::dispatch(&mut sink, frame))
                         .expect("dispatch ok");
@@ -103,6 +119,10 @@ mod tests {
             assert_eq!(
                 client.acquire_hardware().map(Session::into_handle),
                 Ok(cap(0x55))
+            );
+            assert_eq!(
+                client.acquire_system_info().map(Session::into_handle),
+                Ok(cap(0x66))
             );
         });
     }

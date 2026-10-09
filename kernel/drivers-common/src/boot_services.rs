@@ -309,6 +309,10 @@ mod tests {
             panic!("not used in tests")
         }
 
+        fn cpu_count(&self) -> usize {
+            1
+        }
+
         fn exit(&self) -> ! {
             panic!("not used in tests")
         }

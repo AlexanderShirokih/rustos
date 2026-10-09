@@ -12,6 +12,7 @@ use core::{
 
 use capability::{ParkState, WaitToken};
 use kernelspace::syscall_bridge;
+use memory::frame_allocator::FrameCount;
 use scheduler::{ArchCpu, SchedulerServiceExt, SpawnConfig, with_preemption_disabled};
 
 use crate::{memory::address_space_factory::FrameAllocatorImpl, sched::Aarch64Cpu, smp};

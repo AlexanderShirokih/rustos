@@ -57,6 +57,7 @@ impl BootFailure {
             Self::Budget(BudgetFailure::Reserve) => "component reserve not granted",
             Self::Budget(BudgetFailure::StartupPort) => "startup port not created",
             Self::Budget(BudgetFailure::Hardware) => "hardware session not granted",
+            Self::Budget(BudgetFailure::SystemInfo) => "system info session not granted",
         }
     }
 }

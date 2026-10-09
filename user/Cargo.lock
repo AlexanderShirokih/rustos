@@ -562,6 +562,7 @@ dependencies = [
  "component-startup",
  "display-abi",
  "driver-simplefb",
+ "fdt",
  "fdt-test",
  "filesystem",
  "filesystem-abi",

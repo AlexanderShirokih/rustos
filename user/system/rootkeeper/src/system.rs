@@ -8,7 +8,7 @@ use core::{
 
 use bootstrap_abi::{
     FEATURE_MAX_BYTES, FeaturesError, ImageError, bootstrap, features, hardware, image,
-    log_message_max,
+    log_message_max, system_info,
 };
 use component_abi::{
     AcceptError, AttributeSet, Attributes, ComponentManifest, Found, LOG_REQUIREMENT,
@@ -77,6 +77,8 @@ pub enum BudgetFailure {
     StartupPort,
     /// Ядро не выдало сессию `Hardware`.
     Hardware,
+    /// Ядро не выдало сессию `SystemInfo`.
+    SystemInfo,
 }
 
 /// Отказ [`RootSystem::importer`].
@@ -165,6 +167,7 @@ pub struct RootSystem<'a> {
     pub(crate) log_sources: LogSources,
     index: ExportIndex<'a>,
     hardware: Session<hardware::Protocol>,
+    system_info: Session<system_info::Protocol>,
     image: &'a SystemImage,
     kernel: Handle<kind::Port>,
     restarts_used: Vec<u32>,
@@ -193,11 +196,17 @@ impl<'a> RootSystem<'a> {
     ) -> Result<Self, BudgetFailure> {
         let resource = Resource::self_resource().map_err(|_| BudgetFailure::Root)?;
         let children = Children::new().map_err(|_| BudgetFailure::StartupPort)?;
-        let hardware = bootstrap::Client::new(PortTransport::new(kernel))
+        let bootstrap = bootstrap::Client::new(PortTransport::new(kernel));
+        let hardware = bootstrap
             .acquire_hardware()
             .ok()
             .map(Session::from_session)
             .ok_or(BudgetFailure::Hardware)?;
+        let system_info = bootstrap
+            .acquire_system_info()
+            .ok()
+            .map(Session::from_session)
+            .ok_or(BudgetFailure::SystemInfo)?;
 
         Ok(Self {
             children,
@@ -212,6 +221,7 @@ impl<'a> RootSystem<'a> {
             log_sources,
             index,
             hardware,
+            system_info,
             image,
             kernel,
             restarts_used: alloc::vec![0],
@@ -738,6 +748,12 @@ impl<'a> RootSystem<'a> {
                 badge,
                 requirement,
                 self.hardware.handle().borrow(),
+                Rights::WRITE | Rights::TRANSFER,
+            ),
+            system_info::Protocol::ID => self.children.grant(
+                badge,
+                requirement,
+                self.system_info.handle().borrow(),
                 Rights::WRITE | Rights::TRANSFER,
             ),
             image::Protocol::ID => self.children.issue(

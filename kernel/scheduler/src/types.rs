@@ -163,6 +163,9 @@ pub trait SchedulerService: Send + Sync {
     /// Текущий поток. `None`, если планировщик ещё не поднят на этом CPU.
     fn current(&self) -> Option<ThreadId>;
 
+    /// Число CPU, на которые планировщик ставит потоки: CPU с поднятым состоянием планировщика.
+    fn cpu_count(&self) -> usize;
+
     fn exit(&self) -> !;
 }
 

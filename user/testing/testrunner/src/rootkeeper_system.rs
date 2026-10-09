@@ -1121,13 +1121,14 @@ fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
     await_component_lines(PUBLISHER.name, 1);
 
     let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
-    let lines = await_component_lines(FEATURED.name, 5);
+    let lines = await_component_lines(FEATURED.name, 6);
 
     test_harness::check_eq!(opened, Ok(PING));
     test_harness::check_eq!(
         lines,
         [
             "hardware Ok(())",
+            "system_info Ok(true)",
             "image Ok(())",
             "features Err(Refused)",
             "started",

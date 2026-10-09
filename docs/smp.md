@@ -6,8 +6,9 @@
 полномочиями.
 
 Syscall ABI общий для одно- и многопроцессорной конфигураций
-([syscalls.md](syscalls.md)). Userspace не привязывает потоки к CPU и не
-получает число CPU через ABI.
+([syscalls.md](syscalls.md)). Userspace не привязывает потоки к CPU. Число
+CPU в планировании userspace получает по сессии `SystemInfo`
+([userland.md](userland.md#контракт-bootstrap)).
 
 ## Идентификация CPU
 

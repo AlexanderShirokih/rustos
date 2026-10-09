@@ -202,6 +202,7 @@ component-abi = { workspace = true }
 component-startup = { workspace = true }
 display-abi = { workspace = true }
 driver-simplefb = { path = "../../system/driver-simplefb" }
+fdt = { workspace = true }
 fdt-test = { workspace = true }
 filesystem = { workspace = true }
 filesystem-abi = { workspace = true }

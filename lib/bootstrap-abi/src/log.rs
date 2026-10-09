@@ -65,6 +65,19 @@ mod tests {
                 1,
             )
         }
+
+        fn acquire_system_info(
+            &mut self,
+            _frame: &MockResources,
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<ipc::wire::Session<crate::system_info::Protocol>, u32>,
+        > {
+            Err::<
+                ipc::wire::Session<crate::system_info::Protocol, MockHandle<syscall::kind::Port>>,
+                u32,
+            >(1)
+        }
     }
 
     #[test]

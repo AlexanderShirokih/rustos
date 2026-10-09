@@ -2562,6 +2562,20 @@ fn thread_exit_after_external_termination_does_not_finalize_twice() {
     assert!(running.process_object_for(pid).is_none());
 }
 
+#[test]
+fn cpu_count_counts_only_bootstrapped_cpus() {
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let handle = scheduler.handle();
+
+    bootstrap_cpu(&handle, 2);
+
+    assert_eq!(scheduler::SchedulerService::cpu_count(&handle), 2);
+}
+
 fn bootstrap_cpu(handle: &SchedulerHandle<MockContext, MockTimerSource>, raw: u16) -> CpuId {
     let id = CpuId::new(raw).expect("cpu id within MAX_CPUS");
     set_current_cpu(id);

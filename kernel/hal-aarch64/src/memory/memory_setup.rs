@@ -13,7 +13,7 @@ use kbase::{
 use memory::{
     FrameBitmap,
     bump_allocator::BumpAllocator,
-    frame_allocator::{FrameAllocator, PhysicalFrameAllocator},
+    frame_allocator::{FrameAllocator, FrameCount, PhysicalFrameAllocator},
     kernel_vm_allocator::{HeapAllocator, HeapArena},
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
     memory_range::MemoryRange,
@@ -67,6 +67,8 @@ pub(crate) struct MemoryManagerResult {
     pub memory_mapper: &'static (dyn MemoryMapper + Send + Sync),
     pub address_space_factory: Box<dyn AddressSpaceFactory + Send + Sync>,
     pub frame_allocator: &'static (dyn FrameAllocator + Send + Sync),
+    /// Тот же аллокатор фреймов как источник счёта фреймов.
+    pub frame_count: &'static (dyn FrameCount + Send + Sync),
 }
 
 pub(crate) struct PageTableRoots {
@@ -426,6 +428,7 @@ impl MemorySetup<Enabled> {
             memory_mapper: kernel_mapper,
             address_space_factory,
             frame_allocator: fa_virt,
+            frame_count: fa_virt,
         }
     }
 

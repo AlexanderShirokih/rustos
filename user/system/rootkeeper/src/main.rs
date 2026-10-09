@@ -2,12 +2,12 @@
 #![no_main]
 
 component_manifest! {
-    exports: [hardware::Protocol, image::Protocol, features::Protocol],
+    exports: [hardware::Protocol, system_info::Protocol, image::Protocol, features::Protocol],
 }
 
 extern crate alloc;
 
-use bootstrap_abi::{features, hardware, image};
+use bootstrap_abi::{features, hardware, image, system_info};
 use component_startup::component_manifest;
 use kernel_objects::Port;
 use rootkeeper::{Stopped, run};

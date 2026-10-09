@@ -14,7 +14,7 @@ use fdt::{
 };
 use hal_common::cpu::CpuTopology;
 use kernelspace::{
-    kernel_context::{BootDtb, KernelContext, KmmioArena, UserlandImage},
+    kernel_context::{BootDtb, KernelContext, KmmioArena, PhysicalFrames, UserlandImage},
     kmain::kmain,
     scheduler_bootstrap::KernelTimerSource,
 };
@@ -207,7 +207,10 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
     let kernel = Box::leak(Box::new(KernelContext::new(
         memory_mapper,
         address_space_factory,
-        result.frame_allocator,
+        PhysicalFrames {
+            allocator: result.frame_allocator,
+            count: result.frame_count,
+        },
         KmmioArena {
             base: KMMIO_BASE,
             size: KMMIO_MAX_SIZE,

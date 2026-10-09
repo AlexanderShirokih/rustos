@@ -80,6 +80,9 @@ mod tests {
         fn current(&self) -> Option<ThreadId> {
             Some(ThreadId::new(core::num::NonZeroU32::MIN))
         }
+        fn cpu_count(&self) -> usize {
+            1
+        }
         fn exit(&self) -> ! {
             panic!("exit")
         }

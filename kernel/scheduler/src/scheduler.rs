@@ -1,7 +1,11 @@
 #![allow(unsafe_code)]
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{marker::PhantomData, num::NonZeroUsize};
+use core::{
+    marker::PhantomData,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use capability::{
     Capability, DrainedHandles, HandleReservation, HandleTable, ProcessObject, ThreadObject,
@@ -220,6 +224,7 @@ where
     S: SchedulerStage,
 {
     pub(crate) inner: Arc<MutexCell<SchedulerInner<A, T>>>,
+    cpu_count: Arc<AtomicUsize>,
     _stage: PhantomData<S>,
 }
 
@@ -331,6 +336,7 @@ where
                 quantum_ns: config.quantum_ns(),
                 time_slice_ticks: DEFAULT_TIME_SLICE_TICKS,
             })),
+            cpu_count: Arc::new(AtomicUsize::new(0)),
             _stage: PhantomData,
         }
     }
@@ -342,9 +348,11 @@ where
         if let Err(e) = self.inner.with_lock(SchedulerInner::bootstrap_current_cpu) {
             return Err((self, e));
         }
+        self.cpu_count.fetch_add(1, Ordering::Release);
 
         Ok(Scheduler {
             inner: self.inner,
+            cpu_count: self.cpu_count,
             _stage: PhantomData::<Bootstrapped>,
         })
     }
@@ -356,7 +364,7 @@ where
     T: TimerSource,
 {
     pub fn handle(&self) -> super::service::SchedulerHandle<A, T> {
-        super::service::SchedulerHandle::new(self.inner.clone())
+        super::service::SchedulerHandle::new(self.inner.clone(), self.cpu_count.clone())
     }
 
     /// Спавн потока в bootstrap-фазе до первого context switch.
@@ -385,6 +393,7 @@ where
     pub fn run(self) -> Scheduler<A, T, Running> {
         let running = Scheduler {
             inner: self.inner,
+            cpu_count: self.cpu_count,
             _stage: PhantomData::<Running>,
         };
 
@@ -498,7 +507,7 @@ where
     }
 
     pub fn handle(&self) -> super::service::SchedulerHandle<A, T> {
-        super::service::SchedulerHandle::new(self.inner.clone())
+        super::service::SchedulerHandle::new(self.inner.clone(), self.cpu_count.clone())
     }
 
     pub fn spawn_prepared_user_process(

@@ -22,7 +22,7 @@ extern crate alloc;
 
 use core::{fmt::Write as _, panic::PanicInfo};
 
-use bootstrap_abi::{bootstrap, features, hardware, image, log_message_max};
+use bootstrap_abi::{bootstrap, features, hardware, image, log_message_max, system_info};
 use component_startup::component_manifest;
 use io::writer::Writer;
 use kernel_objects::{Port, Session};
@@ -86,6 +86,7 @@ mod std_rt;
 mod std_selftest;
 mod stress;
 mod sync;
+mod system_info_session;
 #[cfg(target_arch = "aarch64")]
 mod thread_pointer;
 mod thread_stack;
@@ -96,7 +97,7 @@ mod vm;
 mod watched_capability;
 
 component_manifest! {
-    exports: [hardware::Protocol, image::Protocol, features::Protocol],
+    exports: [hardware::Protocol, system_info::Protocol, image::Protocol, features::Protocol],
 }
 
 static BOOTSTRAP_HANDLE: Once<Handle<kind::Port>> = Once::new();
@@ -170,6 +171,13 @@ pub(crate) fn hardware_session() -> Session<hardware::Protocol> {
         .acquire_hardware()
         .map(Session::from_session)
         .expect("hardware session granted")
+}
+
+pub(crate) fn system_info_session() -> Session<system_info::Protocol> {
+    bootstrap::Client::new(PortTransport::new(bootstrap_handle()))
+        .acquire_system_info()
+        .map(Session::from_session)
+        .expect("system info session granted")
 }
 
 fn runner_exit(code: u32) -> ! {

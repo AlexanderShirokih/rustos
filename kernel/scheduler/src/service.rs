@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
 use alloc::{boxed::Box, sync::Arc};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use capability::{
     HandleTable, IpcError, KernelRuntime, LoadImageError, ParkState, ProcessObject,
@@ -44,6 +44,7 @@ where
     T: TimerSource,
 {
     inner: Arc<kbase::MutexCell<SchedulerInner<A, T>>>,
+    cpu_count: Arc<AtomicUsize>,
 }
 
 impl<A, T> Clone for SchedulerHandle<A, T>
@@ -54,6 +55,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            cpu_count: self.cpu_count.clone(),
         }
     }
 }
@@ -85,8 +87,11 @@ where
         notify_pending_cpus(&self.inner);
     }
 
-    pub(crate) fn new(inner: Arc<kbase::MutexCell<SchedulerInner<A, T>>>) -> Self {
-        Self { inner }
+    pub(crate) fn new(
+        inner: Arc<kbase::MutexCell<SchedulerInner<A, T>>>,
+        cpu_count: Arc<AtomicUsize>,
+    ) -> Self {
+        Self { inner, cpu_count }
     }
 
     pub fn on_timer_tick(&self, now_ns: u64) {
@@ -253,7 +258,10 @@ where
 {
     fn bootstrap(&self) -> Result<(), CpuBootstrapError> {
         <A::Cpu as ArchCpu>::disable_preemption();
-        self.inner.with_lock(SchedulerInner::bootstrap_current_cpu)
+        self.inner
+            .with_lock(SchedulerInner::bootstrap_current_cpu)?;
+        self.cpu_count.fetch_add(1, Ordering::Release);
+        Ok(())
     }
 
     fn enter(&self) -> ! {
@@ -320,6 +328,10 @@ where
 
     fn current(&self) -> Option<ThreadId> {
         self.inner.with_lock(|inner| inner.current())
+    }
+
+    fn cpu_count(&self) -> usize {
+        self.cpu_count.load(Ordering::Acquire)
     }
 
     fn exit(&self) -> ! {
