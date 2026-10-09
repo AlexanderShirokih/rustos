@@ -1,0 +1,12 @@
+[package]
+license.workspace = true
+name = "input-abi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ipc = { workspace = true }
+
+[lints]
+workspace = true

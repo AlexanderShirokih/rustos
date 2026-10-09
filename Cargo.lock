@@ -167,6 +167,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "input-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+]
+
+[[package]]
 name = "io"
 version = "0.1.0"
 dependencies = [

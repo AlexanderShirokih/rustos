@@ -8,6 +8,7 @@ members = [
     "kernel/hal-common",
     "lib/bootstrap-abi",
     "lib/display-abi",
+    "lib/input-abi",
     "lib/io",
     "lib/ipc",
     "lib/kernel-objects",
@@ -89,6 +90,7 @@ ipc = { path = "lib/ipc" }
 ipc-test = { path = "lib/ipc-test" }
 bootstrap-abi = { path = "lib/bootstrap-abi" }
 display-abi = { path = "lib/display-abi" }
+input-abi = { path = "lib/input-abi" }
 log-abi = { path = "lib/log-abi" }
 platform-abi = { path = "lib/platform-abi" }
 component-abi = { path = "lib/component-abi" }
