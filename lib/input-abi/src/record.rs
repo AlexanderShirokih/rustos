@@ -2,7 +2,11 @@
 
 use core::slice::Iter;
 
-use ipc::wire::FIELD_DATA_MAX;
+use ipc::{
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
+    schema::WireType,
+    wire::{FIELD_DATA_MAX, IpcError, MessageBuf},
+};
 
 use crate::packed::Packed;
 
@@ -58,6 +62,9 @@ pub struct Record {
 }
 
 /// Последовательность записей ёмкостью [`MESSAGE_RECORDS_MAX`].
+///
+/// Передаётся полем сообщения в раскладке [`RecordBuf::as_bytes`]. Поле с длиной, не кратной
+/// [`RECORD_SIZE`], читается как `InvalidValue`.
 #[derive(Clone)]
 pub struct RecordBuf {
     records: Packed<RECORD_SIZE, MESSAGE_RECORDS_MAX>,
@@ -247,7 +254,15 @@ impl RecordBuf {
     /// Отказы:
     /// - `Full` - в буфере [`MESSAGE_RECORDS_MAX`] записей.
     pub fn push(&mut self, record: Record) -> Result<(), RecordsError> {
-        if self.records.push(record.to_bytes()) {
+        self.push_bytes(&record.to_bytes())
+    }
+
+    /// Дописывает запись в раскладке `record` в конец последовательности.
+    ///
+    /// Отказы:
+    /// - `Full` - в буфере [`MESSAGE_RECORDS_MAX`] записей.
+    pub fn push_bytes(&mut self, record: &[u8; RECORD_SIZE]) -> Result<(), RecordsError> {
+        if self.records.push(*record) {
             Ok(())
         } else {
             Err(RecordsError::Full)
@@ -285,6 +300,27 @@ impl Default for RecordBuf {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl<'a, R: ReceivedResources> WireValue<'a, R> for RecordBuf {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        let records = Packed::from_bytes(data).ok_or(IpcError::InvalidValue)?;
+        Ok(Self { records })
+    }
+}
+
+impl<R: ReceivedResources> IntoWireValue<R> for RecordBuf {
+    type Read = Self;
+
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, self.as_bytes())
+    }
+}
+
+impl WireTyped for RecordBuf {
+    const WIRE_TYPE: WireType = WireType::BoundedBytes(MESSAGE_RECORDS_MAX * RECORD_SIZE);
 }
 
 impl<'a> Records<'a> {

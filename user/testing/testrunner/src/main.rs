@@ -48,6 +48,7 @@ mod fixture_protocol;
 mod futex;
 mod heap;
 mod heap_bench;
+mod input_hub;
 mod ipc_buffer;
 mod ipc_raw;
 mod irq_provision;

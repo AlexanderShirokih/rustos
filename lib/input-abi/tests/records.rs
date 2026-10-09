@@ -3,6 +3,7 @@
 use input_abi::{
     CANCEL, Command, Kind, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records, RecordsError,
 };
+use ipc::{WireValue, wire::IpcError};
 
 fn read(bytes: &[u8]) -> Vec<Record> {
     Records::read(bytes).expect("aligned").collect()
@@ -94,4 +95,13 @@ fn a_built_command_reads_as_the_same_records_in_order() {
             Record::contact_up(0, 0, true),
         ]
     );
+}
+
+#[test]
+fn a_record_field_of_misaligned_length_is_refused() {
+    let bytes = [0; RECORD_SIZE + 1];
+
+    let read = <RecordBuf as WireValue<'_, ()>>::from_field(&bytes, &mut ());
+
+    assert_eq!(read.err(), Some(IpcError::InvalidValue));
 }

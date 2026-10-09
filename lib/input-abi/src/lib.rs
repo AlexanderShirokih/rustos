@@ -10,11 +10,15 @@
 //! ссылается на них индексом в списке дескриптора. Абсолютная ось хранит значение в диапазоне,
 //! относительная передаёт приращение. [`Tracker`] держит состояние устройства, применяет к нему
 //! [`Command`] целиком либо отклоняет её без последствий, строит снимок состояния и отменяет его.
+//!
+//! Протокол [`input_inject`] принимает от источников дескрипторы устройств и их команды, протокол
+//! [`input`] отдаёт потребителю очередь кадров всех устройств и дескриптор устройства по номеру.
 #![cfg_attr(not(test), no_std)]
 
 mod command;
 mod descriptor;
 mod packed;
+mod protocol;
 mod record;
 mod tracker;
 mod usage;
@@ -24,6 +28,7 @@ pub use descriptor::{
     AXES_MAX, AXIS_DECL_SIZE, AxisDecl, AxisList, AxisMode, Binding, CONTACTS_MAX, DEVICE_NAME_MAX,
     DescriptorError, DeviceDescriptor, DeviceLayout, KEYS_MAX, KeyList,
 };
+pub use protocol::{DeclareError, DescribeError, NextError, UpdateError, input, input_inject};
 pub use record::{
     CANCEL, Kind, MESSAGE_RECORDS_MAX, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records,
     RecordsError,

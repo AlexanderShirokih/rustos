@@ -14,6 +14,7 @@ members = [
     "system/driver-virtio-gpu",
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
+    "system/input-hub",
     "system/namespace-router",
     "system/platform",
     "system/rootkeeper",
@@ -64,6 +65,7 @@ fdt-test = { path = "../lib/fdt-test" }
 filesystem = { path = "../lib/filesystem" }
 filesystem-abi = { path = "../lib/filesystem-abi" }
 filesystem-client = { path = "../lib/filesystem-client" }
+input-abi = { path = "../lib/input-abi" }
 io = { path = "../lib/io" }
 ipc = { path = "../lib/ipc" }
 kernel-objects = { path = "../lib/kernel-objects" }

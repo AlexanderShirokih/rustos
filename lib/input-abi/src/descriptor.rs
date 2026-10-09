@@ -1,5 +1,11 @@
 //! Дескриптор устройства ввода и его проверка.
 
+use ipc::{
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
+    schema::WireType,
+    wire::{IpcError, MessageBuf},
+};
+
 use crate::{
     packed::Packed,
     record::MESSAGE_RECORDS_MAX,
@@ -56,7 +62,7 @@ pub struct AxisDecl {
 /// Объявление занимает [`AXIS_DECL_SIZE`] байт little-endian: страница usage `u16`, номер usage
 /// `u16`, режим `u8`, три байта резерва, `min` `i32`, `max` `i32`. У относительной оси `min` и
 /// `max` равны нулю. Индекс объявления в списке - код оси в записях `Axis`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxisList {
     decls: Packed<AXIS_DECL_SIZE, AXES_MAX>,
 }
@@ -65,7 +71,7 @@ pub struct AxisList {
 ///
 /// Usage занимает 4 байта little-endian: страница `u16`, номер `u16`. Индекс usage в списке -
 /// код клавиши в записях `Key`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyList {
     usages: Packed<USAGE_SIZE, KEYS_MAX>,
 }
@@ -86,11 +92,16 @@ ipc::wire_value! {
     }
 }
 
-/// Проверенный дескриптор без имени.
+/// Проверенный дескриптор устройства.
 ///
 /// Отдаёт usage клавиш и объявления осей по индексу, которым на них ссылаются записи.
-#[derive(Debug, Clone)]
+/// Передаётся полем сообщения в раскладке [`DeviceDescriptor`]. Поле, которое не читается
+/// дескриптором либо не проходит [`DeviceDescriptor::layout`], читается как `InvalidValue`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceLayout {
+    name: Packed<1, DEVICE_NAME_MAX>,
+    binding: Binding,
+
     keys: [Usage; KEYS_MAX],
     key_count: usize,
 
@@ -99,7 +110,7 @@ pub struct DeviceLayout {
     pub(crate) contact_axes: AxisSet,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AxisSet {
     decls: [AxisDecl; AXES_MAX],
     len: usize,
@@ -304,6 +315,8 @@ impl<'a> DeviceDescriptor<'a> {
         }
 
         let layout = DeviceLayout {
+            name: Packed::from_bytes(self.name.as_bytes()).ok_or(DescriptorError::TooLarge)?,
+            binding: self.binding,
             keys,
             key_count,
             device_axes,
@@ -315,6 +328,55 @@ impl<'a> DeviceDescriptor<'a> {
         }
         Ok(layout)
     }
+}
+
+impl<'a, R: ReceivedResources> WireValue<'a, R> for DeviceLayout {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], frame: &mut R) -> Result<Self, IpcError> {
+        let descriptor = DeviceDescriptor::from_field(data, frame)?;
+        descriptor.layout().map_err(|_| IpcError::InvalidValue)
+    }
+}
+
+impl<R: ReceivedResources> IntoWireValue<R> for DeviceLayout {
+    type Read = Self;
+
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        let mut keys = KeyList::new();
+        for &usage in self.keys.get(..self.key_count).unwrap_or_default() {
+            keys.usages.push(usage.to_bytes());
+        }
+        let device_axes = self.device_axes.to_list();
+        let contact_axes = self.contact_axes.to_list();
+
+        // Имя и списки взяты из проверенного дескриптора, и сборка отказывает только на
+        // испорченной раскладке.
+        let name =
+            core::str::from_utf8(self.name.as_bytes()).map_err(|_| IpcError::InvalidValue)?;
+        let descriptor = DeviceDescriptor::new(
+            name,
+            self.binding,
+            &keys,
+            &device_axes,
+            self.max_contacts,
+            &contact_axes,
+        )
+        .ok_or(IpcError::InvalidValue)?;
+        descriptor.write_into(frame, field_id)
+    }
+}
+
+/// Поля раскладки [`DeviceDescriptor`] с ёмкостями пределов модели.
+impl WireTyped for DeviceLayout {
+    const WIRE_TYPE: WireType = WireType::Aggregate(&[
+        WireType::BoundedStr(DEVICE_NAME_MAX),
+        <Binding as WireTyped>::WIRE_TYPE,
+        WireType::BoundedBytes(KEYS_MAX * USAGE_SIZE),
+        WireType::BoundedBytes(AXES_MAX * AXIS_DECL_SIZE),
+        <u16 as WireTyped>::WIRE_TYPE,
+        WireType::BoundedBytes(AXES_MAX * AXIS_DECL_SIZE),
+    ]);
 }
 
 impl DeviceLayout {
@@ -372,6 +434,14 @@ impl AxisSet {
             set.len += 1;
         }
         Ok(set)
+    }
+
+    fn to_list(self) -> AxisList {
+        let mut list = AxisList::new();
+        for decl in self.iter() {
+            list.decls.push(decl.to_bytes());
+        }
+        list
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = AxisDecl> + '_ {

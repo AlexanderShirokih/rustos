@@ -358,3 +358,29 @@ fn a_descriptor_round_trips_through_an_ipc_field() {
     assert_eq!(read, descriptor);
     assert!(read.layout().is_ok());
 }
+
+#[test]
+fn a_layout_written_to_a_field_reads_back_as_its_descriptor() {
+    let keys = keys(&[Usage::PRIMARY]);
+    let device_axes = axes(&[AxisDecl::relative(Usage::new(0x01, 0x38))]);
+    let contact_axes = axes(&position(0, 1079));
+    let descriptor = DeviceDescriptor::new(
+        "touch",
+        Binding::Screen,
+        &keys,
+        &device_axes,
+        2,
+        &contact_axes,
+    )
+    .expect("short name");
+    let layout = descriptor.layout().expect("valid");
+
+    let mut frame = MessageBuf::<()>::new();
+    layout.write_into(&mut frame, FIELD_ID).expect("fits");
+    frame.finish().expect("fits");
+    let mut cursor = FieldCursor::new(frame.as_bytes());
+    let field = cursor.next_field().expect("valid").expect("present");
+
+    let read = DeviceDescriptor::from_field(field.data, &mut ()).expect("decoded");
+    assert_eq!(read, descriptor);
+}

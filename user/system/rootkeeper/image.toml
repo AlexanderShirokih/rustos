@@ -49,6 +49,10 @@ package = "filesystem-ramfs"
 path = "/filesystem-ramfs"
 
 [[programs]]
+package = "input-hub"
+path = "/input-hub"
+
+[[programs]]
 package = "hello-std"
 path = "/hello-std"
 
