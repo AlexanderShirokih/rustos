@@ -12,20 +12,23 @@ use ipc::{
 };
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
 use managed_component::{Departure, GrantError, Outcome, Status};
-use runtime::{Instant, JoinHandle, PortTransport, Priority, Timeout, port_send, spawn_owned};
+use rootkeeper::relay::LogSessions as _;
+use runtime::{Instant, JoinHandle, PortTransport, Timeout, port_send, spawn_owned};
 use syscall::{MAX_RESOURCE_DEPTH, ProcessName, Rights, SyscallError};
 
 use crate::{
     child_steps_protocol::{
-        Report, Step, child_steps, ipc_error_code, outcome, session_error_code,
+        Report, STEP_PANIC, Step, child_steps, ipc_error_code, outcome, session_error_code,
     },
     composition::{pause, request},
     ipc_raw,
+    log_relay::{
+        STEPS_BADGE, STEPS_SOURCE, ScenarioLogSessions, SharedSourceNames, await_component_lines,
+        start_component_relay, stop_component_relay,
+    },
     parent::{Answer, Child, Parent},
     probe_protocol::probe,
-    startup_exit_protocol::{
-        FIRST_IPC_FAILED_EXIT_CODE, PANIC_EXIT_CODE, SECOND_SESSION_REFUSED_EXIT_CODE,
-    },
+    startup_exit_protocol::{FIRST_IPC_FAILED_EXIT_CODE, SECOND_SESSION_REFUSED_EXIT_CODE},
 };
 
 type Debt = IssuedHandle<kind::Reply>;
@@ -62,9 +65,9 @@ const OUTSIDER_REFUSAL_TIMEOUT: Timeout = Timeout::from_secs(1);
 const TAKE_DOWN_DURATION_MAX: Timeout = Timeout::from_secs(1);
 const REVOKED_SEND_TIMEOUT: Timeout = Timeout::from_millis(500);
 
-const WORKER_STACK_SIZE: u64 = 0x8000;
-
 const FAILURE_EXIT_CODE: u32 = 5;
+const COMPONENT_SUCCESS_EXIT_CODE: u32 = runtime::SUCCESS_EXIT_CODE.cast_unsigned();
+const COMPONENT_FAILED_EXIT_CODE: u32 = runtime::FAILED_EXIT_CODE.cast_unsigned();
 const READ_EXIT_CODE: u32 = 7;
 const TERMINATE_EXIT_CODE: u32 = 9;
 
@@ -214,17 +217,13 @@ fn failed(error: IpcError) -> u32 {
 
 fn ask(importer: &Port, requirement: &'static str) -> JoinHandle {
     let importer = importer.as_raw();
-    spawn_owned(
-        move || {
-            asked(&request::<probe::Protocol>(
-                importer,
-                requirement,
-                Timeout::INFINITE,
-            ))
-        },
-        WORKER_STACK_SIZE,
-        Priority::new(1),
-    )
+    spawn_owned(move || {
+        asked(&request::<probe::Protocol>(
+            importer,
+            requirement,
+            Timeout::INFINITE,
+        ))
+    })
     .expect("importer thread starts")
 }
 
@@ -461,6 +460,55 @@ fn a_waiting_request_outlives_the_departure_of_the_provider() {
 }
 
 #[test_harness::test]
+fn the_result_of_a_component_entry_sets_its_exit_code() {
+    start_component_relay(SharedSourceNames);
+    let log = ScenarioLogSessions
+        .session(STEPS_BADGE)
+        .expect("steps log session");
+    let parent = Parent::start();
+    let mut steps = Steps::new();
+    let provider = parent.add(steps.child(PROVIDER).log(Answer::log(log)));
+
+    test_harness::check_eq!(steps.next(), started(true));
+    steps.send(Step::return_ok());
+    test_harness::check_eq!(
+        parent.departure(DEPARTURE_TIMEOUT),
+        Some(departed(
+            provider,
+            Outcome::Exit(COMPONENT_SUCCESS_EXIT_CODE)
+        ))
+    );
+
+    parent.restart(provider);
+    test_harness::check_eq!(steps.next(), started(true));
+    steps.send(Step::return_err());
+    test_harness::check_eq!(
+        parent.departure(DEPARTURE_TIMEOUT),
+        Some(departed(
+            provider,
+            Outcome::Exit(COMPONENT_FAILED_EXIT_CODE)
+        ))
+    );
+    test_harness::check_eq!(await_component_lines(STEPS_SOURCE, 1), ["stopped: failed"]);
+
+    parent.restart(provider);
+    test_harness::check_eq!(steps.next(), started(true));
+    steps.send(Step::panic());
+    test_harness::check_eq!(
+        parent.departure(DEPARTURE_TIMEOUT),
+        Some(departed(
+            provider,
+            Outcome::Exit(COMPONENT_FAILED_EXIT_CODE)
+        ))
+    );
+    let lines = await_component_lines(STEPS_SOURCE, 3);
+    test_harness::check_eq!(lines.len(), 3);
+    test_harness::check!(lines[1].starts_with("panic: "));
+    test_harness::check_eq!(lines[2], STEP_PANIC);
+    stop_component_relay();
+}
+
+#[test_harness::test]
 fn a_session_request_lost_with_the_provider_is_repeated_by_the_start() {
     let parent = Parent::start();
     let mut steps = Steps::new();
@@ -680,7 +728,7 @@ fn a_panic_in_a_helper_thread_ends_the_child_process() {
 
     test_harness::check_eq!(
         parent.departure(DEPARTURE_TIMEOUT),
-        Some(departed(helper, Outcome::Exit(PANIC_EXIT_CODE)))
+        Some(departed(helper, Outcome::Exit(COMPONENT_FAILED_EXIT_CODE)))
     );
 }
 

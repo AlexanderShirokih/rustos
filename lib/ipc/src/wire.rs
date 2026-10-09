@@ -214,12 +214,11 @@ impl<R: ReceivedResources> MessageBuf<R> {
     /// Записывает запись поля `field_id` с телом `data`.
     /// Держит строго возрастающий `field_id` в диапазоне `1..=254`. Нарушение
     /// порядка, `field_id` вне диапазона и запись после [`MessageBuf::finish`] -
-    /// `FieldOrder`. `data` длиннее [`FIELD_DATA_MAX`] - `InvalidValue`.
-    /// Превышение бюджета кадра - `FrameOverflow`.
+    /// `FieldOrder`. Данные, которые не помещаются в кадр, - `FrameOverflow`.
     pub fn write_field(&mut self, field_id: u8, data: &[u8]) -> Result<(), IpcError> {
         self.check_field_id(field_id)?;
         if data.len() > FIELD_DATA_MAX {
-            return Err(IpcError::InvalidValue);
+            return Err(IpcError::FrameOverflow);
         }
         let start = self.pos;
         let end = start + FIELD_OVERHEAD + data.len();
@@ -576,74 +575,6 @@ impl<P: Protocol, H: core::fmt::Debug> core::fmt::Debug for Session<P, H> {
     }
 }
 
-/// Bounded UTF-8 строка: фактическая длина <= `N`.
-/// `data` записи - UTF-8 байты без длины-префикса.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Str<'a, const N: usize> {
-    value: &'a str,
-}
-
-impl<'a, const N: usize> Str<'a, N> {
-    /// Оборачивает строку, проверяя границу `N`.
-    /// `None`, если байтовая длина превышает `N`.
-    pub fn new(value: &'a str) -> Option<Self> {
-        if value.len() > N {
-            return None;
-        }
-        Some(Self { value })
-    }
-
-    /// Префикс `value` длиной не более `N` байт, обрезанный по границе символа.
-    #[must_use]
-    pub fn truncating(value: &'a str) -> Self {
-        if value.len() <= N {
-            return Self { value };
-        }
-        let mut len = N;
-        while len > 0 && !value.is_char_boundary(len) {
-            len -= 1;
-        }
-        Self {
-            value: value.split_at_checked(len).map_or("", |(head, _)| head),
-        }
-    }
-
-    /// Строковое значение.
-    #[must_use]
-    pub const fn as_str(self) -> &'a str {
-        self.value
-    }
-}
-
-/// Bounded байтовая строка: фактическая длина <= `N`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Bytes<'a, const N: usize> {
-    value: &'a [u8],
-}
-
-impl<'a, const N: usize> Bytes<'a, N> {
-    /// Оборачивает срез, проверяя границу `N`.
-    /// `None`, если длина превышает `N`.
-    pub fn new(value: &'a [u8]) -> Option<Self> {
-        if value.len() > N {
-            return None;
-        }
-        Some(Self { value })
-    }
-
-    /// Байтовое значение.
-    #[must_use]
-    pub const fn as_bytes(self) -> &'a [u8] {
-        self.value
-    }
-}
-
-/// [`Str`] с границей [`FIELD_DATA_MAX`] - максимум для одного поля.
-pub type FieldStr<'a> = Str<'a, FIELD_DATA_MAX>;
-
-/// [`Bytes`] с границей [`FIELD_DATA_MAX`] - максимум для одного поля.
-pub type FieldBytes<'a> = Bytes<'a, FIELD_DATA_MAX>;
-
 /// Кодирование значений в `data` записи поля. Все целые - LE.
 pub mod value {
     use super::IpcError;
@@ -775,14 +706,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_values_admit_their_bound_and_refuse_more() {
-        assert!(Str::<4>::new("abcd").is_some());
-        assert!(Str::<3>::new("abcd").is_none());
-        assert!(Bytes::<3>::new(&[1, 2, 3]).is_some());
-        assert!(Bytes::<2>::new(&[1, 2, 3]).is_none());
-    }
-
-    #[test]
     fn cursor_passes_over_an_unknown_field() {
         // Тело: известное поле id=1, неизвестное id=5, известное id=9.
         let mut buf = MessageBuf::<()>::new();
@@ -810,7 +733,7 @@ mod tests {
         assert_eq!(over.write_field(2, &[0u8]), Err(IpcError::FrameOverflow));
         assert_eq!(
             MessageBuf::<()>::new().write_field(1, &[0u8; FIELD_DATA_MAX + 1]),
-            Err(IpcError::InvalidValue)
+            Err(IpcError::FrameOverflow)
         );
     }
 

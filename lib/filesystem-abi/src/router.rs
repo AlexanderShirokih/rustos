@@ -1,7 +1,7 @@
 //! Контракт маршрутизатора имён. Контракт [`crate::file_system_mount`] на другом порту создаёт
 //! монтирования.
 
-use crate::{error::FileSystemError, limits::PATH_MAX};
+use crate::error::FileSystemError;
 
 ipc::wire_value! {
     /// Сессия, накрывающая оба пути пары. Клиент снимает с обоих путей `root_len` байт и остаток
@@ -22,7 +22,7 @@ ipc::protocol! {
         name = "Namespace";
 
         /// Выдаёт сессию маршрутизатора с корнем на `path` внутри текущей сессии.
-        call fn open_root(path: ipc::wire::Str<{ PATH_MAX }>)
+        call fn open_root(path: &str)
             -> own Result<ipc::wire::Session<crate::namespace::Protocol>, FileSystemError>;
 
         /// Отдаёт свежую сессию файловой системы с корнем на `path`. Путь отсчитывается от области
@@ -33,15 +33,15 @@ ipc::protocol! {
         /// приходит и отказ установления. Файловая система без ответа в отведённый срок -
         /// `Unresponsive`. Маршрутизатор, которому нечем удержать запрос, отвечает `NoSpace`.
         call(defer) fn resolve(
-            path: ipc::wire::Str<{ PATH_MAX }>,
+            path: &str,
         ) -> own Result<ipc::wire::Session<crate::file_system::Protocol>, FileSystemError>;
 
         /// Разбирает оба пути по одному снимку монтирований и отдаёт сессию их общего каталога, не
         /// выше корня монтирования. Пока хотя бы один путь не накрыт, запрос ждёт. Пути под
         /// разными монтированиями - `CrossMount`. Путь выше монтирования - `NotFound`.
         call(defer) fn resolve_pair(
-            from: ipc::wire::Str<{ PATH_MAX }>,
-            to: ipc::wire::Str<{ PATH_MAX }>,
+            from: &str,
+            to: &str,
         ) -> own Result<ResolvedPair, FileSystemError>;
     }
 }
@@ -55,11 +55,11 @@ mod tests {
         vec::Vec,
     };
 
-    use ipc::wire::{Session, Str};
+    use ipc::wire::Session;
     use ipc_test::{MockHandle, MockReply, MockResources};
     use syscall::kind;
 
-    use super::{FileSystemError, PATH_MAX, ResolvedPair, namespace};
+    use super::{FileSystemError, ResolvedPair, namespace};
     use crate::file_system;
 
     type FileSystemSession = Session<file_system::Protocol, MockHandle<kind::Port>>;
@@ -76,7 +76,7 @@ mod tests {
         fn open_root(
             &mut self,
             _frame: &MockResources,
-            _path: Str<'_, PATH_MAX>,
+            _path: &str,
         ) -> impl ipc::IntoWireValue<
             MockResources,
             Read = Result<Session<namespace::Protocol>, FileSystemError>,
@@ -88,14 +88,14 @@ mod tests {
         fn resolve(
             &mut self,
             _frame: &MockResources,
-            path: Str<'_, PATH_MAX>,
+            path: &str,
             reply: namespace::resolve::Reply<MockReply>,
         ) {
             self.resolved
                 .lock()
                 .expect("mutex not poisoned")
-                .push(path.as_str().to_string());
-            let session = if path.as_str().starts_with("/boot") {
+                .push(path.to_string());
+            let session = if path.starts_with("/boot") {
                 Ok(SESSION)
             } else {
                 Err(FileSystemError::NotFound)
@@ -106,18 +106,16 @@ mod tests {
         fn resolve_pair(
             &mut self,
             _frame: &MockResources,
-            from: Str<'_, PATH_MAX>,
-            to: Str<'_, PATH_MAX>,
+            from: &str,
+            to: &str,
             reply: namespace::resolve_pair::Reply<MockReply>,
         ) {
             let mut resolved = self.resolved.lock().expect("mutex not poisoned");
-            resolved.push(from.as_str().to_string());
-            resolved.push(to.as_str().to_string());
+            resolved.push(from.to_string());
+            resolved.push(to.to_string());
             drop(resolved);
 
-            reply
-                .send(pair_of(from.as_str(), to.as_str()))
-                .expect("the caller waits");
+            reply.send(pair_of(from, to)).expect("the caller waits");
         }
     }
 
@@ -140,8 +138,8 @@ mod tests {
         })
     }
 
-    fn path(text: &str) -> Str<'_, PATH_MAX> {
-        Str::new(text).expect("path within the bound")
+    fn path(text: &str) -> &str {
+        text
     }
 
     fn with_router<R>(

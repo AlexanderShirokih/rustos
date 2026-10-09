@@ -7,12 +7,7 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
-runtime::process_heap!();
-
-use core::{
-    panic::PanicInfo,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use fixture_protocol::{
     OP_ALLOCATE_PAGES, OP_CLOSE_CAP, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_HOLD_CAP, OP_HOLD_SELF,
@@ -23,13 +18,12 @@ use fixture_protocol::{
 };
 use kernel_objects::{Error, MemoryRegion, Port, Process, Reply, Resource, Signal, kind};
 use runtime::{
-    IssuedHandle, MemoryAccess, Priority, Timeout, UserMemFlags, process_exit, signal_set,
-    spawn_owned, take_bootstrap, thread_exit,
+    ExitCode, IssuedHandle, MemoryAccess, Timeout, UserMemFlags, process_exit, signal_set,
+    spawn_owned, thread_exit,
 };
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
 use userland::USERLAND_PAGE_SIZE;
 
-const PARKED_STACK_SIZE: u64 = 0x4000;
 const PARK_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 mod fixture_protocol;
@@ -39,15 +33,8 @@ static SLOT: AtomicU64 = AtomicU64::new(0);
 
 const FAILED_EXIT_CODE: u64 = 101;
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(root: u32) -> ! {
-    // SAFETY: `root` - значение `x0` точки входа, и точка входа исполняется один раз.
-    unsafe { runtime::start(root) };
-    let Some(root) = take_bootstrap() else {
-        thread_exit(FAILED_EXIT_CODE)
-    };
-    let port = Port::from(root.assume_kind());
-
+#[program_entry::process]
+fn run(port: &Port) -> ExitCode {
     loop {
         let reply = match port.recv(Timeout::INFINITE) {
             Ok(Some(reply)) => reply,
@@ -127,11 +114,7 @@ fn start_parked_sibling() -> bool {
         return false;
     };
     let ready_handle = ready.as_raw();
-    let spawned = spawn_owned(
-        move || park_forever(ready_handle),
-        PARKED_STACK_SIZE,
-        Priority::new(1),
-    );
+    let spawned = spawn_owned(move || park_forever(ready_handle));
     if spawned.is_err() {
         return false;
     }
@@ -216,12 +199,5 @@ fn map_check(cap: Option<IssuedHandle<kind::Any>>, expected: u64) -> u8 {
         REPLY_OK
     } else {
         REPLY_PATTERN_MISMATCH
-    }
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    loop {
-        core::hint::spin_loop();
     }
 }

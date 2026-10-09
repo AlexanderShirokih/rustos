@@ -1,17 +1,15 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use bootstrap_abi::features;
 use component_startup::{Requirements as _, component_manifest};
 use kernel_objects::Port;
-use runtime::{Timeout, log_line, start_component};
+use runtime::{Timeout, log_line};
+use syscall::{Handle, kind};
 
-mod fixture_start;
+mod failed;
 
-use fixture_start::{Failed, fixture_start};
-
-const LOG_TAG: &str = "holder";
+use failed::Failed;
 
 component_manifest! {
     struct FeatureHolderStartup {
@@ -19,12 +17,10 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     // Открытая сессия `Features` оставляет публикацию незавершённой до конца процесса.
-    let _features = FeatureHolderStartup::from_parent(parent.as_raw())
+    let _features = FeatureHolderStartup::from_parent(parent)
         .features
         .open()
         .map_err(|_| Failed)?;

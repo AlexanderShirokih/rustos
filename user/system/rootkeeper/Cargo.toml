@@ -30,6 +30,7 @@ filesystem-abi = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
 managed-component = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 userland = { workspace = true }

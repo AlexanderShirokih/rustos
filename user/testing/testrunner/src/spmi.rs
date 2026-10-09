@@ -582,7 +582,7 @@ fn spmi_session(importer: &Importer) -> spmi::Client<SessionTransport> {
 fn open(
     bus: &spmi::Client<SessionTransport>,
 ) -> Result<spmi_device::Client<SessionTransport>, CallError<SpmiError>> {
-    let compatible = ipc::wire::Str::new(PMIC_CLOCK).expect("compatible fits");
+    let compatible = PMIC_CLOCK;
     bus.open(compatible).map(|session| {
         Session::<spmi_device::Protocol>::from_session(session)
             .client()

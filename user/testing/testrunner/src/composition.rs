@@ -13,11 +13,11 @@ use component_abi::{
 };
 use component_startup::Found;
 use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
-use ipc::{CallError, Protocol, wire::Str};
+use ipc::{CallError, Protocol};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
 use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SystemImage, relay::LogSources, turn};
-use runtime::{JoinHandle, Mutex, PortTransport, Priority, Timeout, spawn_owned};
+use runtime::{JoinHandle, Mutex, PortTransport, Timeout, spawn_owned};
 use spin::Once;
 use syscall::{Handle, SIGNALED, SyscallError, kind};
 use userland_image::{BootPlan, ComponentSpec, ExportIndex, decode_plan, encode_plan};
@@ -29,10 +29,8 @@ pub(crate) const ROUTER_NAME: &str = "namespace-router";
 const IMPORTER_WAIT: Timeout = Timeout::from_secs(5);
 
 const TURN: Timeout = Timeout::from_millis(20);
-const TURN_STACK_SIZE: u64 = 0x10000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const BUDGET_POLL: Timeout = Timeout::from_millis(10);
-const MOUNT_STACK_SIZE: u64 = 0x10000;
 
 const MOUNT_ENDED: u32 = 0;
 const MOUNT_FAILED: u32 = 1;
@@ -160,14 +158,10 @@ impl TurnThread {
         let turning = Arc::new(AtomicBool::new(true));
         let thread = {
             let turning = Arc::clone(&turning);
-            spawn_owned(
-                move || {
-                    while turning.load(Ordering::Acquire) && turn().is_continue() {}
-                    0
-                },
-                TURN_STACK_SIZE,
-                Priority::new(1),
-            )
+            spawn_owned(move || {
+                while turning.load(Ordering::Acquire) && turn().is_continue() {}
+                0
+            })
             .expect("turn thread starts")
         };
         Self {
@@ -194,9 +188,7 @@ impl Importer {
             && let Some(root) = self.namespace_roots.get(requirement)
         {
             let client = namespace::Client::new(PortTransport::new(session.handle()));
-            let scoped = client
-                .open_root(Str::new(root).expect("view root fits"))
-                .expect("view opened");
+            let scoped = client.open_root(root).expect("view opened");
             return Session::from_handle(Port::from(scoped.into_handle()));
         }
         session
@@ -252,27 +244,20 @@ impl Mounted {
             .clone();
         let mounted_path = path.clone();
         let raw = admin.as_raw();
-        let thread = spawn_owned(
-            move || {
-                let ended = file_system_mount::Client::new(PortTransport::new(raw))
-                    .with_wait(Timeout::INFINITE)
-                    .mount(
-                        Str::new(&mounted_path).expect("mount path fits"),
-                        filesystem,
-                    );
-                if ended.is_ok() {
-                    MOUNT_ENDED
-                } else {
-                    MOUNT_FAILED
-                }
-            },
-            MOUNT_STACK_SIZE,
-            Priority::new(1),
-        )
+        let thread = spawn_owned(move || {
+            let ended = file_system_mount::Client::new(PortTransport::new(raw))
+                .with_wait(Timeout::INFINITE)
+                .mount(&mounted_path, filesystem);
+            if ended.is_ok() {
+                MOUNT_ENDED
+            } else {
+                MOUNT_FAILED
+            }
+        })
         .expect("mount thread starts");
         let resolved = namespace::Client::new(PortTransport::new(&view))
             .with_wait(IMPORTER_WAIT)
-            .resolve(Str::new("/").expect("root path fits"));
+            .resolve("/");
         if let Err(CallError::Ipc(error)) = resolved {
             panic!("the view of the prefix answers: {error:?}");
         }
@@ -290,7 +275,7 @@ impl Mounted {
         let admin = self.admin.as_ref().expect("admin session is held");
         file_system_mount::Client::new(PortTransport::new(admin))
             .with_wait(IMPORTER_WAIT)
-            .mount(Str::new(&self.path).expect("mount path fits"), filesystem)
+            .mount(&self.path, filesystem)
             .map(drop)
     }
 

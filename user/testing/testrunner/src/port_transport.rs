@@ -12,7 +12,7 @@ use ipc::{
     wire::{Cap, IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, Port};
-use runtime::{PortTransport, Priority, Timeout, spawn_owned};
+use runtime::{PortTransport, Timeout, spawn_owned};
 use syscall::{Rights, kind};
 
 use crate::{
@@ -22,7 +22,6 @@ use crate::{
 
 const ANSWER_EXHAUSTION_FIXTURE: &str = "/answer-exhaustion-fixture/exec";
 
-const STACK_SIZE: u64 = 0x4000;
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -58,12 +57,7 @@ fn server_reads_badge_of_receiving_handle() {
         .expect("mint unbadged copy");
     CLIENT_RESULT.store(i64::MIN, SeqCst);
 
-    let client = spawn_owned(
-        move || badge_client(&badged, &plain),
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn client");
+    let client = spawn_owned(move || badge_client(&badged, &plain)).expect("spawn client");
 
     let server = PortTransport::new(port.as_raw());
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];

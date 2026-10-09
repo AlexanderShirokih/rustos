@@ -9,7 +9,7 @@ use component_startup::mint_session;
 use ipc::{IntoWireValue, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Port, Signal};
 use runtime::{Mutex, PortTransport, Timeout, log_fmt};
-use spmi_abi::{COMPATIBLE_MAX, DeviceError, SpmiError, spmi, spmi_device};
+use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use spmi_pmic_arb::{Arbiter, Interrupt, Peripheral};
 use syscall::{Rights, SIGNALED, WakeCount};
 
@@ -155,11 +155,11 @@ impl spmi::Service<Delivery> for Opener<'_> {
     fn open(
         &mut self,
         _frame: &Delivery,
-        compatible: ipc::wire::Str<'_, COMPATIBLE_MAX>,
+        compatible: &str,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<spmi_device::Protocol>, SpmiError>>
     {
         // Порт сессии устройства выпускает эта шина, и она же обслуживает на нём `SpmiDevice`.
-        Opener::open(self, compatible.as_str()).map(kernel_objects::Session::from_handle)
+        Opener::open(self, compatible).map(kernel_objects::Session::from_handle)
     }
 }
 

@@ -3,34 +3,25 @@
 
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
-
-runtime::process_heap!();
 
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::{convert::Infallible, panic::PanicInfo, sync::atomic::AtomicU64};
+use core::sync::atomic::AtomicU64;
 
-use component_startup::{
-    Requirements as _, SessionError, component_manifest, mint_session, serve_export,
-};
+use component_startup::{SessionError, component_manifest, mint_session, serve_export};
 use io::mmio::Reg;
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, SessionTransport};
 use platform_abi::{Description, platform};
 use rtc_abi::rtc;
 use runtime::{
-    Mutex, PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned,
-    start_component,
+    FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, log_line, spawn_owned,
 };
-use syscall::{Handle, kind};
 
 mod error;
 
 use error::{Error, Result};
-
-const LOG_TAG: &str = "rtc";
 
 const RTC_DATA: Reg<u32> = Reg::new(0x00);
 const RTC_MATCH: Reg<u32> = Reg::new(0x04);
@@ -40,8 +31,6 @@ const RTC_INTERRUPT_CLEAR: Reg<u32> = Reg::new(0x1C);
 const ALARM_TICKS: u32 = 2;
 
 const ALARM_BUDGET: Timeout = Timeout::from_secs(10);
-
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
 
 const COMPATIBLE: &str = "arm,pl031";
 
@@ -121,8 +110,8 @@ impl Pl031 {
             })
             .map(|device| device.id().clone())
             .ok_or(Error::NoDevice)?;
-        let line = IrqLine::from(platform.irq(id.as_wire(), 0)?);
-        let window = platform.mmio(id.as_wire(), 0)?;
+        let line = IrqLine::from(platform.irq(id.as_str(), 0)?);
+        let window = platform.mmio(id.as_str(), 0)?;
         let window = MmioWindow {
             region: MemoryRegion::from(window.region),
             offset: window.offset,
@@ -162,22 +151,14 @@ impl<F: ipc::ReceivedResources> rtc::Service<F> for &Pl031 {
         self.arm();
         if self.line.wait(ALARM_BUDGET).is_err() || self.acknowledge().is_err() {
             log_line("alarm line silent");
-            process_exit(1);
+            exit(FAILED_EXIT_CODE);
         }
         u64::from(self.registers.mmio().read_reg(RTC_DATA))
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Err(error) = run(parent);
-    log_fmt(format_args!("stopped: {error:?}"));
-    process_exit(1)
-}
-
-fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
-    start_component(parent, LOG_TAG);
-    let requirements = RtcStartup::from_parent(parent);
+#[program_entry::component]
+fn run(requirements: RtcStartup) -> Result<()> {
     let platform = requirements.platform.open()?.client();
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         service: Port::create()?,
@@ -185,26 +166,16 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
     }));
     // Поток экспорта работает до конца процесса и держит сессию `Platform`.
     let exporter = requirements.parent;
-    spawn_owned(
-        move || {
-            let next_badge = AtomicU64::new(0);
-            let failure =
-                serve_export::<rtc::Protocol>(&exporter, || shared.open(&platform, &next_badge));
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(1)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    )
+    spawn_owned(move || {
+        let next_badge = AtomicU64::new(0);
+        let failure =
+            serve_export::<rtc::Protocol>(&exporter, || shared.open(&platform, &next_badge));
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    })
     .map_err(|_| Error::Runtime)?;
 
     log_line("started");
     shared.serve();
     Err(Error::Ipc)
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(1)
 }

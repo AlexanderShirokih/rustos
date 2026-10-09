@@ -3,8 +3,7 @@
 //!
 //! Набор выбирает переменная сборки `TEST_PROFILE`: `stress` берёт стрессовые прогоны,
 //! `bench` - замеры, любое другое значение - обычные тесты. Строки прогона уходят в
-//! системный журнал bootstrap-контрактом по handle, который программа получает аргументом
-//! точки входа `_start`.
+//! системный журнал bootstrap-контрактом по стартовому handle процесса.
 
 #![no_std]
 #![no_main]
@@ -19,17 +18,15 @@
     clippy::panic
 )]
 
-runtime::process_heap!();
-
 extern crate alloc;
 
 use core::{fmt::Write as _, panic::PanicInfo};
 
-use bootstrap_abi::{LOG_MESSAGE_MAX, bootstrap, features, hardware, image};
+use bootstrap_abi::{bootstrap, features, hardware, image, log_message_max};
 use component_startup::component_manifest;
 use io::writer::Writer;
-use kernel_objects::Session;
-use runtime::{PortTransport, process_exit};
+use kernel_objects::{Port, Session};
+use runtime::{ExitCode, PortTransport, process_exit};
 use spin::{Mutex, Once};
 use syscall::{Handle, kind};
 
@@ -104,12 +101,12 @@ static BOOTSTRAP_HANDLE: Once<Handle<kind::Port>> = Once::new();
 
 struct LogBuffer {
     len: usize,
-    bytes: [u8; LOG_MESSAGE_MAX],
+    bytes: [u8; LOG_LINE_MAX],
 }
 
 static LOG_BUFFER: Mutex<LogBuffer> = Mutex::new(LogBuffer {
     len: 0,
-    bytes: [0; LOG_MESSAGE_MAX],
+    bytes: [0; LOG_LINE_MAX],
 });
 
 struct ChannelLogWriter;
@@ -127,7 +124,7 @@ impl Writer for ChannelLogWriter {
             let len = state.len;
             state.bytes[len] = byte;
             state.len += 1;
-            if state.len == LOG_MESSAGE_MAX {
+            if state.len == LOG_LINE_MAX {
                 flush_line(&mut state);
             }
         }
@@ -147,6 +144,7 @@ fn flush_line(state: &mut LogBuffer) {
 }
 
 const LOG_TAG: &str = "testrunner";
+const LOG_LINE_MAX: usize = log_message_max(LOG_TAG);
 
 fn send_log_frame(payload: &[u8]) {
     let Ok(text) = core::str::from_utf8(payload) else {
@@ -162,7 +160,7 @@ fn send_log_frame(payload: &[u8]) {
 pub(crate) fn bootstrap_handle() -> Handle<kind::Port> {
     *BOOTSTRAP_HANDLE
         .get()
-        .expect("bootstrap handle set in _start")
+        .expect("bootstrap handle set at entry")
 }
 
 pub(crate) fn hardware_session() -> Session<hardware::Protocol> {
@@ -178,10 +176,10 @@ fn runner_exit(code: u32) -> ! {
     process_exit(u64::from(code))
 }
 
-/// `root` приходит в x0 как HandleId WRITE-конца канала, переданного ядром при спавне.
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(root: Handle<kind::Port>) -> ! {
-    BOOTSTRAP_HANDLE.call_once(|| root);
+#[program_entry::process]
+fn run(root: &Port) -> ExitCode {
+    BOOTSTRAP_HANDLE.call_once(|| root.as_raw());
+    runtime::set_panic_hook(report_panic);
     test_harness::runner::install_writer(&LOG_WRITER);
     test_harness::runner::install_exit(runner_exit);
     let profile = match env!("TEST_PROFILE") {
@@ -201,28 +199,24 @@ fn userland_smoke() {
 
 struct PanicBuffer {
     len: usize,
-    bytes: [u8; LOG_MESSAGE_MAX],
+    bytes: [u8; LOG_LINE_MAX],
 }
 
 impl core::fmt::Write for PanicBuffer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let take = s.len().min(LOG_MESSAGE_MAX - self.len);
+        let take = s.len().min(LOG_LINE_MAX - self.len);
         self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
         self.len += take;
         Ok(())
     }
 }
 
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
+fn report_panic(info: &PanicInfo<'_>) {
     let mut buf = PanicBuffer {
         len: 0,
-        bytes: [0; LOG_MESSAGE_MAX],
+        bytes: [0; LOG_LINE_MAX],
     };
     let _ = write!(buf, "[TEST-PANIC] {info}");
     send_log_frame(&buf.bytes[..buf.len]);
     log_relay::shutdown_relays();
-    // Ядро выключает машину по завершении всего процесса, а прогон держит сервисные потоки.
-    // Поэтому паника завершает процесс, а не только паникующий поток.
-    process_exit(1)
 }

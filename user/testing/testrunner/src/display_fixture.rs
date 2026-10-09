@@ -3,35 +3,28 @@
 
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 extern crate alloc;
 
 mod display_fixture_protocol;
-mod fixture_start;
+mod failed;
 
 use alloc::{boxed::Box, vec::Vec};
 
 use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
 use display_fixture_protocol::DIMENSION;
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use ipc::{
     IntoWireValue, Listener, RecvError,
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource};
 use runtime::{
-    MemoryAccess, PortTransport, Priority, Timeout, UserMemFlags, log_fmt, log_line, process_exit,
-    spawn_owned, start_component,
+    FAILED_EXIT_CODE, MemoryAccess, PortTransport, Timeout, UserMemFlags, exit, log_fmt, log_line,
+    spawn_owned,
 };
-use syscall::{Rights, kind};
-
-const LOG_TAG: &str = "display";
-
-const FAILED_EXIT_CODE: u64 = 1;
-
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
+use syscall::{Handle, Rights, kind};
 
 const ROW_MAX_BYTES: usize = DIMENSION.width as usize * SURFACE_PIXEL_BYTES as usize;
 
@@ -161,23 +154,17 @@ impl display::Service<Delivery> for Screen {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let service = Port::create().map_err(|_| Failed)?;
     let mut screen = Screen::new().ok_or(Failed)?;
     let service: &'static Port = Box::leak(Box::new(service));
-    let parent_port = DisplayStartup::from_parent(parent.as_raw()).parent;
-    let export_thread = spawn_owned(
-        move || {
-            let failure = serve_export::<display::Protocol>(&parent_port, whole_export(service));
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(FAILED_EXIT_CODE)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    );
+    let parent_port = DisplayStartup::from_parent(parent).parent;
+    let export_thread = spawn_owned(move || {
+        let failure = serve_export::<display::Protocol>(&parent_port, whole_export(service));
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    });
     if export_thread.is_err() {
         return Err(Failed);
     }

@@ -122,7 +122,7 @@ diff -ruN a/std/src/os/molecular/mod.rs b/std/src/os/molecular/mod.rs
 +/// источника остаётся за значком сессии. Повторная установка сохраняет первую сессию и
 +/// закрывает переданную.
 +pub fn install_log(session: OwnedHandle) {
-+    runtime::install_log(session.into_issued().assume_kind(), "");
++    runtime::install_log(session.into_issued().assume_kind());
 +}
 diff -ruN a/std/src/sys/alloc/mod.rs b/std/src/sys/alloc/mod.rs
 --- a/std/src/sys/alloc/mod.rs	2026-08-07 22:42:12.130085865 +0000
@@ -920,7 +920,7 @@ diff -ruN a/std/src/sys/pal/molecular/mod.rs b/std/src/sys/pal/molecular/mod.rs
 +#[unsafe(no_mangle)]
 +pub extern "C" fn _start(bootstrap: u32) -> ! {
 +    if let Some(parent) = crate::num::NonZeroU32::new(bootstrap) {
-+        runtime::start_component(runtime::Handle::from_abi(parent), "");
++        runtime::start_component(runtime::Handle::from_abi(parent));
 +    }
 +
 +    // SAFETY: `bootstrap` - значение `x0` точки входа, и точка входа исполняется один раз.

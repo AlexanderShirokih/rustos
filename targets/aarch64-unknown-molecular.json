@@ -19,6 +19,9 @@
     ]
   },
   "relocation-model": "static",
+  "stack-probes": {
+    "kind": "inline"
+  },
   "static-position-independent-executables": false,
   "target-pointer-width": 64,
   "vendor": "unknown"

@@ -20,6 +20,7 @@ filesystem-abi = { workspace = true }
 component-startup = { workspace = true }
 filesystem = { workspace = true }
 filesystem-server = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 

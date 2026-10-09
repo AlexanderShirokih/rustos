@@ -1,3 +1,5 @@
+use core::fmt;
+
 use component_startup::{StartupError, StartupFailure};
 use ipc::{CallError, wire::IpcError};
 use platform_abi::{DescriptionError, PlatformError};
@@ -13,6 +15,19 @@ pub(crate) enum Error {
 }
 
 pub(crate) type Result<T> = core::result::Result<T, Error>;
+
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Runtime => formatter.write_str("runtime refused"),
+            Self::Ipc => formatter.write_str("transport failed"),
+            Self::Start => formatter.write_str("startup requirement refused"),
+            Self::Platform(error) => write!(formatter, "platform refused: {error:?}"),
+            Self::Description(error) => write!(formatter, "device description: {error:?}"),
+            Self::NoDevice => formatter.write_str("no device"),
+        }
+    }
+}
 
 impl From<kernel_objects::Error> for Error {
     fn from(_error: kernel_objects::Error) -> Self {

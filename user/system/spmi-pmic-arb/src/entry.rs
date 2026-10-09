@@ -1,30 +1,21 @@
 use alloc::{boxed::Box, vec::Vec};
-use core::{panic::PanicInfo, sync::atomic::AtomicU64};
+use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    Requirements as _, SessionError, component_manifest, mint_session, serve_export,
+    SessionError, StartupError, component_manifest, mint_session, serve_export,
 };
 use kernel_objects::{IrqLine, MemoryRegion, Port, SessionTransport};
 use platform_abi::{Description, platform};
-use runtime::{
-    Mutex, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned, start_component,
-};
+use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, log_line, spawn_owned};
 use spmi_abi::spmi;
 use spmi_pmic_arb::{Arbiter, ArbiterNode, Refusal};
-use syscall::{Handle, kind};
 
 use crate::{
     bus::{Bus, Device, Sessions, serve},
     windows::Windows,
 };
 
-const LOG_TAG: &str = "spmi-pmic-arb";
-
 const COMPATIBLE: &str = "qcom,spmi-pmic-arb";
-
-const THREAD_STACK_SIZE: u64 = 0x10000;
-
-runtime::process_heap!();
 
 component_manifest! {
     struct SpmiStartup {
@@ -34,29 +25,37 @@ component_manifest! {
     }
 }
 
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    run(parent);
-    process_exit(1)
+#[derive(Debug)]
+enum Stopped {
+    Startup(StartupError),
+    Arbiter,
+    ServicePort,
+    ServiceThreads,
+    ServicePortClosed,
 }
 
-fn run(parent: Handle<kind::Port>) {
-    let requirements = SpmiStartup::from_parent(parent);
+impl fmt::Display for Stopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup(error) => error.fmt(formatter),
+            Self::Arbiter => formatter.write_str("arbiter refused"),
+            Self::ServicePort => formatter.write_str("service port refused"),
+            Self::ServiceThreads => formatter.write_str("service threads refused"),
+            Self::ServicePortClosed => formatter.write_str("service port closed"),
+        }
+    }
+}
+
+#[program_entry::component]
+fn run(requirements: SpmiStartup) -> Result<(), Stopped> {
     // Сессия `Platform` держит окна и линию арбитра до конца процесса.
-    let platform = match requirements.platform.open() {
-        Ok(platform) => platform.client(),
-        Err(error) => return log_fmt(format_args!("{error}")),
-    };
-
-    let Some((bus, line)) = take(&platform) else {
-        return;
-    };
-
-    let Ok(service) = Port::create() else {
-        return log_line("service port refused");
-    };
+    let platform = requirements
+        .platform
+        .open()
+        .map_err(Stopped::Startup)?
+        .client();
+    let (bus, line) = take(&platform).ok_or(Stopped::Arbiter)?;
+    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
 
     let bus: &'static Mutex<Bus> = Box::leak(Box::new(Mutex::new(bus)));
     let sessions: &'static Sessions = Box::leak(Box::new(Sessions {
@@ -66,42 +65,35 @@ fn run(parent: Handle<kind::Port>) {
 
     // Поток прерываний и поток экспорта работают до конца процесса.
     let interrupts = line.map(|line| {
-        spawn_owned(
-            move || {
-                while line.wait(Timeout::INFINITE).is_ok() {
-                    bus.lock().deliver();
-                    if line.ack().is_err() {
-                        break;
-                    }
+        spawn_owned(move || {
+            while line.wait(Timeout::INFINITE).is_ok() {
+                bus.lock().deliver();
+                if line.ack().is_err() {
+                    break;
                 }
-                log_line("arbiter line lost");
-                process_exit(1)
-            },
-            THREAD_STACK_SIZE,
-            Priority::new(1),
-        )
+            }
+            log_line("arbiter line lost");
+            exit(FAILED_EXIT_CODE)
+        })
     });
 
     let exporter = requirements.parent;
-    let export = spawn_owned(
-        move || {
-            let failure = serve_export::<spmi::Protocol>(&exporter, || {
-                mint_session(&sessions.service, &sessions.next_badge)
-                    .map(|minted| minted.port)
-                    .map_err(|_| SessionError::NoSpace)
-            });
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(1)
-        },
-        THREAD_STACK_SIZE,
-        Priority::new(1),
-    );
+    let export = spawn_owned(move || {
+        let failure = serve_export::<spmi::Protocol>(&exporter, || {
+            mint_session(&sessions.service, &sessions.next_badge)
+                .map(|minted| minted.port)
+                .map_err(|_| SessionError::NoSpace)
+        });
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    });
 
     if matches!(interrupts, Some(Err(_))) || export.is_err() {
-        return log_line("service threads refused");
+        return Err(Stopped::ServiceThreads);
     }
 
     serve(bus, sessions);
+    Err(Stopped::ServicePortClosed)
 }
 
 fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<IrqLine>)> {
@@ -158,7 +150,7 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
 
     let line = arbiter
         .as_ref()
-        .map(|_| platform.irq(id.as_wire(), 0))
+        .map(|_| platform.irq(id.as_str(), 0))
         .transpose()
         .inspect_err(|error| log_fmt(format_args!("{} line refused: {error:?}", id.as_str())))
         .ok()?
@@ -182,10 +174,4 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
 
     log_fmt(format_args!("{} devices", devices.len()));
     Some((Bus { arbiter, devices }, line))
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(1)
 }

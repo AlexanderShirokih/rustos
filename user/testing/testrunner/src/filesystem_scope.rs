@@ -13,7 +13,7 @@ use runtime::UserMemFlags;
 
 use crate::filesystem::{
     BUFFER_SIZE, COMPONENT_DIRECTORY, IMAGE_FILE, IMAGE_FILE_BODY, acquire_buffer, buffer_head,
-    connect, image_session, open, path, ram_session, walk_directory, write_all,
+    connect, image_session, open, ram_session, walk_directory, write_all,
 };
 
 const WRITE_WINDOW: &str = "/scope-write";
@@ -24,7 +24,7 @@ fn open_root(
     client: &file_system::Client<SessionTransport>,
     text: &str,
 ) -> Result<Session<file_system::Protocol>, CallError<FileSystemError>> {
-    client.open_root(path(text)).map(Session::from_session)
+    client.open_root(text).map(Session::from_session)
 }
 
 fn window_of(
@@ -65,10 +65,10 @@ fn filesystem_scoped_session_stays_inside_its_window() {
     let parent = connect(image_session());
     let scoped = connect(window_of(&parent, COMPONENT_DIRECTORY));
 
-    let absolute = scoped.open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE);
+    let absolute = scoped.open(IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(absolute, Err(CallError::Remote(FileSystemError::NotFound)));
 
-    let escape = scoped.open(path("/../sample"), AccessMode::Read, OpenFlags::NONE);
+    let escape = scoped.open("/../sample", AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(escape, Err(CallError::Remote(FileSystemError::InvalidPath)));
 
     let mut tail = String::new();
@@ -77,13 +77,13 @@ fn filesystem_scoped_session_stays_inside_its_window() {
         tail.push('/');
         tail.push_str(&"p".repeat(room.min(NAME_MAX)));
     }
-    let overflow = scoped.open(path(&tail), AccessMode::Read, OpenFlags::NONE);
+    let overflow = scoped.open(&tail, AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(
         overflow,
         Err(CallError::Remote(FileSystemError::InvalidPath))
     );
 
-    let unscoped = parent.open(path(&tail), AccessMode::Read, OpenFlags::NONE);
+    let unscoped = parent.open(&tail, AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(unscoped, Err(CallError::Remote(FileSystemError::NotFound)));
 }
 
@@ -119,7 +119,7 @@ fn filesystem_scoped_windows_narrow_and_compose() {
     let reached = open(&scoped, "/leaf", AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(reached.size, payload.len() as u64);
 
-    let outside = scoped.open(path("/inner/leaf"), AccessMode::Read, OpenFlags::NONE);
+    let outside = scoped.open("/inner/leaf", AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(outside, Err(CallError::Remote(FileSystemError::NotFound)));
 
     drop(scoped);
@@ -155,14 +155,12 @@ fn filesystem_scoped_session_writes_through_its_window() {
     );
     test_harness::check_eq!(outer.size, payload.len() as u64);
 
+    scoped.rename("/fresh", "/renamed").expect("rename ok");
     scoped
-        .rename(path("/fresh"), path("/renamed"))
-        .expect("rename ok");
-    scoped
-        .unlink(path("/renamed"), NodeKind::File)
+        .unlink("/renamed", NodeKind::File)
         .expect("unlink ok");
     let removed = client.open(
-        path(&format!("{WRITE_WINDOW}/renamed")),
+        &format!("{WRITE_WINDOW}/renamed"),
         AccessMode::Read,
         OpenFlags::NONE,
     );
@@ -178,7 +176,7 @@ fn filesystem_open_root_accepts_any_existing_node() {
     test_harness::check_eq!(opened.kind, NodeKind::File);
     test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
     test_harness::check_eq!(
-        file.open(path("/child"), AccessMode::Read, OpenFlags::NONE),
+        file.open("/child", AccessMode::Read, OpenFlags::NONE),
         Err(CallError::Remote(FileSystemError::NotADirectory))
     );
     test_harness::check_eq!(
@@ -202,22 +200,22 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
     );
     let scoped = connect(window_of(&client, ROOT_WINDOW));
 
-    let removed = scoped.unlink(path("/"), NodeKind::Directory);
+    let removed = scoped.unlink("/", NodeKind::Directory);
     test_harness::check_eq!(
         removed,
         Err(CallError::Remote(FileSystemError::InvalidPath))
     );
-    let moved = scoped.rename(path("/"), path("/inside"));
+    let moved = scoped.rename("/", "/inside");
     test_harness::check_eq!(moved, Err(CallError::Remote(FileSystemError::InvalidPath)));
-    let onto = scoped.rename(path("/inside"), path("/"));
+    let onto = scoped.rename("/inside", "/");
     test_harness::check_eq!(onto, Err(CallError::Remote(FileSystemError::InvalidPath)));
 
     let alive = open(&client, ROOT_WINDOW, AccessMode::Read, OpenFlags::DIRECTORY);
     test_harness::check_eq!(alive.kind, NodeKind::Directory);
 
     client
-        .unlink(path(ROOT_WINDOW), NodeKind::Directory)
+        .unlink(ROOT_WINDOW, NodeKind::Directory)
         .expect("unlink ok");
-    let recreated = scoped.open(path("/"), AccessMode::ReadWrite, OpenFlags::CREATE);
+    let recreated = scoped.open("/", AccessMode::ReadWrite, OpenFlags::CREATE);
     test_harness::check_eq!(recreated, Err(CallError::Remote(FileSystemError::NotFound)));
 }

@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use core::{num::NonZeroU64, sync::atomic::AtomicU64};
 
@@ -10,23 +9,19 @@ use component_startup::{
 };
 use ipc::{CallError, Listener as _, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::Port;
-use runtime::{PortTransport, Timeout, log_line, process_exit, start_component};
+use runtime::{FAILED_EXIT_CODE, PortTransport, Timeout, exit, log_line, process_exit};
 use syscall::{Handle, Rights, kind};
 
 mod child_steps_protocol;
-mod fixture_start;
+mod failed;
 mod probe_protocol;
 
 use child_steps_protocol::{
-    Report, STEP_LINE, Step, accept_error_code, action, child_steps, ipc_error_code, outcome,
-    session_error_of,
+    Report, STEP_LINE, STEP_PANIC, Step, accept_error_code, action, child_steps, ipc_error_code,
+    outcome, session_error_of,
 };
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use probe_protocol::{Echo, probe};
-
-const LOG_TAG: &str = "steps";
-
-const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct StepsStartup {
@@ -42,11 +37,9 @@ struct Fixture {
     held: Option<SessionRequest>,
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
-    let steps = StepsStartup::from_parent(parent.as_raw())
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let steps = StepsStartup::from_parent(parent)
         .steps
         .open()
         .map_err(|_| Failed)?;
@@ -55,7 +48,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
 
     let steps = steps.client();
     let mut fixture = Fixture {
-        parent: parent.as_raw(),
+        parent,
         export,
         next_badge: AtomicU64::new(0),
         held: None,
@@ -68,7 +61,12 @@ fn run(parent: &Port) -> Result<(), Failed> {
             value,
         };
         let step = steps.next(report).map_err(|_| Failed)?;
-        last = fixture.run(step);
+        match step.action {
+            action::RETURN_OK => return Ok(()),
+            action::RETURN_ERR => return Err(Failed),
+            action::PANIC => panic_on_step(),
+            _ => last = fixture.run(step),
+        }
     }
 }
 
@@ -149,9 +147,17 @@ impl Fixture {
     }
 }
 
+#[expect(
+    clippy::panic,
+    reason = "the fixture checks the exit of a panicking component"
+)]
+fn panic_on_step() -> ! {
+    panic!("{STEP_PANIC}")
+}
+
 fn wait() -> ! {
     if let Ok(own) = Port::create() {
         let _ = own.recv(Timeout::INFINITE);
     }
-    process_exit(FAILED_EXIT_CODE)
+    exit(FAILED_EXIT_CODE)
 }

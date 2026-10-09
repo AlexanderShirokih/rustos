@@ -1,10 +1,7 @@
 //! Запросы `ComponentStartup` по стартовой сессии и заявка импортёра на стороне провайдера.
 
 use component_abi::{AcceptError, Attributes, SessionError, SessionRequirement, component_startup};
-use ipc::{
-    CallError, Timeout,
-    wire::{Bytes, IpcError, Str},
-};
+use ipc::{CallError, Timeout};
 use kernel_objects::{IssuedHandle, Port, PortTransport, Session, kind};
 use syscall::Handle;
 
@@ -21,8 +18,6 @@ pub type Found = component_abi::Found<Session<component_startup::Protocol>>;
 /// покрывает `accept` провайдера и его ответ.
 ///
 /// Отказы:
-/// - `Ipc(IpcError::InvalidValue)` - имя длиннее
-///   [`REQUIREMENT_NAME_MAX`](component_abi::REQUIREMENT_NAME_MAX);
 /// - `Ipc(IpcError::Timeout)` - срок истёк, заявка остаётся у родителя до повтора требования;
 /// - `Remote` - отказ родителя.
 pub fn session<P: ipc::Protocol>(
@@ -33,7 +28,7 @@ pub fn session<P: ipc::Protocol>(
 ) -> Result<Session<P>, CallError<SessionError>> {
     component_startup::Client::new(PortTransport::new(parent))
         .with_wait(wait)
-        .session(query::<P>(requirement)?, wire(attributes)?)
+        .session(query::<P>(requirement), attributes.as_bytes())
         .map(|port| Session::from_handle(Port::from(port)))
 }
 
@@ -45,7 +40,7 @@ pub fn all<P: ipc::Protocol>(
     attributes: Attributes<'_>,
 ) -> Result<Session<component_startup::Protocol>, CallError<SessionError>> {
     parent
-        .all(query::<P>(requirement)?, wire(attributes)?)
+        .all(query::<P>(requirement), attributes.as_bytes())
         .map(|port| Session::from_handle(Port::from(port)))
 }
 
@@ -87,16 +82,12 @@ pub fn open<P: ipc::Protocol>(
 pub fn accept<P: ipc::Protocol>(
     parent: &component_startup::Client<PortTransport>,
 ) -> Result<SessionRequest, CallError<AcceptError>> {
-    parent.accept(Str::new(P::ID).ok_or(IpcError::InvalidValue)?)
+    parent.accept(P::ID)
 }
 
-fn query<P: ipc::Protocol>(requirement: &str) -> Result<SessionRequirement<'_>, IpcError> {
-    Ok(SessionRequirement {
-        name: Str::new(requirement).ok_or(IpcError::InvalidValue)?,
-        protocol: Str::new(P::ID).ok_or(IpcError::InvalidValue)?,
-    })
-}
-
-fn wire(attributes: Attributes<'_>) -> Result<component_abi::QueryAttributes<'_>, IpcError> {
-    Bytes::new(attributes.as_bytes()).ok_or(IpcError::InvalidValue)
+fn query<P: ipc::Protocol>(requirement: &str) -> SessionRequirement<'_> {
+    SessionRequirement {
+        name: requirement,
+        protocol: P::ID,
+    }
 }

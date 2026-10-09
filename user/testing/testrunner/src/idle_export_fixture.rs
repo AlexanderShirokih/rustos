@@ -1,27 +1,23 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use component_startup::component_manifest;
 use kernel_objects::Port;
-use runtime::{Timeout, log_line, start_component};
+use runtime::{Timeout, log_line};
+use syscall::{Handle, kind};
 
-mod fixture_start;
+mod failed;
 mod probe_protocol;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use probe_protocol::probe;
-
-const LOG_TAG: &str = "idle";
 
 component_manifest! {
     exports: [probe::Protocol],
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
+#[program_entry::component]
+fn run(_parent: Handle<kind::Port>) -> Result<(), Failed> {
     log_line("started");
 
     let own = Port::create().map_err(|_| Failed)?;

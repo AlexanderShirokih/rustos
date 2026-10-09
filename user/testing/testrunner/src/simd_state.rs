@@ -7,10 +7,9 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
+use runtime::{JoinHandle, Timeout, spawn_owned};
 use syscall::SyscallOp;
 
-const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(10);
 const WORKERS: usize = 6;
 const MAIN_LANE: u64 = WORKERS as u64 + 1;
@@ -158,7 +157,7 @@ fn cycle_simd_state(expected: &SimdState, observed: &mut SimdState, rounds: u32)
 
 fn spawn_noise_worker(shared: &Arc<Shared>) -> JoinHandle {
     let shared = Arc::clone(shared);
-    spawn_owned(move || simd_worker(&shared), STACK_SIZE, Priority::new(1)).expect("spawn worker")
+    spawn_owned(move || simd_worker(&shared)).expect("spawn worker")
 }
 
 fn simd_worker(shared: &Shared) -> u32 {

@@ -21,12 +21,11 @@ use core::{
 
 use kernel_objects::{Error, Port, kind};
 use runtime::{
-    JoinHandle, Priority, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_recv,
-    port_send, signal_create, signal_set, signal_wait_one, spawn, spawn_owned,
+    JoinHandle, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_recv, port_send,
+    signal_create, signal_set, signal_wait_one, spawn, spawn_owned,
 };
 use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
-const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 const CAPS_OFF: usize = core::mem::offset_of!(syscall::IpcBuffer, caps);
@@ -106,7 +105,7 @@ fn ep_handle() -> Handle<kind::Port> {
 fn spawn_worker(entry: extern "C" fn(usize) -> u32) -> JoinHandle {
     WORKER_RESULT.store(i64::MIN, SeqCst);
     WORKER_READY.store(0, SeqCst);
-    spawn(entry, 0, STACK_SIZE, Priority::new(1)).expect("spawn worker")
+    spawn(entry, 0).expect("spawn worker")
 }
 
 fn join(thread: JoinHandle) {
@@ -211,8 +210,7 @@ fn call_reply_round_trip() {
 
     WORKER_RESULT.store(i64::MIN, SeqCst);
     WORKER_READY.store(0, SeqCst);
-    let worker = spawn_owned(move || serve_one_call(&ep), STACK_SIZE, Priority::new(1))
-        .expect("spawn worker");
+    let worker = spawn_owned(move || serve_one_call(&ep)).expect("spawn worker");
     while WORKER_READY.load(SeqCst) == 0 {
         core::hint::spin_loop();
     }
@@ -332,8 +330,8 @@ fn badge_round_trip_two_clients() {
         result.store(i64::MIN, SeqCst);
     }
 
-    let client_a = spawn(badge_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client A");
-    let client_b = spawn(badge_client, 1, STACK_SIZE, Priority::new(1)).expect("spawn client B");
+    let client_a = spawn(badge_client, 0).expect("spawn client A");
+    let client_b = spawn(badge_client, 1).expect("spawn client B");
 
     while CLIENTS_READY.load(SeqCst) < 2 {
         core::hint::spin_loop();

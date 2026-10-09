@@ -5,20 +5,19 @@ use core::num::NonZeroU64;
 use ipc::wire::MESSAGE_INLINE_MAX;
 use kernel_objects::{Port, Result, Session};
 use log_abi::log;
-use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
+use runtime::{JoinHandle, Timeout, thread::Builder};
 use syscall::Rights;
 
 use crate::relay::{LogRelay, LogSink, SourceNames};
 
-const RELAY_STACK_SIZE: u64 = 0x8000;
+const RELAY_STACK_SIZE: usize = 0x8000;
 
 const RELAY_STACK_FRAME_BUFFERS: usize = 4;
 
 const RELAY_STACK_CALL_RESERVE: usize = 0x1000;
 
 const _: () = assert!(
-    RELAY_STACK_SIZE
-        >= (RELAY_STACK_FRAME_BUFFERS * MESSAGE_INLINE_MAX + RELAY_STACK_CALL_RESERVE) as u64
+    RELAY_STACK_SIZE >= RELAY_STACK_FRAME_BUFFERS * MESSAGE_INLINE_MAX + RELAY_STACK_CALL_RESERVE
 );
 
 /// Лог-порт с циклом пересылки в отдельном потоке. Корневая capability не
@@ -39,14 +38,12 @@ impl LogRelayThread {
     ) -> Result<Self> {
         let root = Port::create()?;
         let mut relay = LogRelay::new(root.duplicate(Rights::READ, None)?, names, sink);
-        let thread = spawn_owned(
-            move || {
+        let thread = Builder::new()
+            .stack_bytes(RELAY_STACK_SIZE)
+            .spawn_owned(move || {
                 relay.serve();
                 0
-            },
-            RELAY_STACK_SIZE,
-            Priority::new(1),
-        )?;
+            })?;
         Ok(Self { root, thread })
     }
 

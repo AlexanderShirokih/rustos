@@ -5,17 +5,14 @@
 
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
-
-runtime::process_heap!();
 
 extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{panic::PanicInfo, sync::atomic::AtomicU64};
+use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    MintedSession, Requirements as _, SessionError, component_manifest, mint_session, serve_export,
+    MintedSession, SessionError, StartupError, component_manifest, mint_session, serve_export,
 };
 use display_abi::{Area, DisplayDimension, DisplayError, display};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
@@ -29,14 +26,10 @@ use kernel_objects::{
 };
 use platform_abi::{Description, DeviceId, PlatformError, platform};
 use runtime::{
-    MemoryAccess, Mutex, PortTransport, Priority, Timeout, UserMemFlags, log_fmt, log_line,
-    process_exit, spawn_owned, start_component,
+    FAILED_EXIT_CODE, MemoryAccess, Mutex, PortTransport, Timeout, UserMemFlags, exit, log_fmt,
+    log_line, spawn_owned,
 };
-use syscall::{Handle, PAGE_SIZE, Rights, kind};
-
-const LOG_TAG: &str = "simplefb";
-
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
+use syscall::{PAGE_SIZE, Rights, kind};
 
 component_manifest! {
     struct SimplefbStartup {
@@ -78,6 +71,15 @@ struct Surface {
     _region: MemoryRegion,
 }
 
+#[derive(Debug)]
+enum Stopped {
+    Startup(StartupError),
+    Description,
+    ServicePort,
+    ExportThread,
+    ServicePortClosed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenRefusal {
     NoDevice,
@@ -85,6 +87,18 @@ enum OpenRefusal {
     Platform(PlatformError),
     PlatformCall,
     Map,
+}
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup(error) => error.fmt(formatter),
+            Self::Description => formatter.write_str("platform description refused"),
+            Self::ServicePort => formatter.write_str("service port refused"),
+            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::ServicePortClosed => formatter.write_str("service port closed"),
+        }
+    }
 }
 
 impl Attacher {
@@ -142,7 +156,7 @@ impl Attacher {
 
         let window = self
             .platform
-            .mmio(id.as_wire(), 0)
+            .mmio(id.as_str(), 0)
             .map_err(|error| error.fold(|_| OpenRefusal::PlatformCall, OpenRefusal::Platform))?;
         framebuffer
             .fits(window.size)
@@ -257,30 +271,27 @@ impl display::Service<Delivery> for Session {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    let Some(shared) = start(parent) else {
-        process_exit(1)
-    };
+#[program_entry::component]
+fn run(requirements: SimplefbStartup) -> Result<(), Stopped> {
+    let shared = start(requirements)?;
     log_line("started");
     shared.serve();
-    process_exit(1)
+    Err(Stopped::ServicePortClosed)
 }
 
-fn start(parent: Handle<kind::Port>) -> Option<&'static Shared> {
-    let requirements = SimplefbStartup::from_parent(parent);
+fn start(requirements: SimplefbStartup) -> Result<&'static Shared, Stopped> {
     let platform = requirements
         .platform
         .open()
-        .inspect_err(|error| log_fmt(format_args!("{error}")))
-        .ok()?
+        .map_err(Stopped::Startup)?
         .client();
-    let description = platform.description().ok()?;
+    let description = platform.description().map_err(|_| Stopped::Description)?;
     let description_offset = description.offset;
     // Драйвер держит регион описания до выхода, и закрытие хендла региона сняло бы отображение.
     let description_region = MemoryRegion::from(description.region);
-    let description = description_region.map_full_read_only().ok()?;
+    let description = description_region
+        .map_full_read_only()
+        .map_err(|_| Stopped::Description)?;
     let mut attacher = Attacher {
         platform,
         description,
@@ -291,27 +302,17 @@ fn start(parent: Handle<kind::Port>) -> Option<&'static Shared> {
     };
 
     let shared: &'static Shared = Box::leak(Box::new(Shared {
-        service: Port::create().ok()?,
+        service: Port::create().map_err(|_| Stopped::ServicePort)?,
         sessions: Mutex::new(Vec::new()),
     }));
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    spawn_owned(
-        move || {
-            let failure = serve_export::<display::Protocol>(&exporter, || attacher.open(shared));
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(1)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    )
-    .ok()?;
+    let _ = spawn_owned(move || {
+        let failure = serve_export::<display::Protocol>(&exporter, || attacher.open(shared));
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    })
+    .map_err(|_| Stopped::ExportThread)?;
 
-    Some(shared)
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(1)
+    Ok(shared)
 }

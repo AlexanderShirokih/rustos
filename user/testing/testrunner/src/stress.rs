@@ -11,14 +11,13 @@ use core::{
 use kernel_objects::{Error, ObjectKind, Port, Resource, Signal, kind};
 use rootkeeper::SystemImage;
 use runtime::{
-    JoinHandle, Priority, Timeout, handle_close, ipc_buffer_ptr, port_call, port_send,
-    signal_create, signal_wait_one, spawn,
+    JoinHandle, Timeout, handle_close, ipc_buffer_ptr, port_call, port_send, signal_create,
+    signal_wait_one, spawn,
 };
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
 
 const PLAN_PATH: &str = "/testrunner/stress-plan";
 
-const STACK_SIZE: u64 = 0x4000;
 const OPERATION_TIMEOUT: Timeout = Timeout::from_secs(1);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(2);
 const READY_SPIN_LIMIT: usize = 10_000_000;
@@ -307,7 +306,7 @@ fn spawn_worker<K: ObjectKind>(
     spawn_error: i64,
 ) -> Result<JoinHandle, FailureKind> {
     let arg = Arc::into_raw(Arc::clone(state)) as usize;
-    spawn(entry, arg, STACK_SIZE, Priority::new(1)).map_err(|_| {
+    spawn(entry, arg).map_err(|_| {
         // SAFETY: поток не стартовал, ссылку из into_raw забрать больше некому.
         drop(unsafe { Arc::from_raw(arg as *const WorkerState<K>) });
         FailureKind::violated(spawn_error)

@@ -30,7 +30,9 @@ pub enum StartupFailure {
     NoStartHandle,
 }
 
-/// Требования компонента, объявленные через `component_manifest!`.
+/// Требования компонента, построенные по стартовой сессии. Структура `component_manifest!`
+/// собирает поля требований, handle стартовой сессии служит требованиями компонента без
+/// структуры манифеста.
 pub trait Requirements {
     /// Строит требования по стартовой сессии `parent` без запросов к родителю.
     fn from_parent(parent: Handle<kind::Port>) -> Self;
@@ -50,6 +52,12 @@ impl fmt::Display for StartupError {
 }
 
 impl core::error::Error for StartupError {}
+
+impl Requirements for Handle<kind::Port> {
+    fn from_parent(parent: Handle<kind::Port>) -> Self {
+        parent
+    }
+}
 
 impl From<SessionError> for StartupFailure {
     fn from(error: SessionError) -> Self {

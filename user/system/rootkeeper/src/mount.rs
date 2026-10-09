@@ -2,19 +2,14 @@ use alloc::{string::String, vec::Vec};
 
 use component_abi::{Attributes, RequirementDeclaration};
 use component_startup::session;
-use filesystem_abi::{MountEnded, PATH_MAX, file_system, file_system_mount};
-use ipc::{
-    CallError, Protocol as _,
-    wire::{IpcError, Str},
-};
+use filesystem_abi::{MountEnded, file_system, file_system_mount};
+use ipc::{CallError, Protocol as _, wire::IpcError};
 use kernel_objects::{Port, Session};
-use runtime::{JoinHandle, Priority, Timeout, spawn_owned};
+use runtime::{JoinHandle, Timeout, spawn_owned};
 use syscall::{Handle, kind};
 use userland_image::BootPlan;
 
 use crate::{BootFailure, RootSystem};
-
-const MOUNT_STACK_SIZE: u64 = 0x8000;
 
 const MOUNT_JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -62,12 +57,8 @@ pub(crate) fn start(
             )
             .map_err(|_| BootFailure::BadImage)?;
         let path = String::from(path.as_str());
-        let thread = spawn_owned(
-            move || mount(&importer, &path, kernel),
-            MOUNT_STACK_SIZE,
-            Priority::new(1),
-        )
-        .map_err(|_| BootFailure::Budget(crate::BudgetFailure::StartupPort))?;
+        let thread = spawn_owned(move || mount(&importer, &path, kernel))
+            .map_err(|_| BootFailure::Budget(crate::BudgetFailure::StartupPort))?;
         system.mounts.0.push(thread);
     }
     Ok(())
@@ -84,10 +75,6 @@ fn mount(importer: &Port, path: &str, kernel: Handle<kind::Port>) -> u32 {
         let Some(mount) = requested::<file_system_mount::Protocol>(parent, "mount", kernel) else {
             return 1;
         };
-        let Some(path) = Str::<PATH_MAX>::new(path) else {
-            crate::system::log_line(kernel, format_args!("mount path too long"));
-            return 1;
-        };
         match mount
             .client()
             .with_wait(Timeout::INFINITE)
@@ -96,10 +83,7 @@ fn mount(importer: &Port, path: &str, kernel: Handle<kind::Port>) -> u32 {
             Err(CallError::Ipc(IpcError::PeerClosed)) | Ok(MountEnded::FileSystemGone) => {}
             Ok(MountEnded::Closed | MountEnded::Replaced) => return 0,
             failure => {
-                crate::system::log_line(
-                    kernel,
-                    format_args!("mount {} failed: {failure:?}", path.as_str()),
-                );
+                crate::system::log_line(kernel, format_args!("mount {path} failed: {failure:?}"));
                 return 1;
             }
         }

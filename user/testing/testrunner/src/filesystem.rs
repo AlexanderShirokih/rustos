@@ -10,14 +10,14 @@ use filesystem_client::{Failure, FileSystem};
 use ipc::{
     CallError, Channel, Incoming, Outgoing, Unsent,
     wire::{
-        FieldCursor, HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf, Str, TERMINATOR,
+        FieldCursor, HEADER_SIZE, Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf, TERMINATOR,
     },
 };
 use kernel_objects::{
     Delivery, MemoryRegion, OwnedHandle, Port, Resource, Session, SessionTransport, Signal,
 };
 use rootkeeper::relay::{ComponentNames, LogSources};
-use runtime::{PortTransport, Priority, Timeout, UserMemFlags, port_send, spawn_owned};
+use runtime::{PortTransport, Timeout, UserMemFlags, port_send, spawn_owned};
 use spin::Once;
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
@@ -143,7 +143,7 @@ fn view_of(requirement: &str) -> Port {
 fn resolved(importer: &Importer, requirement: &str, text: &str) -> Session<file_system::Protocol> {
     let view = importer.port::<namespace::Protocol>(requirement);
     let session = namespace_client(&view)
-        .resolve(path(text))
+        .resolve(text)
         .expect("path is covered by a mount");
     Session::from_session(session)
 }
@@ -167,7 +167,7 @@ pub(crate) fn mount_ram_window(requirement: &str, scope: &str) -> Mounted {
             OpenFlags::CREATE | OpenFlags::DIRECTORY,
         ),
     );
-    let window = client.open_root(path(scope)).expect("window granted");
+    let window = client.open_root(scope).expect("window granted");
     Mounted::new(importer(), requirement, Session::from_session(window))
 }
 
@@ -181,7 +181,7 @@ pub(crate) fn root_view() -> Port {
 
 pub(crate) fn remove_ram_directory(text: &str) {
     connect(ram_session())
-        .unlink(path(text), NodeKind::Directory)
+        .unlink(text, NodeKind::Directory)
         .expect("unlink of an emptied directory");
 }
 
@@ -315,17 +315,13 @@ pub(crate) fn acquire_buffer(client: &file_system::Client<SessionTransport>) -> 
     MemoryRegion::from(cap)
 }
 
-pub(crate) fn path(text: &str) -> Str<'_, { filesystem_abi::PATH_MAX }> {
-    Str::new(text).expect("path within bound")
-}
-
 pub(crate) fn open(
     client: &file_system::Client<SessionTransport>,
     text: &str,
     mode: AccessMode,
     flags: OpenFlags,
 ) -> Opened {
-    client.open(path(text), mode, flags).expect("open ok")
+    client.open(text, mode, flags).expect("open ok")
 }
 
 fn close(client: &file_system::Client<SessionTransport>, opened: &Opened) {
@@ -415,7 +411,7 @@ fn filesystem_creates_and_writes_a_file() {
     test_harness::check_eq!(info.size, payload.len() as u64);
 
     let again = client.open(
-        path("/created"),
+        "/created",
         AccessMode::Read,
         OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
     );
@@ -540,12 +536,12 @@ fn filesystem_unlinks_a_file() {
     );
     close(&client, &opened);
     client
-        .unlink(path("/removed"), NodeKind::File)
+        .unlink("/removed", NodeKind::File)
         .expect("unlink ok");
 
-    let reopened = client.open(path("/removed"), AccessMode::Read, OpenFlags::NONE);
+    let reopened = client.open("/removed", AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(reopened, Err(CallError::Remote(FileSystemError::NotFound)));
-    let again = client.unlink(path("/removed"), NodeKind::File);
+    let again = client.unlink("/removed", NodeKind::File);
     test_harness::check_eq!(again, Err(CallError::Remote(FileSystemError::NotFound)));
 }
 
@@ -566,7 +562,7 @@ fn filesystem_rejects_write_through_a_read_only_descriptor() {
     let resized = client.set_size(opened.fd, 16);
     test_harness::check_eq!(resized, Err(CallError::Remote(FileSystemError::WrongMode)));
 
-    let truncated = client.open(path("/read-only"), AccessMode::Read, OpenFlags::TRUNCATE);
+    let truncated = client.open("/read-only", AccessMode::Read, OpenFlags::TRUNCATE);
     test_harness::check_eq!(
         truncated,
         Err(CallError::Remote(FileSystemError::WrongMode))
@@ -578,7 +574,7 @@ fn a_view_does_not_resolve_outside_its_scope() {
     let uncovered = view_of(UNCOVERED_VIEW);
     let outside = namespace::Client::new(PortTransport::new(&uncovered))
         .with_wait(OUT_OF_SCOPE_RESOLVE_TIMEOUT)
-        .resolve(path(Path::ROOT.as_str()));
+        .resolve(Path::ROOT.as_str());
     test_harness::check_eq!(outside.err(), Some(CallError::Ipc(IpcError::Timeout)));
 }
 
@@ -596,7 +592,7 @@ fn a_view_counts_paths_and_the_pair_root_from_its_scope() {
     );
 
     let pair = namespace_client(&view_of(RAM_VIEW))
-        .resolve_pair(path("/a/x"), path("/a/y"))
+        .resolve_pair("/a/x", "/a/y")
         .expect("the mount of the scope covers the pair");
     test_harness::check_eq!(pair.root_len, 2);
 }
@@ -652,20 +648,20 @@ fn namespace_resolves_each_path_to_the_longest_prefix() {
     let namespace = namespace_client(&capability);
 
     let image = namespace
-        .resolve(path(IMAGE_MOUNT))
+        .resolve(IMAGE_MOUNT)
         .expect("image mount covers the path");
     drop(image);
 
     connect(ram_session())
         .open(
-            path("/inner"),
+            "/inner",
             AccessMode::ReadWrite,
             OpenFlags::CREATE | OpenFlags::DIRECTORY,
         )
         .expect("directory created");
 
     let ram = namespace
-        .resolve(path("/tmp/inner"))
+        .resolve("/tmp/inner")
         .expect("ram mount covers the path");
     drop(ram);
 }
@@ -692,8 +688,7 @@ fn namespace_grafts_the_session_it_is_handed() {
     );
     test_harness::check_eq!(opened.kind, NodeKind::File);
 
-    let absent =
-        connect(image_session()).open(path(GRAFT_ENTRY), AccessMode::Read, OpenFlags::NONE);
+    let absent = connect(image_session()).open(GRAFT_ENTRY, AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(absent, Err(CallError::Remote(FileSystemError::NotFound)));
 }
 
@@ -702,18 +697,18 @@ fn namespace_rejects_admin_operations_on_the_service_port() {
     let capability = view_of(ROOT_VIEW);
     let refused = file_system_mount::Client::new(PortTransport::new(&capability))
         .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
-        .mount(path("/invalid"), Session::from_handle(ram_port()));
+        .mount("/invalid", Session::from_handle(ram_port()));
     test_harness::check_eq!(refused.err(), Some(CallError::Ipc(IpcError::PeerClosed)));
 
     let mounted = namespace_client(&view_of(ROOT_VIEW))
-        .resolve(path(IMAGE_MOUNT))
+        .resolve(IMAGE_MOUNT)
         .expect("image mount survives the rejected frame");
     drop(mounted);
 }
 
 #[test_harness::test]
 fn namespace_reports_an_unresponsive_mount() {
-    let resolved = namespace_client(&view_of(STUCK_VIEW)).resolve(path(Path::ROOT.as_str()));
+    let resolved = namespace_client(&view_of(STUCK_VIEW)).resolve(Path::ROOT.as_str());
     test_harness::check_eq!(
         resolved.err(),
         Some(CallError::Remote(FileSystemError::Unresponsive))
@@ -745,7 +740,7 @@ fn namespace_resolves_a_pair_to_the_session_of_their_common_directory() {
     let capability = view_of(ROOT_VIEW);
     let namespace = namespace_client(&capability);
     let pair = namespace
-        .resolve_pair(path("/tmp/pair-left/first"), path("/tmp/pair-right/second"))
+        .resolve_pair("/tmp/pair-left/first", "/tmp/pair-right/second")
         .expect("one mount covers the pair");
     test_harness::check_eq!(pair.root_len, RAM_MOUNT.len() as u32);
     let opened = open(
@@ -760,7 +755,7 @@ fn namespace_resolves_a_pair_to_the_session_of_their_common_directory() {
 #[test_harness::test]
 fn namespace_keeps_the_pair_scope_inside_the_mount_root() {
     let pair = namespace_client(&view_of(ROOT_VIEW))
-        .resolve_pair(path(RAM_MOUNT), path("/tmp/inside"))
+        .resolve_pair(RAM_MOUNT, "/tmp/inside")
         .expect("one mount covers the pair");
     test_harness::check_eq!(pair.root_len, RAM_MOUNT.len() as u32);
 }
@@ -777,13 +772,13 @@ fn namespace_reports_a_pair_under_different_mounts() {
     let namespace = namespace_client(&capability);
 
     let across = namespace
-        .resolve_pair(path("/tmp/first"), path("/paired-second/second"))
+        .resolve_pair("/tmp/first", "/paired-second/second")
         .map(|pair| pair.root_len);
     test_harness::check_eq!(across, Err(CallError::Remote(FileSystemError::CrossMount)));
 
     drop(
         namespace
-            .resolve(path("/paired-second/second"))
+            .resolve("/paired-second/second")
             .expect("second mount covers the path"),
     );
 }
@@ -800,10 +795,10 @@ fn namespace_opens_no_session_for_a_call_without_a_reply_channel() {
     })
     .with_wait(FILE_SYSTEM_REPLY_TIMEOUT);
     for _ in 0..LEAK_FRAMES {
-        let _ = without_reply.resolve_pair(path("/tmp/first"), path("/tmp/second"));
+        let _ = without_reply.resolve_pair("/tmp/first", "/tmp/second");
     }
 
-    let covered = namespace_client(&view_of(ROOT_VIEW)).resolve(path(RAM_MOUNT));
+    let covered = namespace_client(&view_of(ROOT_VIEW)).resolve(RAM_MOUNT);
     test_harness::check!(covered.is_ok());
     let client = connect(ram_session());
     close(
@@ -821,10 +816,7 @@ fn namespace_opens_no_session_for_a_call_without_a_reply_channel() {
 fn namespace_pair_scope_survives_a_table_change() {
     let mounted = Mounted::new(importer(), "paired-detached", ram_session());
     let pair = namespace_client(&view_of(ROOT_VIEW))
-        .resolve_pair(
-            path("/paired-detached/first"),
-            path("/paired-detached/second"),
-        )
+        .resolve_pair("/paired-detached/first", "/paired-detached/second")
         .expect("fixture covers the pair");
     let scope = Session::from_session(pair.session);
 
@@ -836,13 +828,12 @@ fn namespace_pair_scope_survives_a_table_change() {
         &open(&client, "/first", AccessMode::ReadWrite, OpenFlags::CREATE),
     );
     client
-        .rename(path("/first"), path("/second"))
+        .rename("/first", "/second")
         .expect("rename inside the issued scope");
 }
 
 const ROUTER_VIEW_WAITING_REQUESTS_MAX: usize = 8;
 const QUEUED_RESOLVE_TIMEOUT: Timeout = Timeout::from_secs(20);
-const QUEUE_CALLER_STACK_SIZE: u64 = 0x4000;
 const EVICTION_POLL_INTERVAL: Timeout = Timeout::from_millis(10);
 const EVICTION_POLL_ATTEMPTS: usize = 500;
 const QUEUE_CALLER_ANSWERED: u32 = 0;
@@ -855,19 +846,15 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
     let raw = capability.as_raw();
     let mut callers: Vec<_> = (0..=ROUTER_VIEW_WAITING_REQUESTS_MAX)
         .map(|_| {
-            spawn_owned(
-                move || {
-                    let client = namespace::Client::new(PortTransport::new(raw))
-                        .with_wait(QUEUED_RESOLVE_TIMEOUT);
-                    match client.resolve(path(Path::ROOT.as_str())) {
-                        Ok(_) => QUEUE_CALLER_ANSWERED,
-                        Err(CallError::Remote(FileSystemError::NoSpace)) => QUEUE_CALLER_EVICTED,
-                        _ => QUEUE_CALLER_FAILED,
-                    }
-                },
-                QUEUE_CALLER_STACK_SIZE,
-                Priority::new(1),
-            )
+            spawn_owned(move || {
+                let client = namespace::Client::new(PortTransport::new(raw))
+                    .with_wait(QUEUED_RESOLVE_TIMEOUT);
+                match client.resolve(Path::ROOT.as_str()) {
+                    Ok(_) => QUEUE_CALLER_ANSWERED,
+                    Err(CallError::Remote(FileSystemError::NoSpace)) => QUEUE_CALLER_EVICTED,
+                    _ => QUEUE_CALLER_FAILED,
+                }
+            })
             .expect("queue caller starts")
         })
         .collect();
@@ -899,7 +886,6 @@ fn a_full_view_queue_evicts_one_request_and_keeps_the_rest() {
 const UNMOUNTED_PATH: &str = "/unmounted/file";
 const IMAGE_COMPONENT_ENTRY: &str = "testrunner";
 const IMAGE_FILE_IN_MOUNT: &str = "/boot/testrunner/sample";
-const WAITING_CALLER_STACK_SIZE: u64 = 0x4000;
 const WAITING_CALLER_PAUSE: Timeout = Timeout::from_millis(100);
 const WAITING_CALLER_NOT_FOUND: u32 = 0;
 const WAITING_CALLER_FAILED: u32 = 1;
@@ -930,7 +916,7 @@ fn the_facade_reaches_a_mount_point_without_a_mount_above_it() {
 #[test_harness::test]
 fn a_pair_with_a_side_above_a_mount_is_not_found() {
     let pair = namespace_client(&view_of(ROOT_VIEW))
-        .resolve_pair(path(Path::ROOT.as_str()), path(IMAGE_FILE_IN_MOUNT));
+        .resolve_pair(Path::ROOT.as_str(), IMAGE_FILE_IN_MOUNT);
     test_harness::check_eq!(
         pair.err(),
         Some(CallError::Remote(FileSystemError::NotFound))
@@ -941,18 +927,14 @@ fn a_pair_with_a_side_above_a_mount_is_not_found() {
 fn a_waiting_request_fails_once_a_mount_appears_below_its_path() {
     let capability = view_of(ABOVE_MOUNT_VIEW);
     let raw = capability.as_raw();
-    let caller = spawn_owned(
-        move || {
-            let client =
-                namespace::Client::new(PortTransport::new(raw)).with_wait(NAMESPACE_REPLY_TIMEOUT);
-            match client.resolve(path(Path::ROOT.as_str())) {
-                Err(CallError::Remote(FileSystemError::NotFound)) => WAITING_CALLER_NOT_FOUND,
-                _ => WAITING_CALLER_FAILED,
-            }
-        },
-        WAITING_CALLER_STACK_SIZE,
-        Priority::new(1),
-    )
+    let caller = spawn_owned(move || {
+        let client =
+            namespace::Client::new(PortTransport::new(raw)).with_wait(NAMESPACE_REPLY_TIMEOUT);
+        match client.resolve(Path::ROOT.as_str()) {
+            Err(CallError::Remote(FileSystemError::NotFound)) => WAITING_CALLER_NOT_FOUND,
+            _ => WAITING_CALLER_FAILED,
+        }
+    })
     .expect("waiting caller starts");
     test_harness::check!(caller.wait(WAITING_CALLER_PAUSE).is_err());
 
@@ -968,7 +950,7 @@ fn a_mount_with_an_empty_path_is_refused() {
     let port = importer().port::<file_system_mount::Protocol>(EMPTY_SCOPE_ADMIN);
     let answer = file_system_mount::Client::new(PortTransport::new(&port))
         .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
-        .mount(Str::new("").expect("empty fits"), ram_session());
+        .mount("", ram_session());
     test_harness::check_eq!(answer, Err(CallError::Remote(FileSystemError::InvalidPath)));
 }
 
@@ -981,7 +963,7 @@ fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
     drop(mounted);
 
     let opened = connect(window)
-        .open(path(Path::ROOT.as_str()), AccessMode::Read, OpenFlags::NONE)
+        .open(Path::ROOT.as_str(), AccessMode::Read, OpenFlags::NONE)
         .expect("issued window keeps its root");
     test_harness::check_eq!(opened.kind, NodeKind::Directory);
     let rerouted = session_for(SHADOW_MOUNT);
@@ -1057,9 +1039,9 @@ fn filesystem_mounts_hold_separate_trees() {
         OpenFlags::CREATE,
     );
 
-    let absent = image.open(path("/only-in-ram"), AccessMode::Read, OpenFlags::NONE);
+    let absent = image.open("/only-in-ram", AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(absent, Err(CallError::Remote(FileSystemError::NotFound)));
-    let foreign = ram.open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::NONE);
+    let foreign = ram.open(IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(foreign, Err(CallError::Remote(FileSystemError::NotFound)));
 }
 
@@ -1209,7 +1191,7 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
         .expect("map shared region");
     mapped.copy_in(b"client").expect("initialize region");
     creator
-        .create_backed(path("/client-region"), region, 6)
+        .create_backed("/client-region", region, 6)
         .expect("create backed file");
 
     let reader = connect(ram_session());
@@ -1328,11 +1310,7 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
     test_harness::check!(fillers.len() < FILLER_LIMIT);
 
     client
-        .create_backed(
-            path(IMPORTED),
-            region_carrying(PAYLOAD),
-            PAYLOAD.len() as u64,
-        )
+        .create_backed(IMPORTED, region_carrying(PAYLOAD), PAYLOAD.len() as u64)
         .expect("registration outlives the refused mapping");
 
     let imported = open(&client, IMPORTED, AccessMode::ReadWrite, OpenFlags::NONE);
@@ -1373,25 +1351,25 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
 fn filesystem_refuses_to_change_the_image() {
     let client = connect(image_session());
 
-    let writable = client.open(path(IMAGE_FILE), AccessMode::ReadWrite, OpenFlags::NONE);
+    let writable = client.open(IMAGE_FILE, AccessMode::ReadWrite, OpenFlags::NONE);
     test_harness::check_eq!(writable, Err(CallError::Remote(FileSystemError::ReadOnly)));
 
-    let truncated = client.open(path(IMAGE_FILE), AccessMode::Read, OpenFlags::TRUNCATE);
+    let truncated = client.open(IMAGE_FILE, AccessMode::Read, OpenFlags::TRUNCATE);
     test_harness::check_eq!(
         truncated,
         Err(CallError::Remote(FileSystemError::WrongMode))
     );
 
-    let created = client.open(path("/fresh"), AccessMode::Write, OpenFlags::CREATE);
+    let created = client.open("/fresh", AccessMode::Write, OpenFlags::CREATE);
     test_harness::check_eq!(created, Err(CallError::Remote(FileSystemError::ReadOnly)));
 
-    let removed = client.unlink(path(IMAGE_FILE), NodeKind::File);
+    let removed = client.unlink(IMAGE_FILE, NodeKind::File);
     test_harness::check_eq!(removed, Err(CallError::Remote(FileSystemError::ReadOnly)));
 
-    let absent = client.unlink(path("/absent"), NodeKind::File);
+    let absent = client.unlink("/absent", NodeKind::File);
     test_harness::check_eq!(absent, Err(CallError::Remote(FileSystemError::NotFound)));
 
-    let through_a_file = client.unlink(path("/testrunner/sample/inner"), NodeKind::File);
+    let through_a_file = client.unlink("/testrunner/sample/inner", NodeKind::File);
     test_harness::check_eq!(
         through_a_file,
         Err(CallError::Remote(FileSystemError::NotADirectory))
@@ -1513,15 +1491,11 @@ fn filesystem_isolates_descriptors_between_sessions() {
 #[test_harness::test]
 fn filesystem_creates_nothing_for_a_call_without_a_reply_channel() {
     let without_reply = connect_without_reply(connect(ram_session()));
-    let _ = without_reply.open(
-        path(UNANSWERED_PATH),
-        AccessMode::ReadWrite,
-        OpenFlags::CREATE,
-    );
+    let _ = without_reply.open(UNANSWERED_PATH, AccessMode::ReadWrite, OpenFlags::CREATE);
 
     let client = connect(ram_session());
     let missing = client
-        .open(path(UNANSWERED_PATH), AccessMode::Read, OpenFlags::NONE)
+        .open(UNANSWERED_PATH, AccessMode::Read, OpenFlags::NONE)
         .map(|opened| opened.kind);
     let created = open(
         &client,

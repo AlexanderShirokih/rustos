@@ -212,6 +212,7 @@ ipc = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
 platform-abi = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
 spin = { workspace = true }
 test-harness = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "program-entry"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+proc-macro = true
+doctest = false
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[lints]
+workspace = true

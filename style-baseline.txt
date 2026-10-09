@@ -86,7 +86,6 @@ code_in_crate_root|lib/log-abi/src/lib.rs|<file-root>|19e3df34
 code_in_crate_root|lib/log-abi/src/lib.rs|<file-root>|98c71a2d
 code_in_crate_root|lib/log-abi/src/lib.rs|LOG_MESSAGE_MAX|b4dbf8bc
 code_in_crate_root|lib/log-abi/src/lib.rs|LOG_SOURCE_MAX|4c17d616
-code_in_crate_root|lib/log-abi/src/lib.rs|LOG_TAG_MAX|c349525f
 code_in_crate_root|lib/log-abi/src/lib.rs|TERMINATOR_SIZE|049ef224
 code_in_crate_root|lib/log-abi/src/lib.rs|tests|4dfda322
 code_in_crate_root|lib/rtc-abi/src/lib.rs|<file-root>|98c71a2d

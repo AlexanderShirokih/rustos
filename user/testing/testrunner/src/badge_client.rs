@@ -1,16 +1,14 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use kernel_objects::Port;
 use runtime::Timeout;
 
-mod fixture_start;
+mod failed;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 
-fixture_start!(run);
-
+#[program_entry::process]
 fn run(client: &Port) -> Result<(), Failed> {
     client
         .send_bytes(b"badged", Timeout::INFINITE)

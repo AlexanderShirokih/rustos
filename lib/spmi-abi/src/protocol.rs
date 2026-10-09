@@ -2,9 +2,6 @@ use syscall::kind;
 
 use crate::error::{DeviceError, SpmiError};
 
-/// Предельная длина строки `compatible` запроса `open` в байтах.
-pub const COMPATIBLE_MAX: usize = 64;
-
 ipc::protocol! {
     /// Шина устройств PMIC за арбитром SPMI.
     pub mod spmi {
@@ -13,7 +10,7 @@ ipc::protocol! {
         /// Выдаёт сессию первого свободного устройства за арбитром, в списке совместимостей
         /// которого есть `compatible`. Устройство занято до ухода клиента сессии.
         call fn open(
-            compatible: ipc::wire::Str<{ COMPATIBLE_MAX }>,
+            compatible: &str,
         ) -> own Result<ipc::wire::Session<crate::spmi_device::Protocol>, SpmiError>;
     }
 }

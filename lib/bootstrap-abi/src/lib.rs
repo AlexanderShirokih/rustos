@@ -19,8 +19,9 @@ mod hardware_session;
 mod image_session;
 mod log;
 
-pub use bootstrap_session::{LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
+pub use bootstrap_session::bootstrap;
 pub use device_window::{ContainingWindow, DeviceWindow};
 pub use features_session::{FEATURE_MAX_BYTES, FeaturesError, features};
 pub use hardware_session::{BootFdt, hardware};
 pub use image_session::{ImageError, image};
+pub use log::log_message_max;

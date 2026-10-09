@@ -165,10 +165,36 @@ Rootkeeper предоставляет её компоненту `platform`, ко
 
 ### Freestanding-программа
 
-Программа на `no_std` объявляет `_start`, обработчик паники и глобальный
-аллокатор. Она использует `runtime` напрямую, передаёт стартовый хендл в
-`runtime::start_component` и получает требования своего манифеста.
+Программа на `no_std` объявляет точку входа атрибутом
+[`program_entry::component`](../lib/program-entry/src/lib.rs) на функции,
+которая получает требования своего манифеста. Программа без стартовой
+сессии компонента, например корень композиции, объявляет атрибут
+`program_entry::process` и получает владельца своего стартового handle. Код выхода
+процесса следует результату функции. Программа использует `runtime` напрямую.
 
-Полный пример — [driver-pl031](../user/system/driver-pl031/src/main.rs).
+```rust
+#![no_std]
+#![no_main]
+
+use component_startup::{StartupError, component_manifest};
+use rtc_abi::rtc;
+use runtime::log_fmt;
+
+component_manifest! {
+    struct ClockStartup {
+        requirements: { rtc: session(rtc::Protocol) },
+    }
+}
+
+#[program_entry::component]
+fn run(requirements: ClockStartup) -> Result<(), StartupError> {
+    let ClockStartup { rtc, .. } = requirements;
+    if let Ok(seconds) = rtc.open()?.client().now() {
+        log_fmt(format_args!("rtc reads {seconds}"));
+    }
+    Ok(())
+}
+```
+
 Правила единственного рантайма в процессе заданы в
 [workspace.md](workspace.md#состояние-процесса).

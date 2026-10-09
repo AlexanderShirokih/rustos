@@ -1,19 +1,21 @@
 //! Сток relay в klog: строки уходят ядру по bootstrap-контракту.
 
 use bootstrap_abi::bootstrap;
-use ipc::wire::IpcError;
+use ipc::{
+    schema::{WireType, max_body_len},
+    wire::{BODY_MAX, IpcError},
+};
 use runtime::PortTransport;
 use syscall::{Handle, kind};
 
 use crate::relay::LogSink;
 
 const _: () = assert!(
-    log_abi::LOG_SOURCE_MAX <= bootstrap_abi::LOG_TAG_MAX,
-    "the bootstrap tag field holds a composed log source without truncation"
-);
-const _: () = assert!(
-    log_abi::LOG_MESSAGE_MAX <= bootstrap_abi::LOG_MESSAGE_MAX,
-    "the bootstrap message field holds a log message without truncation"
+    max_body_len(&[
+        WireType::BoundedStr(log_abi::LOG_SOURCE_MAX),
+        WireType::BoundedStr(log_abi::LOG_MESSAGE_MAX),
+    ]) <= BODY_MAX,
+    "the bootstrap log frame holds a log source and a log message without truncation"
 );
 
 /// Сток поверх bootstrap-капы ядра. Капа остаётся в процессе-владельце relay и

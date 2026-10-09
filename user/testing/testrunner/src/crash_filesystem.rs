@@ -1,26 +1,14 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 extern crate alloc;
-
-use core::convert::Infallible;
 
 use component_startup::component_manifest;
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system};
-use filesystem_server::{Result as ServerResult, serve};
-use kernel_objects::Port;
-use runtime::{log_fmt, process_exit, start_component};
+use filesystem_server::serve;
+use runtime::{FAILED_EXIT_CODE, exit};
 use syscall::{Handle, USER_VA_END, kind};
-
-mod fixture_start;
-
-use fixture_start::{Failed, fixture_start};
-
-const LOG_TAG: &str = "crashfs";
-
-const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     exports: [file_system::Protocol],
@@ -133,29 +121,23 @@ impl FileSystemBackend for CrashingFileSystem {
     }
 }
 
+#[allow(unsafe_code)]
 fn kill_process_by_fault() -> ! {
     let unmapped = USER_VA_END as *const u64;
     // SAFETY: адрес намеренно недоступен из EL0 - фикстура проверяет завершение процесса ядром.
     unsafe {
         unmapped.read_volatile();
     }
-    process_exit(FAILED_EXIT_CODE)
+    exit(FAILED_EXIT_CODE)
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    let Err(error) = serve_crashing(parent.as_raw());
-    log_fmt(format_args!("stopped: {error}"));
-    Err(Failed)
-}
-
-fn serve_crashing(parent: Handle<kind::Port>) -> ServerResult<Infallible> {
-    start_component(parent, LOG_TAG);
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> filesystem_server::Result<()> {
     let backend = |_| {
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),
         })
     };
-    serve(parent, None, backend)
+    let Err(error) = serve(parent, None, backend);
+    Err(error)
 }

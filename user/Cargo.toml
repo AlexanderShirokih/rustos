@@ -69,6 +69,7 @@ ipc = { path = "../lib/ipc" }
 kernel-objects = { path = "../lib/kernel-objects" }
 log-abi = { path = "../lib/log-abi" }
 platform-abi = { path = "../lib/platform-abi" }
+program-entry = { path = "../lib/program-entry" }
 rtc-abi = { path = "../lib/rtc-abi" }
 spmi-abi = { path = "../lib/spmi-abi" }
 syscall = { path = "../lib/syscall" }

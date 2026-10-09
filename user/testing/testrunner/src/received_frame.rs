@@ -15,13 +15,11 @@ use ipc::{
     wire::{Header, IpcError, MESSAGE_INLINE_MAX, MessageBuf},
 };
 use kernel_objects::{Delivery, IssuedHandle, Port, Resource, SessionTransport, Signal, kind};
-use runtime::{Mutex, PortTransport, Priority, Timeout, spawn, spawn_owned};
+use runtime::{Mutex, PortTransport, Timeout, spawn, spawn_owned};
 use syscall::{Handle, ProcessName, kind as object_kind};
 use userland_loader::load_program;
 
 use crate::{fixture::program, watched_capability::Watched};
-
-const STACK_SIZE: u64 = 0x4000;
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -297,13 +295,7 @@ fn a_frame_hands_its_capability_to_the_parameter() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
     let exchange = Exchange::with_capability(service.client.as_raw(), watched.deliver());
-    let worker = spawn(
-        hand_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
+    let worker = spawn(hand_worker, core::ptr::from_ref(&exchange) as usize).expect("spawn worker");
 
     let transport = PortTransport::new(&service.server);
     let mut probe = Probe::default();
@@ -331,20 +323,9 @@ fn a_nested_call_does_not_change_the_received_set() {
 
     let handing = Exchange::with_capability(service.client.as_raw(), handed.deliver());
     let vending = Exchange::with_capability(nested.server.as_raw(), answered.deliver());
-    let sender = spawn(
-        hand_worker,
-        core::ptr::from_ref(&handing) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn sender");
-    let vendor = spawn(
-        vending_worker,
-        core::ptr::from_ref(&vending) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn vendor");
+    let sender = spawn(hand_worker, core::ptr::from_ref(&handing) as usize).expect("spawn sender");
+    let vendor =
+        spawn(vending_worker, core::ptr::from_ref(&vending) as usize).expect("spawn vendor");
 
     let transport = PortTransport::new(&service.server);
     let mut probe = Probe {
@@ -374,13 +355,7 @@ fn a_nested_call_does_not_change_the_received_set() {
 fn an_unanswered_frame_refuses_its_caller() {
     let service = Port::create_service(None).expect("port create");
     let exchange = Exchange::new(service.client.as_raw());
-    let worker = spawn(
-        echo_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
+    let worker = spawn(echo_worker, core::ptr::from_ref(&exchange) as usize).expect("spawn worker");
 
     let transport = PortTransport::new(&service.server);
     serve_one(&transport, RECV_TIMEOUT, |frame| drop(frame)).expect("frame delivered");
@@ -393,13 +368,7 @@ fn an_unanswered_frame_refuses_its_caller() {
 fn an_answered_frame_does_not_close_its_reply_twice() {
     let service = Port::create_service(None).expect("port create");
     let exchange = Exchange::new(service.client.as_raw());
-    let worker = spawn(
-        echo_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
+    let worker = spawn(echo_worker, core::ptr::from_ref(&exchange) as usize).expect("spawn worker");
 
     let transport = PortTransport::new(&service.server);
     let mut probe = Probe::default();
@@ -450,12 +419,7 @@ fn a_client_decode_failure_closes_its_reply_capabilities() {
         capability: watched.deliver(),
         scalar: false,
     };
-    let worker = spawn_owned(
-        move || tampered_reply_worker(exchange),
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn reply worker");
+    let worker = spawn_owned(move || tampered_reply_worker(exchange)).expect("spawn reply worker");
     let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
     let answer = client.request();
@@ -473,12 +437,7 @@ fn a_scalar_reply_closes_extra_capabilities() {
         capability: watched.deliver(),
         scalar: true,
     };
-    let worker = spawn_owned(
-        move || tampered_reply_worker(exchange),
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn reply worker");
+    let worker = spawn_owned(move || tampered_reply_worker(exchange)).expect("spawn reply worker");
     let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
     let answer = client.echo(PROBE_VALUE).expect("scalar answer");
@@ -492,13 +451,8 @@ fn a_dropped_answer_closes_its_capability() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
     let vending = Exchange::with_capability(service.server.as_raw(), watched.deliver());
-    let worker = spawn(
-        vending_worker,
-        core::ptr::from_ref(&vending) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn vendor");
+    let worker =
+        spawn(vending_worker, core::ptr::from_ref(&vending) as usize).expect("spawn vendor");
 
     let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(CALL_TIMEOUT);
@@ -515,13 +469,8 @@ fn an_undelivered_answer_closes_the_capability_it_vended() {
     let service = Port::create_service(None).expect("port create");
     let watched = Watched::create(FIRST_BADGE);
     let vending = Exchange::with_capability(service.server.as_raw(), watched.deliver());
-    let vendor = spawn(
-        undelivered_vendor,
-        core::ptr::from_ref(&vending) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn vendor");
+    let vendor =
+        spawn(undelivered_vendor, core::ptr::from_ref(&vending) as usize).expect("spawn vendor");
 
     let client = frame_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(IDLE_TIMEOUT);
@@ -540,13 +489,7 @@ fn an_undelivered_answer_closes_the_capability_it_vended() {
 fn a_kept_debt_is_answered_after_its_frame() {
     let service = Port::create_service(None).expect("port create");
     let exchange = Exchange::new(service.client.as_raw());
-    let worker = spawn(
-        echo_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
+    let worker = spawn(echo_worker, core::ptr::from_ref(&exchange) as usize).expect("spawn worker");
 
     let transport = PortTransport::new(&service.server);
     let mut probe = Probe {
@@ -574,20 +517,9 @@ fn a_forwarded_debt_is_answered_by_its_new_holder() {
     let holder_port = Port::create_service(None).expect("holder port create");
     let exchange = Exchange::new(service.client.as_raw());
     let holding = Exchange::new(holder_port.server.as_raw());
-    let worker = spawn(
-        echo_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
-    let holder = spawn(
-        holder_worker,
-        core::ptr::from_ref(&holding) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn holder");
+    let worker = spawn(echo_worker, core::ptr::from_ref(&exchange) as usize).expect("spawn worker");
+    let holder =
+        spawn(holder_worker, core::ptr::from_ref(&holding) as usize).expect("spawn holder");
 
     let transport = PortTransport::new(&service.server);
     let mut probe = Probe {
@@ -618,13 +550,8 @@ fn an_unsent_forward_keeps_the_debt_with_its_holder() {
     let absent = Port::create_service(None).expect("port without a receiver");
     let first = Exchange::new(service.client.as_raw());
     let second = Exchange::new(service.client.as_raw());
-    let first_worker = spawn(
-        echo_worker,
-        core::ptr::from_ref(&first) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn first worker");
+    let first_worker =
+        spawn(echo_worker, core::ptr::from_ref(&first) as usize).expect("spawn first worker");
 
     let transport = PortTransport::new(&service.server);
     let mut probe = Probe {
@@ -650,13 +577,8 @@ fn an_unsent_forward_keeps_the_debt_with_its_holder() {
         .expect("the holder answers its debt");
     first_worker.join(JOIN_TIMEOUT).expect("first worker joins");
 
-    let second_worker = spawn(
-        echo_worker,
-        core::ptr::from_ref(&second) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn second worker");
+    let second_worker =
+        spawn(echo_worker, core::ptr::from_ref(&second) as usize).expect("spawn second worker");
     probe.keep = false;
     serve_one(&transport, RECV_TIMEOUT, |frame| {
         frame_probe::dispatch(&mut probe, frame)
@@ -676,13 +598,8 @@ fn an_owning_transport_carries_both_sides_of_a_session() {
     let service = Port::create_service(None).expect("port create");
     let client = service.client;
     let exchange = Exchange::with_capability(client.as_raw(), client);
-    let worker = spawn(
-        session_echo_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
+    let worker =
+        spawn(session_echo_worker, core::ptr::from_ref(&exchange) as usize).expect("spawn worker");
 
     let session = SessionTransport::new(service.server);
     let mut probe = Probe::default();
@@ -701,13 +618,8 @@ fn a_dropped_owning_transport_refuses_its_caller() {
     let service = Port::create_service(None).expect("port create");
     let client = service.client;
     let exchange = Exchange::with_capability(client.as_raw(), client);
-    let worker = spawn(
-        session_echo_worker,
-        core::ptr::from_ref(&exchange) as usize,
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
+    let worker =
+        spawn(session_echo_worker, core::ptr::from_ref(&exchange) as usize).expect("spawn worker");
 
     drop(SessionTransport::new(service.server));
 

@@ -133,10 +133,10 @@ impl Bus {
 impl Transport {
     fn take(platform: &platform::Client<SessionTransport>, id: &DeviceId) -> Result<Self, Refusal> {
         let line = platform
-            .irq(id.as_wire(), 0)
+            .irq(id.as_str(), 0)
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
         let window = platform
-            .mmio(id.as_wire(), 0)
+            .mmio(id.as_str(), 0)
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
         let window = MmioWindow {
             region: MemoryRegion::from(window.region),

@@ -1,13 +1,11 @@
 //! Строки процесса в системный журнал.
 //!
 //! Лог-сессия приходит процессу стартовым кадром компонента, и до неё строки уходят в никуда.
-//! Тег источника процесс задаёт при установке сессии. Пустой тег оставляет имя источника
-//! значку сессии, непустой сам называет источник.
+//! Источник строк называет сервер журнала по значку сессии.
 
 use core::{
     fmt::Write as _,
-    slice, str,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use ipc::wire::IpcError;
@@ -20,10 +18,6 @@ use crate::{
 };
 
 static SESSION: AtomicU32 = AtomicU32::new(0);
-
-static TAG_ADDRESS: AtomicUsize = AtomicUsize::new(0);
-
-static TAG_LENGTH: AtomicUsize = AtomicUsize::new(0);
 
 /// Поток вывода, ведущий записи журнала построчно.
 ///
@@ -57,12 +51,11 @@ impl Stream {
         let Some(client) = client() else {
             return Ok(());
         };
-        let tag = tag();
         let mut failure = None;
         take(&mut self.lines.lock(), &mut |line| {
             // Отказ первой записи возвращается вызывающему, остальные строки уходят следом:
             // накопитель уже отдал их, и держать их негде.
-            let outcome = client.write_str(tag, line);
+            let outcome = client.write_str(line);
             failure = failure.take().or_else(|| outcome.err());
         });
         match failure {
@@ -84,11 +77,11 @@ pub fn installed() -> bool {
     SESSION.load(Ordering::Acquire) != 0
 }
 
-/// Запоминает лог-сессию процесса и тег его строк.
+/// Запоминает лог-сессию процесса.
 ///
 /// Сессию приносит стартовый кадр, и он один. Сессия остаётся открытой до завершения
 /// процесса. Повторный вызов закрывает переданную сессию.
-pub fn install(session: IssuedHandle<kind::Port>, tag: &'static str) {
+pub fn install(session: IssuedHandle<kind::Port>) {
     if SESSION
         .compare_exchange(
             0,
@@ -101,9 +94,6 @@ pub fn install(session: IssuedHandle<kind::Port>, tag: &'static str) {
         return;
     }
     let _ = session.leak();
-    TAG_ADDRESS.store(tag.as_ptr() as usize, Ordering::Relaxed);
-    // Длина публикуется последней, и по ней тег читают.
-    TAG_LENGTH.store(tag.len(), Ordering::Release);
 }
 
 /// Пишет текст в журнал построчно, не накапливая незавершённую строку.
@@ -113,24 +103,10 @@ pub fn write(text: &str) -> Result<(), IpcError> {
     let Some(client) = client() else {
         return Ok(());
     };
-    let tag = tag();
     for line in text.strip_suffix('\n').unwrap_or(text).split('\n') {
-        client.write_str(tag, line)?;
+        client.write_str(line)?;
     }
     Ok(())
-}
-
-fn tag() -> &'static str {
-    let length = TAG_LENGTH.load(Ordering::Acquire);
-    if length == 0 {
-        return "";
-    }
-    let address = TAG_ADDRESS.load(Ordering::Relaxed);
-    // SAFETY: адрес и длина принадлежат одному `&'static str`, положенному `install`; байты
-    // остаются валидными до конца процесса, а непустая длина означает записанный адрес.
-    let bytes = unsafe { slice::from_raw_parts(address as *const u8, length) };
-    // SAFETY: срез покрывает байты `&str` целиком, поэтому содержит валидный UTF-8.
-    unsafe { str::from_utf8_unchecked(bytes) }
 }
 
 fn client() -> Option<log::Client<PortTransport>> {

@@ -9,6 +9,7 @@ use ipc::wire::IpcError;
 use syscall::Timeout;
 
 pub(crate) const STEP_LINE: &str = "step logged";
+pub(crate) const STEP_PANIC: &str = "step panics";
 
 pub(crate) mod action {
     pub(crate) const ACCEPT: u32 = 1;
@@ -20,6 +21,9 @@ pub(crate) mod action {
     pub(crate) const LOG: u32 = 7;
     pub(crate) const EXIT: u32 = 8;
     pub(crate) const WAIT: u32 = 9;
+    pub(crate) const RETURN_OK: u32 = 10;
+    pub(crate) const RETURN_ERR: u32 = 11;
+    pub(crate) const PANIC: u32 = 12;
 }
 
 pub(crate) mod outcome {
@@ -107,6 +111,21 @@ impl Step {
     #[must_use]
     pub(crate) const fn wait() -> Self {
         Self::new(action::WAIT, 0)
+    }
+
+    #[must_use]
+    pub(crate) const fn return_ok() -> Self {
+        Self::new(action::RETURN_OK, 0)
+    }
+
+    #[must_use]
+    pub(crate) const fn return_err() -> Self {
+        Self::new(action::RETURN_ERR, 0)
+    }
+
+    #[must_use]
+    pub(crate) const fn panic() -> Self {
+        Self::new(action::PANIC, 0)
     }
 
     const fn new(action: u32, argument: u64) -> Self {

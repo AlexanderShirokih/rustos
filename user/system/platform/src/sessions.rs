@@ -5,17 +5,12 @@ use core::fmt;
 
 use bootstrap_abi::hardware;
 use device_resolver::{DeviceTreePlatform, InterruptLine, PlatformDescription, ResolveError};
-use ipc::{
-    IntoWireValue,
-    wire::{Cap, Str},
-};
+use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{
     Delivery, Error, IrqControl, IrqLine, MemoryRegion, ObjectKind, OwnedHandle, SessionTransport,
     kind,
 };
-use platform_abi::{
-    DEVICE_ID_MAX, DescriptionRegion, DeviceId, MmioWindow, PlatformError, platform,
-};
+use platform_abi::{DescriptionRegion, DeviceId, MmioWindow, PlatformError, platform};
 use runtime::{Mutex, log_fmt};
 use syscall::{MemoryAccess, Rights, SyscallError};
 
@@ -224,10 +219,9 @@ impl platform::Service<Delivery> for Platform {
     fn irq(
         &mut self,
         frame: &Delivery,
-        device: Str<'_, DEVICE_ID_MAX>,
+        device: &str,
         resource: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::IrqLine>, PlatformError>> {
-        let device = device.as_str();
         self.line(frame.badge, device, resource)
             .map_err(|refusal| Self::refuse(format_args!("{device} irq {resource}"), refusal))
     }
@@ -235,10 +229,9 @@ impl platform::Service<Delivery> for Platform {
     fn mmio(
         &mut self,
         frame: &Delivery,
-        device: Str<'_, DEVICE_ID_MAX>,
+        device: &str,
         resource: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<MmioWindow, PlatformError>> {
-        let device = device.as_str();
         self.window(frame.badge, device, resource)
             .map_err(|refusal| Self::refuse(format_args!("{device} mmio {resource}"), refusal))
     }

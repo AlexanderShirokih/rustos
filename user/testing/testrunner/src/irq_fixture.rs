@@ -1,17 +1,15 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use component_startup::{Requirements as _, component_manifest};
-use kernel_objects::{MemoryRegion, Port};
+use kernel_objects::MemoryRegion;
 use platform_abi::platform;
-use runtime::{log_fmt, log_line, start_component};
+use runtime::{log_fmt, log_line};
+use syscall::{Handle, kind};
 
-mod fixture_start;
+mod failed;
 
-use fixture_start::{Failed, fixture_start};
-
-const LOG_TAG: &str = "irq";
+use failed::Failed;
 
 component_manifest! {
     struct IrqStartup {
@@ -19,16 +17,14 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
-    let platform = IrqStartup::from_parent(parent.as_raw())
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let platform = IrqStartup::from_parent(parent)
         .platform
         .open()
         .map_err(|_| Failed)?
         .client();
-    let device = ipc::wire::Str::new("/pl031@9010000").ok_or(Failed)?;
+    let device = "/pl031@9010000";
     let (Ok(_line), Ok(window)) = (platform.irq(device, 0), platform.mmio(device, 0)) else {
         log_line("resources refused");
         return Err(Failed);

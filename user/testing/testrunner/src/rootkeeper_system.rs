@@ -13,10 +13,7 @@ use component_startup::{Attributes, Found, accept, session};
 use filesystem_abi::{
     AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, file_system_mount, namespace,
 };
-use ipc::{
-    CallError, Protocol,
-    wire::{Bytes, IpcError, Str},
-};
+use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{Error, IrqLine, MemoryRegion, Port, Session, SessionTransport};
 use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
@@ -26,7 +23,7 @@ use rootkeeper::{
     relay::{ComponentNames, LogSessions as _, LogSources, log_badge},
 };
 use rtc_abi::rtc;
-use runtime::{JoinHandle, PortTransport, Priority, Timeout, spawn_owned};
+use runtime::{JoinHandle, PortTransport, Timeout, spawn_owned};
 use syscall::{Handle, ProcessName, Rights, SyscallError, kind};
 use userland::USERLAND_PROGRAM_MAGIC;
 use userland_image::{ComponentSpec, ExportIndex, PlanDecodeError};
@@ -36,7 +33,7 @@ use crate::{
         BOOT_PLAN_ENTRY, Composition, Importer, Mounted, ROUTER_NAME, admin, drained, encoded,
         image, pause, request, view,
     },
-    filesystem::{IMAGE_FILE, connect, open, path},
+    filesystem::{IMAGE_FILE, connect, open},
     log_relay::{
         ScenarioLogSessions, await_component_lines, await_component_sources, start_component_relay,
         stop_component_relay,
@@ -68,6 +65,9 @@ const NESTED_SPARE_MOUNT: &str = "/boot/spare";
 const NESTED_SPARE_PATH: &str = "/boot/spare/x";
 const AREA_SCOPE: &str = "/boot/scope-consumer-fixture";
 
+const STOPPED_LINE: &str = "stopped: failed";
+const DUPLICATE_REFUSED_LINES: [&str; 2] = ["Err(Syscall(AccessDenied))", STOPPED_LINE];
+
 const COMPONENT_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 const PARENT_REFUSAL_TIMEOUT: Timeout = Timeout::from_secs(1);
 const IDLE_PROVIDER_REQUEST_TIMEOUT: Timeout = Timeout::from_millis(500);
@@ -84,8 +84,6 @@ const FREED_PREFIX_TIMEOUT: Timeout = Timeout::from_millis(100);
 
 pub(crate) const POLL_ATTEMPTS: usize = 300;
 const SEARCH_CYCLES: usize = 300;
-
-const REQUEST_STACK_SIZE: u64 = 0x8000;
 
 const TERMINATE_EXIT_CODE: u32 = 7;
 
@@ -487,22 +485,18 @@ fn line(
     session: &platform::Client<SessionTransport>,
     device: &str,
 ) -> Result<IrqLine, CallError<PlatformError>> {
-    session
-        .irq(Str::new(device).expect("device fits"), 0)
-        .map(IrqLine::from)
+    session.irq(device, 0).map(IrqLine::from)
 }
 
 fn window(
     session: &platform::Client<SessionTransport>,
     device: &str,
 ) -> Result<MmioWindow<MemoryRegion>, CallError<PlatformError>> {
-    session
-        .mmio(Str::new(device).expect("device fits"), 0)
-        .map(|window| MmioWindow {
-            region: MemoryRegion::from(window.region),
-            offset: window.offset,
-            size: window.size,
-        })
+    session.mmio(device, 0).map(|window| MmioWindow {
+        region: MemoryRegion::from(window.region),
+        offset: window.offset,
+        size: window.size,
+    })
 }
 
 fn description(
@@ -570,8 +564,6 @@ fn held_request(found: Found, wait: Timeout) -> JoinHandle {
             Err(CallError::Ipc(IpcError::Timeout)) => TIMED_OUT,
             _ => OTHER,
         },
-        REQUEST_STACK_SIZE,
-        Priority::new(1),
     )
     .expect("request thread starts")
 }
@@ -590,7 +582,11 @@ fn answered(request: JoinHandle) -> u32 {
 fn budget_scenario() -> (Composition, Importer) {
     let composition = scenario(&[ROUTER, RAM_FS, HOLDER, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(HELD), probe_of(PROBE), view(TMP_VIEW, "/tmp")]);
-    test_harness::check_eq!(await_component_lines(HOLDER.name, 1), ["budget held"]);
+    let held = await_component_lines(HOLDER.name, 2);
+    test_harness::check_eq!(
+        held.iter().take(2).collect::<Vec<_>>(),
+        ["budget held", STOPPED_LINE]
+    );
     (composition, importer)
 }
 
@@ -601,7 +597,7 @@ fn resolve(
 ) -> Result<Session<file_system::Protocol>, CallError<FileSystemError>> {
     namespace::Client::new(PortTransport::new(view))
         .with_wait(wait)
-        .resolve(path(text))
+        .resolve(text)
         .map(Session::from_session)
 }
 
@@ -626,7 +622,7 @@ fn written(
     client: &file_system::Client<SessionTransport>,
 ) -> Result<NodeKind, CallError<FileSystemError>> {
     client
-        .open(path(WRITTEN_PATH), AccessMode::Read, OpenFlags::NONE)
+        .open(WRITTEN_PATH, AccessMode::Read, OpenFlags::NONE)
         .map(|opened| opened.kind)
 }
 
@@ -817,8 +813,8 @@ fn a_component_logs_under_its_instance_name() {
 
     let sources = await_component_sources(&["first-probe", "second-probe"]);
 
-    test_harness::check!(sources.iter().any(|source| source == "first-probe/export"));
-    test_harness::check!(sources.iter().any(|source| source == "second-probe/export"));
+    test_harness::check!(sources.iter().any(|source| source == "first-probe"));
+    test_harness::check!(sources.iter().any(|source| source == "second-probe"));
     test_harness::check!(!sources.iter().any(|source| source.starts_with("badge-")));
     finish(composition);
 }
@@ -827,9 +823,9 @@ fn a_component_logs_under_its_instance_name() {
 fn a_child_log_session_refuses_duplicate() {
     let composition = scenario(&[LOG_DUPLICATE]);
 
-    let lines = await_component_lines(LOG_DUPLICATE.name, 1);
+    let lines = await_component_lines(LOG_DUPLICATE.name, 2);
 
-    test_harness::check_eq!(lines, ["Err(Syscall(AccessDenied))"]);
+    test_harness::check_eq!(lines, DUPLICATE_REFUSED_LINES);
     finish(composition);
 }
 
@@ -888,11 +884,11 @@ fn a_failing_child_spends_each_restart_once() {
         ..LOG_DUPLICATE
     }]);
 
-    let failures = await_component_lines(LOG_DUPLICATE.name, 3);
-    let after = await_component_lines(LOG_DUPLICATE.name, 4);
+    let failures = await_component_lines(LOG_DUPLICATE.name, 6);
+    let after = await_component_lines(LOG_DUPLICATE.name, 7);
 
-    test_harness::check_eq!(failures, ["Err(Syscall(AccessDenied))"; 3]);
-    test_harness::check_eq!(after.len(), 3);
+    test_harness::check_eq!(failures, DUPLICATE_REFUSED_LINES.repeat(3));
+    test_harness::check_eq!(after.len(), 6);
     finish(composition);
 }
 
@@ -998,7 +994,7 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
         component_startup::open::<probe::Protocol>(found, SERVED_CHILD_REPLY_TIMEOUT).map(drop)
     });
     let removed = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/")
-        .unlink(path(HELD_PATH), NodeKind::File);
+        .unlink(HELD_PATH, NodeKind::File);
     let pinged = ping_found(&first_found::<probe::Protocol>(&importer, HELD));
 
     test_harness::check_eq!(served, Some(Ok(())));
@@ -1165,11 +1161,12 @@ fn a_restarted_child_takes_the_same_line_and_region_again() {
 
     let composition = scenario(&[PLATFORM, IRQ]);
 
-    let lines = await_component_lines(IRQ.name, 2);
+    let lines = await_component_lines(IRQ.name, 4);
 
-    test_harness::check_eq!(lines.len(), 2);
+    test_harness::check_eq!(lines.len(), 4);
     test_harness::check!(lines[0].starts_with("line and region "));
-    test_harness::check_eq!(lines[0], lines[1]);
+    test_harness::check_eq!(lines[1], STOPPED_LINE);
+    test_harness::check_eq!(lines[2..], lines[..2]);
     finish(composition);
 }
 
@@ -1428,9 +1425,9 @@ fn a_directory_session_is_opened_anew_for_every_incarnation() {
         resolve(&root, AREA_SCOPE, RESOLVE_TIMEOUT).expect("component directory exists");
     let mounted = Mounted::new(&importer, AREA, directory);
 
-    let lines = await_component_lines(SCOPE_CONSUMER.name, 2);
+    let lines = await_component_lines(SCOPE_CONSUMER.name, 4);
 
-    test_harness::check_eq!(lines, ["area read", "area read"]);
+    test_harness::check_eq!(lines, ["area read", STOPPED_LINE].repeat(2));
     drop(mounted);
     finish(composition);
 }
@@ -1443,7 +1440,7 @@ fn a_component_that_faults_is_restarted() {
     let faulting = resolved(&filesystem, "/");
     write(&faulting);
 
-    let renamed = faulting.rename(path(WRITTEN_PATH), path(RENAMED_PATH));
+    let renamed = faulting.rename(WRITTEN_PATH, RENAMED_PATH);
     let restarted = resolved(&filesystem, "/");
     let rewritten = written(&restarted);
 
@@ -1892,13 +1889,13 @@ fn a_query_with_a_repeated_key_is_refused_and_the_next_one_is_served() {
     let importer = composition.importer(&[probe_of(PROBE)]);
     let bytes = query(&[pair("role", "c"), pair("role", "c")]);
     let requirement = SessionRequirement {
-        name: Str::new(PROBE).expect("requirement fits"),
-        protocol: Str::new(probe::Protocol::ID).expect("protocol fits"),
+        name: PROBE,
+        protocol: probe::Protocol::ID,
     };
 
     let answer = startup_contract::Client::new(PortTransport::new(importer.handle()))
         .with_wait(COMPONENT_REPLY_TIMEOUT)
-        .session(requirement, Bytes::new(&bytes).expect("query fits"))
+        .session(requirement, &bytes)
         .map(drop);
     let pinged = ping(&importer, PROBE);
 

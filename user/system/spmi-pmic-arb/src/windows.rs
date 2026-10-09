@@ -60,7 +60,7 @@ impl Region {
         resource: u16,
     ) -> Result<Self, Refusal> {
         let window = platform
-            .mmio(id.as_wire(), resource)
+            .mmio(id.as_str(), resource)
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
 
         let window = MmioWindow {

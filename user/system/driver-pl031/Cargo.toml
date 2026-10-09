@@ -22,8 +22,8 @@ io = { workspace = true }
 ipc = { workspace = true }
 platform-abi = { workspace = true }
 rtc-abi = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
-syscall = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

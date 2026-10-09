@@ -1,18 +1,16 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use component_startup::{Requirements as _, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, namespace};
-use ipc::{CallError, wire::Str};
-use kernel_objects::{MemoryRegion, Port, SessionTransport};
-use runtime::{Timeout, UserMemFlags, log_line, start_component};
+use ipc::CallError;
+use kernel_objects::{MemoryRegion, SessionTransport};
+use runtime::{Timeout, UserMemFlags, log_line};
+use syscall::{Handle, kind};
 
-mod fixture_start;
+mod failed;
 
-use fixture_start::{Failed, fixture_start};
-
-const LOG_TAG: &str = "area";
+use failed::Failed;
 
 const FILESYSTEM_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -30,15 +28,13 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
-    let area = AreaStartup::from_parent(parent.as_raw())
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let area = AreaStartup::from_parent(parent)
         .area
         .open()
         .map_err(|_| Failed)?;
-    let root = Str::new("/boot/scope-consumer-fixture").ok_or(Failed)?;
+    let root = "/boot/scope-consumer-fixture";
     let session = area
         .client()
         .with_wait(Timeout::from_secs(5))
@@ -63,10 +59,7 @@ fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
         return false;
     };
 
-    let Some(path) = Str::new(RECORD) else {
-        return false;
-    };
-    let Ok(opened) = client.open(path, AccessMode::Read, OpenFlags::NONE) else {
+    let Ok(opened) = client.open(RECORD, AccessMode::Read, OpenFlags::NONE) else {
         return false;
     };
     if opened.kind != NodeKind::File || opened.size != RECORD_BODY.len() as u64 {
@@ -96,8 +89,5 @@ fn escapes(
     text: &str,
     refused: FileSystemError,
 ) -> bool {
-    let Some(path) = Str::new(text) else {
-        return true;
-    };
-    client.open(path, AccessMode::Read, OpenFlags::NONE) != Err(CallError::Remote(refused))
+    client.open(text, AccessMode::Read, OpenFlags::NONE) != Err(CallError::Remote(refused))
 }

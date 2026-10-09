@@ -1,7 +1,5 @@
 //! Дескриптор устройства ввода и его проверка.
 
-use ipc::wire::{Bytes, Str};
-
 use crate::{
     packed::Packed,
     record::MESSAGE_RECORDS_MAX,
@@ -14,17 +12,11 @@ pub const DEVICE_NAME_MAX: usize = 128;
 /// Наибольшее число клавиш устройства.
 pub const KEYS_MAX: usize = 256;
 
-/// Наибольший размер списка клавиш в байтах.
-pub const KEY_LIST_BYTES: usize = KEYS_MAX * USAGE_SIZE;
-
 /// Наибольшее число осей устройства и наибольшее число осей контакта.
 pub const AXES_MAX: usize = 8;
 
 /// Размер объявления оси в байтах.
 pub const AXIS_DECL_SIZE: usize = 16;
-
-/// Наибольший размер списка осей в байтах.
-pub const AXIS_LIST_BYTES: usize = AXES_MAX * AXIS_DECL_SIZE;
 
 /// Наибольшее значение `max_contacts` дескриптора.
 pub const CONTACTS_MAX: u16 = 16;
@@ -82,15 +74,15 @@ ipc::wire_value! {
     /// Дескриптор устройства ввода.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct DeviceDescriptor<'a> {
-        pub name: Str<'a, DEVICE_NAME_MAX>,
+        pub name: &'a str,
         pub binding: Binding,
         /// Клавиши в раскладке [`KeyList`].
-        pub keys: Bytes<'a, KEY_LIST_BYTES>,
+        pub keys: &'a [u8],
         /// Оси устройства в раскладке [`AxisList`].
-        pub device_axes: Bytes<'a, AXIS_LIST_BYTES>,
+        pub device_axes: &'a [u8],
         pub max_contacts: u16,
         /// Оси контакта в раскладке [`AxisList`].
-        pub contact_axes: Bytes<'a, AXIS_LIST_BYTES>,
+        pub contact_axes: &'a [u8],
     }
 }
 
@@ -129,6 +121,7 @@ pub enum DescriptorError {
     /// - абсолютная ось `X` или `Y` объявлена и у устройства, и у контакта.
     Inconsistent,
     /// Дескриптор больше пределов модели:
+    /// - имя длиннее [`DEVICE_NAME_MAX`] байт либо клавиш больше [`KEYS_MAX`];
     /// - контактов больше [`CONTACTS_MAX`] либо осей больше [`AXES_MAX`];
     /// - наибольший снимок устройства больше [`MESSAGE_RECORDS_MAX`] записей.
     TooLarge,
@@ -257,13 +250,17 @@ impl<'a> DeviceDescriptor<'a> {
         max_contacts: u16,
         contact_axes: &'a AxisList,
     ) -> Option<Self> {
+        if name.len() > DEVICE_NAME_MAX {
+            return None;
+        }
+
         Some(Self {
-            name: Str::new(name)?,
+            name,
             binding,
-            keys: Bytes::new(keys.as_bytes())?,
-            device_axes: Bytes::new(device_axes.as_bytes())?,
+            keys: keys.as_bytes(),
+            device_axes: device_axes.as_bytes(),
             max_contacts,
-            contact_axes: Bytes::new(contact_axes.as_bytes())?,
+            contact_axes: contact_axes.as_bytes(),
         })
     }
 
@@ -271,9 +268,13 @@ impl<'a> DeviceDescriptor<'a> {
     ///
     /// Отказы - варианты [`DescriptorError`].
     pub fn layout(&self) -> Result<DeviceLayout, DescriptorError> {
-        let (keys, key_count) = parse_keys(self.keys.as_bytes())?;
-        let device_axes = AxisSet::parse(self.device_axes.as_bytes())?;
-        let contact_axes = AxisSet::parse(self.contact_axes.as_bytes())?;
+        if self.name.len() > DEVICE_NAME_MAX {
+            return Err(DescriptorError::TooLarge);
+        }
+
+        let (keys, key_count) = parse_keys(self.keys)?;
+        let device_axes = AxisSet::parse(self.device_axes)?;
+        let contact_axes = AxisSet::parse(self.contact_axes)?;
 
         if contact_axes.iter().any(|decl| !decl.is_absolute()) {
             return Err(DescriptorError::Malformed);
@@ -398,6 +399,10 @@ fn parse_keys(bytes: &[u8]) -> Result<([Usage; KEYS_MAX], usize), DescriptorErro
     let (usages, rest): (&[[u8; USAGE_SIZE]], _) = bytes.as_chunks();
     if !rest.is_empty() {
         return Err(DescriptorError::Malformed);
+    }
+
+    if usages.len() > KEYS_MAX {
+        return Err(DescriptorError::TooLarge);
     }
 
     let mut keys = [Usage::new(0, 0); KEYS_MAX];

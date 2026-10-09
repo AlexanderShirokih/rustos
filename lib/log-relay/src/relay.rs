@@ -8,7 +8,7 @@ use ipc::{
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, Port};
-use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LOG_TAG_MAX, LogBuffer, log};
+use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
 use runtime::PortTransport;
 use syscall::Timeout;
 
@@ -110,19 +110,9 @@ struct Forwarding<'a, S: LogSink, N: SourceNames> {
 }
 
 impl<S: LogSink, N: SourceNames> log::Service<Delivery> for Forwarding<'_, S, N> {
-    fn write(
-        &mut self,
-        frame: &Delivery,
-        tag: ipc::wire::Str<'_, { LOG_TAG_MAX }>,
-        message: ipc::wire::Str<'_, { LOG_MESSAGE_MAX }>,
-    ) {
-        let owner = source_of(self.names, frame.badge);
-        let source = compose_source(owner.as_str(), tag.as_str());
-        self.forwarded = Some(forward_message(
-            self.sink,
-            source.as_str(),
-            message.as_str(),
-        ));
+    fn write(&mut self, frame: &Delivery, message: &str) {
+        let source = source_of(self.names, frame.badge);
+        self.forwarded = Some(forward_message(self.sink, source.as_str(), message));
     }
 }
 
@@ -130,21 +120,11 @@ fn source_of<N: SourceNames>(names: &N, badge: u64) -> LogBuffer<LOG_SOURCE_MAX>
     let mut source = LogBuffer::new();
     match names.name(badge) {
         Some(name) => {
-            append_escaped(&mut source, name.as_str(), false);
+            append_escaped(&mut source, name.as_str());
         }
         None => {
             let _ = write!(source, "badge-{badge:016x}");
         }
-    }
-    source
-}
-
-fn compose_source(trusted: &str, local: &str) -> LogBuffer<LOG_SOURCE_MAX> {
-    let mut source = LogBuffer::new();
-    source.push_str(trusted);
-    if !local.is_empty() && source.as_str().len() < LOG_SOURCE_MAX {
-        source.push_str("/");
-        append_escaped(&mut source, local, true);
     }
     source
 }
@@ -158,7 +138,7 @@ fn forward_message<S: LogSink>(sink: &mut S, source: &str, message: &str) -> Res
     // Экранирование растёт по одному scalar, поэтому кусок сбрасывается в сток только
     // между целыми scalar.
     for character in message.chars() {
-        let escaped = escape_character(character, false);
+        let escaped = escape_character(character);
         if escaped.as_str().len() > LOG_MESSAGE_MAX - chunk.as_str().len() {
             sink.write(source, chunk.as_str())?;
             chunk.clear();
@@ -168,9 +148,9 @@ fn forward_message<S: LogSink>(sink: &mut S, source: &str, message: &str) -> Res
     sink.write(source, chunk.as_str())
 }
 
-fn append_escaped<const N: usize>(buffer: &mut LogBuffer<N>, text: &str, brackets: bool) {
+fn append_escaped<const N: usize>(buffer: &mut LogBuffer<N>, text: &str) {
     for character in text.chars() {
-        let escaped = escape_character(character, brackets);
+        let escaped = escape_character(character);
         if escaped.as_str().len() > N - buffer.as_str().len() {
             break;
         }
@@ -178,7 +158,7 @@ fn append_escaped<const N: usize>(buffer: &mut LogBuffer<N>, text: &str, bracket
     }
 }
 
-fn escape_character(character: char, brackets: bool) -> LogBuffer<ESCAPED_CHARACTER_MAX> {
+fn escape_character(character: char) -> LogBuffer<ESCAPED_CHARACTER_MAX> {
     let mut escaped = LogBuffer::new();
     match character {
         '\n' => {
@@ -189,11 +169,6 @@ fn escape_character(character: char, brackets: bool) -> LogBuffer<ESCAPED_CHARAC
         }
         '\t' => {
             escaped.push_str("\\t");
-        }
-        '[' | ']' if brackets => {
-            escaped.push_str("\\");
-            let mut bytes = [0; 4];
-            escaped.push_str(character.encode_utf8(&mut bytes));
         }
         // Unicode line separators создают физическую строку, а bidi-controls
         // могут визуально переставить доверенный prefix при отображении журнала.

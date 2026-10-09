@@ -18,7 +18,7 @@ use std::{
 
 use ipc::{
     CallError, Channel, Incoming, Outgoing, ReceivedResources, ReplyChannel, Timeout, Unsent,
-    wire::{Cap, Header, IpcError, MessageBuf, Session, Str, value},
+    wire::{Cap, Header, IpcError, MessageBuf, Session, value},
 };
 use ipc_test::{MockChannel, MockHandle, MockReply, MockResources};
 use syscall::{ObjectKind, kind};
@@ -83,7 +83,8 @@ ipc::protocol! {
 
         call fn add(a: u32, b: u32) -> u32;
         call fn div(a: u32, b: u32) -> Result<u32, u32>;
-        call fn echo_len(text: Str<16>) -> u32;
+        call fn echo_len(text: &str) -> u32;
+        call fn joined_len(head: &str, tail: &str) -> u32;
         cast fn reset(seed: u64);
     }
 }
@@ -104,8 +105,12 @@ impl<F: ReceivedResources> calc::Service<F> for CalcServer {
         a.checked_div(b).ok_or(ERR_DIVIDE_BY_ZERO)
     }
 
-    fn echo_len(&mut self, _frame: &F, text: Str<16>) -> u32 {
-        text.as_str().len() as u32
+    fn echo_len(&mut self, _frame: &F, text: &str) -> u32 {
+        text.len() as u32
+    }
+
+    fn joined_len(&mut self, _frame: &F, head: &str, tail: &str) -> u32 {
+        (head.len() + tail.len()) as u32
     }
 
     fn reset(&mut self, _frame: &F, seed: u64) {
@@ -119,15 +124,24 @@ fn operations_round_trip_through_the_dispatcher() {
         let client = calc::Client::new(channel);
         let sum = client.add(7, 35).expect("add");
         let refused = client.div(1, 0);
-        let len = client
-            .echo_len(Str::new("hello").expect("within bound"))
-            .expect("echo_len");
+        let len = client.echo_len("hello").expect("echo_len");
         client.reset(0xDEAD_BEEF).expect("reset");
         (sum, refused, len)
     });
 
     assert_eq!(answers, (42, Err(CallError::Remote(ERR_DIVIDE_BY_ZERO)), 5));
     assert_eq!(server.seed, 0xDEAD_BEEF);
+}
+
+#[test]
+fn a_string_is_bounded_only_by_the_frame() {
+    let long = "s".repeat(3000);
+    let (answers, _) = serve(CalcServer::default(), 1, calc::dispatch, |channel| {
+        let client = calc::Client::new(channel);
+        (client.echo_len(&long), client.joined_len(&long, &long))
+    });
+
+    assert_eq!(answers, (Ok(3000), Err(IpcError::FrameOverflow)));
 }
 
 #[test]
@@ -262,7 +276,7 @@ ipc::wire_value! {
 
 ipc::wire_value! {
     struct Tagged<'a> {
-        label: Str<'a, 8>,
+        label: &'a str,
         value: u32,
     }
 }
@@ -288,7 +302,7 @@ impl<F: ReceivedResources> geo::Service<F> for GeoServer {
     }
 
     fn label_len(&mut self, _frame: &F, t: Tagged<'_>) -> u32 {
-        t.label.as_str().len() as u32 + t.value
+        t.label.len() as u32 + t.value
     }
 }
 
@@ -303,7 +317,7 @@ fn nested_and_borrowing_aggregates_round_trip() {
             })
             .expect("flip ok");
         let tagged = Tagged {
-            label: Str::new("ab").expect("within bound"),
+            label: "ab",
             value: 40,
         };
         (flipped, client.label_len(tagged).expect("label_len ok"))

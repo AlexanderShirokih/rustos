@@ -21,9 +21,8 @@ mod usage;
 
 pub use command::{COMMAND_RECORDS_MAX, Command};
 pub use descriptor::{
-    AXES_MAX, AXIS_DECL_SIZE, AXIS_LIST_BYTES, AxisDecl, AxisList, AxisMode, Binding, CONTACTS_MAX,
-    DEVICE_NAME_MAX, DescriptorError, DeviceDescriptor, DeviceLayout, KEY_LIST_BYTES, KEYS_MAX,
-    KeyList,
+    AXES_MAX, AXIS_DECL_SIZE, AxisDecl, AxisList, AxisMode, Binding, CONTACTS_MAX, DEVICE_NAME_MAX,
+    DescriptorError, DeviceDescriptor, DeviceLayout, KEYS_MAX, KeyList,
 };
 pub use record::{
     CANCEL, Kind, MESSAGE_RECORDS_MAX, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records,

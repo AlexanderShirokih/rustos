@@ -20,6 +20,7 @@ kernel-objects = { workspace = true }
 component-startup = { workspace = true }
 display-abi = { workspace = true }
 ipc = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 virtio = { workspace = true }

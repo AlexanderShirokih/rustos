@@ -8,43 +8,28 @@
 
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
-
-runtime::process_heap!();
 
 extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{panic::PanicInfo, sync::atomic::AtomicU64};
+use core::{fmt, sync::atomic::AtomicU64};
 
 use bootstrap_abi::{features, hardware};
 use component_startup::{
-    MintedSession, Requirements as _, SessionError, StartupError, component_manifest, mint_session,
-    serve_export,
+    MintedSession, SessionError, StartupError, component_manifest, mint_session, serve_export,
 };
 use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
 use fdt::devicetree::DeviceTree;
-use ipc::{
-    Listener, RecvError,
-    wire::{MESSAGE_INLINE_MAX, Str},
-};
+use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqControl, MemoryRegion, Port, SessionTransport};
 use platform_abi::{Description, platform};
 use runtime::{
-    Mutex, PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned,
-    start_component,
+    FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, log_line, spawn_owned,
 };
-use syscall::{Handle, kind};
 
 mod sessions;
 
 use sessions::{HardwareDescription, Platform, SessionRecord};
-
-const LOG_TAG: &str = "platform";
-
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
-
-const FAILED_EXIT_CODE: u64 = 1;
 
 component_manifest! {
     struct PlatformStartup {
@@ -56,64 +41,89 @@ component_manifest! {
     }
 }
 
+#[derive(Debug)]
+enum Stopped {
+    Startup(StartupError),
+    Hardware,
+    Description,
+    ServicePort,
+    ExportThread,
+    ServicePortClosed,
+}
+
 struct Shared {
     sessions: Mutex<Vec<SessionRecord>>,
     service: Port,
     next_badge: AtomicU64,
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    let Some((service, platform)) = start(parent) else {
-        process_exit(FAILED_EXIT_CODE)
-    };
-    log_line("started");
-    serve(service, platform);
-    process_exit(FAILED_EXIT_CODE)
+impl fmt::Display for Stopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup(error) => error.fmt(formatter),
+            Self::Hardware => formatter.write_str("hardware refused"),
+            Self::Description => formatter.write_str("platform description malformed"),
+            Self::ServicePort => formatter.write_str("service port refused"),
+            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::ServicePortClosed => formatter.write_str("service port closed"),
+        }
+    }
 }
 
-fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
-    let requirements = PlatformStartup::from_parent(parent);
+#[program_entry::component]
+fn run(requirements: PlatformStartup) -> Result<(), Stopped> {
+    let (service, platform) = start(requirements)?;
+    log_line("started");
+    serve(service, platform);
+    Err(Stopped::ServicePortClosed)
+}
+
+fn start(requirements: PlatformStartup) -> Result<(&'static Port, Platform), Stopped> {
     let hardware = requirements
         .hardware
         .open()
-        .inspect_err(log_error)
-        .ok()?
+        .map_err(Stopped::Startup)?
         .client();
-    let lines = IrqControl::from(hardware.acquire_irq_control().ok()?);
-    let fdt = hardware.acquire_boot_fdt().ok()?;
-    let offset = usize::try_from(fdt.offset).ok()?;
+    let lines = IrqControl::from(
+        hardware
+            .acquire_irq_control()
+            .map_err(|_| Stopped::Hardware)?,
+    );
+    let fdt = hardware.acquire_boot_fdt().map_err(|_| Stopped::Hardware)?;
+    let offset = usize::try_from(fdt.offset).map_err(|_| Stopped::Description)?;
     let region: &'static MemoryRegion = Box::leak(Box::new(MemoryRegion::from(fdt.region)));
-    let mapping = Box::leak(Box::new(region.map_full_read_only().ok()?));
-    let tree = DeviceTree::from_bytes(mapping.as_bytes().get(offset..)?)
-        .inspect_err(|_| log_line("platform description malformed"))
-        .ok()?;
+    let mapping = Box::leak(Box::new(
+        region
+            .map_full_read_only()
+            .map_err(|_| Stopped::Description)?,
+    ));
+    let tree = mapping
+        .as_bytes()
+        .get(offset..)
+        .and_then(|bytes| DeviceTree::from_bytes(bytes).ok())
+        .ok_or(Stopped::Description)?;
     let tree: &'static DeviceTree<'static> = Box::leak(Box::new(tree));
 
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         sessions: Mutex::new(Vec::new()),
-        service: Port::create().ok()?,
+        service: Port::create().map_err(|_| Stopped::ServicePort)?,
         next_badge: AtomicU64::new(0),
     }));
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    spawn_owned(
-        move || {
-            let failure = serve_export::<platform::Protocol>(&exporter, || open(shared));
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(FAILED_EXIT_CODE)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    )
-    .ok()?;
+    let _ = spawn_owned(move || {
+        let failure = serve_export::<platform::Protocol>(&exporter, || open(shared));
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    })
+    .map_err(|_| Stopped::ExportThread)?;
 
-    let description = Description::new(mapping.as_bytes(), u64::from(fdt.offset)).ok()?;
-    let features = requirements.features.open().inspect_err(log_error).ok()?;
+    let description = Description::new(mapping.as_bytes(), u64::from(fdt.offset))
+        .map_err(|_| Stopped::Description)?;
+    let features = requirements.features.open().map_err(Stopped::Startup)?;
     publish(&features.client(), &description);
 
-    Some((
+    Ok((
         &shared.service,
         Platform::new(
             &shared.sessions,
@@ -128,10 +138,6 @@ fn start(parent: Handle<kind::Port>) -> Option<(&'static Port, Platform)> {
     ))
 }
 
-fn log_error(error: &StartupError) {
-    log_fmt(format_args!("{error}"));
-}
-
 fn publish(features: &features::Client<SessionTransport>, description: &Description<'_>) {
     let mut published: Vec<&str> = Vec::new();
     for device in description.devices().filter_map(Result::ok) {
@@ -140,12 +146,7 @@ fn publish(features: &features::Client<SessionTransport>, description: &Descript
                 continue;
             }
 
-            let Some(feature) = Str::new(compatible) else {
-                log_fmt(format_args!("feature {compatible} not published: too long"));
-                continue;
-            };
-
-            match features.publish(feature) {
+            match features.publish(compatible) {
                 Ok(()) => published.push(compatible),
 
                 failure => {
@@ -179,10 +180,4 @@ fn serve(service: &Port, mut platform: Platform) {
             Err(RecvError::Closed) => break,
         }
     }
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(FAILED_EXIT_CODE)
 }

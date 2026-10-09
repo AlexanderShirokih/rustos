@@ -1,11 +1,12 @@
 //! Запуск потока в текущем процессе: стек отдельным регионом и вход по трамплину вызывающего.
 //!
 //! Стек - анонимный регион `MemoryAllocate`, и под его нижней границей ядро оставляет
-//! неотображённую страницу. Запись в эту страницу завершает процесс отказом доступа.
+//! неотображённую страницу. Запись в эту страницу завершает процесс отказом доступа. Rust-код
+//! таргета пробует стек постранично, и кадр больше страницы тоже упирается в эту страницу.
 //!
 //! Механизм - выдача стека и `ThreadCreate`, а что делает поток на выходе, решает трамплин
-//! вызывающего. Поверх механизма лежит `spawn`. Он берёт тело потока значением и снимает с
-//! вызывающего передачу состояния через сырой указатель.
+//! вызывающего. Поверх механизма лежат [`Builder`] и `spawn`. Они берут тело потока значением и
+//! снимают с вызывающего передачу состояния через сырой указатель.
 
 use alloc::boxed::Box;
 use core::ptr::NonNull;
@@ -23,6 +24,9 @@ use crate::{
     },
     tls::run_destructors,
 };
+
+const DEFAULT_STACK_BYTES: usize = 0x10000;
+const DEFAULT_PRIORITY: Priority = Priority::new(1);
 
 /// Поднятый поток: его handle и стек.
 pub struct Spawned {
@@ -54,6 +58,91 @@ impl Spawned {
     #[must_use]
     pub const fn stack_bytes(&self) -> usize {
         self.stack_bytes
+    }
+}
+
+/// Размер стека и приоритет запускаемого потока.
+#[derive(Debug, Clone, Copy)]
+#[must_use]
+pub struct Builder {
+    stack_bytes: usize,
+    priority: Priority,
+}
+
+impl Builder {
+    /// Параметры по умолчанию.
+    pub const fn new() -> Self {
+        Self {
+            stack_bytes: DEFAULT_STACK_BYTES,
+            priority: DEFAULT_PRIORITY,
+        }
+    }
+
+    /// Размер стека в байтах. Стек округляется вверх до страницы.
+    pub const fn stack_bytes(self, stack_bytes: usize) -> Self {
+        Self {
+            stack_bytes,
+            ..self
+        }
+    }
+
+    /// Приоритет потока.
+    pub const fn priority(self, priority: Priority) -> Self {
+        Self { priority, ..self }
+    }
+
+    /// Запускает поток, который входит в `entry(arg)` и завершается её кодом возврата.
+    pub fn spawn(
+        self,
+        entry: extern "C" fn(usize) -> u32,
+        arg: usize,
+    ) -> Result<JoinHandle, SyscallError> {
+        let payload = Box::into_raw(Box::new(SpawnPayload { entry, arg })) as usize;
+
+        match create(trampoline, payload, self.stack_bytes, self.priority) {
+            Ok(Spawned {
+                thread,
+                stack,
+                stack_bytes,
+            }) => Ok(JoinHandle {
+                thread,
+                stack,
+                stack_bytes,
+            }),
+            Err(error) => {
+                // Поток не стартовал - трамплин payload не прочитает, освобождаем его;
+                // стек освободил сам слой.
+                // SAFETY: payload только что из Box::into_raw, нет других владельцев.
+                drop(unsafe { Box::from_raw(payload as *mut SpawnPayload) });
+                Err(error)
+            }
+        }
+    }
+
+    /// Запускает поток с телом `body`. Владение перенесённым в него состоянием берёт на себя
+    /// поток.
+    pub fn spawn_owned<F>(self, body: F) -> Result<JoinHandle, SyscallError>
+    where
+        F: FnOnce() -> u32 + Send + 'static,
+    {
+        let body: Box<dyn FnOnce() -> u32> = Box::new(body);
+        let payload = Box::into_raw(Box::new(body)) as usize;
+
+        match self.spawn(run_owned, payload) {
+            Ok(thread) => Ok(thread),
+            Err(error) => {
+                // Поток не стартовал - тело его не прочитает.
+                // SAFETY: указатель только что из Box::into_raw, нет других владельцев.
+                drop(unsafe { Box::from_raw(payload as *mut Box<dyn FnOnce() -> u32>) });
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -152,28 +241,12 @@ pub fn exit(code: u32) -> ! {
     thread_exit(u64::from(code))
 }
 
-/// Запускает поток в текущем процессе с телом `body`. Владение перенесённым в
-/// него состоянием берёт на себя поток: `spawn_owned` снимает с вызывающего
-/// передачу состояния через сырой указатель.
-pub fn spawn_owned<F>(
-    body: F,
-    stack_bytes: u64,
-    priority: Priority,
-) -> Result<JoinHandle, SyscallError>
+/// Запускает поток в текущем процессе с телом `body` и параметрами [`Builder::new`].
+pub fn spawn_owned<F>(body: F) -> Result<JoinHandle, SyscallError>
 where
     F: FnOnce() -> u32 + Send + 'static,
 {
-    let body: Box<dyn FnOnce() -> u32> = Box::new(body);
-    let payload = Box::into_raw(Box::new(body)) as usize;
-    match spawn(run_owned, payload, stack_bytes, priority) {
-        Ok(thread) => Ok(thread),
-        Err(error) => {
-            // Поток не стартовал - тело его не прочитает.
-            // SAFETY: указатель только что из Box::into_raw, нет других владельцев.
-            drop(unsafe { Box::from_raw(payload as *mut Box<dyn FnOnce() -> u32>) });
-            Err(error)
-        }
-    }
+    Builder::new().spawn_owned(body)
 }
 
 extern "C" fn run_owned(payload: usize) -> u32 {
@@ -183,34 +256,10 @@ extern "C" fn run_owned(payload: usize) -> u32 {
     body()
 }
 
-/// Запускает поток в текущем процессе. Выделяет стек `stack_bytes` и входит в
-/// `entry(arg)` с приоритетом `priority`. Поток завершается кодом возврата `entry`.
-pub fn spawn(
-    entry: extern "C" fn(usize) -> u32,
-    arg: usize,
-    stack_bytes: u64,
-    priority: Priority,
-) -> Result<JoinHandle, SyscallError> {
-    let payload = Box::into_raw(Box::new(SpawnPayload { entry, arg })) as usize;
-    let bytes = usize::try_from(stack_bytes).unwrap_or(usize::MAX);
-    match create(trampoline, payload, bytes, priority) {
-        Ok(Spawned {
-            thread,
-            stack,
-            stack_bytes,
-        }) => Ok(JoinHandle {
-            thread,
-            stack,
-            stack_bytes,
-        }),
-        Err(error) => {
-            // Поток не стартовал - трамплин payload не прочитает, освобождаем его;
-            // стек освободил сам слой.
-            // SAFETY: payload только что из Box::into_raw, нет других владельцев.
-            drop(unsafe { Box::from_raw(payload as *mut SpawnPayload) });
-            Err(error)
-        }
-    }
+/// Запускает поток в текущем процессе с параметрами [`Builder::new`]. Поток входит в
+/// `entry(arg)` и завершается её кодом возврата.
+pub fn spawn(entry: extern "C" fn(usize) -> u32, arg: usize) -> Result<JoinHandle, SyscallError> {
+    Builder::new().spawn(entry, arg)
 }
 
 /// Дескриптор запущенного потока владеет его хэндлом и стеком.

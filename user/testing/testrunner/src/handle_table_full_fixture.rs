@@ -1,18 +1,16 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use kernel_objects::Port;
 use runtime::Timeout;
 
-mod fixture_start;
+mod failed;
 mod handle_table_fill;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use handle_table_fill::fill_handle_table;
 
-fixture_start!(run);
-
+#[program_entry::process]
 fn run(server: &Port) -> Result<(), Failed> {
     let parking = Port::create().map_err(|_| Failed)?;
 

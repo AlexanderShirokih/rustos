@@ -9,14 +9,14 @@ use core::num::NonZeroU64;
 
 use filesystem_abi::{
     AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
-    Opened, PATH_MAX, Written, file_system,
+    Opened, Written, file_system,
 };
 use ipc::{
     IntoWireValue, Listener as _, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX, Str},
+    wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{Delivery, IssuedHandle, Port, Session, kind};
-use runtime::{JoinHandle, PortTransport, Priority, Timeout, spawn_owned};
+use runtime::{JoinHandle, PortTransport, Timeout, spawn_owned};
 use syscall::Rights;
 
 use crate::{
@@ -26,8 +26,6 @@ use crate::{
 };
 
 const MOUNT_BADGE: u64 = 0x0600_0000;
-
-const FAILING_STACK_BYTES: u64 = 0x4000;
 
 const ERRORS: [FileSystemError; 17] = [
     FileSystemError::NotFound,
@@ -89,7 +87,7 @@ impl file_system::Service<Delivery> for Failing<'_> {
     fn open(
         &mut self,
         frame: &Delivery,
-        _path: Str<'_, PATH_MAX>,
+        _path: &str,
         _mode: AccessMode,
         _flags: OpenFlags,
     ) -> Result<Opened, FileSystemError> {
@@ -142,19 +140,14 @@ impl file_system::Service<Delivery> for Failing<'_> {
         Err(error_of(frame))
     }
 
-    fn rename(
-        &mut self,
-        frame: &Delivery,
-        _from: Str<'_, PATH_MAX>,
-        _to: Str<'_, PATH_MAX>,
-    ) -> Result<u32, FileSystemError> {
+    fn rename(&mut self, frame: &Delivery, _from: &str, _to: &str) -> Result<u32, FileSystemError> {
         Err(error_of(frame))
     }
 
     fn unlink(
         &mut self,
         frame: &Delivery,
-        _path: Str<'_, PATH_MAX>,
+        _path: &str,
         _expected: NodeKind,
     ) -> Result<u32, FileSystemError> {
         Err(error_of(frame))
@@ -163,7 +156,7 @@ impl file_system::Service<Delivery> for Failing<'_> {
     fn create_backed(
         &mut self,
         frame: &Delivery,
-        _path: Str<'_, PATH_MAX>,
+        _path: &str,
         _region: IssuedHandle<kind::MemoryRegion>,
         _size: u64,
     ) -> Result<u32, FileSystemError> {
@@ -181,12 +174,12 @@ impl file_system::Service<Delivery> for Failing<'_> {
     fn open_root(
         &mut self,
         _frame: &Delivery,
-        path: Str<'_, PATH_MAX>,
+        path: &str,
     ) -> impl IntoWireValue<
         Delivery,
         Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
     > {
-        self.window(path.as_str()).map(Session::from_handle)
+        self.window(path).map(Session::from_handle)
     }
 }
 
@@ -205,12 +198,7 @@ pub(crate) fn mount_failing() -> FailingMount {
     let mount_badge = NonZeroU64::new(MOUNT_BADGE).expect("badge is non-zero");
     let failing = Port::create_service(Some(mount_badge)).expect("failing service");
     let server = failing.server;
-    let thread = spawn_owned(
-        move || serve_failing(&server),
-        FAILING_STACK_BYTES,
-        Priority::new(1),
-    )
-    .expect("failing server starts");
+    let thread = spawn_owned(move || serve_failing(&server)).expect("failing server starts");
 
     FailingMount {
         mounted: Some(mount(FAILING_VIEW, Session::from_handle(failing.client))),

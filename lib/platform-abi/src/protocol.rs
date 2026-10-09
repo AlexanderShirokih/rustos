@@ -1,8 +1,6 @@
 use syscall::kind;
 
-use crate::{
-    description::DescriptionRegion, device::DEVICE_ID_MAX, error::PlatformError, window::MmioWindow,
-};
+use crate::{description::DescriptionRegion, error::PlatformError, window::MmioWindow};
 
 ipc::protocol! {
     /// Описание платформы и ресурсы её устройств.
@@ -13,7 +11,7 @@ ipc::protocol! {
         /// [`DeviceId`](crate::DeviceId), `resource` - номер спецификатора в `interrupts`
         /// устройства.
         call fn irq(
-            device: ipc::wire::Str<{ DEVICE_ID_MAX }>,
+            device: &str,
             resource: u16,
         ) -> own Result<ipc::wire::Cap<kind::IrqLine>, PlatformError>;
 
@@ -21,7 +19,7 @@ ipc::protocol! {
         /// смещение и размер окна. `resource` - номер записи в `reg` устройства. Окна устройств
         /// сессии в одном регионе приходят этим регионом, каждое со своим смещением.
         call fn mmio(
-            device: ipc::wire::Str<{ DEVICE_ID_MAX }>,
+            device: &str,
             resource: u16,
         ) -> own Result<MmioWindow, PlatformError>;
 

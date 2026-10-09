@@ -9,14 +9,13 @@
 
 use io::{RingError, SpscRing};
 use kernel_objects::{Resource, RingConsumer, RingProducer, Signal, kind};
-use runtime::{MemoryAccess, Priority, Timeout, UserMemFlags, spawn};
+use runtime::{MemoryAccess, Timeout, UserMemFlags, spawn};
 use syscall::Handle;
 
 const SLOT_PAYLOAD: usize = 4;
 const RING_CAPACITY: usize = 4;
 const FRAMES: u32 = 4096;
 
-const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const WAIT_TIMEOUT: Timeout = Timeout::from_secs(1);
 
@@ -86,8 +85,7 @@ fn ring_transport_round_trip() {
     let producer = RingProducer::new(producer_ring, data_signal.borrow());
 
     let arg = (&raw const shared) as usize;
-    let thread =
-        spawn(consumer_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn consumer worker");
+    let thread = spawn(consumer_worker, arg).expect("spawn consumer worker");
 
     let mut sent = 0u32;
     while sent < FRAMES {

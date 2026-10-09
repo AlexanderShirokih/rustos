@@ -4,10 +4,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use kernel_objects::Signal;
-use runtime::{Condvar, Instant, Mutex, Priority, RawCondvar, RawMutex, Timeout, spawn};
+use runtime::{Condvar, Instant, Mutex, RawCondvar, RawMutex, Timeout, spawn};
 use syscall::{SIGNALED, WakeCount};
-
-const STACK_SIZE: u64 = 0x4000;
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -69,7 +67,7 @@ fn bench_thread_round_trip() {
         cv: Condvar::new(),
     };
     let arg = (&raw const shared) as usize;
-    let thread = spawn(pingpong_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker");
+    let thread = spawn(pingpong_worker, arg).expect("spawn worker");
 
     let start = Instant::now();
     for _ in 0..ROUNDS {
@@ -93,9 +91,8 @@ fn bench_thread_round_trip() {
 fn mutex_contention() {
     let shared = Shared { m: Mutex::new(0) };
     let arg = (&raw const shared) as usize;
-    let threads: [_; WORKERS as usize] = core::array::from_fn(|_| {
-        spawn(contention_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker")
-    });
+    let threads: [_; WORKERS as usize] =
+        core::array::from_fn(|_| spawn(contention_worker, arg).expect("spawn worker"));
     for thread in threads {
         thread
             .join(JOIN_TIMEOUT)
@@ -114,7 +111,7 @@ fn condvar_ping_pong() {
         cv: Condvar::new(),
     };
     let arg = (&raw const shared) as usize;
-    let thread = spawn(pingpong_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker");
+    let thread = spawn(pingpong_worker, arg).expect("spawn worker");
 
     for _ in 0..ROUNDS {
         let mut g = shared.m.lock();
@@ -188,8 +185,8 @@ fn condvar_notify_is_not_stolen_by_a_later_waiter() {
     };
     let arg = (&raw const shared) as usize;
 
-    let victim = spawn(theft_victim, arg, STACK_SIZE, Priority::new(1)).expect("spawn victim");
-    let thief = spawn(theft_thief, arg, STACK_SIZE, Priority::new(1)).expect("spawn thief");
+    let victim = spawn(theft_victim, arg).expect("spawn victim");
+    let thief = spawn(theft_thief, arg).expect("spawn thief");
 
     shared
         .in_window
@@ -271,8 +268,8 @@ fn condvar_notify_one_releases_waiters_one_by_one() {
     };
     let arg = (&raw const shared) as usize;
 
-    let first = spawn(baton_waiter, arg, STACK_SIZE, Priority::new(1)).expect("spawn first");
-    let second = spawn(baton_waiter, arg, STACK_SIZE, Priority::new(1)).expect("spawn second");
+    let first = spawn(baton_waiter, arg).expect("spawn first");
+    let second = spawn(baton_waiter, arg).expect("spawn second");
 
     let mut released_in_turn = wait_for_count(&shared.progress, &shared.registrations, 2);
 
@@ -348,7 +345,7 @@ fn raw_condvar_destroy_waits_for_notified_waiter() {
         destroyed_in_window: AtomicBool::new(false),
     };
     let arg = (&raw const shared) as usize;
-    let waiter = spawn(teardown_waiter, arg, STACK_SIZE, Priority::new(1)).expect("spawn waiter");
+    let waiter = spawn(teardown_waiter, arg).expect("spawn waiter");
 
     shared
         .in_window

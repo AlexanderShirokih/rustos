@@ -23,6 +23,7 @@ device-resolver = { workspace = true }
 fdt = { workspace = true }
 ipc = { workspace = true }
 platform-abi = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 

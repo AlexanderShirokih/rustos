@@ -14,7 +14,7 @@ use ipc::{
     wire::{IpcError, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Resource};
-use runtime::{Mutex, PortTransport, Priority, log_line, process_exit, spawn_owned};
+use runtime::{Mutex, PortTransport, log_line, process_exit, spawn_owned};
 use spin::Once;
 use syscall::{Handle, Timeout, kind};
 
@@ -44,8 +44,6 @@ pub fn serve<B>(
 where
     B: FileSystemBackend + Send + 'static,
 {
-    const EXPORT_THREAD_STACK_SIZE: u64 = 0x8000;
-
     let bytes = match backing.as_ref() {
         Some(backing) => {
             let mapping = backing.map_full_read_only()?;
@@ -64,17 +62,13 @@ where
         service: Port::create()?,
         next_badge: AtomicU64::new(0),
     }));
-    let _ = spawn_owned(
-        move || {
-            let parent = component_abi::component_startup::Client::new(PortTransport::new(start));
-            let _ = component_startup::serve_export::<file_system::Protocol>(&parent, || {
-                session::open_session(shared).map_err(|_| component_startup::SessionError::NoSpace)
-            });
-            process_exit(1)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    )?;
+    let _ = spawn_owned(move || {
+        let parent = component_abi::component_startup::Client::new(PortTransport::new(start));
+        let _ = component_startup::serve_export::<file_system::Protocol>(&parent, || {
+            session::open_session(shared).map_err(|_| component_startup::SessionError::NoSpace)
+        });
+        process_exit(1)
+    })?;
     log_line("started");
     serve_sessions(shared);
     Err(Error::Ipc(IpcError::PeerClosed))

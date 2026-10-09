@@ -3,11 +3,6 @@
 
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
-
-runtime::process_heap!();
-
-use core::{convert::Infallible, panic::PanicInfo};
 
 use bootstrap_abi::image;
 use component_startup::{Requirements as _, component_manifest};
@@ -15,10 +10,7 @@ use filesystem::ImageFileSystem;
 use filesystem_abi::file_system;
 use filesystem_server::{Error, Result, serve};
 use kernel_objects::MemoryRegion;
-use runtime::{log_fmt, process_exit, start_component};
 use syscall::{Handle, kind};
-
-const LOG_TAG: &str = "imagefs";
 
 component_manifest! {
     struct ImageFileSystemStartup {
@@ -27,15 +19,8 @@ component_manifest! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    let Err(error) = run(parent);
-    log_fmt(format_args!("stopped: {error}"));
-    process_exit(1)
-}
-
-fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
-    start_component(parent, LOG_TAG);
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<()> {
     let image = ImageFileSystemStartup::from_parent(parent)
         .image
         .open()
@@ -46,14 +31,9 @@ fn run(parent: Handle<kind::Port>) -> Result<Infallible> {
         .ok()
         .map(MemoryRegion::from)
         .ok_or(Error::Start)?;
-    serve(parent, Some(region), |backing| {
+    let Err(error) = serve(parent, Some(region), |backing| {
         let backing = backing.ok_or(Error::Start)?;
         Ok(ImageFileSystem::new(backing)?)
-    })
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(1)
+    });
+    Err(error)
 }

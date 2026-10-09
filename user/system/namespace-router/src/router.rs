@@ -16,7 +16,7 @@ use filesystem_abi::{
 };
 use ipc::{
     CallError,
-    wire::{IpcError, Session, Str},
+    wire::{IpcError, Session},
 };
 use kernel_objects::{Delivery, IssuedHandle, Port, SessionTransport, kind};
 use runtime::{Mutex, Timeout, log_fmt};
@@ -121,7 +121,7 @@ impl namespace::Service<Delivery> for Router {
     fn open_root(
         &mut self,
         frame: &Delivery,
-        path: Str<'_, PATH_MAX>,
+        path: &str,
     ) -> impl ipc::IntoWireValue<Delivery, Read = Result<Session<namespace::Protocol>, FileSystemError>>
     {
         let root = TREE
@@ -132,30 +132,25 @@ impl namespace::Service<Delivery> for Router {
             .ok_or(FileSystemError::NoSession);
         let port = root.and_then(|root| {
             let mut full = [0; PATH_MAX];
-            let path = rebase(Path::new(&root)?, Path::new(path.as_str())?, &mut full)?;
+            let path = rebase(Path::new(&root)?, Path::new(path)?, &mut full)?;
             open(self.views, path.as_str())
         });
         port.map(kernel_objects::Session::<namespace::Protocol>::from_handle)
     }
 
-    fn resolve(
-        &mut self,
-        frame: &Delivery,
-        path: Str<'_, PATH_MAX>,
-        reply: namespace::resolve::Reply<Debt>,
-    ) {
-        let path = String::from(path.as_str());
+    fn resolve(&mut self, frame: &Delivery, path: &str, reply: namespace::resolve::Reply<Debt>) {
+        let path = String::from(path);
         answer(frame.badge, Pending::Resolve { path, reply });
     }
 
     fn resolve_pair(
         &mut self,
         frame: &Delivery,
-        from: Str<'_, PATH_MAX>,
-        to: Str<'_, PATH_MAX>,
+        from: &str,
+        to: &str,
         reply: namespace::resolve_pair::Reply<Debt>,
     ) {
-        let (from, to) = (String::from(from.as_str()), String::from(to.as_str()));
+        let (from, to) = (String::from(from), String::from(to));
         answer(frame.badge, Pending::Pair { from, to, reply });
     }
 }
@@ -164,11 +159,11 @@ impl file_system_mount::Service<Delivery> for Router {
     fn mount(
         &mut self,
         frame: &Delivery,
-        path: Str<'_, PATH_MAX>,
+        path: &str,
         filesystem: ReceivedSession,
         call: file_system_mount::mount::Reply<Debt>,
     ) {
-        let prefix = match Path::new(path.as_str()) {
+        let prefix = match Path::new(path) {
             Ok(path) => String::from(path.as_str()),
             Err(error) => {
                 let _ = call.send(Err::<MountEnded, _>(error));
@@ -246,10 +241,7 @@ fn answer(view: u64, request: Pending) {
         };
         drop(tree);
 
-        let opened = match Str::new(&tail) {
-            Some(tail) => filesystem.lock().open_root(tail),
-            None => Err(CallError::Remote(FileSystemError::InvalidPath)),
-        };
+        let opened = filesystem.lock().open_root(&tail);
         match opened {
             Ok(session) => return request.reply(Ok((session, root_len))),
             Err(CallError::Remote(error)) => return request.reply(Err(error)),

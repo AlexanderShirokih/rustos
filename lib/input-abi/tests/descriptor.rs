@@ -1,12 +1,12 @@
 #![allow(clippy::expect_used)]
 
 use input_abi::{
-    AXES_MAX, AxisDecl, AxisList, Binding, CONTACTS_MAX, DescriptorError, DeviceDescriptor,
-    DeviceLayout, KEYS_MAX, KeyList, Usage,
+    AXES_MAX, AxisDecl, AxisList, Binding, CONTACTS_MAX, DEVICE_NAME_MAX, DescriptorError,
+    DeviceDescriptor, DeviceLayout, KEYS_MAX, KeyList, Usage,
 };
 use ipc::{
     IntoWireValue, WireValue,
-    wire::{Bytes, FieldCursor, MessageBuf, Str},
+    wire::{FieldCursor, MessageBuf},
 };
 
 const FIELD_ID: u8 = 1;
@@ -71,12 +71,12 @@ fn refusal(spec: &Spec<'_>) -> DescriptorError {
 
 fn raw(keys: &[u8], device_axes: &[u8]) -> Result<DeviceLayout, DescriptorError> {
     DeviceDescriptor {
-        name: Str::new("device").expect("short"),
+        name: "device",
         binding: Binding::None,
-        keys: Bytes::new(keys).expect("short"),
-        device_axes: Bytes::new(device_axes).expect("short"),
+        keys,
+        device_axes,
         max_contacts: 0,
-        contact_axes: Bytes::new(&[]).expect("short"),
+        contact_axes: &[],
     }
     .layout()
 }
@@ -213,8 +213,30 @@ fn axes_past_the_model_limit_are_refused() {
 #[test]
 fn keys_past_the_model_limit_are_refused() {
     let mut list = keys(&keyboard(KEYS_MAX));
+    let mut crowded = list.as_bytes().to_vec();
+    crowded.extend_from_slice(&[0; 4]);
 
     assert_eq!(list.push(Usage::POWER), Err(DescriptorError::TooLarge));
+    assert_eq!(raw(&crowded, &[]).err(), Some(DescriptorError::TooLarge));
+}
+
+#[test]
+fn a_name_past_the_limit_is_refused() {
+    let name = "n".repeat(DEVICE_NAME_MAX + 1);
+    let empty = AxisList::new();
+    let descriptor = DeviceDescriptor {
+        name: &name,
+        binding: Binding::None,
+        keys: &[],
+        device_axes: &[],
+        max_contacts: 0,
+        contact_axes: &[],
+    };
+
+    assert!(
+        DeviceDescriptor::new(&name, Binding::None, &KeyList::new(), &empty, 0, &empty).is_none()
+    );
+    assert_eq!(descriptor.layout().err(), Some(DescriptorError::TooLarge));
 }
 
 #[test]

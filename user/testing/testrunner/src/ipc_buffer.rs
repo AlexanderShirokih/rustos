@@ -6,10 +6,9 @@
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use runtime::{Priority, Timeout, ipc_buffer_addr, ipc_buffer_ptr, spawn};
+use runtime::{Timeout, ipc_buffer_addr, ipc_buffer_ptr, spawn};
 use syscall::{IPC_BUFFER_DATA_MAX, encode_tag};
 
-const STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 static SIBLING_VA: AtomicU64 = AtomicU64::new(0);
@@ -68,8 +67,7 @@ fn ipc_buffer_per_thread_distinct() {
     test_harness::check!(main_ret > 0);
     let main_va = u64::try_from(main_ret).expect("positive va fits u64");
 
-    let thread =
-        spawn(sibling_worker, 0, STACK_SIZE, Priority::new(1)).expect("spawn sibling worker");
+    let thread = spawn(sibling_worker, 0).expect("spawn sibling worker");
     thread
         .join(JOIN_TIMEOUT)
         .expect("sibling joins before timeout");

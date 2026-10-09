@@ -6,7 +6,7 @@ use syscall::ObjectKind;
 use crate::{
     ReceivedResources,
     schema::{self, WireType},
-    wire::{Bytes, Cap, FieldCursor, IpcError, MessageBuf, Str, value},
+    wire::{Cap, FieldCursor, IpcError, MessageBuf, value},
 };
 
 const RESULT_OK_FIELD: u8 = 1;
@@ -82,35 +82,15 @@ int_wire_value!(i32, encode_i32, decode_i32, WireType::Int(4));
 int_wire_value!(i64, encode_i64, decode_i64, WireType::Int(8));
 int_wire_value!(bool, encode_bool, decode_bool, WireType::Bool);
 
-impl<'a, R: ReceivedResources, const N: usize> WireValue<'a, R> for Str<'a, N> {
+impl<'a, R: ReceivedResources> WireValue<'a, R> for &'a str {
     type Owned = Self;
 
     fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
-        Str::new(value::decode_str(data)?).ok_or(IpcError::InvalidValue)
+        value::decode_str(data)
     }
 }
 
-impl<R: ReceivedResources, const N: usize> IntoWireValue<R> for Str<'_, N> {
-    type Read = Self;
-
-    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
-        frame.write_field(field_id, self.as_str().as_bytes())
-    }
-}
-
-impl<const N: usize> WireTyped for Str<'_, N> {
-    const WIRE_TYPE: WireType = WireType::BoundedStr(N);
-}
-
-impl<'a, R: ReceivedResources, const N: usize> WireValue<'a, R> for Bytes<'a, N> {
-    type Owned = Self;
-
-    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
-        Bytes::new(data).ok_or(IpcError::InvalidValue)
-    }
-}
-
-impl<R: ReceivedResources, const N: usize> IntoWireValue<R> for Bytes<'_, N> {
+impl<R: ReceivedResources> IntoWireValue<R> for &str {
     type Read = Self;
 
     fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
@@ -118,8 +98,28 @@ impl<R: ReceivedResources, const N: usize> IntoWireValue<R> for Bytes<'_, N> {
     }
 }
 
-impl<const N: usize> WireTyped for Bytes<'_, N> {
-    const WIRE_TYPE: WireType = WireType::BoundedBytes(N);
+impl WireTyped for &str {
+    const WIRE_TYPE: WireType = WireType::Str;
+}
+
+impl<'a, R: ReceivedResources> WireValue<'a, R> for &'a [u8] {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        Ok(data)
+    }
+}
+
+impl<R: ReceivedResources> IntoWireValue<R> for &[u8] {
+    type Read = Self;
+
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, self)
+    }
+}
+
+impl WireTyped for &[u8] {
+    const WIRE_TYPE: WireType = WireType::Bytes;
 }
 
 impl<'a, R: ReceivedResources> WireValue<'a, R> for () {
@@ -259,7 +259,7 @@ mod tests {
     use super::{IntoWireValue, WireValue};
     use crate::{
         resources::testing::{TestCap, TestFrame, cap},
-        wire::{Bytes, Cap, FieldCursor, IpcError, MessageBuf, Str},
+        wire::{Cap, FieldCursor, IpcError, MessageBuf},
     };
 
     const FIELD_ID: u8 = 1;
@@ -322,25 +322,13 @@ mod tests {
     }
 
     #[test]
-    fn bounded_values_round_trip_and_refuse_data_over_their_bound() {
-        let (encoded, mut frame) = encode(Str::<8>::new("hello").expect("within bound"));
-        let text = <Str<8> as WireValue<TestFrame>>::from_field(only_field(&encoded), &mut frame);
-        assert_eq!(text.expect("from_field ok").as_str(), "hello");
-        let (encoded, mut frame) = encode(Bytes::<8>::new(&[1, 2, 3]).expect("within bound"));
-        let bytes =
-            <Bytes<8> as WireValue<TestFrame>>::from_field(only_field(&encoded), &mut frame);
-        assert_eq!(bytes.expect("from_field ok").as_bytes(), &[1, 2, 3]);
-
-        // Отправитель записал больше, чем объявленная граница получателя.
-        let long = field_with(b"abcd");
-        assert_eq!(
-            <Str<3> as WireValue<()>>::from_field(only_field(&long), &mut ()),
-            Err(IpcError::InvalidValue)
-        );
-        assert_eq!(
-            <Bytes<3> as WireValue<()>>::from_field(only_field(&long), &mut ()),
-            Err(IpcError::InvalidValue)
-        );
+    fn strings_and_bytes_round_trip() {
+        let (encoded, mut frame) = encode("hello");
+        let text = <&str as WireValue<TestFrame>>::from_field(only_field(&encoded), &mut frame);
+        assert_eq!(text, Ok("hello"));
+        let (encoded, mut frame) = encode(&[1u8, 2, 3][..]);
+        let bytes = <&[u8] as WireValue<TestFrame>>::from_field(only_field(&encoded), &mut frame);
+        assert_eq!(bytes, Ok(&[1u8, 2, 3][..]));
     }
 
     #[test]

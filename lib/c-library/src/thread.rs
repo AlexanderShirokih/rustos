@@ -22,7 +22,7 @@ use core::{
     },
 };
 
-use runtime::{JoinHandle, Mutex, Priority, Timeout, tls};
+use runtime::{JoinHandle, Mutex, Timeout, thread::Builder, tls};
 use syscall::PAGE_SIZE;
 
 use crate::{errno::Errno, process};
@@ -34,8 +34,6 @@ const DETACHED: u32 = 1;
 const EXITING: u32 = 2;
 
 const DEFAULT_STACK_BYTES: usize = 256 * 1024;
-
-const PRIORITY: Priority = Priority::new(1);
 
 const _: () = assert!(size_of::<Attributes>() == 16 && align_of::<Attributes>() == 8);
 
@@ -240,8 +238,10 @@ unsafe extern "C" fn pthread_create(
     };
     let record = Box::into_raw(record);
 
-    let stack_bytes = u64::try_from(attributes.stack_bytes).unwrap_or(u64::MAX);
-    let Ok(handle) = runtime::spawn(entry, record.addr(), stack_bytes, PRIORITY) else {
+    let Ok(handle) = Builder::new()
+        .stack_bytes(attributes.stack_bytes)
+        .spawn(entry, record.addr())
+    else {
         // SAFETY: поток не стартовал, запись есть только у создателя.
         drop(unsafe { Box::from_raw(record) });
         return Errno::Again.code();

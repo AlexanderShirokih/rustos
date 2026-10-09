@@ -28,7 +28,7 @@ use filesystem_abi::{
 use filesystem_client::{Environment, Failure, FileSystem, SharedRegion};
 use ipc::{
     Channel, Incoming, Listener, Outgoing, Timeout, Unsent,
-    wire::{Cap, HEADER_SIZE, IpcError, MESSAGE_INLINE_MAX, Str},
+    wire::{Cap, HEADER_SIZE, IpcError, MESSAGE_INLINE_MAX},
 };
 use ipc_test::{MockChannel, MockHandle, MockListener, MockReply, MockResources};
 use syscall::{ObjectKind, kind};
@@ -280,14 +280,11 @@ struct SessionServer {
 }
 
 impl SessionServer {
-    fn root_session(
-        &mut self,
-        path: Str<'_, { PATH_MAX }>,
-    ) -> Result<TestSession, FileSystemError> {
+    fn root_session(&mut self, path: &str) -> Result<TestSession, FileSystemError> {
         if self.world.scoping_fails.load(Ordering::SeqCst) {
             return Err(FileSystemError::NotFound);
         }
-        let full = self.full(path.as_str());
+        let full = self.full(path);
         match self.filesystem.tree().get(&full) {
             Some(Node::Directory) => {}
             Some(Node::File(_)) => return Err(FileSystemError::NotADirectory),
@@ -363,11 +360,11 @@ impl file_system::Service<MockResources> for SessionServer {
     fn open(
         &mut self,
         _frame: &MockResources,
-        path: Str<'_, { PATH_MAX }>,
+        path: &str,
         _mode: AccessMode,
         flags: OpenFlags,
     ) -> Result<Opened, FileSystemError> {
-        let full = self.full(path.as_str());
+        let full = self.full(path);
         let mut tree = self.filesystem.tree();
         let node = if let Some(node) = tree.get(&full).cloned() {
             if flags.contains(OpenFlags::CREATE | OpenFlags::EXCLUSIVE) {
@@ -566,11 +563,11 @@ impl file_system::Service<MockResources> for SessionServer {
     fn rename(
         &mut self,
         _frame: &MockResources,
-        from: Str<'_, { PATH_MAX }>,
-        to: Str<'_, { PATH_MAX }>,
+        from: &str,
+        to: &str,
     ) -> Result<u32, FileSystemError> {
-        let from = self.full(from.as_str());
-        let to = self.full(to.as_str());
+        let from = self.full(from);
+        let to = self.full(to);
         let mut tree = self.filesystem.tree();
         let node = tree.remove(&from).ok_or(FileSystemError::NotFound)?;
         tree.insert(to, node);
@@ -580,13 +577,13 @@ impl file_system::Service<MockResources> for SessionServer {
     fn unlink(
         &mut self,
         _frame: &MockResources,
-        path: Str<'_, { PATH_MAX }>,
+        path: &str,
         expected: NodeKind,
     ) -> Result<u32, FileSystemError> {
-        if path.as_str() == ROOT {
+        if path == ROOT {
             return Err(FileSystemError::InvalidPath);
         }
-        let full = self.full(path.as_str());
+        let full = self.full(path);
         if self
             .world
             .protected
@@ -615,7 +612,7 @@ impl file_system::Service<MockResources> for SessionServer {
     fn create_backed(
         &mut self,
         _frame: &MockResources,
-        _path: Str<'_, { PATH_MAX }>,
+        _path: &str,
         _region: MockHandle<kind::MemoryRegion>,
         _size: u64,
     ) -> Result<u32, FileSystemError> {
@@ -634,7 +631,7 @@ impl file_system::Service<MockResources> for SessionServer {
     fn open_root(
         &mut self,
         _frame: &MockResources,
-        path: Str<'_, { PATH_MAX }>,
+        path: &str,
     ) -> impl ipc::IntoWireValue<
         MockResources,
         Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
@@ -650,21 +647,21 @@ struct Router {
 impl Router {
     fn resolved_pair(
         &mut self,
-        from: Str<'_, { PATH_MAX }>,
-        to: Str<'_, { PATH_MAX }>,
+        from: &str,
+        to: &str,
     ) -> Result<ResolvedPair<TestSession>, FileSystemError> {
         let mut resolved = self.world.resolved.lock().expect("mutex not poisoned");
-        resolved.push(String::from(from.as_str()));
-        resolved.push(String::from(to.as_str()));
+        resolved.push(String::from(from));
+        resolved.push(String::from(to));
         drop(resolved);
 
         let first = self
             .world
-            .covering_index(from.as_str())
+            .covering_index(from)
             .ok_or(FileSystemError::NotFound)?;
         let second = self
             .world
-            .covering_index(to.as_str())
+            .covering_index(to)
             .ok_or(FileSystemError::NotFound)?;
         if first != second {
             return Err(FileSystemError::CrossMount);
@@ -677,7 +674,7 @@ impl Router {
             .ok_or(FileSystemError::NotFound)?;
         let prefix = Path::new(&mount.prefix)?;
         // Общий каталог пары может лежать выше корня монтирования, и сессия не поднимается над ним.
-        let common = common_directory(Path::new(from.as_str())?, Path::new(to.as_str())?)?;
+        let common = common_directory(Path::new(from)?, Path::new(to)?)?;
         let scope = common.strip_prefix(prefix).map_or(prefix, |_| common);
         let tail = scope
             .strip_prefix(prefix)
@@ -702,19 +699,13 @@ impl Router {
         })
     }
 
-    fn resolved_session(
-        &mut self,
-        path: Str<'_, { PATH_MAX }>,
-    ) -> Result<TestSession, FileSystemError> {
+    fn resolved_session(&mut self, path: &str) -> Result<TestSession, FileSystemError> {
         self.world
             .resolved
             .lock()
             .expect("mutex not poisoned")
-            .push(String::from(path.as_str()));
-        let (filesystem, root) = self
-            .world
-            .covering(path.as_str())
-            .ok_or(FileSystemError::NotFound)?;
+            .push(String::from(path));
+        let (filesystem, root) = self.world.covering(path).ok_or(FileSystemError::NotFound)?;
         // Окно открывается на узле монтирования, и `open_root` не каталога даёт
         // `NotADirectory`.
         match filesystem.tree().get(&root) {
@@ -730,7 +721,7 @@ impl namespace::Service<MockResources> for Router {
     fn open_root(
         &mut self,
         _frame: &MockResources,
-        _path: Str<'_, PATH_MAX>,
+        _path: &str,
     ) -> impl ipc::IntoWireValue<
         MockResources,
         Read = Result<ipc::wire::Session<namespace::Protocol>, FileSystemError>,
@@ -743,7 +734,7 @@ impl namespace::Service<MockResources> for Router {
     fn resolve(
         &mut self,
         _frame: &MockResources,
-        path: Str<'_, { PATH_MAX }>,
+        path: &str,
         reply: namespace::resolve::Reply<MockReply>,
     ) {
         let _ = reply.send(self.resolved_session(path));
@@ -752,8 +743,8 @@ impl namespace::Service<MockResources> for Router {
     fn resolve_pair(
         &mut self,
         _frame: &MockResources,
-        from: Str<'_, { PATH_MAX }>,
-        to: Str<'_, { PATH_MAX }>,
+        from: &str,
+        to: &str,
         reply: namespace::resolve_pair::Reply<MockReply>,
     ) {
         let _ = reply.send(self.resolved_pair(from, to));

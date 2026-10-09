@@ -8,4 +8,4 @@ mod error;
 mod protocol;
 
 pub use error::{DeviceError, SpmiError};
-pub use protocol::{COMPATIBLE_MAX, spmi, spmi_device};
+pub use protocol::{spmi, spmi_device};

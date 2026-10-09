@@ -9,10 +9,8 @@ use component_abi::{Attributes, component_startup as startup_contract};
 use component_startup::{accept, whole_export};
 use ipc::{Listener as _, ReceivedResources, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::Port;
-use runtime::{PortTransport, Priority, Timeout, log_fmt, process_exit, spawn_owned};
+use runtime::{PortTransport, Timeout, log_fmt, process_exit, spawn_owned};
 use syscall::{Handle, kind};
-
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
 
 ipc::protocol! {
     pub mod probe {
@@ -48,23 +46,19 @@ impl fmt::Display for Pairs<'_> {
 }
 
 pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> ! {
-    let exporting = spawn_owned(
-        move || {
-            let parent = startup_contract::Client::new(PortTransport::new(parent));
-            let mut open = whole_export(export);
-            while let Ok(request) = accept::<probe::Protocol>(&parent) {
-                let attributes = request.attributes.as_attributes();
-                if !attributes.is_empty() {
-                    log_fmt(format_args!("request {}", Pairs(attributes)));
-                }
-
-                let _ = request.reply.send(open());
+    let exporting = spawn_owned(move || {
+        let parent = startup_contract::Client::new(PortTransport::new(parent));
+        let mut open = whole_export(export);
+        while let Ok(request) = accept::<probe::Protocol>(&parent) {
+            let attributes = request.attributes.as_attributes();
+            if !attributes.is_empty() {
+                log_fmt(format_args!("request {}", Pairs(attributes)));
             }
-            process_exit(1)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    );
+
+            let _ = request.reply.send(open());
+        }
+        process_exit(1)
+    });
     if exporting.is_err() {
         process_exit(1)
     }

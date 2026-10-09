@@ -106,9 +106,9 @@ dependencies = [
  "ipc",
  "kernel-objects",
  "platform-abi",
+ "program-entry",
  "rtc-abi",
  "runtime",
- "syscall",
  "userland-build",
 ]
 
@@ -119,6 +119,7 @@ dependencies = [
  "component-startup",
  "ipc",
  "kernel-objects",
+ "program-entry",
  "rtc-abi",
  "runtime",
  "spmi-abi",
@@ -135,6 +136,7 @@ dependencies = [
  "ipc",
  "kernel-objects",
  "platform-abi",
+ "program-entry",
  "runtime",
  "syscall",
  "userland-build",
@@ -148,6 +150,7 @@ dependencies = [
  "display-abi",
  "ipc",
  "kernel-objects",
+ "program-entry",
  "runtime",
  "syscall",
  "userland-build",
@@ -213,6 +216,7 @@ dependencies = [
  "filesystem-abi",
  "filesystem-server",
  "kernel-objects",
+ "program-entry",
  "runtime",
  "syscall",
  "userland-build",
@@ -226,6 +230,7 @@ dependencies = [
  "filesystem",
  "filesystem-abi",
  "filesystem-server",
+ "program-entry",
  "runtime",
  "syscall",
  "userland-build",
@@ -333,6 +338,7 @@ dependencies = [
  "filesystem-abi",
  "ipc",
  "kernel-objects",
+ "program-entry",
  "runtime",
  "syscall",
  "userland-build",
@@ -349,6 +355,7 @@ dependencies = [
  "ipc",
  "kernel-objects",
  "platform-abi",
+ "program-entry",
  "runtime",
  "syscall",
  "userland-build",
@@ -373,6 +380,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "program-entry"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -394,6 +410,7 @@ dependencies = [
  "log-abi",
  "log-relay",
  "managed-component",
+ "program-entry",
  "runtime",
  "syscall",
  "userland",
@@ -450,6 +467,7 @@ dependencies = [
  "ipc",
  "kernel-objects",
  "platform-abi",
+ "program-entry",
  "runtime",
  "spmi-abi",
  "syscall",
@@ -530,6 +548,7 @@ dependencies = [
  "log-relay",
  "managed-component",
  "platform-abi",
+ "program-entry",
  "rootkeeper",
  "rtc-abi",
  "runtime",
@@ -592,6 +611,7 @@ dependencies = [
  "ipc",
  "kernel-objects",
  "platform-abi",
+ "program-entry",
  "runtime",
  "syscall",
  "userland-build",

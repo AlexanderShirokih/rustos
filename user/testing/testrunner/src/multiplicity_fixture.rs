@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use bootstrap_abi::image;
 use component_startup::{
@@ -10,13 +9,13 @@ use component_startup::{
 use ipc::CallError;
 use kernel_objects::{Port, Signal};
 use rtc_abi::rtc;
-use runtime::{Timeout, log_fmt, log_line, start_component};
-use syscall::SIGNALED;
+use runtime::{Timeout, log_fmt, log_line};
+use syscall::{Handle, SIGNALED, kind};
 
-mod fixture_start;
+mod failed;
 mod probe_protocol;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use probe_protocol::probe;
 
 const SESSION_PING_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -32,11 +31,9 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), "multiplicity");
-    let requirements = MultiplicityStartup::from_parent(parent.as_raw());
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let requirements = MultiplicityStartup::from_parent(parent);
 
     match requirements.rtc.open() {
         Err(StartupError {
@@ -77,7 +74,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
     }
     log_fmt(format_args!("providers {count}"));
 
-    let requests = start_parent(parent.as_raw()).with_wait(SESSION_PING_TIMEOUT);
+    let requests = start_parent(parent).with_wait(SESSION_PING_TIMEOUT);
     match all::<probe::Protocol>(&requests, "one", Attributes::empty()) {
         Err(CallError::Remote(SessionError::Refused)) => log_line("all refused"),
         _ => return Err(Failed),
@@ -112,7 +109,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
                     }
 
                     let one = request_session::<probe::Protocol>(
-                        parent.as_raw(),
+                        parent,
                         "one",
                         Attributes::empty(),
                         SESSION_PING_TIMEOUT,

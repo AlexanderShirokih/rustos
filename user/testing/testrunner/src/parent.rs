@@ -5,14 +5,10 @@ use alloc::{sync::Arc, vec::Vec};
 use core::{num::NonZeroU64, ops::ControlFlow};
 
 use component_abi::{
-    AcceptError, AttributeSet, Attributes, Found, LOG_REQUIREMENT, PROTOCOL_ID_MAX,
-    QueryAttributes, SessionError, SessionRequest, SessionRequirement,
-    component_startup as startup_contract,
+    AcceptError, AttributeSet, Attributes, Found, LOG_REQUIREMENT, QueryAttributes, SessionError,
+    SessionRequest, SessionRequirement, component_startup as startup_contract,
 };
-use ipc::{
-    IntoWireValue, Listener as _, Protocol as _, RecvError,
-    wire::{MESSAGE_INLINE_MAX, Str},
-};
+use ipc::{IntoWireValue, Listener as _, Protocol as _, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
 use log_abi::log;
 use managed_component::{Children, Departure, GrantError, Status};
@@ -345,8 +341,8 @@ impl startup_contract::Service<Delivery> for State {
         reply: startup_contract::session::Reply<Debt>,
     ) {
         let badge = frame.badge;
-        let name = requirement.name.as_str();
-        let protocol = requirement.protocol.as_str();
+        let name = requirement.name;
+        let protocol = requirement.protocol;
         let requirements = match self.caller(badge) {
             Some(Key::Record(child)) => self
                 .records
@@ -369,7 +365,7 @@ impl startup_contract::Service<Delivery> for State {
                 protocol: exported,
             }) if *exported == protocol => {
                 let provider = Key::Record(*provider);
-                let attributes = Attributes::decode(attributes.as_bytes());
+                let attributes = Attributes::decode(attributes);
                 if matches!(self.children.status(provider), None | Some(Status::Removed)) {
                     let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
                 } else if let Some(attributes) = attributes {
@@ -416,11 +412,10 @@ impl startup_contract::Service<Delivery> for State {
     fn accept(
         &mut self,
         frame: &Delivery,
-        export: Str<'_, { PROTOCOL_ID_MAX }>,
+        export: &str,
         reply: startup_contract::accept::Reply<Debt>,
     ) {
         self.accepts += 1;
-        let export = export.as_str();
         let provider = match self.caller(frame.badge) {
             Some(Key::Record(child))
                 if self

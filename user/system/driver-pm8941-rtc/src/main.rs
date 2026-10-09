@@ -8,30 +8,20 @@
 #![no_std]
 #![no_main]
 
-runtime::process_heap!();
-
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::{panic::PanicInfo, sync::atomic::AtomicU64};
+use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    Requirements as _, SessionError, component_manifest, mint_session, serve_export,
+    SessionError, StartupError, component_manifest, mint_session, serve_export,
 };
-use ipc::{
-    CallError, Listener, RecvError,
-    wire::{IpcError, MESSAGE_INLINE_MAX},
-};
+use ipc::{CallError, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Port, Session, SessionTransport, Signal};
 use rtc_abi::rtc;
-use runtime::{
-    Mutex, PortTransport, Priority, Timeout, log_fmt, log_line, process_exit, spawn_owned,
-    start_component,
-};
+use runtime::{FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, spawn_owned};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
-use syscall::{Handle, SIGNALED, kind};
-
-const LOG_TAG: &str = "pm8941-rtc";
+use syscall::SIGNALED;
 
 const COMPATIBLE: &str = "qcom,pm8941-rtc";
 
@@ -54,8 +44,6 @@ const ALARM_BUDGET: Timeout = Timeout::from_secs(10);
 
 const BUS_CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
-
 component_manifest! {
     struct RtcStartup {
         requirements: { spmi: session(spmi::Protocol) },
@@ -74,11 +62,30 @@ struct Clock {
     alarm: Mutex<Option<Signal>>,
 }
 
+#[derive(Debug)]
+enum Stopped {
+    Startup(StartupError),
+    ServicePort,
+    ExportThread,
+    ServicePortClosed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
     Bus(CallError<SpmiError>),
     Device(CallError<DeviceError>),
     Silent,
+}
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup(error) => error.fmt(formatter),
+            Self::ServicePort => formatter.write_str("service port refused"),
+            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::ServicePortClosed => formatter.write_str("service port closed"),
+        }
+    }
 }
 
 impl Shared {
@@ -126,8 +133,7 @@ impl Shared {
 
 impl Clock {
     fn bind(bus: &spmi::Client<SessionTransport>) -> Result<Self, Failure> {
-        let compatible = ipc::wire::Str::new(COMPATIBLE)
-            .ok_or(Failure::Bus(CallError::Ipc(IpcError::InvalidValue)))?;
+        let compatible = COMPATIBLE;
         let device = bus.open(compatible).map_err(Failure::Bus)?;
 
         let clock = Self {
@@ -209,27 +215,18 @@ impl From<CallError<DeviceError>> for Failure {
 
 fn stop(operation: &str, failure: Failure) -> ! {
     log_fmt(format_args!("{operation} failed: {failure:?}"));
-    process_exit(1)
+    exit(FAILED_EXIT_CODE)
 }
 
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    run(parent);
-    process_exit(1)
-}
-
-fn run(parent: Handle<kind::Port>) {
-    let requirements = RtcStartup::from_parent(parent);
-    let bus = match requirements.spmi.open() {
-        Ok(bus) => bus.client().with_wait(BUS_CALL_TIMEOUT),
-        Err(error) => return log_fmt(format_args!("{error}")),
-    };
-
-    let Ok(service) = Port::create() else {
-        return log_line("service port refused");
-    };
+#[program_entry::component]
+fn run(requirements: RtcStartup) -> Result<(), Stopped> {
+    let bus = requirements
+        .spmi
+        .open()
+        .map_err(Stopped::Startup)?
+        .client()
+        .with_wait(BUS_CALL_TIMEOUT);
+    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
 
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         service,
@@ -238,27 +235,14 @@ fn run(parent: Handle<kind::Port>) {
 
     // Поток экспорта работает до конца процесса и держит сессию `Spmi`.
     let exporter = requirements.parent;
-    let export = spawn_owned(
-        move || {
-            let next_badge = AtomicU64::new(0);
-            let failure =
-                serve_export::<rtc::Protocol>(&exporter, || shared.open(&bus, &next_badge));
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(1)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    );
-
-    if export.is_err() {
-        return log_line("export thread refused");
-    }
+    let _ = spawn_owned(move || {
+        let next_badge = AtomicU64::new(0);
+        let failure = serve_export::<rtc::Protocol>(&exporter, || shared.open(&bus, &next_badge));
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    })
+    .map_err(|_| Stopped::ExportThread)?;
 
     shared.serve();
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(1)
+    Err(Stopped::ServicePortClosed)
 }

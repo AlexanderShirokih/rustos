@@ -9,7 +9,7 @@ use core::fmt;
 use ipc::{
     IntoWireValue, ReceivedResources, WireTyped, WireValue,
     schema::{WireType, max_body_len},
-    wire::{BODY_MAX, Bytes, IpcError, MessageBuf, Str, value},
+    wire::{BODY_MAX, IpcError, MessageBuf, value},
 };
 use syscall::kind;
 
@@ -30,7 +30,7 @@ pub const LOG_REQUIREMENT: &str = "log";
 
 /// Байты атрибутов запроса в кодировке [`Attributes`](crate::Attributes). Родитель разбирает
 /// их сам и отвечает на недопустимые `Refused`.
-pub type QueryAttributes<'a> = Bytes<'a, ATTRIBUTES_MAX_BYTES>;
+pub type QueryAttributes<'a> = &'a [u8];
 
 ipc::wire_enum! {
     /// Отказ в сессии требования. `Unbound`, `Refused` и `Unavailable` окончательны.
@@ -127,8 +127,8 @@ ipc::wire_value! {
     /// Имя требования и протокол сессии.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct SessionRequirement<'a> {
-        pub name: Str<'a, REQUIREMENT_NAME_MAX>,
-        pub protocol: Str<'a, PROTOCOL_ID_MAX>,
+        pub name: &'a str,
+        pub protocol: &'a str,
     }
 }
 
@@ -157,8 +157,11 @@ ipc::wire_value! {
 
 const _: () = assert!(
     max_body_len(&[
-        <SessionRequirement<'static> as WireTyped>::WIRE_TYPE,
-        <QueryAttributes<'static> as WireTyped>::WIRE_TYPE,
+        WireType::Aggregate(&[
+            WireType::BoundedStr(REQUIREMENT_NAME_MAX),
+            WireType::BoundedStr(PROTOCOL_ID_MAX),
+        ]),
+        WireType::BoundedBytes(ATTRIBUTES_MAX_BYTES),
     ]) <= BODY_MAX,
     "session request frame exceeds the body budget"
 );
@@ -195,7 +198,7 @@ ipc::protocol! {
         /// Выдаёт заявку импортёра на экспорт `export`. Импортёр получает ответ на заявку как
         /// ответ своей операции `session` либо `open`.
         call(defer) fn accept(
-            export: Str<{ PROTOCOL_ID_MAX }>,
+            export: &str,
         ) -> own Result<SessionRequest, AcceptError>;
 
         /// Выдаёт сессию перечисления экспортов протокола `requirement.protocol`, совпавших с
@@ -220,7 +223,7 @@ ipc::protocol! {
 mod tests {
     use std::{string::String, vec::Vec};
 
-    use ipc::wire::{Bytes, Cap, IpcError, Str};
+    use ipc::wire::{Cap, IpcError};
     use ipc_test::{MockHandle, MockReply, MockResources};
     use syscall::kind;
 
@@ -262,11 +265,11 @@ mod tests {
             reply: component_startup::session::Reply<MockReply>,
         ) {
             self.requirements.push(RequestedSession {
-                name: requirement.name.as_str().into(),
-                protocol: requirement.protocol.as_str().into(),
-                attributes: attributes.as_bytes().into(),
+                name: requirement.name.into(),
+                protocol: requirement.protocol.into(),
+                attributes: attributes.into(),
             });
-            match Attributes::decode(attributes.as_bytes()) {
+            match Attributes::decode(attributes) {
                 Some(attributes) => self.waiting = Some((reply, AttributeSet::new(attributes))),
                 None => {
                     let _ = reply.send(Err::<MockHandle<kind::Port>, _>(SessionError::Refused));
@@ -277,10 +280,10 @@ mod tests {
         fn accept(
             &mut self,
             _frame: &MockResources,
-            export: Str<'_, PROTOCOL_ID_MAX>,
+            export: &str,
             reply: component_startup::accept::Reply<MockReply>,
         ) {
-            self.exports.push(export.as_str().into());
+            self.exports.push(export.into());
             let Some((debt, attributes)) = self.waiting.take() else {
                 let _ = reply.send(Err::<
                     SessionRequest<component_startup::session::Reply<MockReply>>,
@@ -334,8 +337,8 @@ mod tests {
 
     ipc::wire_value! {
         struct IndexedRequirement<'a> {
-            name: Str<'a, 64>,
-            protocol: Str<'a, 64>,
+            name: &'a str,
+            protocol: &'a str,
             index: u16,
         }
     }
@@ -377,22 +380,17 @@ mod tests {
         let answer = std::thread::scope(|scope| {
             let importer = scope.spawn(|| {
                 let requirement = SessionRequirement {
-                    name: Str::new(&name).expect("name within the bound"),
-                    protocol: Str::new(&protocol).expect("protocol within the bound"),
+                    name: &name,
+                    protocol: &protocol,
                 };
-                component_startup::Client::new(importer_end).session(
-                    requirement,
-                    Bytes::new(&attributes).expect("attributes within the bound"),
-                )
+                component_startup::Client::new(importer_end).session(requirement, &attributes)
             });
             importer_listener
                 .serve(|frame| component_startup::dispatch(&mut parent, frame))
                 .expect("dispatch ok");
 
-            let provider = scope.spawn(|| {
-                component_startup::Client::new(provider_end)
-                    .accept(Str::new(EXPORT).expect("export within the bound"))
-            });
+            let provider =
+                scope.spawn(|| component_startup::Client::new(provider_end).accept(EXPORT));
             provider_listener
                 .serve(|frame| component_startup::dispatch(&mut parent, frame))
                 .expect("dispatch ok");
@@ -453,8 +451,8 @@ mod tests {
             let answer = std::thread::scope(|scope| {
                 let importer = scope.spawn(|| {
                     indexed_startup::Client::new(end).session(IndexedRequirement {
-                        name: Str::new(REQUIREMENT).expect("name within the bound"),
-                        protocol: Str::new(EXPORT).expect("protocol within the bound"),
+                        name: REQUIREMENT,
+                        protocol: EXPORT,
                         index,
                     })
                 });

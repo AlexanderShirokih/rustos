@@ -60,7 +60,7 @@ ipc::protocol! {
         /// `TRUNCATE` без права записи - `WrongMode`. Режим записи в неизменяемом дереве -
         /// `ReadOnly`, исчерпанный потолок дескрипторов сессии - `TooManyOpenFiles`.
         call fn open(
-            path: ipc::wire::Str<{ PATH_MAX }>,
+            path: &str,
             mode: AccessMode,
             flags: OpenFlags,
         ) -> Result<Opened, FileSystemError>;
@@ -112,8 +112,8 @@ ipc::protocol! {
         /// каталога внутрь собственного поддерева - `InvalidPath`, путь корня сессии -
         /// `InvalidPath`, неизменяемое дерево - `ReadOnly`.
         call fn rename(
-            from: ipc::wire::Str<{ PATH_MAX }>,
-            to: ipc::wire::Str<{ PATH_MAX }>,
+            from: &str,
+            to: &str,
         ) -> Result<u32, FileSystemError>;
 
         /// Снимает с узла имя, сверяя вид узла с `expected`. Ожидание файла при фактическом
@@ -124,7 +124,7 @@ ipc::protocol! {
         /// Открытые дескрипторы снятого узла остаются рабочими, и узел освобождается с закрытием
         /// последнего из них.
         call fn unlink(
-            path: ipc::wire::Str<{ PATH_MAX }>,
+            path: &str,
             expected: NodeKind,
         ) -> Result<u32, FileSystemError>;
 
@@ -136,7 +136,7 @@ ipc::protocol! {
         /// ёмкости региона - `NoSpace`, занятое имя - `AlreadyExists`, неизменяемое дерево -
         /// `ReadOnly`.
         call fn create_backed(
-            path: ipc::wire::Str<{ PATH_MAX }>,
+            path: &str,
             own region: ipc::wire::Cap<syscall::kind::MemoryRegion>,
             size: u64,
         ) -> Result<u32, FileSystemError>;
@@ -157,7 +157,7 @@ ipc::protocol! {
         ///
         /// Дескрипторы и буфер данных у производной сессии свои.
         call fn open_root(
-            path: ipc::wire::Str<{ PATH_MAX }>,
+            path: &str,
         ) -> own Result<ipc::wire::Session<crate::file_system::Protocol>, FileSystemError>;
     }
 }
@@ -171,10 +171,7 @@ mod tests {
         vec::Vec,
     };
 
-    use ipc::{
-        CallError,
-        wire::{Cap, Str},
-    };
+    use ipc::{CallError, wire::Cap};
     use ipc_test::{MockHandle, MockResources};
 
     use super::{
@@ -295,12 +292,12 @@ mod tests {
         fn open(
             &mut self,
             _frame: &MockResources,
-            path: Str<'_, { PATH_MAX }>,
+            path: &str,
             mode: AccessMode,
             flags: OpenFlags,
         ) -> Result<Opened, FileSystemError> {
             self.record(Call::Open {
-                path: path.as_str().to_string(),
+                path: path.to_string(),
                 mode,
                 flags,
             });
@@ -370,12 +367,12 @@ mod tests {
         fn rename(
             &mut self,
             _frame: &MockResources,
-            from: Str<'_, { PATH_MAX }>,
-            to: Str<'_, { PATH_MAX }>,
+            from: &str,
+            to: &str,
         ) -> Result<u32, FileSystemError> {
             self.record(Call::Rename {
-                from: from.as_str().to_string(),
-                to: to.as_str().to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
             });
             Ok(DONE)
         }
@@ -383,11 +380,11 @@ mod tests {
         fn unlink(
             &mut self,
             _frame: &MockResources,
-            path: Str<'_, { PATH_MAX }>,
+            path: &str,
             expected: NodeKind,
         ) -> Result<u32, FileSystemError> {
             self.record(Call::Unlink {
-                path: path.as_str().to_string(),
+                path: path.to_string(),
                 expected,
             });
             Ok(DONE)
@@ -396,12 +393,12 @@ mod tests {
         fn create_backed(
             &mut self,
             _frame: &MockResources,
-            path: Str<'_, { PATH_MAX }>,
+            path: &str,
             region: MockHandle<syscall::kind::MemoryRegion>,
             size: u64,
         ) -> Result<u32, FileSystemError> {
             self.record(Call::CreateBacked {
-                path: path.as_str().to_string(),
+                path: path.to_string(),
                 region: region.raw(),
                 size,
             });
@@ -423,13 +420,13 @@ mod tests {
         fn open_root(
             &mut self,
             _frame: &MockResources,
-            path: Str<'_, { PATH_MAX }>,
+            path: &str,
         ) -> impl ipc::IntoWireValue<
             MockResources,
             Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
         > {
             self.record(Call::OpenRoot {
-                path: path.as_str().to_string(),
+                path: path.to_string(),
             });
             Ok(SCOPED_SESSION)
         }
@@ -459,8 +456,8 @@ mod tests {
         (result, calls)
     }
 
-    fn path(text: &str) -> Str<'_, PATH_MAX> {
-        Str::new(text).expect("path within bound")
+    fn path(text: &str) -> &str {
+        text
     }
 
     /// Каждая операция доносит свои параметры до метода сервиса и возвращает его ответ.
@@ -556,13 +553,8 @@ mod tests {
     #[test]
     fn path_at_bound_fits_the_frame() {
         let path = "/".to_string() + &"p".repeat(PATH_MAX - 1);
-        let (result, calls) = with_service(|client| {
-            client.open(
-                Str::new(&path).expect("path at bound"),
-                AccessMode::Read,
-                OpenFlags::NONE,
-            )
-        });
+        let (result, calls) =
+            with_service(|client| client.open(&path, AccessMode::Read, OpenFlags::NONE));
         assert_eq!(result, Ok(OPENED));
         assert_eq!(
             calls,

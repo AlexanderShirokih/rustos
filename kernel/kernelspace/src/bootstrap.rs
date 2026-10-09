@@ -15,7 +15,7 @@ use drivers_common::services::interrupts::IrqLineSpan;
 use ipc::{
     FrameBytes, Incoming, IntoWireValue, Listener, Outgoing, ReceivedResources, RecvError,
     ReplyChannel, Unsent,
-    wire::{Cap, IpcError as WireError, MESSAGE_INLINE_MAX, MessageBuf, Session, Str},
+    wire::{Cap, IpcError as WireError, MESSAGE_INLINE_MAX, MessageBuf, Session},
 };
 use kbase::{LockCell, MutexCell};
 use klog::{info, warn};
@@ -295,16 +295,11 @@ impl<K: ObjectKind> Drop for KernelEntry<K> {
 }
 
 impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
-    fn log(
-        &mut self,
-        _frame: &BootstrapFrame,
-        tag: Str<{ bootstrap_abi::LOG_TAG_MAX }>,
-        message: Str<{ bootstrap_abi::LOG_MESSAGE_MAX }>,
-    ) {
-        if tag.as_str().is_empty() {
-            info!("{}", message.as_str());
+    fn log(&mut self, _frame: &BootstrapFrame, tag: &str, message: &str) {
+        if tag.is_empty() {
+            info!("{}", message);
         } else {
-            info!(tag.as_str(); "{}", message.as_str());
+            info!(tag; "{}", message);
         }
     }
 

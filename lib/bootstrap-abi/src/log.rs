@@ -1,29 +1,38 @@
-//! Строковый фасад [`bootstrap::log`]: принимает `&str`
-//! и усекает их до границ кадра, снимая с вызывателя конструирование `Str`.
+//! Фасад [`bootstrap::log`], усекающий строку до остатка кадра за тегом.
 
 use ipc::{
     Channel,
-    wire::{IpcError, Str},
+    wire::{FIELD_DATA_MAX, FIELD_OVERHEAD, IpcError},
 };
 
 use crate::bootstrap;
 
 impl<C: Channel> bootstrap::Client<C> {
-    /// Шлёт [`bootstrap::log`], усекая `tag` и
-    /// `message` до границ кадра по границе символа.
+    /// Шлёт [`bootstrap::log`], усекая `message` по границе символа до
+    /// [`log_message_max`] для `tag`. Тег, который не помещается в кадр, даёт `FrameOverflow`.
     pub fn log_str(&self, tag: &str, message: &str) -> Result<(), IpcError> {
-        self.log(Str::truncating(tag), Str::truncating(message))
+        let message = message
+            .get(..message.floor_char_boundary(log_message_max(tag)))
+            .unwrap_or_default();
+        self.log(tag, message)
     }
+}
+
+/// Наибольшая длина строки [`bootstrap::log`] с тегом `tag`, то есть остаток кадра за тегом.
+#[must_use]
+pub const fn log_message_max(tag: &str) -> usize {
+    FIELD_DATA_MAX
+        .saturating_sub(FIELD_OVERHEAD)
+        .saturating_sub(tag.len())
 }
 
 #[cfg(test)]
 mod tests {
     use std::{format, string::String};
 
-    use ipc::wire::Str;
     use ipc_test::{MockHandle, MockResources};
 
-    use crate::{LOG_MESSAGE_MAX, LOG_TAG_MAX, bootstrap};
+    use crate::{bootstrap, log_message_max};
 
     #[derive(Default)]
     struct Sink {
@@ -31,13 +40,8 @@ mod tests {
     }
 
     impl crate::bootstrap::Service<MockResources> for Sink {
-        fn log(
-            &mut self,
-            _frame: &MockResources,
-            tag: ipc::wire::Str<'_, { LOG_TAG_MAX }>,
-            message: ipc::wire::Str<'_, { LOG_MESSAGE_MAX }>,
-        ) {
-            self.last_log = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
+        fn log(&mut self, _frame: &MockResources, tag: &str, message: &str) {
+            self.last_log = Some(format!("[{tag}] {message}"));
         }
 
         fn acquire_userland_image(
@@ -76,26 +80,19 @@ mod tests {
     }
 
     #[test]
-    fn log_str_clamps_overlong_strings() {
+    fn log_str_clamps_the_message_to_the_frame_rest() {
         let (client_end, server_end) = ipc_test::pair();
         let client = bootstrap::Client::new(client_end);
-        let long_tag = "t".repeat(LOG_TAG_MAX + 5);
-        let long_message = "m".repeat(LOG_MESSAGE_MAX + 5);
+        let tag = "t".repeat(200);
+        let long_message = "m".repeat(log_message_max(&tag) + 5);
         client
-            .log_str(&long_tag, &long_message)
+            .log_str(&tag, &long_message)
             .expect("clamped log write");
         let mut sink = Sink::default();
         server_end
             .serve(|frame| bootstrap::dispatch(&mut sink, frame))
             .expect("dispatch ok");
         let logged = sink.last_log.expect("logged");
-        assert_eq!(logged.len(), 1 + LOG_TAG_MAX + 2 + LOG_MESSAGE_MAX);
-    }
-
-    #[test]
-    fn truncating_respects_char_boundary() {
-        // "é" занимает два байта, срез по середине символа запрещён.
-        assert_eq!(Str::<4>::truncating("ééé").as_str(), "éé");
-        assert_eq!(Str::<4>::truncating("abc").as_str(), "abc");
+        assert_eq!(logged.len(), 1 + tag.len() + 2 + log_message_max(&tag));
     }
 }

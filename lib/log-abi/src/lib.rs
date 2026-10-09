@@ -1,9 +1,9 @@
 //! Контракт `Log` для односторонней записи строки в системный журнал и сборка такой строки
 //! на стороне пишущего.
 //!
-//! Клиента и сервис даёт модуль [`log`], его единственная операция `write` принимает тег
-//! источника и текст. [`log::Client::write_str`] режет сообщение длиннее кадра на несколько
-//! вызовов и усекает тег.
+//! Клиента и сервис даёт модуль [`log`], его единственная операция `write` принимает текст
+//! строки. Источник строки сервер контракта выводит из значка сессии.
+//! [`log::Client::write_str`] режет сообщение длиннее кадра на несколько вызовов.
 //!
 //! [`LogBuffer`] копит строку на стеке до отправки, [`LineAssembler`] собирает строки из
 //! потока фрагментов, [`chunks`] режет текст по границе символа. [`Utf8Assembler`] собирает
@@ -23,11 +23,7 @@ pub use buffer::{LogBuffer, chunks};
 pub use line::LineAssembler;
 pub use utf8::Utf8Assembler;
 
-/// Граница локального тега источника, назначаемого клиентом.
-pub const LOG_TAG_MAX: usize = 32;
-
-/// Граница доверенного источника строки. Его составляет сервер контракта из
-/// значка сессии и локального тега клиента.
+/// Граница доверенного источника строки. Его назначает сервер контракта по значку сессии.
 pub const LOG_SOURCE_MAX: usize = 64;
 
 /// Граница строки лога: остаток кадра за доверенным источником.
@@ -51,24 +47,18 @@ ipc::protocol! {
     pub mod log {
         name = "Log";
 
-        /// Пишет строку в системный журнал. `tag` - локальный тег источника внутри
-        /// процесса-клиента, пустой тег - строка без него. Строку длиннее кадра
-        /// клиентская обёртка разбивает на несколько вызовов. Полномочий сверх
-        /// записи строки capability на этот контракт не даёт.
-        cast fn write(
-            tag: ipc::wire::Str<{ LOG_TAG_MAX }>,
-            message: ipc::wire::Str<{ LOG_MESSAGE_MAX }>,
-        );
+        /// Пишет строку в системный журнал. Строку длиннее кадра клиентская обёртка
+        /// разбивает на несколько вызовов. Полномочий сверх записи строки capability на
+        /// этот контракт не даёт.
+        cast fn write(message: &str);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{format, string::String};
+    use std::string::String;
 
-    use ipc::wire::Str;
-
-    use super::{LOG_MESSAGE_MAX, LOG_TAG_MAX, log};
+    use super::{LOG_MESSAGE_MAX, log};
 
     #[derive(Default)]
     pub(crate) struct Sink {
@@ -76,13 +66,8 @@ mod tests {
     }
 
     impl<F: ipc::ReceivedResources> log::Service<F> for Sink {
-        fn write(
-            &mut self,
-            _frame: &F,
-            tag: Str<'_, { LOG_TAG_MAX }>,
-            message: Str<'_, { LOG_MESSAGE_MAX }>,
-        ) {
-            self.last = Some(format!("[{}] {}", tag.as_str(), message.as_str()));
+        fn write(&mut self, _frame: &F, message: &str) {
+            self.last = Some(String::from(message));
         }
     }
 
@@ -90,36 +75,13 @@ mod tests {
     fn write_round_trip() {
         let (client_end, server_end) = ipc_test::pair();
         let client = log::Client::new(client_end);
-        client
-            .write(
-                Str::new("relay").expect("tag within bound"),
-                Str::new("log line").expect("message within bound"),
-            )
-            .expect("log write");
+        client.write("log line").expect("log write");
 
         let mut sink = Sink::default();
         server_end
             .serve(|frame| log::dispatch(&mut sink, frame))
             .expect("dispatch ok");
-        assert_eq!(sink.last.as_deref(), Some("[relay] log line"));
-    }
-
-    #[test]
-    fn empty_tag_round_trips() {
-        let (client_end, server_end) = ipc_test::pair();
-        let client = log::Client::new(client_end);
-        client
-            .write(
-                Str::new("").expect("empty tag within bound"),
-                Str::new("untagged").expect("message within bound"),
-            )
-            .expect("log write");
-
-        let mut sink = Sink::default();
-        server_end
-            .serve(|frame| log::dispatch(&mut sink, frame))
-            .expect("dispatch ok");
-        assert_eq!(sink.last.as_deref(), Some("[] untagged"));
+        assert_eq!(sink.last.as_deref(), Some("log line"));
     }
 
     #[test]
@@ -127,17 +89,12 @@ mod tests {
         let (client_end, server_end) = ipc_test::pair();
         let client = log::Client::new(client_end);
         let message = "m".repeat(LOG_MESSAGE_MAX);
-        client
-            .write(
-                Str::new("relay").expect("tag within bound"),
-                Str::new(&message).expect("message within bound"),
-            )
-            .expect("log write");
+        client.write(&message).expect("log write");
 
         let mut sink = Sink::default();
         server_end
             .serve(|frame| log::dispatch(&mut sink, frame))
             .expect("dispatch ok");
-        assert_eq!(sink.last.expect("logged").len(), 8 + LOG_MESSAGE_MAX);
+        assert_eq!(sink.last.expect("logged").len(), LOG_MESSAGE_MAX);
     }
 }

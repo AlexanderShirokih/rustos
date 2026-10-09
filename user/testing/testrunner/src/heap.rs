@@ -4,9 +4,7 @@
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use runtime::{Priority, Timeout, spawn};
-
-const STACK_SIZE: u64 = 0x4000;
+use runtime::{Timeout, spawn};
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -83,7 +81,7 @@ fn heap_concurrent() {
     let arg = (&raw const shared) as usize;
     let mut threads: Vec<_> = Vec::new();
     for _ in 0..WORKERS {
-        threads.push(spawn(churn_worker, arg, STACK_SIZE, Priority::new(1)).expect("spawn worker"));
+        threads.push(spawn(churn_worker, arg).expect("spawn worker"));
     }
     for thread in threads {
         thread

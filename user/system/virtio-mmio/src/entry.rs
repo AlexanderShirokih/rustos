@@ -1,24 +1,17 @@
 //! Точка входа процесса: требования, поток экспорта `VirtioMmio` и обслуживание шины.
 
 use alloc::boxed::Box;
-use core::{panic::PanicInfo, sync::atomic::AtomicU64};
+use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    Requirements as _, SessionError, component_manifest, mint_session, serve_export,
+    SessionError, StartupError, component_manifest, mint_session, serve_export,
 };
 use kernel_objects::Port;
 use platform_abi::platform;
-use runtime::{Priority, log_fmt, log_line, process_exit, spawn_owned, start_component};
-use syscall::{Handle, kind};
+use runtime::{FAILED_EXIT_CODE, exit, log_fmt, log_line, spawn_owned};
 use virtio_mmio_abi::virtio_mmio;
 
 use crate::bus::{Bus, Sessions};
-
-const LOG_TAG: &str = "virtio-mmio";
-
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
-
-runtime::process_heap!();
 
 component_manifest! {
     struct VirtioMmioStartup {
@@ -28,27 +21,37 @@ component_manifest! {
     }
 }
 
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    run(parent);
-    process_exit(1)
+#[derive(Debug)]
+enum Stopped {
+    Startup(StartupError),
+    Description,
+    ServicePort,
+    ExportThread,
+    ServicePortClosed,
 }
 
-fn run(parent: Handle<kind::Port>) {
-    let requirements = VirtioMmioStartup::from_parent(parent);
+impl fmt::Display for Stopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup(error) => error.fmt(formatter),
+            Self::Description => formatter.write_str("platform description refused"),
+            Self::ServicePort => formatter.write_str("service port refused"),
+            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::ServicePortClosed => formatter.write_str("service port closed"),
+        }
+    }
+}
+
+#[program_entry::component]
+fn run(requirements: VirtioMmioStartup) -> Result<(), Stopped> {
     // Сессия `Platform` держит окна и линии транспортов до конца процесса.
-    let platform = match requirements.platform.open() {
-        Ok(platform) => platform.client(),
-        Err(error) => return log_fmt(format_args!("{error}")),
-    };
-    let Some(mut bus) = Bus::take(&platform) else {
-        return log_line("platform description refused");
-    };
-    let Ok(service) = Port::create() else {
-        return log_line("service port refused");
-    };
+    let platform = requirements
+        .platform
+        .open()
+        .map_err(Stopped::Startup)?
+        .client();
+    let mut bus = Bus::take(&platform).ok_or(Stopped::Description)?;
+    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
     let sessions: &'static Sessions = Box::leak(Box::new(Sessions {
         service,
         next_badge: AtomicU64::new(0),
@@ -56,29 +59,18 @@ fn run(parent: Handle<kind::Port>) {
 
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let export_thread = spawn_owned(
-        move || {
-            let failure = serve_export::<virtio_mmio::Protocol>(&exporter, || {
-                mint_session(&sessions.service, &sessions.next_badge)
-                    .map(|minted| minted.port)
-                    .map_err(|_| SessionError::NoSpace)
-            });
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(1)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    );
-    if export_thread.is_err() {
-        return log_line("export thread refused");
-    }
+    let _ = spawn_owned(move || {
+        let failure = serve_export::<virtio_mmio::Protocol>(&exporter, || {
+            mint_session(&sessions.service, &sessions.next_badge)
+                .map(|minted| minted.port)
+                .map_err(|_| SessionError::NoSpace)
+        });
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    })
+    .map_err(|_| Stopped::ExportThread)?;
 
     log_line("started");
     bus.serve(sessions);
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(1)
+    Err(Stopped::ServicePortClosed)
 }

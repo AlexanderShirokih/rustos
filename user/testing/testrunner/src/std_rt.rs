@@ -10,9 +10,7 @@ use core::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed},
 };
 
-use runtime::{Mutex, Priority, Timeout, alloc as rt_alloc, dealloc as rt_dealloc, spawn};
-
-const STACK_SIZE: u64 = 0x4000;
+use runtime::{Mutex, Timeout, alloc as rt_alloc, dealloc as rt_dealloc, spawn};
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -118,9 +116,8 @@ fn std_rt_lock_serialises_workers() {
         *counter = 0;
     }
 
-    let threads: [_; LOCK_WORKERS as usize] = core::array::from_fn(|_| {
-        spawn(lock_worker, 0, STACK_SIZE, Priority::new(1)).expect("spawn worker")
-    });
+    let threads: [_; LOCK_WORKERS as usize] =
+        core::array::from_fn(|_| spawn(lock_worker, 0).expect("spawn worker"));
     for thread in threads {
         thread
             .join(JOIN_TIMEOUT)
@@ -132,13 +129,7 @@ fn std_rt_lock_serialises_workers() {
 }
 
 #[test_harness::test]
-fn std_rt_start_hands_out_the_bootstrap_handle_once() {
-    let root = crate::bootstrap_handle();
-    // SAFETY: номер - стартовый handle из `x0` точки входа testrunner, и владелец из
-    // `take_bootstrap` отказывается от записи через `leak`.
-    unsafe { runtime::start(root.raw()) };
-    let published = runtime::take_bootstrap().expect("bootstrap handle is published");
-    test_harness::check_eq!(published.leak().raw(), root.raw());
+fn the_bootstrap_handle_is_handed_out_once() {
     test_harness::check!(runtime::take_bootstrap().is_none());
 }
 
@@ -202,9 +193,8 @@ fn std_rt_thread_locals_are_private_and_destroyed() {
     TLS_MISMATCHES.store(0, Relaxed);
     TLS_DESTROYED.store(0, Relaxed);
 
-    let threads: [_; TLS_WORKERS as usize] = core::array::from_fn(|_| {
-        spawn(tls_worker, 0, STACK_SIZE, Priority::new(1)).expect("spawn worker")
-    });
+    let threads: [_; TLS_WORKERS as usize] =
+        core::array::from_fn(|_| spawn(tls_worker, 0).expect("spawn worker"));
     for thread in threads {
         thread
             .join(JOIN_TIMEOUT)
@@ -248,7 +238,7 @@ fn std_rt_destructor_reads_a_key_without_destructor() {
     PLAIN_KEY.store(plain as u64, Relaxed);
     PLAIN_SEEN.store(0, Relaxed);
 
-    spawn(plain_worker, recording, STACK_SIZE, Priority::new(1))
+    spawn(plain_worker, recording)
         .expect("spawn worker")
         .join(JOIN_TIMEOUT)
         .expect("worker joins before timeout");

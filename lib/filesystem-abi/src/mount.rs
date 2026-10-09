@@ -24,7 +24,7 @@ ipc::protocol! {
         /// после снятия монтирования: закрытия сессии, отказа `PeerClosed` на запрос к порту
         /// файловой системы либо монтирования другой сессии под тем же префиксом.
         call(defer) fn mount(
-            path: ipc::wire::Str<{ crate::PATH_MAX }>,
+            path: &str,
             own filesystem: ipc::wire::Session<crate::file_system::Protocol>,
         ) -> Result<MountEnded, FileSystemError>;
     }
@@ -54,12 +54,12 @@ mod tests {
         fn mount(
             &mut self,
             _frame: &MockResources,
-            path: ipc::wire::Str<'_, { crate::PATH_MAX }>,
+            path: &str,
             filesystem: FileSystemSession,
             reply: file_system_mount::mount::Reply<MockReply>,
         ) {
             self.mounted
-                .push((path.as_str().into(), filesystem.into_handle().raw()));
+                .push((path.into(), filesystem.into_handle().raw()));
             reply
                 .send(Ok::<_, FileSystemError>(MountEnded::Replaced))
                 .expect("the caller waits");
@@ -78,10 +78,7 @@ mod tests {
             });
 
             let client = file_system_mount::Client::new(client_end);
-            assert_eq!(
-                client.mount(ipc::wire::Str::new("/boot").expect("path fits"), SESSION),
-                Ok(MountEnded::Replaced)
-            );
+            assert_eq!(client.mount("/boot", SESSION), Ok(MountEnded::Replaced));
             server.join().expect("server joins");
         });
         assert_eq!(

@@ -11,7 +11,7 @@ use kernel_objects::{MemoryRegion, Resource, SessionTransport};
 use runtime::{Instant, MemoryAccess, UserMemFlags};
 use userland::USERLAND_PAGE_SIZE;
 
-use crate::filesystem::{connect, open, path, ram_session};
+use crate::filesystem::{connect, open, ram_session};
 
 const SIZES: [usize; 3] = [64, 4096, 64 * 1024];
 
@@ -182,7 +182,7 @@ fn bench_ramfs_imported_plane() {
             .create_virtual(bytes, MemoryAccess::RW)
             .expect("create imported region");
         client
-            .create_backed(path(name), region, size as u64)
+            .create_backed(name, region, size as u64)
             .expect("create backed file");
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::NONE);
         measure_frame_plane(&client, &opened, "imported", size);
@@ -204,7 +204,7 @@ fn bench_ramfs_imported_scales_with_region() {
             .create_virtual(pages * USERLAND_PAGE_SIZE, MemoryAccess::RW)
             .expect("create imported region");
         client
-            .create_backed(path(name), region, PROBE as u64)
+            .create_backed(name, region, PROBE as u64)
             .expect("create backed file");
         let opened = open(&client, name, AccessMode::ReadWrite, OpenFlags::NONE);
 

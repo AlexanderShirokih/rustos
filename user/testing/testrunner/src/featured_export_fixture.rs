@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 extern crate alloc;
 
@@ -9,15 +8,14 @@ use alloc::boxed::Box;
 use bootstrap_abi::{features, hardware, image};
 use component_startup::{Attributes, Providers, Requirements as _, component_manifest};
 use kernel_objects::Port;
-use runtime::{log_fmt, log_line, start_component};
+use runtime::{log_fmt, log_line};
+use syscall::{Handle, kind};
 
-mod fixture_start;
+mod failed;
 mod probe_protocol;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use probe_protocol::{probe, serve_probe};
-
-const LOG_TAG: &str = "featured";
 
 component_manifest! {
     struct FeaturedExportStartup {
@@ -31,11 +29,9 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
-    let requirements = FeaturedExportStartup::from_parent(parent.as_raw());
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let requirements = FeaturedExportStartup::from_parent(parent);
 
     log_opened("hardware", &requirements.hardware)?;
     log_opened("image", &requirements.images)?;
@@ -43,7 +39,7 @@ fn run(parent: &Port) -> Result<(), Failed> {
 
     let export = Port::create().map_err(|_| Failed)?;
     log_line("started");
-    serve_probe(parent.as_raw(), Box::leak(Box::new(export)))
+    serve_probe(parent, Box::leak(Box::new(export)))
 }
 
 fn log_opened<P: ipc::Protocol>(name: &str, providers: &Providers<P>) -> Result<(), Failed> {

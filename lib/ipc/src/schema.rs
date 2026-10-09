@@ -18,9 +18,13 @@ pub enum WireType {
     Int(u8),
     /// Логическое значение (один байт).
     Bool,
-    /// Bounded UTF-8 строка с границей длины `N`.
+    /// UTF-8 строка, длину которой ограничивает кадр.
+    Str,
+    /// Байты, длину которых ограничивает кадр.
+    Bytes,
+    /// UTF-8 строка владеющего значения с ёмкостью `N` байт.
     BoundedStr(usize),
-    /// Bounded байтовая строка с границей длины `N`.
+    /// Байты владеющего значения с ёмкостью `N`.
     BoundedBytes(usize),
     /// Capability: handle передаётся вне тела, в поле - индекс в handle-массиве.
     Capability,
@@ -47,15 +51,21 @@ pub const fn is_never_empty(field_type: WireType) -> bool {
         | WireType::Capability
         | WireType::Aggregate(_)
         | WireType::Result { .. } => true,
-        WireType::BoundedStr(_) | WireType::BoundedBytes(_) | WireType::Optional(_) => false,
+        WireType::Str
+        | WireType::Bytes
+        | WireType::BoundedStr(_)
+        | WireType::BoundedBytes(_)
+        | WireType::Optional(_) => false,
     }
 }
 
-/// Наибольшая длина данных одной записи поля такого типа.
+/// Наибольшая длина данных одной записи поля такого типа. Длину данных строки и байтов без
+/// ёмкости считает нулевой.
 #[must_use]
 pub const fn max_data_len(field_type: WireType) -> usize {
     match field_type {
         WireType::Uint(width) | WireType::Int(width) => width as usize,
+        WireType::Str | WireType::Bytes => 0,
         WireType::Bool | WireType::Capability => 1,
         WireType::BoundedStr(bound) | WireType::BoundedBytes(bound) => bound,
         // Агрегат передаётся вложенной записью, и её поля добавляют свои накладные расходы.
@@ -69,7 +79,8 @@ pub const fn max_data_len(field_type: WireType) -> usize {
     }
 }
 
-/// Наибольшая длина тела из записей полей таких типов, включая терминатор.
+/// Наибольшая длина тела из записей полей таких типов, включая терминатор. Длину данных строки
+/// и байтов без ёмкости считает нулевой.
 #[must_use]
 pub const fn max_body_len(fields: &[WireType]) -> usize {
     let mut total = 1;
@@ -155,6 +166,7 @@ mod tests {
             max_body_len(&[WireType::BoundedStr(16), WireType::BoundedBytes(16)]),
             1 + 2 * (3 + 16)
         );
+        assert_eq!(max_body_len(&[WireType::Str, WireType::Bytes]), 1 + 2 * 3);
         assert_eq!(max_body_len(&[]), 1);
     }
 
@@ -206,6 +218,8 @@ mod tests {
                 },
                 true,
             ),
+            (WireType::Str, false),
+            (WireType::Bytes, false),
             (WireType::BoundedStr(16), false),
             (WireType::BoundedBytes(16), false),
             (WireType::BoundedBytes(0), false),

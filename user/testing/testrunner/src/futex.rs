@@ -9,13 +9,10 @@ use core::{
 
 use kernel_objects::Signal;
 use runtime::{
-    Futex, Instant, JoinHandle, Priority, Timeout, futex_bucket, futex_wait,
-    futex_wait_interleaved, futex_wait_without_slot, futex_wake, futex_wake_all, spawn_owned,
-    thread_yield,
+    Futex, Instant, JoinHandle, Timeout, futex_bucket, futex_wait, futex_wait_interleaved,
+    futex_wait_without_slot, futex_wake, futex_wake_all, spawn_owned, thread_yield,
 };
 use syscall::SIGNALED;
-
-const STACK_SIZE: u64 = 0x4000;
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(10);
 
@@ -75,8 +72,7 @@ impl Pack {
         (0..count)
             .map(|_| {
                 let pack = Arc::clone(self);
-                spawn_owned(move || pack.wait_once(), STACK_SIZE, Priority::new(1))
-                    .expect("spawn waiter")
+                spawn_owned(move || pack.wait_once()).expect("spawn waiter")
             })
             .collect()
     }
@@ -183,21 +179,17 @@ fn wake_inside_the_park_window_is_not_lost() {
 
     let waiter = {
         let shared = Arc::clone(&shared);
-        spawn_owned(
-            move || {
-                let released = futex_wait_interleaved(&shared.futex, PARKED, PARK_LIMIT, || {
-                    shared.reached.notify_all().expect("report the window");
-                    shared
-                        .wake_done
-                        .wait(SIGNALED, JOIN_TIMEOUT)
-                        .expect("wake lands before the park");
-                });
-                shared.outcome.store(u32::from(released), Ordering::Release);
-                0
-            },
-            STACK_SIZE,
-            Priority::new(1),
-        )
+        spawn_owned(move || {
+            let released = futex_wait_interleaved(&shared.futex, PARKED, PARK_LIMIT, || {
+                shared.reached.notify_all().expect("report the window");
+                shared
+                    .wake_done
+                    .wait(SIGNALED, JOIN_TIMEOUT)
+                    .expect("wake lands before the park");
+            });
+            shared.outcome.store(u32::from(released), Ordering::Release);
+            0
+        })
         .expect("spawn waiter")
     };
 
@@ -226,25 +218,21 @@ fn baton_under_contention_completes_every_lap() {
     let runners: Vec<JoinHandle> = (0..RUNNERS)
         .map(|index| {
             let shared = Arc::clone(&shared);
-            spawn_owned(
-                move || {
-                    for _ in 0..LAPS {
-                        loop {
-                            let current = shared.turn.load(Ordering::Acquire);
-                            if current == index {
-                                break;
-                            }
-                            futex_wait(&shared.turn, current, PARK_LIMIT);
+            spawn_owned(move || {
+                for _ in 0..LAPS {
+                    loop {
+                        let current = shared.turn.load(Ordering::Acquire);
+                        if current == index {
+                            break;
                         }
-                        shared.total.fetch_add(1, Ordering::AcqRel);
-                        shared.turn.store((index + 1) % RUNNERS, Ordering::Release);
-                        futex_wake_all(&shared.turn);
+                        futex_wait(&shared.turn, current, PARK_LIMIT);
                     }
-                    0
-                },
-                STACK_SIZE,
-                Priority::new(1),
-            )
+                    shared.total.fetch_add(1, Ordering::AcqRel);
+                    shared.turn.store((index + 1) % RUNNERS, Ordering::Release);
+                    futex_wake_all(&shared.turn);
+                }
+                0
+            })
             .expect("spawn runner")
         })
         .collect();
@@ -260,17 +248,13 @@ fn a_waiter_without_a_slot_follows_the_value() {
     let pack = Pack::new();
     let waiter = {
         let pack = Arc::clone(&pack);
-        spawn_owned(
-            move || {
-                pack.ready.fetch_add(1, Ordering::AcqRel);
-                let released = futex_wait_without_slot(&pack.futex, PARKED, PARK_LIMIT);
-                pack.returned
-                    .fetch_add(u32::from(released), Ordering::AcqRel);
-                0
-            },
-            STACK_SIZE,
-            Priority::new(1),
-        )
+        spawn_owned(move || {
+            pack.ready.fetch_add(1, Ordering::AcqRel);
+            let released = futex_wait_without_slot(&pack.futex, PARKED, PARK_LIMIT);
+            pack.returned
+                .fetch_add(u32::from(released), Ordering::AcqRel);
+            0
+        })
         .expect("spawn waiter")
     };
 
@@ -325,21 +309,17 @@ fn a_wake_leaves_a_colliding_address_parked() {
         .into_iter()
         .map(|(cell, is_first)| {
             let shared = Arc::clone(&shared);
-            spawn_owned(
-                move || {
-                    shared.ready.fetch_add(1, Ordering::AcqRel);
-                    let released = futex_wait(&shared.cells[cell], PARKED, PARK_LIMIT);
-                    let outcome = if is_first {
-                        &shared.first_outcome
-                    } else {
-                        &shared.second_outcome
-                    };
-                    outcome.store(u32::from(released), Ordering::Release);
-                    0
-                },
-                STACK_SIZE,
-                Priority::new(1),
-            )
+            spawn_owned(move || {
+                shared.ready.fetch_add(1, Ordering::AcqRel);
+                let released = futex_wait(&shared.cells[cell], PARKED, PARK_LIMIT);
+                let outcome = if is_first {
+                    &shared.first_outcome
+                } else {
+                    &shared.second_outcome
+                };
+                outcome.store(u32::from(released), Ordering::Release);
+                0
+            })
             .expect("spawn waiter")
         })
         .collect();

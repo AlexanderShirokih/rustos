@@ -1,6 +1,7 @@
 //! Переполнение стека потока из EL0. Поток с малым стеком уходит в рекурсию, запись под
 //! нижней границей стека попадает на защитную страницу, и процесс завершается отказом
-//! доступа к памяти, не задев память ниже стека.
+//! доступа к памяти, не задев память ниже защитной страницы. Кадр больше страницы не
+//! перешагивает защитную страницу.
 
 use core::sync::atomic::Ordering::Relaxed;
 
@@ -13,8 +14,9 @@ use userland_loader::load_program;
 use crate::{
     fixture::program,
     thread_stack_protocol::{
-        JOIN_FAILED_EXIT_CODE, MAP_FAILED_EXIT_CODE, RECURSION_RETURNED_EXIT_CODE,
-        SPAWN_FAILED_EXIT_CODE, StackReport, THREAD_STACK_BYTES,
+        JOIN_FAILED_EXIT_CODE, LARGE_FRAME_BYTES, MAP_FAILED_EXIT_CODE,
+        RECURSION_RETURNED_EXIT_CODE, SMALL_FRAME_BYTES, SPAWN_FAILED_EXIT_CODE, StackReport,
+        THREAD_STACK_BYTES, UNKNOWN_FRAME_EXIT_CODE,
     },
 };
 
@@ -25,6 +27,18 @@ const DEEPEST_FRAME_SPAN: u64 = 512;
 
 #[test_harness::test]
 fn thread_stack_overflow_faults_on_the_guard_page() {
+    overflow_lands_on_the_guard_page(SMALL_FRAME_BYTES);
+}
+
+#[test_harness::test]
+fn thread_stack_overflow_with_large_frames_faults_on_the_guard_page() {
+    overflow_lands_on_the_guard_page(LARGE_FRAME_BYTES);
+}
+
+fn overflow_lands_on_the_guard_page(frame_bytes: usize) {
+    let frame_bytes = u64::try_from(frame_bytes).expect("frame size fits u64");
+    let stack_bytes = u64::try_from(THREAD_STACK_BYTES).expect("stack size fits u64");
+
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
@@ -32,6 +46,12 @@ fn thread_stack_overflow_faults_on_the_guard_page() {
     let mapping = region
         .map(PAGE_SIZE, UserMemFlags::ReadWrite)
         .expect("map report region");
+
+    let va = usize::try_from(mapping.va()).expect("positive va fits usize");
+    // SAFETY: map выдал RW-маппинг в страницу, и отчёт лежит в его начале. Фикстура пишет
+    // отчёт атомарными операциями.
+    let report = unsafe { &*(va as *const StackReport) };
+    report.frame_bytes.store(frame_bytes, Relaxed);
 
     let lease = region
         .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
@@ -53,19 +73,19 @@ fn thread_stack_overflow_faults_on_the_guard_page() {
             SPAWN_FAILED_EXIT_CODE,
             RECURSION_RETURNED_EXIT_CODE,
             JOIN_FAILED_EXIT_CODE,
+            UNKNOWN_FRAME_EXIT_CODE,
         ]
         .contains(&exit_code)
     );
 
-    let va = usize::try_from(mapping.va()).expect("positive va fits usize");
-    // SAFETY: map выдал RW-маппинг в страницу, отчёт лежит в его начале, а фикстура, которая
-    // писала отчёт, завершилась.
-    let report = unsafe { &*(va as *const StackReport) };
     let entry = report.entry_frame.load(Relaxed);
     let deepest = report.deepest_frame.load(Relaxed);
     test_harness::check!(entry != 0);
+    test_harness::check!(deepest != 0);
 
-    let stack_base = (entry / PAGE_SIZE + 1) * PAGE_SIZE - THREAD_STACK_BYTES;
-    test_harness::check!(deepest >= stack_base);
-    test_harness::check!(deepest < stack_base + DEEPEST_FRAME_SPAN);
+    // Фикстура не трогает буфер кадра, и буфер последнего кадра может лечь на защитную
+    // страницу, но не ниже неё. Следующий кадр не поместился над нижней границей стека.
+    let stack_base = (entry / PAGE_SIZE + 1) * PAGE_SIZE - stack_bytes;
+    test_harness::check!(deepest >= stack_base - PAGE_SIZE);
+    test_harness::check!(deepest < stack_base + frame_bytes + DEEPEST_FRAME_SPAN);
 }

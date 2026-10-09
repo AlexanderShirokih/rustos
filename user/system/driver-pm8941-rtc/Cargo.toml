@@ -20,6 +20,7 @@ kernel-objects = { workspace = true }
 component-startup = { workspace = true }
 ipc = { workspace = true }
 rtc-abi = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
 spmi-abi = { workspace = true }
 syscall = { workspace = true }

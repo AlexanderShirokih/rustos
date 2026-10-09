@@ -26,6 +26,7 @@ component-startup = { workspace = true }
 display-abi = { workspace = true }
 ipc = { workspace = true }
 platform-abi = { workspace = true }
+program-entry = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 

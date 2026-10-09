@@ -14,14 +14,12 @@ use core::{
 use kernel_objects::{Port, Resource, Signal, kind};
 use runtime::{
     JoinHandle, Priority, Timeout, UserMemFlags, handle_close, handle_duplicate, port_call,
-    port_recv, port_reply, port_send, signal_wait_one, spawn_owned, thread_exit_code,
-    thread_terminate, thread_yield,
+    port_recv, port_reply, port_send, signal_wait_one, spawn_owned, thread::Builder,
+    thread_exit_code, thread_terminate, thread_yield,
 };
 use syscall::{Handle, Rights, SIGNALED, SYSCALL_RETURN_TIMEOUT, SyscallError};
 
 use crate::stress::{SplitMix64, StressPlan, log_pass, log_seed, read_payload, write_payload};
-
-const STACK_SIZE: u64 = 0x4000;
 
 const CALLERS: usize = 3;
 const RESPONDERS: usize = 3;
@@ -314,34 +312,24 @@ fn run_brigade(seed: u64, steps: u64) {
         let caller_seed = random.next();
         let arena = Arc::clone(&arena);
         workers.push(
-            spawn_owned(
-                move || caller(&arena, index, share.max(1), caller_seed),
-                STACK_SIZE,
-                priority,
-            )
-            .expect("caller thread spawns"),
+            Builder::new()
+                .priority(priority)
+                .spawn_owned(move || caller(&arena, index, share.max(1), caller_seed))
+                .expect("caller thread spawns"),
         );
     }
     for _ in 0..RESPONDERS {
         let arena = Arc::clone(&arena);
-        workers.push(
-            spawn_owned(move || responder(&arena), STACK_SIZE, Priority::new(1))
-                .expect("responder thread spawns"),
-        );
+        workers.push(spawn_owned(move || responder(&arena)).expect("responder thread spawns"));
     }
     for _ in 0..MAPPERS {
         let arena = Arc::clone(&arena);
-        workers.push(
-            spawn_owned(move || mapper(&arena), STACK_SIZE, Priority::new(1))
-                .expect("mapper thread spawns"),
-        );
+        workers.push(spawn_owned(move || mapper(&arena)).expect("mapper thread spawns"));
     }
     for _ in 0..CHURNERS {
         let arena = Arc::clone(&arena);
-        workers.push(
-            spawn_owned(move || handle_churn(&arena), STACK_SIZE, Priority::new(1))
-                .expect("handle churn thread spawns"),
-        );
+        workers
+            .push(spawn_owned(move || handle_churn(&arena)).expect("handle churn thread spawns"));
     }
 
     await_brigade(&arena, BRIGADE as u64, seed);
@@ -410,19 +398,15 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     let mut victims: Vec<JoinHandle> = Vec::with_capacity(VICTIMS);
     for _ in 0..VICTIMS {
         victims.push(
-            spawn_owned(
-                move || {
-                    // За отметкой готовности у жертвы нет обращений к общему
-                    // состоянию процесса.
-                    VICTIMS_READY.fetch_add(1, Release);
-                    let result = port_recv(server, VICTIM_TIMEOUT);
-                    // Возврата быть не должно. У порта нет отправителей, и приём
-                    // обязан прерваться снятием.
-                    u32::from(!matches!(result, Ok(None)))
-                },
-                STACK_SIZE,
-                Priority::new(1),
-            )
+            spawn_owned(move || {
+                // За отметкой готовности у жертвы нет обращений к общему
+                // состоянию процесса.
+                VICTIMS_READY.fetch_add(1, Release);
+                let result = port_recv(server, VICTIM_TIMEOUT);
+                // Возврата быть не должно. У порта нет отправителей, и приём
+                // обязан прерваться снятием.
+                u32::from(!matches!(result, Ok(None)))
+            })
             .expect("victim thread spawns"),
         );
     }

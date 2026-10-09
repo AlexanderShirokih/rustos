@@ -17,8 +17,8 @@ use ipc::{
 };
 use kernel_objects::{Error, MemoryRegion, Port, Reply, Result, kind};
 use runtime::{
-    Instant, PortTransport, Priority, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr,
-    port_call, port_send, spawn, spawn_owned,
+    Instant, PortTransport, Timeout, handle_close, handle_duplicate, ipc_buffer_ptr, port_call,
+    port_send, spawn, spawn_owned,
 };
 use syscall::{Handle, Rights, SyscallError};
 
@@ -27,7 +27,6 @@ use crate::{
     fixture_protocol::{OP_WRITE_SLOT, REPLY_OK},
 };
 
-const STACK_SIZE: u64 = 0x4000;
 const SERVE_TIMEOUT: Timeout = Timeout::from_secs(3);
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const PARK_SETTLE: Timeout = Timeout::from_millis(100);
@@ -103,7 +102,7 @@ fn sender_is_refused_when_the_last_receiver_goes() {
     REFUSED_PARKED_CALL.store(i64::MIN, SeqCst);
     REFUSED_FRESH_CALL.store(i64::MIN, SeqCst);
 
-    let worker = spawn(refused_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
+    let worker = spawn(refused_client, 0).expect("spawn client");
     port.recv(SERVE_TIMEOUT).expect("handshake frame");
     pause(PARK_SETTLE);
 
@@ -162,12 +161,7 @@ fn badge_departs_when_a_living_client_closes_its_capability() {
         .expect("mint unbadged capability");
     LIVING_CLIENT_RESULT.store(i64::MIN, SeqCst);
 
-    let worker = spawn_owned(
-        move || living_client(badged, plain),
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn client");
+    let worker = spawn_owned(move || living_client(badged, plain)).expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("badged frame");
     test_harness::check_eq!(received_badge(), LIVING_CLIENT_BADGE.get());
@@ -202,8 +196,7 @@ fn departed_badge_waits_for_the_busy_server() {
     SERVED_CLIENT_CLOSED.store(0, SeqCst);
     SERVED_CLIENT_RESULT.store(i64::MIN, SeqCst);
 
-    let worker = spawn_owned(move || served_client(badged), STACK_SIZE, Priority::new(1))
-        .expect("spawn client");
+    let worker = spawn_owned(move || served_client(badged)).expect("spawn client");
 
     port.recv(SERVE_TIMEOUT).expect("client frame");
     test_harness::check_eq!(received_badge(), SERVED_CLIENT_BADGE.get());
@@ -306,10 +299,8 @@ fn departed_badge_names_the_session_that_left() {
     FIRST_CLIENT_RESULT.store(i64::MIN, SeqCst);
     SECOND_CLIENT_RESULT.store(i64::MIN, SeqCst);
 
-    let first_worker =
-        spawn(first_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn first client");
-    let second_worker =
-        spawn(second_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn second client");
+    let first_worker = spawn(first_client, 0).expect("spawn first client");
+    let second_worker = spawn(second_client, 0).expect("spawn second client");
 
     let mut seen = [0u64; 2];
     for slot in &mut seen {
@@ -363,7 +354,7 @@ fn a_frame_with_a_stale_handle_leaves_a_listener_serving() {
     STALE_FRAME_SEND.store(i64::MIN, SeqCst);
     STALE_FRAME_FOLLOWUP.store(i64::MIN, SeqCst);
 
-    let worker = spawn(stale_frame_client, 0, STACK_SIZE, Priority::new(1)).expect("spawn client");
+    let worker = spawn(stale_frame_client, 0).expect("spawn client");
     let server = PortTransport::new(port.as_raw());
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
     let incoming = server
@@ -399,7 +390,7 @@ fn a_failed_transfer_does_not_extend_the_receive_deadline() {
     LATE_SENDER_CAP.store(client.as_raw().raw(), SeqCst);
     LATE_SENDER_RESULT.store(i64::MIN, SeqCst);
 
-    let worker = spawn(late_stale_sender, 0, STACK_SIZE, Priority::new(1)).expect("spawn sender");
+    let worker = spawn(late_stale_sender, 0).expect("spawn sender");
     let started = Instant::now();
     let received = port.recv(DEADLINE_RECV);
     let elapsed = Instant::now().since(started);

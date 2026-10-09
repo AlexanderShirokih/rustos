@@ -17,7 +17,7 @@ use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
 use runtime::UserMemFlags;
 
 use crate::{
-    filesystem::{STRESS_VIEW, connect, mount_ram_window, path, remove_ram_directory, session_for},
+    filesystem::{STRESS_VIEW, connect, mount_ram_window, remove_ram_directory, session_for},
     stress::{SplitMix64, StressPlan, log_pass, log_seed},
 };
 
@@ -135,7 +135,7 @@ impl Run {
             run.session
                 .client
                 .open(
-                    path(directory),
+                    directory,
                     AccessMode::Read,
                     OpenFlags::CREATE | OpenFlags::DIRECTORY,
                 )
@@ -173,7 +173,7 @@ impl Run {
         let opened = self
             .session
             .client
-            .open(path(&text), AccessMode::ReadWrite, OpenFlags::CREATE)
+            .open(&text, AccessMode::ReadWrite, OpenFlags::CREATE)
             .map_err(Mismatch::refused("open with CREATE"))?;
         expect(opened.kind == NodeKind::File, "opened node is not a file")?;
         expect(
@@ -193,7 +193,7 @@ impl Run {
         let text = self.file_path();
         let known = self.files.contains_key(&text);
         let opened = self.session.client.open(
-            path(&text),
+            &text,
             AccessMode::ReadWrite,
             OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
         );
@@ -220,7 +220,7 @@ impl Run {
         let opened = self
             .session
             .client
-            .open(path(&text), AccessMode::Read, OpenFlags::NONE);
+            .open(&text, AccessMode::Read, OpenFlags::NONE);
         let Some(size) = expected else {
             return expect(
                 opened == Err(CallError::Remote(FileSystemError::NotFound)),
@@ -347,7 +347,7 @@ impl Run {
     fn unlink(&mut self) -> Step {
         let text = self.file_path();
         let known = self.files.remove(&text);
-        let removed = self.session.client.unlink(path(&text), NodeKind::File);
+        let removed = self.session.client.unlink(&text, NodeKind::File);
         let Some(content) = known else {
             return expect(
                 removed == Err(CallError::Remote(FileSystemError::NotFound)),
@@ -362,7 +362,7 @@ impl Run {
     fn rename(&mut self) -> Step {
         let from = self.file_path();
         let to = self.file_path();
-        let renamed = self.session.client.rename(path(&from), path(&to));
+        let renamed = self.session.client.rename(&from, &to);
         let Some(content) = self.files.remove(&from) else {
             return expect(
                 renamed == Err(CallError::Remote(FileSystemError::NotFound)),
@@ -417,7 +417,7 @@ impl Run {
             let opened = self
                 .session
                 .client
-                .open(path(&text), AccessMode::Read, OpenFlags::NONE)
+                .open(&text, AccessMode::Read, OpenFlags::NONE)
                 .map_err(Mismatch::refused(
                     "open of a node that outlived the session",
                 ))?;
@@ -465,7 +465,7 @@ impl Run {
             let opened = self
                 .session
                 .client
-                .open(path(&text), AccessMode::Read, OpenFlags::NONE)
+                .open(&text, AccessMode::Read, OpenFlags::NONE)
                 .map_err(Mismatch::refused("open of a node of the tree"))?;
             expect(
                 opened.size == content.len() as u64,
@@ -503,7 +503,7 @@ impl Run {
         for (text, expected) in files.chain(directories) {
             self.session
                 .client
-                .unlink(path(text), expected)
+                .unlink(text, expected)
                 .map_err(Mismatch::refused("unlink of the window"))?;
         }
         Ok(())
@@ -513,7 +513,7 @@ impl Run {
         let opened = self
             .session
             .client
-            .open(path(text), AccessMode::Read, OpenFlags::DIRECTORY)
+            .open(text, AccessMode::Read, OpenFlags::DIRECTORY)
             .map_err(Mismatch::refused("open of a directory"))?;
         let mut listed = self.walk(opened.fd)?;
         self.session

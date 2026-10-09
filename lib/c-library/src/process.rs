@@ -36,7 +36,7 @@ unsafe extern "Rust" {
 #[unsafe(no_mangle)]
 extern "C" fn _start(bootstrap: u32) -> ! {
     if let Some(parent) = NonZeroU32::new(bootstrap) {
-        runtime::start_component(Handle::from_abi(parent), "");
+        runtime::start_component(Handle::from_abi(parent));
     }
     // SAFETY: точка входа исполняется один раз и получает значение `x0` точки входа.
     unsafe { runtime::start(bootstrap) };

@@ -4,10 +4,9 @@
 use core::num::NonZeroU32;
 
 use kernel_objects::{Signal, kind, wait_any};
-use runtime::{Priority, Timeout, signal_set, spawn};
+use runtime::{Timeout, signal_set, spawn};
 use syscall::{Handle, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem, WakeCount};
 
-const STACK_SIZE: u64 = 0x4000;
 const WAKE_TIMEOUT: Timeout = Timeout::from_secs(5);
 const WORKER_DELAY: Timeout = Timeout::from_millis(50);
 
@@ -43,8 +42,7 @@ fn wait_blocks_until_another_thread_signals() {
     let signal = Signal::create().expect("signal create must succeed");
     let raw = signal.as_raw().raw() as usize;
 
-    let worker =
-        spawn(delayed_signaler, raw, STACK_SIZE, Priority::new(1)).expect("spawn signaler");
+    let worker = spawn(delayed_signaler, raw).expect("spawn signaler");
 
     test_harness::check!(signal.wait(SIGNALED, Timeout::POLL).is_err());
 
@@ -80,8 +78,7 @@ fn wait_many_blocks_until_another_thread_signals() {
     let target = Signal::create().expect("target signal create");
     let raw = target.as_raw().raw() as usize;
 
-    let worker =
-        spawn(delayed_signaler, raw, STACK_SIZE, Priority::new(1)).expect("spawn signaler");
+    let worker = spawn(delayed_signaler, raw).expect("spawn signaler");
 
     let items = [
         WaitItem::new(idle.as_raw(), SIGNALED),

@@ -10,10 +10,7 @@ use filesystem_abi::{
     AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
     Opened, PATH_MAX, Path, Written, file_system, rebase,
 };
-use ipc::{
-    IntoWireValue,
-    wire::{Cap, Str},
-};
+use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, IssuedHandle, MemoryRegion, OwnedHandle, Port, Resource, kind};
 use runtime::{MemoryAccess, MutexGuard};
 
@@ -49,10 +46,10 @@ pub(crate) struct Serving<'a> {
 
 fn scoped<'a>(
     scope: &str,
-    tail: Str<'a, PATH_MAX>,
+    tail: &'a str,
     out: &'a mut [u8; PATH_MAX],
 ) -> Result<Path<'a>, FileSystemError> {
-    let tail = Path::new(tail.as_str())?;
+    let tail = Path::new(tail)?;
     if scope.is_empty() {
         return Ok(tail);
     }
@@ -61,12 +58,12 @@ fn scoped<'a>(
 
 fn scoped_entry<'a>(
     scope: &str,
-    tail: Str<'a, PATH_MAX>,
+    tail: &'a str,
     out: &'a mut [u8; PATH_MAX],
 ) -> Result<Path<'a>, FileSystemError> {
     // Корень окна - запись каталога над ним. Операция над именем его не называет. Корень
     // монтирования у сессии без окна отвергает бекенд.
-    if !scope.is_empty() && Path::new(tail.as_str())?.is_root() {
+    if !scope.is_empty() && Path::new(tail)?.is_root() {
         return Err(FileSystemError::InvalidPath);
     }
     scoped(scope, tail, out)
@@ -216,11 +213,7 @@ impl Serving<'_> {
         Ok(slice)
     }
 
-    fn mint_root(
-        &mut self,
-        client: ClientId,
-        path: Str<'_, PATH_MAX>,
-    ) -> Result<Port, FileSystemError> {
+    fn mint_root(&mut self, client: ClientId, path: &str) -> Result<Port, FileSystemError> {
         let mut full = [0; PATH_MAX];
         let (backend, _, session) = self.backend_stores_session(client)?;
         let root = scoped(&session.attachment().scope, path, &mut full)?;
@@ -247,7 +240,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
     fn open(
         &mut self,
         delivery: &Delivery,
-        path: Str<'_, PATH_MAX>,
+        path: &str,
         mode: AccessMode,
         flags: OpenFlags,
     ) -> Result<Opened, FileSystemError> {
@@ -256,7 +249,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         let (backend, stores, session) = self.backend_stores_session(client)?;
         let scope = &session.attachment().scope;
         // Корень окна - запись каталога над ним. Сессия его открывает, но не создаёт.
-        let names_window_root = !scope.is_empty() && Path::new(path.as_str())?.is_root();
+        let names_window_root = !scope.is_empty() && Path::new(path)?.is_root();
         let path = scoped(scope, path, &mut full)?;
         if mode.writable() && !backend.is_mutable() {
             return Err(FileSystemError::ReadOnly);
@@ -373,8 +366,8 @@ impl file_system::Service<Delivery> for Serving<'_> {
     fn rename(
         &mut self,
         delivery: &Delivery,
-        from: Str<'_, PATH_MAX>,
-        to: Str<'_, PATH_MAX>,
+        from: &str,
+        to: &str,
     ) -> Result<u32, FileSystemError> {
         let (mut full_from, mut full_to) = ([0; PATH_MAX], [0; PATH_MAX]);
         let (backend, stores, session) = self.backend_stores_session(client_of(delivery)?)?;
@@ -388,7 +381,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
     fn unlink(
         &mut self,
         delivery: &Delivery,
-        path: Str<'_, PATH_MAX>,
+        path: &str,
         expected: NodeKind,
     ) -> Result<u32, FileSystemError> {
         let mut full = [0; PATH_MAX];
@@ -401,7 +394,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
     fn create_backed(
         &mut self,
         delivery: &Delivery,
-        path: Str<'_, PATH_MAX>,
+        path: &str,
         region: IssuedHandle<kind::MemoryRegion>,
         size: u64,
     ) -> Result<u32, FileSystemError> {
@@ -443,7 +436,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
     fn open_root(
         &mut self,
         delivery: &Delivery,
-        path: Str<'_, PATH_MAX>,
+        path: &str,
     ) -> impl IntoWireValue<
         Delivery,
         Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,

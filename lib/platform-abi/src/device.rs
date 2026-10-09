@@ -1,5 +1,3 @@
-use ipc::wire::Str;
-
 /// Предельная длина [`DeviceId`] в байтах.
 pub const DEVICE_ID_MAX: usize = 255;
 
@@ -27,13 +25,6 @@ impl DeviceId {
         let mut id = Self::EMPTY;
         id.append(path)?;
         Some(id)
-    }
-
-    /// Путь как строка запросов протокола `Platform`. Длина пути не превышает [`DEVICE_ID_MAX`],
-    /// и строка совпадает с [`DeviceId::as_str`].
-    #[must_use]
-    pub fn as_wire(&self) -> Str<'_, DEVICE_ID_MAX> {
-        Str::truncating(self.as_str())
     }
 
     /// Путь целиком, включая ведущий разделитель.

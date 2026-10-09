@@ -13,6 +13,14 @@ use crate::{
     sources::rust_sources,
 };
 
+const EXPANSION_DEPENDENCIES: &[(&str, &[&str])] = &[
+    (
+        "program_entry::component",
+        &["runtime", "component_startup"],
+    ),
+    ("program_entry::process", &["runtime", "kernel_objects"]),
+];
+
 pub(super) fn unused_dependencies(metas: &[CargoMetadata], root: &Path) -> Result<Vec<String>> {
     let lib_names = lib_target_names(metas);
     let mut findings = BTreeSet::new();
@@ -39,7 +47,7 @@ pub(super) fn unused_dependencies(metas: &[CargoMetadata], root: &Path) -> Resul
                         .get(dep.name.as_str())
                         .map_or(dep.name.as_str(), |name| name.as_str())
                 });
-                if !mentions_crate(&sources, referenced) {
+                if !mentions_crate(&sources, referenced) && !expansion_uses(&sources, referenced) {
                     findings.insert(format!(
                         "{}: dependency `{}` is declared but never used in {}",
                         pkg.name,
@@ -80,6 +88,13 @@ fn mentions_crate(sources: &[String], dep: &str) -> bool {
     })
 }
 
+fn expansion_uses(sources: &[String], dep: &str) -> bool {
+    let ident = dep.replace('-', "_");
+    EXPANSION_DEPENDENCIES
+        .iter()
+        .any(|(macros, crates)| crates.contains(&ident.as_str()) && mentions_crate(sources, macros))
+}
+
 fn is_ident_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
@@ -98,6 +113,19 @@ mod tests {
         let mentioned = ["ipc-test", "ipc", "test"].map(|name| mentions_crate(&sources, name));
 
         assert_eq!(mentioned, [true, false, false]);
+    }
+
+    #[test]
+    fn a_crate_reached_by_an_attribute_expansion_is_used() {
+        let component = vec!["#[program_entry::component]\nfn run() {}\n".to_string()];
+        let process = vec!["#[program_entry::process]\nfn run() {}\n".to_string()];
+        let crates = ["runtime", "component_startup", "kernel_objects", "syscall"];
+
+        let by_component = crates.map(|name| expansion_uses(&component, name));
+        let by_process = crates.map(|name| expansion_uses(&process, name));
+
+        assert_eq!(by_component, [true, true, false, false]);
+        assert_eq!(by_process, [true, false, true, false]);
     }
 
     #[test]

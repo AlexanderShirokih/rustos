@@ -1,14 +1,8 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
-
-use component_startup::{Requirements as _, StartupError, StartupFailure, component_manifest};
-use runtime::{Timeout, process_exit};
-use syscall::{Handle, kind};
+use component_startup::{StartupError, StartupFailure, component_manifest};
+use runtime::{ExitCode, FAILED_EXIT_CODE, Timeout};
 
 mod probe_protocol;
 mod startup_exit_protocol;
@@ -16,7 +10,6 @@ mod startup_exit_protocol;
 use probe_protocol::probe;
 use startup_exit_protocol::{FIRST_IPC_FAILED_EXIT_CODE, SECOND_SESSION_REFUSED_EXIT_CODE};
 
-const FAILED_EXIT_CODE: u64 = 1;
 const PING: u64 = 7;
 const PING_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -29,30 +22,22 @@ component_manifest! {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    process_exit(exit_code(&TwoRequirementsStartup::from_parent(parent)))
-}
-
-fn exit_code(requirements: &TwoRequirementsStartup) -> u64 {
-    let first = match requirements.first.open() {
+#[program_entry::component]
+fn run(requirements: TwoRequirementsStartup) -> ExitCode {
+    let TwoRequirementsStartup { first, second, .. } = requirements;
+    let first = match first.open() {
         Ok(first) => first.client().with_wait(PING_TIMEOUT),
         Err(StartupError {
             requirement: "first",
             failure: StartupFailure::Ipc(_),
-        }) => return u64::from(FIRST_IPC_FAILED_EXIT_CODE),
-        Err(_) => return FAILED_EXIT_CODE,
+        }) => return ExitCode::from(FIRST_IPC_FAILED_EXIT_CODE),
+        Err(_) => return ExitCode::new(FAILED_EXIT_CODE),
     };
-    match requirements.second.open() {
+    match second.open() {
         Err(StartupError {
             requirement: "second",
             failure: StartupFailure::Refused,
-        }) if first.ping(PING) == Ok(PING) => u64::from(SECOND_SESSION_REFUSED_EXIT_CODE),
-        _ => FAILED_EXIT_CODE,
+        }) if first.ping(PING) == Ok(PING) => ExitCode::from(SECOND_SESSION_REFUSED_EXIT_CODE),
+        _ => ExitCode::new(FAILED_EXIT_CODE),
     }
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(FAILED_EXIT_CODE)
 }

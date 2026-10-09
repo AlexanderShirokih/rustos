@@ -1,14 +1,14 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
 use filesystem_abi::file_system;
 use kernel_objects::Port;
+use syscall::{Handle, kind};
 
-mod fixture_start;
+mod failed;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 
 component_manifest! {
     struct UnresponsiveFileSystemStartup {
@@ -17,10 +17,9 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    let requirements = UnresponsiveFileSystemStartup::from_parent(parent.as_raw());
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let requirements = UnresponsiveFileSystemStartup::from_parent(parent);
     let service = Port::create().map_err(|_| Failed)?;
     let _ = serve_export::<file_system::Protocol>(&requirements.parent, whole_export(&service));
     Err(Failed)

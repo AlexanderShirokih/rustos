@@ -1,33 +1,20 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
-
-runtime::process_heap!();
-
-use core::panic::PanicInfo;
 
 use kernel_objects::Port;
-use runtime::{Priority, Timeout, process_exit, spawn_owned};
+use runtime::{ExitCode, Timeout, spawn_owned};
 use syscall::{Handle, kind};
 
-mod startup_exit_protocol;
+const HELPER_SURVIVED_EXIT_CODE: u32 = 8;
 
-use startup_exit_protocol::PANIC_EXIT_CODE;
-
-const HELPER_STACK_SIZE: u64 = 0x4000;
-
-const FAILED_EXIT_CODE: u64 = 1;
-
-#[unsafe(no_mangle)]
-pub extern "C" fn _start(_parent: Handle<kind::Port>) -> ! {
-    let Ok(own) = Port::create() else {
-        process_exit(FAILED_EXIT_CODE)
-    };
-    if spawn_owned(helper, HELPER_STACK_SIZE, Priority::new(1)).is_err() {
-        process_exit(FAILED_EXIT_CODE)
+#[program_entry::component]
+fn run(_parent: Handle<kind::Port>) -> ExitCode {
+    if let Ok(own) = Port::create()
+        && spawn_owned(helper).is_ok()
+    {
+        let _ = own.recv(Timeout::INFINITE);
     }
-    let _ = own.recv(Timeout::INFINITE);
-    process_exit(FAILED_EXIT_CODE)
+    ExitCode::from(HELPER_SURVIVED_EXIT_CODE)
 }
 
 #[expect(
@@ -36,9 +23,4 @@ pub extern "C" fn _start(_parent: Handle<kind::Port>) -> ! {
 )]
 fn helper() -> u32 {
     panic!("helper thread panics")
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
-    process_exit(u64::from(PANIC_EXIT_CODE))
 }

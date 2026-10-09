@@ -13,10 +13,8 @@ use ipc::{
     wire::{Header, MESSAGE_INLINE_MAX, MessageBuf},
 };
 use kernel_objects::{Delivery, IssuedHandle, OwnedHandle, Port, Signal, kind};
-use runtime::{PortTransport, Priority, Timeout, port_send, signal_set, spawn_owned};
+use runtime::{PortTransport, Timeout, port_send, signal_set, spawn_owned};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount};
-
-const STACK_SIZE: u64 = 0x4000;
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -106,12 +104,7 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
         answered: AtomicI64::new(i64::MIN),
     };
     let exchange_addr = core::ptr::from_ref(&exchange) as usize;
-    let worker = spawn_owned(
-        move || sending_worker(exchange_addr, carried),
-        STACK_SIZE,
-        Priority::new(1),
-    )
-    .expect("spawn worker");
+    let worker = spawn_owned(move || sending_worker(exchange_addr, carried)).expect("spawn worker");
 
     let transport = PortTransport::new(&service.server);
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];

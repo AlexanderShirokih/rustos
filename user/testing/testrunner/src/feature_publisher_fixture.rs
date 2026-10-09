@@ -1,18 +1,15 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use bootstrap_abi::features;
 use component_startup::{Requirements as _, component_manifest};
-use ipc::wire::Str;
 use kernel_objects::Port;
-use runtime::{Timeout, log_fmt, start_component};
+use runtime::{Timeout, log_fmt};
+use syscall::{Handle, kind};
 
-mod fixture_start;
+mod failed;
 
-use fixture_start::{Failed, fixture_start};
-
-const LOG_TAG: &str = "publisher";
+use failed::Failed;
 
 const FEATURE: &str = "testrunner,featured";
 
@@ -22,16 +19,14 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
-    let features = FeaturePublisherStartup::from_parent(parent.as_raw())
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let features = FeaturePublisherStartup::from_parent(parent)
         .features
         .open()
         .map_err(|_| Failed)?
         .client();
-    let feature = Str::new(FEATURE).ok_or(Failed)?;
+    let feature = FEATURE;
 
     let first = features.publish(feature);
     let again = features.publish(feature);

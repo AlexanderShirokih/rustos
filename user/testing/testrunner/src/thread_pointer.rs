@@ -6,9 +6,8 @@ use core::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use runtime::{Priority, Timeout, spawn, thread_yield};
+use runtime::{Timeout, spawn, thread_yield};
 
-const WORKER_STACK_SIZE: u64 = 0x4000;
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const MAIN_POINTER: u64 = 0xA5A5_5A5A_0000_0001;
 const WORKER_POINTER_BASE: u64 = 0x5A5A_A5A5_0000_0010;
@@ -82,9 +81,8 @@ fn thread_pointer_is_private_to_the_thread() {
     let arg = (&raw const shared) as usize;
 
     set_thread_pointer(MAIN_POINTER);
-    let threads: [_; WORKERS] = core::array::from_fn(|_| {
-        spawn(pointer_worker, arg, WORKER_STACK_SIZE, Priority::new(1)).expect("spawn worker")
-    });
+    let threads: [_; WORKERS] =
+        core::array::from_fn(|_| spawn(pointer_worker, arg).expect("spawn worker"));
 
     let mut main_mismatches = 0u32;
     for _ in 0..RECHECK_ROUNDS {

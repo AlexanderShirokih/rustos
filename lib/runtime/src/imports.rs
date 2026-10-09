@@ -3,18 +3,17 @@
 use component_abi::{
     Attributes, LOG_REQUIREMENT, STARTUP_REQUEST_TIMEOUT, SessionRequirement, component_startup,
 };
-use ipc::wire::{Bytes, Str};
 use log_abi::log;
 use syscall::{Handle, kind};
 
 use crate::svc::{IssuedHandle, PortTransport};
 
 /// Запрашивает у родителя по стартовой сессии `parent` неявные импорты компонента и ставит их в
-/// состояние процесса. Журнал получает вывод процесса с тегом `tag`. Отказ родителя оставляет
-/// процесс без импорта. Handle стартовой сессии остаётся у вызывающего.
-pub fn start_component(parent: Handle<kind::Port>, tag: &'static str) {
+/// состояние процесса. Отказ родителя оставляет процесс без импорта. Handle стартовой сессии
+/// остаётся у вызывающего.
+pub fn start_component(parent: Handle<kind::Port>) {
     if let Some(session) = import::<log::Protocol>(parent, LOG_REQUIREMENT) {
-        crate::log::install(session, tag);
+        crate::log::install(session);
     }
 }
 
@@ -23,12 +22,13 @@ fn import<P: ipc::Protocol>(
     name: &str,
 ) -> Option<IssuedHandle<kind::Port>> {
     let requirement = SessionRequirement {
-        name: Str::new(name)?,
-        protocol: Str::new(P::ID)?,
+        name,
+        protocol: P::ID,
     };
-    let attributes = Bytes::new(Attributes::empty().as_bytes())?;
 
     let requests = component_startup::Client::new(PortTransport::new(parent))
         .with_wait(STARTUP_REQUEST_TIMEOUT);
-    requests.session(requirement, attributes).ok()
+    requests
+        .session(requirement, Attributes::empty().as_bytes())
+        .ok()
 }

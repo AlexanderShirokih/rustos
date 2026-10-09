@@ -1,25 +1,23 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 extern crate alloc;
 
 use alloc::boxed::Box;
 
 use component_startup::{Requirements as _, component_manifest};
-use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, PATH_MAX, file_system, namespace};
-use ipc::{CallError, wire::Str};
+use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, file_system, namespace};
+use ipc::CallError;
 use kernel_objects::{Port, Resource, SessionTransport};
-use runtime::{MemoryAccess, Timeout, log_line, start_component};
+use runtime::{MemoryAccess, Timeout, log_line};
+use syscall::{Handle, kind};
 use userland::USERLAND_PAGE_SIZE;
 
-mod fixture_start;
+mod failed;
 mod probe_protocol;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use probe_protocol::{probe, serve_probe};
-
-const LOG_TAG: &str = "holder";
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -33,15 +31,13 @@ component_manifest! {
     }
 }
 
-fixture_start!(run);
-
-fn run(parent: &Port) -> Result<(), Failed> {
-    start_component(parent.as_raw(), LOG_TAG);
-    let files = BudgetHolderStartup::from_parent(parent.as_raw())
+#[program_entry::component]
+fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
+    let files = BudgetHolderStartup::from_parent(parent)
         .files
         .open()
         .map_err(|_| Failed)?;
-    let root = Str::new("/tmp").ok_or(Failed)?;
+    let root = "/tmp";
     let session = files
         .client()
         .with_wait(CALL_TIMEOUT)
@@ -50,14 +46,14 @@ fn run(parent: &Port) -> Result<(), Failed> {
     let files = kernel_objects::Session::from_session(session)
         .client()
         .with_wait(CALL_TIMEOUT);
-    let started_path = Str::new(STARTED_PATH).ok_or(Failed)?;
-    let held_path = Str::new(HELD_PATH).ok_or(Failed)?;
+    let started_path = STARTED_PATH;
+    let held_path = HELD_PATH;
 
     match files.open(started_path, AccessMode::Read, OpenFlags::NONE) {
         Ok(_) => {
             let export = Port::create().map_err(|_| Failed)?;
             log_line("started");
-            serve_probe(parent.as_raw(), Box::leak(Box::new(export)))
+            serve_probe(parent, Box::leak(Box::new(export)))
         }
         Err(CallError::Remote(FileSystemError::NotFound)) => {
             hold_budget(&files, started_path, held_path)?;
@@ -70,8 +66,8 @@ fn run(parent: &Port) -> Result<(), Failed> {
 
 fn hold_budget(
     files: &file_system::Client<SessionTransport>,
-    started: Str<'_, PATH_MAX>,
-    held: Str<'_, PATH_MAX>,
+    started: &str,
+    held: &str,
 ) -> Result<(), Failed> {
     files
         .open(started, AccessMode::ReadWrite, OpenFlags::CREATE)

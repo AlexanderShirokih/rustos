@@ -3,10 +3,10 @@
 //! Первая заявка привязывает GPU, уход последней сессии освобождает его.
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{panic::PanicInfo, sync::atomic::AtomicU64};
+use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    MintedSession, Requirements as _, SessionError, component_manifest, mint_session, serve_export,
+    MintedSession, SessionError, StartupError, component_manifest, mint_session, serve_export,
 };
 use display_abi::{Area, DisplayDimension, DisplayError, display};
 use ipc::{
@@ -15,27 +15,40 @@ use ipc::{
 };
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport};
 use runtime::{
-    MemoryAccess, Mutex, PortTransport, Priority, Timeout, UserMemFlags, log_fmt, log_line,
-    process_exit, spawn_owned, start_component,
+    FAILED_EXIT_CODE, MemoryAccess, Mutex, PortTransport, Timeout, UserMemFlags, exit, log_fmt,
+    log_line, spawn_owned,
 };
-use syscall::{Handle, PAGE_SIZE, Rights, kind};
+use syscall::{PAGE_SIZE, Rights, kind};
 use virtio_mmio_abi::virtio_mmio;
 
 use crate::device::Gpu;
 
-const LOG_TAG: &str = "virtio-gpu";
-
-const EXPORT_THREAD_STACK_SIZE: u64 = 0x10000;
-
 const BUS_CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
-
-runtime::process_heap!();
 
 component_manifest! {
     struct VirtioGpuStartup {
         requirements: { virtio: session(virtio_mmio::Protocol) },
         features: ["virtio,mmio"],
         exports: [display::Protocol],
+    }
+}
+
+#[derive(Debug)]
+enum Stopped {
+    Startup(StartupError),
+    ServicePort,
+    ExportThread,
+    ServicePortClosed,
+}
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Startup(error) => error.fmt(formatter),
+            Self::ServicePort => formatter.write_str("service port refused"),
+            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::ServicePortClosed => formatter.write_str("service port closed"),
+        }
     }
 }
 
@@ -182,23 +195,15 @@ impl display::Service<Delivery> for Served<'_> {
     }
 }
 
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn _start(parent: Handle<kind::Port>) -> ! {
-    start_component(parent, LOG_TAG);
-    run(parent);
-    process_exit(1)
-}
-
-fn run(parent: Handle<kind::Port>) {
-    let requirements = VirtioGpuStartup::from_parent(parent);
-    let bus = match requirements.virtio.open() {
-        Ok(bus) => bus.client().with_wait(BUS_CALL_TIMEOUT),
-        Err(error) => return log_fmt(format_args!("{error}")),
-    };
-    let Ok(service) = Port::create() else {
-        return log_line("service port refused");
-    };
+#[program_entry::component]
+fn run(requirements: VirtioGpuStartup) -> Result<(), Stopped> {
+    let bus = requirements
+        .virtio
+        .open()
+        .map_err(Stopped::Startup)?
+        .client()
+        .with_wait(BUS_CALL_TIMEOUT);
+    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         service,
         next_badge: AtomicU64::new(0),
@@ -207,25 +212,14 @@ fn run(parent: Handle<kind::Port>) {
 
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let export_thread = spawn_owned(
-        move || {
-            let failure = serve_export::<display::Protocol>(&exporter, || shared.open(&bus));
-            log_fmt(format_args!("export stopped: {failure:?}"));
-            process_exit(1)
-        },
-        EXPORT_THREAD_STACK_SIZE,
-        Priority::new(1),
-    );
-    if export_thread.is_err() {
-        return log_line("export thread refused");
-    }
+    let _ = spawn_owned(move || {
+        let failure = serve_export::<display::Protocol>(&exporter, || shared.open(&bus));
+        log_fmt(format_args!("export stopped: {failure:?}"));
+        exit(FAILED_EXIT_CODE)
+    })
+    .map_err(|_| Stopped::ExportThread)?;
 
     log_line("started");
     shared.serve();
-}
-
-#[panic_handler]
-fn panic(info: &PanicInfo<'_>) -> ! {
-    log_fmt(format_args!("panic: {info}"));
-    process_exit(1)
+    Err(Stopped::ServicePortClosed)
 }

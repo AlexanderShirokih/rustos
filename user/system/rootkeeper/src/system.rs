@@ -7,8 +7,8 @@ use core::{
 };
 
 use bootstrap_abi::{
-    FEATURE_MAX_BYTES, FeaturesError, ImageError, LOG_MESSAGE_MAX, bootstrap, features, hardware,
-    image,
+    FEATURE_MAX_BYTES, FeaturesError, ImageError, bootstrap, features, hardware, image,
+    log_message_max,
 };
 use component_abi::{
     AcceptError, AttributeSet, Attributes, ComponentManifest, Found, LOG_REQUIREMENT,
@@ -18,14 +18,14 @@ use component_abi::{
 };
 use ipc::{
     IntoWireValue, Listener as _, Protocol as _, RecvError,
-    wire::{Cap, FIELD_DATA_MAX, MESSAGE_INLINE_MAX, Str},
+    wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
     Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, kind,
 };
 use log_abi::{LogBuffer, log};
 use managed_component::{Children, Departure, GrantError, Outcome, Purpose, Status};
-use runtime::{Mutex, PortTransport, Timeout};
+use runtime::{Mutex, PortTransport, Termination, Timeout};
 use syscall::{Handle, ProcessName, Rights};
 use userland::{DecodedProgram, ProgramView};
 use userland_image::{ExportIndex, IndexedExport, PlanComponent};
@@ -53,14 +53,15 @@ pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
 type Debt = IssuedHandle<kind::Reply>;
 
-/// Код, с которым завершается процесс rootkeeper.
+/// Код, с которым завершается процесс rootkeeper. Паника завершает его кодом
+/// `runtime::FAILED_EXIT_CODE`, равным коду [`Stopped::Startup`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
     /// Relay журнала не поднялся либо ресурса композиции не хватило.
     Startup = 1,
     /// Userland-образ, план загрузки либо программа записи недоступны.
     BadImage = 2,
-    /// Главный поток вышел из оборота либо паниковал.
+    /// Главный поток вышел из оборота.
     Subsystem = 3,
 }
 
@@ -178,9 +179,9 @@ pub struct RootSystem<'a> {
     pub(crate) mounts: MountThreads,
 }
 
-impl From<Stopped> for u64 {
-    fn from(stopped: Stopped) -> Self {
-        stopped as Self
+impl Termination for Stopped {
+    fn report(self) -> i32 {
+        self as i32
     }
 }
 
@@ -826,9 +827,9 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         reply: component_startup::session::Reply<Debt>,
     ) {
         let badge = frame.badge;
-        let name = requirement.name.as_str();
-        let protocol = requirement.protocol.as_str();
-        let Some(attributes) = Attributes::decode(attributes.as_bytes()) else {
+        let name = requirement.name;
+        let protocol = requirement.protocol;
+        let Some(attributes) = Attributes::decode(attributes) else {
             let _ = reply.send(Err::<Port, _>(SessionError::Refused));
             return;
         };
@@ -863,10 +864,9 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
     fn accept(
         &mut self,
         frame: &Delivery,
-        export: Str<'_, { PROTOCOL_ID_MAX }>,
+        export: &str,
         reply: component_startup::accept::Reply<Debt>,
     ) {
-        let export = export.as_str();
         let provider = match self.children.caller(frame.badge) {
             Some(Holder::Record(record))
                 if self
@@ -893,9 +893,9 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         requirement: SessionRequirement<'_>,
         attributes: QueryAttributes<'_>,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
-        let name = requirement.name.as_str();
-        let protocol = requirement.protocol.as_str();
-        let attributes = Attributes::decode(attributes.as_bytes()).ok_or(SessionError::Refused)?;
+        let name = requirement.name;
+        let protocol = requirement.protocol;
+        let attributes = Attributes::decode(attributes).ok_or(SessionError::Refused)?;
         let (mode, _) = self.declared(self.children.caller(frame.badge), name, protocol)?;
         if mode != RequirementMode::All {
             return Err(SessionError::Refused);
@@ -1013,16 +1013,10 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
 }
 
 impl features::Service<Delivery> for RootSystem<'_> {
-    fn publish(
-        &mut self,
-        frame: &Delivery,
-        feature: Str<'_, { FIELD_DATA_MAX }>,
-    ) -> Result<(), FeaturesError> {
+    fn publish(&mut self, frame: &Delivery, feature: &str) -> Result<(), FeaturesError> {
         let Some(Holder::Features(publisher)) = self.children.caller(frame.badge) else {
             return Err(FeaturesError::Invalid);
         };
-
-        let feature = feature.as_str();
 
         if feature.is_empty() || feature.len() > FEATURE_MAX_BYTES {
             return Err(FeaturesError::Invalid);
@@ -1135,7 +1129,7 @@ fn only<'a>(
 }
 
 pub(crate) fn log_line(kernel: Handle<kind::Port>, line: Arguments<'_>) {
-    let mut message = LogBuffer::<LOG_MESSAGE_MAX>::new();
+    let mut message = LogBuffer::<{ log_message_max(LOG_TAG) }>::new();
     let _ = message.write_fmt(line);
     let _ = bootstrap::Client::new(PortTransport::new(kernel)).log_str(LOG_TAG, message.as_str());
 }

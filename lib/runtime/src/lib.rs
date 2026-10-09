@@ -36,7 +36,10 @@ pub use futex::{
 pub use heap::{ProcessHeap, alloc, dealloc};
 pub use imports::start_component;
 pub use log::{fmt as log_fmt, install as install_log, line as log_line};
-pub use process::{exit, metering_handle, start, take_bootstrap};
+pub use process::{
+    ExitCode, FAILED_EXIT_CODE, SUCCESS_EXIT_CODE, Termination, exit, finish, metering_handle,
+    panic, set_panic_hook, start, take_bootstrap,
+};
 pub use sync::{Condvar, Mutex, MutexGuard, RawCondvar, RawMutex};
 pub use syscall::{
     Handle, MemoryAccess, MemoryProfile, ObjectKind, Priority, Timeout, UserMemFlags, kind,

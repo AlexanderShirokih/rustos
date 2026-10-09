@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![allow(unsafe_code)]
 
 use bootstrap_abi::bootstrap;
 use ipc::CallError;
@@ -8,14 +7,13 @@ use kernel_objects::{MemoryRegion, Port};
 use runtime::PortTransport;
 use syscall::HANDLE_TABLE_CAPACITY;
 
-mod fixture_start;
+mod failed;
 mod handle_table_fill;
 
-use fixture_start::{Failed, fixture_start};
+use failed::Failed;
 use handle_table_fill::fill_handle_table;
 
-fixture_start!(run);
-
+#[program_entry::process]
 fn run(kernel: &Port) -> Result<(), Failed> {
     let client = bootstrap::Client::new(PortTransport::new(kernel));
     let spare = fill_handle_table().ok_or(Failed)?;
