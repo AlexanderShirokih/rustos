@@ -27,6 +27,7 @@ members = [
     "testing/c-selftest",
     "testing/cxx-exit",
     "testing/cxx-selftest",
+    "testing/sqlite-selftest",
     "testing/std-selftest",
     "testing/testrunner",
     "../lib/c-library",
@@ -35,6 +36,7 @@ members = [
     "../lib/filesystem-server",
     "../lib/log-relay",
     "../lib/managed-component",
+    "../lib/sqlite",
     "../lib/userland-loader",
     "../lib/virtio-driver",
 ]
@@ -60,6 +62,7 @@ filesystem-server = { path = "../lib/filesystem-server" }
 log-relay = { path = "../lib/log-relay" }
 managed-component = { path = "../lib/managed-component" }
 runtime = { path = "../lib/runtime" }
+sqlite = { path = "../lib/sqlite" }
 userland-loader = { path = "../lib/userland-loader" }
 virtio-driver = { path = "../lib/virtio-driver" }
 

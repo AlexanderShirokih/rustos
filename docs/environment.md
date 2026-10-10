@@ -32,12 +32,13 @@ cargo install cargo-binutils
 sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build cmake unzip xz-utils
 ```
 
-`clang` должен быть доступен в `PATH` под именем `clang`, а компоновщик `lld` той же
-версии — под именем `ld.lld`. Минимальную версию `clang` задаёт `MIN_CLANG_MAJOR` в
+В `PATH` должны быть `clang` и компоновщик `ld.lld` той же версии.
+Минимальную версию `clang` задаёт `MIN_CLANG_MAJOR` в
 [libc_src.rs](../xtask/src/libc_src.rs).
-Архиватором библиотек C и C++ и исходников программ служит `llvm-ar`, если его
-находит `clang` (`clang -print-prog-name=llvm-ar`), иначе `ar`. Архиватор должен
-понимать ELF-объекты: GNU `ar` из binutils подходит, `ar` macOS — нет.
+Сборка использует архиватор `llvm-ar`, найденный через
+`clang -print-prog-name=llvm-ar`, либо `ar`. Архиватор должен поддерживать
+ELF-объекты. Для этой сборки подходит GNU `ar` из binutils. Системный `ar`
+macOS не поддерживает ELF.
 
 `mkbootimg` должен быть доступен в `PATH` при сборке Android-образа.
 Нужную версию `similarity-rs` задаёт
@@ -48,16 +49,17 @@ sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build cmak
 
 ### macOS
 
-Компоновщик `ld.lld` даёт пакет `lld`, архиватор `llvm-ar` — пакет `llvm`. Пакет `llvm` не
-ставит программы в `PATH`, его каталог `bin` добавляется вручную:
+Пакет `lld` предоставляет `ld.lld`, пакет `llvm` — `clang` и `llvm-ar`.
+Каталог `bin` пакета `llvm` добавляется в `PATH` вручную:
 
 ```bash
 brew install meson ninja cmake lld llvm
-export PATH="$PATH:$(brew --prefix llvm)/bin"
+export PATH="$(brew --prefix llvm)/bin:$PATH"
 ```
 
-Каталог `bin` в конце `PATH` оставляет `clang` от Apple, в начале — подставляет `clang` из
-`llvm`. Библиотека C собирается с любым из них.
+Эта настройка выбирает `clang` из пакета `llvm`. `clang` от Apple также
+подходит, если соответствует минимальной версии. Версию выбранного
+компилятора показывает `clang -dumpversion`.
 
 `mkbootimg` берётся из репозитория AOSP `platform/system/tools/mkbootimg`; каталог клона
 добавляется в `PATH`.

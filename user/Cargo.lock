@@ -4157,6 +4157,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlite"
+version = "0.1.0"
+dependencies = [
+ "c-library",
+ "userland-build",
+]
+
+[[package]]
+name = "sqlite-selftest"
+version = "0.1.0"
+dependencies = [
+ "c-library",
+ "filesystem-abi",
+ "sqlite",
+ "userland-build",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

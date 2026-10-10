@@ -1,0 +1,27 @@
+[package]
+license.workspace = true
+name = "sqlite-selftest"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 262144
+
+[[bin]]
+name = "sqlite-selftest"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+c-library = { workspace = true }
+filesystem-abi = { workspace = true }
+sqlite = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

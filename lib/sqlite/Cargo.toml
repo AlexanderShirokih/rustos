@@ -1,0 +1,23 @@
+[package]
+license.workspace = true
+name = "sqlite"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+workspace = "../../user"
+build = "build.rs"
+links = "sqlite3"
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+c-library = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

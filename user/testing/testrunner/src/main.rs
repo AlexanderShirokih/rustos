@@ -91,6 +91,7 @@ mod smp_stress;
 mod source_fixture;
 mod spawn_from_image;
 mod spmi;
+mod sqlite_selftest;
 mod startup_exit_protocol;
 mod startup_port;
 mod std_rt;

@@ -268,6 +268,10 @@ package = "c-selftest"
 path = "/c-selftest"
 
 [[programs]]
+package = "sqlite-selftest"
+path = "/sqlite-selftest"
+
+[[programs]]
 package = "cxx-selftest"
 path = "/cxx-selftest"
 

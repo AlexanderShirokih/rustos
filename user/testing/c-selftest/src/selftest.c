@@ -54,6 +54,10 @@
 #define FILE_BLOCK_BYTES 512u
 #define FILE_LINES       32
 
+/* Случайные байты: размер буфера двух заполнений и предел длины `getentropy`. */
+#define ENTROPY_BYTES     32
+#define ENTROPY_MAX_BYTES 256
+
 /* Часы: наносекунды в секунде и наибольшее допустимое разрешение. */
 #define NS_PER_SEC        1000000000L
 #define MAX_RESOLUTION_NS 1000000L
@@ -265,6 +269,19 @@ static void check_allocation(void)
     check(kept == NULL && errno == ENOMEM, "malloc over the budget fails with ENOMEM");
 }
 
+static void check_entropy(void)
+{
+    unsigned char first[ENTROPY_BYTES];
+    unsigned char second[ENTROPY_BYTES];
+    check(getentropy(first, sizeof first) == 0 && getentropy(second, sizeof second) == 0 &&
+              memcmp(first, second, sizeof first) != 0,
+          "two getentropy calls fill different bytes");
+
+    unsigned char over[ENTROPY_MAX_BYTES + 1];
+    errno = 0;
+    check(fails_with(getentropy(over, sizeof over), EINVAL), "getentropy over 256 bytes fails with EINVAL");
+}
+
 static void check_unaligned_buffers(void)
 {
     alignas(16) unsigned char source[64];
@@ -363,6 +380,29 @@ static void check_read_write(void)
     check(fstat(1, &st) == 0 && S_ISCHR(st.st_mode), "fstat on fd 1 reports a character device");
 }
 
+static void check_truncate(void)
+{
+    char buffer[16];
+    int  fd = open(SCRATCH "/truncated", O_RDWR | O_CREAT, 0644);
+    check(write(fd, "0123456789", 10) == 10, "write puts 10 bytes before ftruncate");
+    check(ftruncate(fd, 4) == 0 && ftruncate(fd, 8) == 0, "ftruncate shrinks and extends the file");
+    check(lseek(fd, 0, SEEK_CUR) == 10, "ftruncate keeps the position");
+    check(lseek(fd, 0, SEEK_SET) == 0 && read(fd, buffer, sizeof buffer) == 8 && memcmp(buffer, "0123\0\0\0\0", 8) == 0,
+          "ftruncate keeps the head and extends with zeros");
+
+    errno = 0;
+    check(fails_with(ftruncate(fd, -1), EINVAL), "ftruncate with a negative length fails with EINVAL");
+    close(fd);
+
+    fd = open(SCRATCH "/truncated", O_RDONLY);
+    errno = 0;
+    check(fails_with(ftruncate(fd, 0), EBADF), "ftruncate on an O_RDONLY descriptor fails with EBADF");
+    close(fd);
+
+    errno = 0;
+    check(fails_with(ftruncate(1, 0), EINVAL), "ftruncate on fd 1 fails with EINVAL");
+}
+
 static void check_streams(void)
 {
     char  buffer[32] = { 0 };
@@ -443,6 +483,7 @@ static void check_files(void)
     check(mkdir(SCRATCH, 0755) == 0 && mkdir(SCRATCH_PEER, 0755) == 0, "mkdir creates the scratch directories");
     check_open();
     check_read_write();
+    check_truncate();
     check_streams();
     check_paths();
     check_directory();
@@ -1342,6 +1383,7 @@ int selftest_main(int argc, char **argv)
     check_descriptors();
     check_system();
     check_allocation();
+    check_entropy();
     check_unaligned_buffers();
     check_files();
     check_threads();

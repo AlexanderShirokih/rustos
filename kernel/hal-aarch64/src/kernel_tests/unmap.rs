@@ -223,7 +223,7 @@ fn mapper_unmap_unmapped_returns_not_mapped() {
     test_harness::check!(matches!(err, MemoryUnmappingError::NotMapped));
 }
 
-/// Регресс к Codex P1: до появления `OWNED_BY_FA_BIT` `unmap` дёргал
+/// До появления `OWNED_BY_FA_BIT` `unmap` дёргал
 /// `deallocate_frame` на любом leaf и корруптил bitmap на cleanup MMIO.
 #[test_harness::test]
 fn mapper_unmap_after_map_exact_keeps_frame_allocated() {

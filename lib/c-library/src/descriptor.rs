@@ -157,6 +157,14 @@ pub(crate) fn metadata(fd: c_int) -> Result<NodeInfo, Errno> {
     )
 }
 
+pub(crate) fn set_size(fd: c_int, size: u64) -> Result<(), Errno> {
+    on_descriptor(
+        fd,
+        |_| Err(Errno::InvalidArgument),
+        |file| Ok(file.node.set_size(size)?),
+    )
+}
+
 fn on_descriptor<T>(
     fd: c_int,
     standard: impl FnOnce(c_int) -> Result<T, Errno>,

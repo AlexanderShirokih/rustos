@@ -1,9 +1,9 @@
 //! Операции библиотеки C над путями и каталогами поверх файлового корня процесса.
 //!
-//! Модуль экспортирует `unlink`, `rmdir`, `rename`, `mkdir` и невариадическую часть `stat`,
-//! `fstat`, `opendir`, `readdir` и `closedir`, которую `files.c` раскладывает в структуры
-//! заголовков. `mkdir` создаёт каталог только под свободным именем. Поток каталога владеет
-//! обходом `filesystem-client` с отдельной сессией.
+//! Модуль экспортирует `ftruncate`, `unlink`, `rmdir`, `rename`, `mkdir` и невариадическую часть
+//! `stat`, `fstat`, `opendir`, `readdir` и `closedir`, которую `files.c` раскладывает в
+//! структуры заголовков. `mkdir` создаёт каталог только под свободным именем. Поток каталога
+//! владеет обходом `filesystem-client` с отдельной сессией.
 
 use alloc::{alloc::AllocError, boxed::Box};
 use core::{
@@ -98,6 +98,13 @@ unsafe extern "C" fn c_library_fstat(fd: c_int, out: *mut Node) -> c_int {
     };
     // SAFETY: `fstat` передаёт свою `struct c_library_node` на стеке.
     unsafe { report(node, out) }
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+extern "C" fn ftruncate(fd: c_int, length: i64) -> c_int {
+    let size = u64::try_from(length).map_err(|_| Errno::InvalidArgument);
+    status(size.and_then(|size| descriptor::set_size(fd, size)))
 }
 
 #[allow(unsafe_code)]

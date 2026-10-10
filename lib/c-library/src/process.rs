@@ -7,16 +7,19 @@
 //! библиотеки, а затем [`_exit`]. Тот выполняет деструкторы локальных данных потока,
 //! выталкивает потоки вывода и завершает процесс.
 //!
+//! `getentropy` заполняет буфер до 256 байт из источника случайности процесса
+//! `runtime::random`.
+//!
 //! Обработчик паники пишет сообщение в журнал прямой записью `runtime::log_fmt`, мимо потоков
 //! вывода, и завершает процесс через `abort`.
 
 #![allow(unsafe_code)]
 
 use core::{
-    ffi::{c_char, c_int},
+    ffi::{c_char, c_int, c_void},
     num::NonZeroU32,
     panic::PanicInfo,
-    ptr,
+    ptr, slice,
 };
 
 use syscall::Handle;
@@ -26,6 +29,8 @@ use crate::{
     errno::{Errno, fail},
     memory, stdio, thread,
 };
+
+const ENTROPY_MAX_BYTES: usize = 256;
 
 unsafe extern "C" {
     fn __libc_init_array();
@@ -78,6 +83,22 @@ extern "C" fn system(command: *const c_char) -> c_int {
     } else {
         fail(Errno::NoSystem, -1)
     }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
+    if length > ENTROPY_MAX_BYTES {
+        return fail(Errno::InvalidArgument, -1);
+    }
+    if length == 0 {
+        return 0;
+    }
+
+    // SAFETY: по контракту POSIX вызывающий передаёт `length` записываемых байт по `buffer`, и
+    // никто другой не обращается к ним до возврата; `length` не больше 256.
+    let bytes = unsafe { slice::from_raw_parts_mut(buffer.cast::<u8>(), length) };
+    runtime::random::fill_bytes(bytes);
+    0
 }
 
 pub(crate) fn abort_with(message: &str) -> ! {

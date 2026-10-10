@@ -54,6 +54,16 @@ const ENTRIES: &[Entry] = &[
             members: &["extras/ttf"],
         },
     },
+    Entry {
+        name: "sqlite",
+        role: Role::Sources,
+        pin: Pin::Archive {
+            url: "https://sqlite.org/2026/sqlite-amalgamation-3540000.zip",
+            sha256: "68e913b0fe8ec6b4e5f391c594a28872884e80d6cd042a1e50c957be46b5aa4d",
+            format: Format::Zip,
+            members: &[],
+        },
+    },
 ];
 
 pub(crate) fn materialize_sources() -> Result<()> {
