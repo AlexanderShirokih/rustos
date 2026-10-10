@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use component_abi::{STARTUP_REQUEST_TIMEOUT, SessionError, component_startup as startup_contract};
-use component_startup::{Attributes, Found, Providers, StartupFailure};
+use component_startup::{AnyOf, Attributes, Found, Providers, StartupFailure};
 use ipc::{CallError, wire::IpcError};
 use kernel_objects::Session;
 use rootkeeper::{RootSystem, SEARCH_LIMITS, SearchLimits};
@@ -153,6 +153,29 @@ fn provider_sessions_continue_after_no_space() {
     test_harness::check!(refused);
     test_harness::check!(second.is_some());
     drop(second);
+    finish(composition);
+}
+
+// Исчерпанное перечисление набора не должно занимать место, нужное запросу следующего набора.
+#[test_harness::test]
+fn the_next_set_of_alternatives_is_requested_after_the_exhausted_one_is_released() {
+    let composition = limited(&[EXPORT], OWNER_STATES);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let _held = all(&importer).expect("held enumeration granted");
+    let mut sessions = Providers::<probe::Protocol>::new(importer.handle(), PROBE)
+        .all(AnyOf::new("kind", ["absent", "missing"]))
+        .expect("first set granted");
+
+    let ended = (0..POLL_ATTEMPTS).any(|_| match sessions.next() {
+        None => true,
+        Some(Err(error)) if error.failure == StartupFailure::NoSpace => {
+            pause(POLL_INTERVAL);
+            false
+        }
+        Some(_) => false,
+    });
+
+    test_harness::check!(ended);
     finish(composition);
 }
 

@@ -436,7 +436,9 @@ dependencies = [
 name = "spmi-abi"
 version = "0.1.0"
 dependencies = [
+ "fdt-test",
  "ipc",
+ "platform-abi",
  "syscall",
 ]
 

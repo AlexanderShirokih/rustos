@@ -6,14 +6,13 @@
 //! ближайшего предка ниже узла PMIC, у которого `reg` есть, и остаётся отдельным устройством.
 //! Запись `interrupts` - четыре ячейки: SID, номер блока, бит 0..7 и тип `IRQ_TYPE_*`.
 
-use alloc::{borrow::ToOwned, string::String, vec::Vec};
+use alloc::vec::Vec;
+use core::iter;
 
-use platform_abi::{Description, DescriptionError, DeviceId};
+use platform_abi::{Ancestor, Description, DescriptionError, DeviceId, Node};
 use spmi_abi::DeviceError;
 
 use crate::{arbiter::COMMAND_BYTES_MAX, registers::Window};
-
-const CELL_BYTES: usize = 4;
 
 const EE_MAX: u32 = 5;
 
@@ -26,8 +25,6 @@ const INTERRUPT_BIT_MAX: u32 = 7;
 
 const ADDRESS_CELLS_DEFAULT: u32 = 2;
 const SIZE_CELLS_DEFAULT: u32 = 1;
-
-const SEPARATOR: char = '/';
 
 /// Свойства узла арбитра.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +51,6 @@ pub enum NodeError {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Peripheral {
     id: DeviceId,
-    compatible: Vec<String>,
     sid: u8,
     blocks: Vec<u8>,
     interrupts: Vec<Result<Interrupt, DeviceError>>,
@@ -180,22 +176,12 @@ impl ArbiterNode {
     ) -> Vec<Result<Peripheral, Skipped>> {
         let mut found = Vec::new();
         for device in description.devices().filter_map(Result::ok) {
-            let Some(below) = device
-                .id()
-                .as_str()
-                .strip_prefix(id.as_str())
-                .and_then(|below| below.strip_prefix(SEPARATOR))
-            else {
+            let Some(pmic) = pmic(description, id, device.id()) else {
                 continue;
             };
 
-            let Some((pmic, _)) = below.split_once(SEPARATOR) else {
-                continue;
-            };
-
-            let compatible = device.compatible().map(ToOwned::to_owned).collect();
             found.push(
-                self.peripheral(description, id, pmic, device.id(), compatible)
+                self.peripheral(description, id, &pmic, device.id())
                     .map_err(|reason| Skipped {
                         id: device.id().clone(),
                         reason,
@@ -210,36 +196,31 @@ impl ArbiterNode {
         &self,
         description: &Description<'_>,
         arbiter: &DeviceId,
-        pmic: &str,
+        pmic: &Ancestor<'_>,
         id: &DeviceId,
-        compatible: Vec<String>,
     ) -> Result<Peripheral, SkipReason> {
-        let mut pmic_path = String::from(arbiter.as_str());
-        pmic_path.push(SEPARATOR);
-        pmic_path.push_str(pmic);
-
-        let pmic = description.find(&pmic_path).ok_or(SkipReason::Sid)?;
-        let sid = cells(pmic.bytes("reg").unwrap_or_default())
-            .and_then(|cells| cells.first().copied())
+        let sid = pmic
+            .node
+            .cells("reg")
+            .ok()
+            .flatten()
+            .and_then(|mut cells| cells.next())
             .filter(|sid| *sid <= SID_MAX)
             .and_then(|sid| u8::try_from(sid).ok())
             .ok_or(SkipReason::Sid)?;
 
-        let holder = blocks_holder(description, &pmic_path, id.as_str());
-        let parent = holder
-            .rsplit_once(SEPARATOR)
-            .and_then(|(parent, _)| description.find(parent))
-            .ok_or(SkipReason::Block)?;
+        let node = description.find(id.as_str()).ok_or(SkipReason::Block)?;
+        let (holder, parent) =
+            blocks_holder_with_parent(description, &pmic.id, id, node).ok_or(SkipReason::Block)?;
 
         let address_cells = cell_count(&parent, "#address-cells", ADDRESS_CELLS_DEFAULT)?;
         let size_cells = cell_count(&parent, "#size-cells", SIZE_CELLS_DEFAULT)?;
 
-        let reg = description
-            .find(holder)
-            .and_then(|holder| holder.bytes("reg"))
+        let reg: Vec<u32> = holder
+            .cells("reg")
+            .map_err(|_| SkipReason::Block)?
+            .map(Iterator::collect)
             .unwrap_or_default();
-        let reg = cells(reg).ok_or(SkipReason::Block)?;
-        let node = description.find(id.as_str()).ok_or(SkipReason::Block)?;
 
         let entry = address_cells + size_cells;
         if address_cells != 1 || !reg.len().is_multiple_of(entry) {
@@ -259,9 +240,13 @@ impl ArbiterNode {
             .collect::<Option<Vec<_>>>()
             .ok_or(SkipReason::Block)?;
 
-        let interrupt_cells = cells(node.bytes("interrupts").unwrap_or_default())
+        let interrupt_cells = node
+            .cells("interrupts")
+            .ok()
+            .flatten()
+            .map(Iterator::collect::<Vec<_>>)
             .filter(|cells| cells.len().is_multiple_of(INTERRUPT_CELLS))
-            .filter(|_| self.delivers(description, arbiter, id))
+            .filter(|_| self.delivers(description, arbiter, id, node))
             .unwrap_or_default();
 
         let interrupts = interrupt_cells
@@ -273,37 +258,38 @@ impl ArbiterNode {
 
         Ok(Peripheral {
             id: id.clone(),
-            compatible,
             sid,
             blocks,
             interrupts,
         })
     }
 
-    fn delivers(&self, description: &Description<'_>, arbiter: &DeviceId, id: &DeviceId) -> bool {
-        let mut path = id.as_str();
+    fn delivers(
+        &self,
+        description: &Description<'_>,
+        arbiter: &DeviceId,
+        id: &DeviceId,
+        node: Node<'_>,
+    ) -> bool {
+        if let Ok(Some(parent)) = node.u32("interrupt-parent") {
+            return self.phandle == Some(parent);
+        }
 
-        loop {
-            let Some(node) = description.find(path) else {
-                return false;
-            };
-
-            if let Ok(Some(parent)) = node.u32("interrupt-parent") {
-                return self.phandle == Some(parent);
-            }
-
-            path = path.rsplit_once(SEPARATOR).map_or("", |(parent, _)| parent);
-            if path == arbiter.as_str() {
+        for ancestor in description.ancestors(id) {
+            if ancestor.id == *arbiter {
                 return true;
             }
 
-            let controller = description
-                .find(path)
-                .is_some_and(|parent| parent.bytes("#interrupt-cells").is_some());
-            if controller || !path.starts_with(arbiter.as_str()) {
+            if ancestor.node.bytes("#interrupt-cells").is_some() {
                 return false;
             }
+
+            if let Ok(Some(parent)) = ancestor.node.u32("interrupt-parent") {
+                return self.phandle == Some(parent);
+            }
         }
+
+        false
     }
 }
 
@@ -311,11 +297,6 @@ impl Peripheral {
     /// Путь узла устройства.
     pub fn id(&self) -> &DeviceId {
         &self.id
-    }
-
-    /// Есть ли `compatible` в списке совместимостей устройства.
-    pub fn is_compatible(&self, compatible: &str) -> bool {
-        self.compatible.iter().any(|each| each == compatible)
     }
 
     /// PPID блоков устройства в порядке `reg`.
@@ -380,21 +361,48 @@ fn interrupt(
     })
 }
 
-fn blocks_holder<'a>(description: &Description<'_>, pmic: &str, id: &'a str) -> &'a str {
-    let mut path = id;
-
-    while path.len() > pmic.len() {
-        if description
-            .find(path)
-            .is_some_and(|node| node.bytes("reg").is_some())
-        {
-            return path;
+fn pmic<'d>(
+    description: &'d Description<'_>,
+    arbiter: &DeviceId,
+    id: &DeviceId,
+) -> Option<Ancestor<'d>> {
+    let mut below = None;
+    for ancestor in description.ancestors(id) {
+        if ancestor.id == *arbiter {
+            return below;
         }
-
-        path = path.rsplit_once(SEPARATOR).map_or("", |(parent, _)| parent);
+        below = Some(ancestor);
     }
 
-    id
+    None
+}
+
+fn blocks_holder_with_parent<'d>(
+    description: &'d Description<'_>,
+    pmic: &DeviceId,
+    id: &DeviceId,
+    node: Node<'d>,
+) -> Option<(Node<'d>, Node<'d>)> {
+    let lineage: Vec<Ancestor<'d>> = iter::once(Ancestor {
+        id: id.clone(),
+        node,
+    })
+    .chain(description.ancestors(id))
+    .collect();
+    let below_pmic = lineage
+        .iter()
+        .position(|each| each.id == *pmic)
+        .unwrap_or(lineage.len());
+
+    let holder = lineage
+        .get(..below_pmic)?
+        .iter()
+        .position(|each| each.node.bytes("reg").is_some())
+        .unwrap_or_default();
+    let holder_node = lineage.get(holder)?.node;
+    let parent = lineage.get(holder.checked_add(1)?)?.node;
+
+    Some((holder_node, parent))
 }
 
 const fn trigger(kind: u32) -> Option<Trigger> {
@@ -412,18 +420,7 @@ fn ppid(sid: u8, block: u8) -> u16 {
     u16::from_be_bytes([sid, block])
 }
 
-fn cells(bytes: &[u8]) -> Option<Vec<u32>> {
-    let (cells, rest) = bytes.as_chunks::<CELL_BYTES>();
-
-    rest.is_empty()
-        .then(|| cells.iter().map(|cell| u32::from_be_bytes(*cell)).collect())
-}
-
-fn cell_count(
-    node: &platform_abi::Node<'_>,
-    name: &str,
-    default: u32,
-) -> Result<usize, SkipReason> {
+fn cell_count(node: &Node<'_>, name: &str, default: u32) -> Result<usize, SkipReason> {
     let count = node
         .u32(name)
         .map_err(SkipReason::Description)?

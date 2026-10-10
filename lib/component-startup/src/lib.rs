@@ -13,6 +13,7 @@ mod declare;
 mod export;
 mod import;
 mod providers;
+mod query;
 mod request;
 
 // Раскрытие `component_manifest!` вызывает макрос записи манифеста по этому пути, и
@@ -31,5 +32,6 @@ pub use import::Import;
 pub use ipc::wire::IpcError;
 pub use kernel_objects::{OwnedHandle, Port, PortTransport, Session, kind};
 pub use providers::{ProviderSessions, ProviderWatch, Providers};
+pub use query::{AnyOf, Query};
 pub use request::{Found, SessionRequest, accept, all, next, open, session, watch};
 pub use syscall::{Handle, ObjectKind};

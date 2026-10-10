@@ -175,7 +175,9 @@ fn a_property_is_read_in_the_requested_form() {
     let name = node.string("name");
     let names = node.strings("name");
     let raw = node.bytes("raw");
+    let cells = node.cells("two");
     let absent = node.u32("absent");
+    let absent_cells = node.cells("absent");
 
     assert_eq!(one, Ok(Some(7)));
     assert_eq!(two, Ok(Some(0x1_0000_0002)));
@@ -185,7 +187,12 @@ fn a_property_is_read_in_the_requested_form() {
         Some(vec!["pl031"])
     );
     assert_eq!(raw, Some(&[1, 2, 3][..]));
+    assert_eq!(
+        cells.unwrap().map(Iterator::collect::<Vec<_>>),
+        Some(vec![1, 2])
+    );
     assert_eq!(absent, Ok(None));
+    assert!(matches!(absent_cells, Ok(None)));
 }
 
 #[test]
@@ -198,11 +205,59 @@ fn a_property_of_another_length_or_form_is_invalid() {
     let one = node.u64("one");
     let raw = node.string("raw");
     let raw_list = node.strings("raw");
+    let raw_cells = node.cells("raw");
 
     assert_eq!(two, Err(DescriptionError::InvalidValue));
     assert_eq!(one, Err(DescriptionError::InvalidValue));
     assert_eq!(raw, Err(DescriptionError::InvalidValue));
     assert!(matches!(raw_list, Err(DescriptionError::InvalidValue)));
+    assert!(matches!(raw_cells, Err(DescriptionError::InvalidValue)));
+}
+
+#[test]
+fn ancestors_go_from_the_parent_up_to_a_child_of_the_root_regardless_of_status() {
+    let blob = fdt_test::build(TREE);
+    let description = Description::new(&blob, 0).unwrap();
+    let ancestors = |path| {
+        description
+            .ancestors(&DeviceId::new(path).unwrap())
+            .map(|ancestor| {
+                (
+                    ancestor.id.as_str().to_owned(),
+                    ancestor.node.bytes("compatible"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(ancestors("/bus/uart@2000"), [("/bus".to_owned(), None)]);
+    assert_eq!(
+        ancestors("/soc/serial@1000"),
+        [("/soc".to_owned(), Some(&b"simple-bus\0"[..]))]
+    );
+    assert!(ancestors("/bus").is_empty());
+    assert!(ancestors("/absent/node").is_empty());
+}
+
+#[test]
+fn an_ancestor_path_equals_the_same_path_given_as_an_id() {
+    let tokens = [
+        Token::Node("a"),
+        Token::Node("b"),
+        Token::Node("c"),
+        Token::End,
+        Token::End,
+        Token::End,
+    ];
+    let blob = fdt_test::build(&tokens);
+    let description = Description::new(&blob, 0).unwrap();
+
+    let ancestors: Vec<_> = description
+        .ancestors(&DeviceId::new("/a/b/c").unwrap())
+        .map(|ancestor| ancestor.id)
+        .collect();
+
+    assert!(ancestors == [DeviceId::new("/a/b").unwrap(), DeviceId::new("/a").unwrap()]);
 }
 
 #[test]

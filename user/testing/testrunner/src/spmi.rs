@@ -4,11 +4,12 @@
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::cell::{Cell, RefCell};
 
-use component_abi::RequirementDeclaration;
+use component_abi::{RequirementDeclaration, SessionError};
+use component_startup::{AnyOf, Providers};
 use fdt_test::Token;
 use ipc::{CallError, Protocol};
 use kernel_objects::{Error, Session, SessionTransport, Signal};
-use platform_abi::{Description, DeviceId};
+use platform_abi::{CONTROLLER_KEY, Description, DeviceId};
 use runtime::Timeout;
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use spmi_pmic_arb::{
@@ -20,7 +21,8 @@ use syscall::{SIGNALED, SyscallError};
 use crate::{
     composition::{Importer, pause, request},
     rootkeeper_system::{
-        POLL_ATTEMPTS, POLL_INTERVAL, await_revoked, finish, platform_describes, with_drivers,
+        POLL_ATTEMPTS, POLL_INTERVAL, await_revoked, finish, platform_describes, with_description,
+        with_drivers,
     },
 };
 
@@ -165,7 +167,8 @@ const CLOCK_ALARM: Interrupt = Interrupt {
 };
 
 const PMIC_ARBITER: &str = "/soc@0/spmi@800f000";
-const PMIC_CLOCK: &str = "qcom,pm8941-rtc";
+const PMIC_CLOCK: &str = "/soc@0/spmi@800f000/pmic@0/rtc@6000";
+const OUTSIDE_THE_BUS: &str = "/soc@0/serial@c170000";
 
 const SPMI_REQUIREMENT: &str = "spmi";
 const SPMI_REPLY_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -394,8 +397,6 @@ fn a_node_without_reg_takes_the_blocks_of_its_nearest_ancestor_below_the_pmic() 
 
     test_harness::check_eq!(devices, 3);
     test_harness::check_eq!(blocks, [[0x008], [0x008]]);
-    test_harness::check!(pwrkey.is_compatible("qcom,pm8941-pwrkey"));
-    test_harness::check!(resin.is_compatible("qcom,pm8941-resin"));
     test_harness::check_eq!(
         pwrkey.interrupt(0),
         Ok(Interrupt {
@@ -662,18 +663,54 @@ fn an_arbiter_of_another_environment_uses_its_command_page_and_accumulator() {
     test_harness::check_eq!(delivered, [(0x2D0, 0b1000)]);
 }
 
-pub(crate) fn spmi_session(importer: &Importer) -> spmi::Client<SessionTransport> {
-    request::<spmi::Protocol>(importer.handle(), SPMI_REQUIREMENT, SPMI_REPLY_TIMEOUT)
+pub(crate) fn described_device(compatible: &str) -> Option<(String, Vec<String>)> {
+    with_description(|description| {
+        let id = description
+            .compatible_devices(compatible)
+            .next()?
+            .id()
+            .clone();
+        let controller = controller_compatibles(description, &id);
+        Some((String::from(id.as_str()), controller))
+    })
+}
+
+fn controller_compatibles(description: &Description<'_>, id: &DeviceId) -> Vec<String> {
+    let Some(controller) = spmi_abi::controller(description, id) else {
+        return Vec::new();
+    };
+    let Ok(Some(compatible)) = controller.strings("compatible") else {
+        return Vec::new();
+    };
+    compatible.map(String::from).collect()
+}
+
+pub(crate) fn spmi_bus(
+    importer: &Importer,
+    controller: &[String],
+) -> spmi::Client<SessionTransport> {
+    let providers = Providers::<spmi::Protocol>::new(importer.handle(), SPMI_REQUIREMENT);
+    let found = providers
+        .all(AnyOf::new(
+            CONTROLLER_KEY,
+            controller.iter().map(String::as_str),
+        ))
+        .expect("spmi enumeration")
+        .next()
+        .expect("spmi export")
+        .expect("spmi export found");
+    providers
+        .open(&found)
         .expect("spmi session")
         .client()
         .with_wait(SPMI_REPLY_TIMEOUT)
 }
 
-fn open(
+pub(crate) fn open(
     bus: &spmi::Client<SessionTransport>,
+    path: &str,
 ) -> Result<spmi_device::Client<SessionTransport>, CallError<SpmiError>> {
-    let compatible = PMIC_CLOCK;
-    bus.open(compatible).map(|session| {
+    bus.open(path).map(|session| {
         Session::<spmi_device::Protocol>::from_session(session)
             .client()
             .with_wait(SPMI_REPLY_TIMEOUT)
@@ -686,16 +723,23 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
         test_harness::skip!("{} is not described", PMIC_ARBITER);
     }
 
+    let clock = DeviceId::new(PMIC_CLOCK).expect("absolute path");
+    let controller = with_description(|description| controller_compatibles(description, &clock));
+
     let composition = with_drivers();
     let importer = composition.importer(SPMI_IMPORTS);
-    let bus = spmi_session(&importer);
-    let clock = open(&bus).expect("pmic clock session");
+    let unfiltered =
+        request::<spmi::Protocol>(importer.handle(), SPMI_REQUIREMENT, SPMI_REPLY_TIMEOUT)
+            .map(drop);
+    let bus = spmi_bus(&importer, &controller);
+    let clock = open(&bus, PMIC_CLOCK).expect("pmic clock session");
 
     let first = clock.read(RTC_READ, 4).expect("count read");
     pause(COUNT_PAUSE);
     let second = clock.read(RTC_READ, 4).expect("count read");
 
-    let busy = open(&bus).map(drop);
+    let busy = open(&bus, PMIC_CLOCK).map(drop);
+    let outside = open(&bus, OUTSIDE_THE_BUS).map(drop);
     let past_blocks = clock.write(RTC_PAST_BLOCKS, 1, 0);
 
     let alarm = clock.irq(0).map(Signal::from);
@@ -722,7 +766,7 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
         .as_ref()
         .is_ok_and(|alarm| await_revoked(|| alarm.wait(SIGNALED, Timeout::from_millis(0))));
 
-    let reopened = (0..POLL_ATTEMPTS).any(|_| match open(&bus) {
+    let reopened = (0..POLL_ATTEMPTS).any(|_| match open(&bus, PMIC_CLOCK) {
         Err(CallError::Remote(SpmiError::Busy)) => {
             pause(POLL_INTERVAL);
             false
@@ -730,8 +774,10 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
         opened => opened.is_ok(),
     });
 
+    test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));
     test_harness::check!((1..=3).contains(&second.wrapping_sub(first)));
     test_harness::check_eq!(busy, Err(CallError::Remote(SpmiError::Busy)));
+    test_harness::check_eq!(outside, Err(CallError::Remote(SpmiError::NoDevice)));
     test_harness::check_eq!(past_blocks, Err(CallError::Remote(DeviceError::OutOfRange)));
     test_harness::check!(alarm.is_ok());
     test_harness::check_eq!(set, Ok(()));

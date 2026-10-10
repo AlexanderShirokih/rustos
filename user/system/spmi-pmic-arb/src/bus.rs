@@ -110,21 +110,16 @@ impl Bus {
 }
 
 impl Opener<'_> {
-    fn open(&mut self, compatible: &str) -> Result<Port, SpmiError> {
-        let mut matching = self
+    fn open(&mut self, device: &str) -> Result<Port, SpmiError> {
+        let device = self
             .bus
             .devices
             .iter_mut()
-            .filter(|device| device.peripheral.is_compatible(compatible))
-            .peekable();
-
-        if matching.peek().is_none() {
-            return Err(SpmiError::NoDevice);
+            .find(|each| each.peripheral.id().as_str() == device)
+            .ok_or(SpmiError::NoDevice)?;
+        if device.holder.is_some() {
+            return Err(SpmiError::Busy);
         }
-
-        let device = matching
-            .find(|device| device.holder.is_none())
-            .ok_or(SpmiError::Busy)?;
 
         let minted = mint_session(&self.sessions.service, &self.sessions.next_badge)
             .map_err(|_| SpmiError::NoSpace)?;
@@ -155,11 +150,11 @@ impl spmi::Service<Delivery> for Opener<'_> {
     fn open(
         &mut self,
         _frame: &Delivery,
-        compatible: &str,
+        device: &str,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<spmi_device::Protocol>, SpmiError>>
     {
         // Порт сессии устройства выпускает эта шина, и она же обслуживает на нём `SpmiDevice`.
-        Opener::open(self, compatible).map(kernel_objects::Session::from_handle)
+        Opener::open(self, device).map(kernel_objects::Session::from_handle)
     }
 }
 

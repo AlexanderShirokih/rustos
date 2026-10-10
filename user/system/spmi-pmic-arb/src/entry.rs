@@ -21,7 +21,7 @@ component_manifest! {
     struct SpmiStartup {
         requirements: { platform: session(platform::Protocol) },
         features: ["qcom,spmi-pmic-arb"],
-        exports: [spmi::Protocol],
+        exports: [spmi::Protocol => [{ controller = "qcom,spmi-pmic-arb" }]],
     }
 }
 

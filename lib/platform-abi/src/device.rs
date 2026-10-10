@@ -6,7 +6,7 @@ const SEPARATOR: char = '/';
 /// Идентичность устройства: абсолютный путь его узла в описании платформы вместе с
 /// unit-address. Путь начинается с `/`, его компоненты непусты, корень устройством не
 /// считается.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct DeviceId {
     bytes: [u8; DEVICE_ID_MAX],
     len: usize,
@@ -63,3 +63,11 @@ impl DeviceId {
         Some(())
     }
 }
+
+impl PartialEq for DeviceId {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for DeviceId {}

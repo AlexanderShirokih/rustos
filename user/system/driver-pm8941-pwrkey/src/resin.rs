@@ -12,7 +12,7 @@ use spmi_abi::spmi;
 component_manifest! {
     struct ResinStartup {
         requirements: {
-            spmi: session(spmi::Protocol),
+            spmi: all(spmi::Protocol),
             platform: session(platform::Protocol),
         },
         features: ["qcom,pm8941-resin"],
@@ -24,7 +24,7 @@ component_manifest! {
 fn run(requirements: ResinStartup) -> Result<(), Stopped> {
     driver_pm8941_pwrkey::run(
         &RESIN,
-        &requirements.spmi,
+        requirements.spmi,
         &requirements.platform,
         requirements.parent,
     )

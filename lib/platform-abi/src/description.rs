@@ -1,10 +1,14 @@
 use fdt::{
     devicetree::{self, DeviceTree, TreeWalk},
-    devicetreeext::{BUS_PATH_MAX_NODES, NodeExt, PropExt, StringList, available_path, node_path},
+    devicetreeext::{
+        BUS_PATH_MAX_NODES, NodeExt, NodePath, PropExt, StringList, available_path, node_path,
+    },
 };
 use syscall::kind;
 
 use crate::{device::DeviceId, error::DescriptionError};
+
+const CELL_BYTES: usize = size_of::<u32>();
 
 ipc::wire_value! {
     /// Описание платформы: регион только для чтения и смещение начала описания в нём.
@@ -43,6 +47,20 @@ pub struct Devices<'a> {
     path: DeviceId,
     path_depth: usize,
     hidden_below: Option<usize>,
+}
+
+/// Предок узла из [`Description::ancestors`].
+pub struct Ancestor<'a> {
+    /// Путь предка.
+    pub id: DeviceId,
+    /// Узел предка.
+    pub node: Node<'a>,
+}
+
+struct Ancestors<'a> {
+    found: NodePath<'a>,
+    path: DeviceId,
+    index: usize,
 }
 
 impl<'a> Description<'a> {
@@ -92,6 +110,15 @@ impl<'a> Description<'a> {
         node_path(&self.tree, path).map(|found| Node { node: found.node() })
     }
 
+    /// Предки узла `id` от родителя до потомка корня независимо от статуса. Отсутствующий узел
+    /// предков не имеет.
+    pub fn ancestors(&'a self, id: &DeviceId) -> impl Iterator<Item = Ancestor<'a>> + use<'a> {
+        node_path(&self.tree, id.as_str())
+            .and_then(|found| Ancestors::new(&found))
+            .into_iter()
+            .flatten()
+    }
+
     fn parsed_devices(&'a self) -> impl Iterator<Item = Device<'a>> + 'a {
         self.devices().filter_map(Result::ok)
     }
@@ -108,6 +135,21 @@ impl<'a> Node<'a> {
         self.value(name, |value| value.try_into().ok().map(u64::from_be_bytes))
     }
 
+    /// Значение свойства `name` как список big-endian чисел из четырёх байт в порядке описания.
+    ///
+    /// Отказы:
+    /// - [`DescriptionError::InvalidValue`] - длина значения не кратна четырём байтам.
+    pub fn cells(
+        &self,
+        name: &str,
+    ) -> Result<Option<impl Iterator<Item = u32> + use<'a>>, DescriptionError> {
+        self.value(name, |value| {
+            let (cells, rest) = value.as_chunks::<CELL_BYTES>();
+            rest.is_empty()
+                .then(|| cells.iter().map(|cell| u32::from_be_bytes(*cell)))
+        })
+    }
+
     /// Значение свойства `name` как строка до первого нуля.
     pub fn string(&self, name: &str) -> Result<Option<&'a str>, DescriptionError> {
         self.property(name, |property| property.as_cstr())
@@ -117,7 +159,7 @@ impl<'a> Node<'a> {
     pub fn strings(
         &self,
         name: &str,
-    ) -> Result<Option<impl Iterator<Item = &'a str> + 'a>, DescriptionError> {
+    ) -> Result<Option<impl Iterator<Item = &'a str> + use<'a>>, DescriptionError> {
         self.property(name, PropExt::into_string_list_iter)
     }
 
@@ -205,5 +247,39 @@ impl<'a> Iterator for Devices<'a> {
                 compatible,
             }));
         }
+    }
+}
+
+impl<'a> Ancestors<'a> {
+    fn new(found: &NodePath<'a>) -> Option<Self> {
+        let mut path = DeviceId::EMPTY;
+        for node in found.ancestors().iter().skip(1) {
+            path.push(node.name())?;
+        }
+
+        Some(Self {
+            found: *found,
+            path,
+            index: found.ancestors().len().saturating_sub(1),
+        })
+    }
+}
+
+impl<'a> Iterator for Ancestors<'a> {
+    type Item = Ancestor<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == 0 {
+            return None;
+        }
+
+        let node = *self.found.ancestors().get(self.index)?;
+        let id = self.path.clone();
+        self.path.pop();
+        self.index -= 1;
+        Some(Ancestor {
+            id,
+            node: Node { node },
+        })
     }
 }

@@ -9,7 +9,7 @@ use component_abi::{
     SessionError, SessionRequirement, attributes_len, component_startup as startup_contract,
     encode_attributes_into,
 };
-use component_startup::{Attributes, Found, accept, session};
+use component_startup::{AnyOf, Attributes, Found, Providers, accept, session};
 use filesystem_abi::{
     AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, file_system_mount, namespace,
 };
@@ -528,7 +528,7 @@ fn described_clock() -> Option<(&'static str, &'static str)> {
     })
 }
 
-fn with_description<T>(inspect: impl FnOnce(&Description<'_>) -> T) -> T {
+pub(crate) fn with_description<T>(inspect: impl FnOnce(&Description<'_>) -> T) -> T {
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
@@ -2154,6 +2154,42 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
     test_harness::check_eq!(with_extra, ["kind=b,role=c"]);
     test_harness::check_eq!(role_only, ["role=c"]);
     test_harness::check_eq!(filtered, Ok(PING));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn an_enumeration_of_alternatives_walks_the_values_in_order() {
+    let composition = scenario(&[EXPORT, FILTERED]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let providers = Providers::<probe::Protocol>::new(importer.handle(), PROBE);
+
+    let found: Vec<String> = providers
+        .all(AnyOf::new("kind", ["absent", "b", "a", "b"]))
+        .expect("enumeration granted")
+        .map(|found| found.map(|found| format!("{}", Pairs(found.filter.as_attributes()))))
+        .collect::<Result<_, _>>()
+        .expect("results answered");
+    let pinged = providers
+        .all(AnyOf::new("kind", ["absent", "a"]))
+        .expect("enumeration granted")
+        .next()
+        .map(|found| {
+            let opened = providers.open(&found.expect("result answered"));
+            opened.map(|opened| {
+                opened
+                    .client()
+                    .with_wait(COMPONENT_REPLY_TIMEOUT)
+                    .ping(PING)
+            })
+        });
+    let unmatched = providers
+        .all(AnyOf::new("kind", ["absent"]))
+        .expect("enumeration granted")
+        .count();
+
+    test_harness::check_eq!(found, ["kind=a"]);
+    test_harness::check_eq!(pinged, Some(Ok(Ok(PING))));
+    test_harness::check_eq!(unmatched, 0);
     finish(composition);
 }
 

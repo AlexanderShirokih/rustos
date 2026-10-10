@@ -5,7 +5,8 @@ use alloc::boxed::Box;
 use core::fmt;
 
 use component_startup::{
-    Import, StartupError, component_startup as startup_contract, serve_export, whole_export,
+    AnyOf, Import, Providers, StartupError, component_startup as startup_contract, serve_export,
+    whole_export,
 };
 use input_abi::{
     AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, KeyList, UpdateError,
@@ -13,7 +14,7 @@ use input_abi::{
 };
 use ipc::{CallError, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, IssuedHandle, Port, Session, SessionTransport, Signal, kind};
-use platform_abi::{DescriptionError, MappedDescription, PlatformError, platform};
+use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
 use runtime::{FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_owned};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use syscall::SIGNALED;
@@ -27,9 +28,6 @@ const DBC_CTL: u16 = 0x71;
 
 const KEY_INTERRUPT: u16 = 0;
 const KEY_INDEX: u16 = 0;
-
-const CELL_BYTES: usize = 4;
-const SEPARATOR: char = '/';
 
 const CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -48,13 +46,15 @@ pub enum Stopped {
 
 struct Source {
     key: &'static Key,
-    bus: spmi::Client<SessionTransport>,
+    spmi: Providers<spmi::Protocol>,
     platform: platform::Client<SessionTransport>,
     attached: bool,
     refused: bool,
 }
 
 struct Node {
+    bus: spmi::Client<SessionTransport>,
+    device: spmi_device::Client<SessionTransport>,
     base: u16,
     usage: Usage,
     debounce: u32,
@@ -62,6 +62,7 @@ struct Node {
 }
 
 struct Button {
+    _bus: spmi::Client<SessionTransport>,
     device: spmi_device::Client<SessionTransport>,
     inject: input_inject::Client<SessionTransport>,
     number: u16,
@@ -78,6 +79,9 @@ enum Failure {
     Description(DescriptionError),
     NoNode,
     NoBase,
+    NoController,
+    NoBus,
+    Startup(StartupError),
     UnknownCode(u32),
     Debounce(u32),
     Bus(CallError<SpmiError>),
@@ -102,8 +106,8 @@ impl fmt::Display for Stopped {
 
 impl Source {
     fn bind(&self, inject: input_inject::Client<SessionTransport>) -> Result<(), Failure> {
-        let node = Node::find(self.key, &self.platform)?;
-        let button = Button::bind(self.key, &self.bus, &node, inject)?;
+        let node = Node::find(self.key, &self.platform, &self.spmi)?;
+        let button = Button::bind(self.key, node, inject)?;
 
         spawn_owned(move || button.watch())
             .map(drop)
@@ -144,31 +148,56 @@ impl input_source::Service<Delivery> for Source {
 }
 
 impl Node {
-    fn find(key: &Key, platform: &platform::Client<SessionTransport>) -> Result<Self, Failure> {
+    fn find(
+        key: &Key,
+        platform: &platform::Client<SessionTransport>,
+        spmi: &Providers<spmi::Protocol>,
+    ) -> Result<Self, Failure> {
         let description = platform.description().map_err(Failure::Platform)?;
         let mapped = MappedDescription::new(description)
             .map_err(|refused| Failure::Mapping(refused.error))?;
         let description = mapped.description().map_err(Failure::Description)?;
 
-        // Шина выдаёт программе первый свободный узел совместимости, и драйвер читает первый
-        // доступный узел той же совместимости.
         let id = description
             .compatible_devices(key.compatible)
             .next()
             .map(|device| device.id().clone())
             .ok_or(Failure::NoNode)?;
         let node = description.node(&id).ok_or(Failure::NoNode)?;
+        let compatible = spmi_abi::controller(&description, &id)
+            .ok_or(Failure::NoController)?
+            .strings("compatible")
+            .map_err(Failure::Description)?
+            .ok_or(Failure::NoController)?;
+        let found = spmi
+            .all(AnyOf::new(CONTROLLER_KEY, compatible))
+            .map_err(Failure::Startup)?
+            .next()
+            .ok_or(Failure::NoBus)?
+            .map_err(Failure::Startup)?;
+        let bus = spmi
+            .open(&found)
+            .map_err(Failure::Startup)?
+            .client()
+            .with_wait(CALL_TIMEOUT);
+        let device = Session::<spmi_device::Protocol>::from_session(
+            bus.open(id.as_str()).map_err(Failure::Bus)?,
+        )
+        .client()
+        .with_wait(CALL_TIMEOUT);
 
         // База блока PON - первая ячейка `reg` узла, а без него - родителя, как в Linux.
-        let parent = id
-            .as_str()
-            .rsplit_once(SEPARATOR)
-            .and_then(|(parent, _)| description.find(parent));
-        let base = node
-            .bytes("reg")
-            .or_else(|| parent.and_then(|parent| parent.bytes("reg")))
-            .and_then(|reg| reg.first_chunk::<CELL_BYTES>())
-            .map(|cell| u32::from_be_bytes(*cell))
+        let parent = description.ancestors(&id).next();
+        let reg = match node.cells("reg").map_err(Failure::Description)? {
+            Some(reg) => Some(reg),
+            None => parent
+                .map(|parent| parent.node.cells("reg"))
+                .transpose()
+                .map_err(Failure::Description)?
+                .flatten(),
+        };
+        let base = reg
+            .and_then(|mut reg| reg.next())
             .and_then(|base| u16::try_from(base).ok())
             .ok_or(Failure::NoBase)?;
 
@@ -181,62 +210,63 @@ impl Node {
             .unwrap_or(DEBOUNCE_DEFAULT_US);
 
         Ok(Self {
+            bus,
+            device,
             base,
             usage,
             debounce,
             pull_up: node.bytes("bias-pull-up").is_some(),
         })
     }
-
-    fn register(&self, offset: u16) -> u16 {
-        self.base.wrapping_add(offset)
-    }
 }
 
 impl Button {
     fn bind(
         key: &Key,
-        bus: &spmi::Client<SessionTransport>,
-        node: &Node,
+        node: Node,
         inject: input_inject::Client<SessionTransport>,
     ) -> Result<Self, Failure> {
-        let compatible = key.compatible;
-        let device = Session::<spmi_device::Protocol>::from_session(
-            bus.open(compatible).map_err(Failure::Bus)?,
-        )
-        .client()
-        .with_wait(CALL_TIMEOUT);
+        let Node {
+            bus,
+            device,
+            base,
+            usage,
+            debounce,
+            pull_up,
+        } = node;
+        let register = |offset: u16| base.wrapping_add(offset);
 
-        let subtype = device.read(node.register(SUBTYPE), 1)?;
+        let subtype = device.read(register(SUBTYPE), 1)?;
         let generation = Generation::of(u8::try_from(subtype).unwrap_or_default());
         let mask = generation.mask();
         let field = generation
-            .debounce_field(node.debounce)
-            .ok_or(Failure::Debounce(node.debounce))?;
+            .debounce_field(debounce)
+            .ok_or(Failure::Debounce(debounce))?;
 
-        device.update(node.register(DBC_CTL), mask, field)?;
-        let pull_up = if node.pull_up { key.pull_up_bit } else { 0 };
-        device.update(node.register(PULL_CTL), key.pull_up_bit, pull_up)?;
+        device.update(register(DBC_CTL), mask, field)?;
+        let pull_up = if pull_up { key.pull_up_bit } else { 0 };
+        device.update(register(PULL_CTL), key.pull_up_bit, pull_up)?;
 
         // Поле общее для кнопок блока, и окно считается по записанному последним значению.
-        let configured = device.read(node.register(DBC_CTL), 1)?;
+        let configured = device.read(register(DBC_CTL), 1)?;
         let window = generation.debounce_window(u8::try_from(configured).unwrap_or_default());
 
         let signal = Signal::from(device.irq(KEY_INTERRUPT)?);
 
         let mut keys = KeyList::new();
-        keys.push(node.usage).map_err(|_| Failure::Descriptor)?;
+        keys.push(usage).map_err(|_| Failure::Descriptor)?;
         let axes = AxisList::new();
         let descriptor = DeviceDescriptor::new(key.name, Binding::None, &keys, &axes, 0, &axes)
             .ok_or(Failure::Descriptor)?;
         let number = inject.declare(descriptor).map_err(Failure::Declare)?;
 
         Ok(Self {
+            _bus: bus,
             device,
             inject,
             number,
             signal,
-            status: node.register(RT_STS),
+            status: register(RT_STS),
             status_bit: key.status_bit,
             window,
         })
@@ -309,15 +339,10 @@ impl From<CallError<DeviceError>> for Failure {
 /// подключения либо обслуживания кнопки завершает процесс.
 pub fn run(
     key: &'static Key,
-    spmi: &Import<spmi::Protocol>,
+    spmi: Providers<spmi::Protocol>,
     platform: &Import<platform::Protocol>,
     parent: startup_contract::Client<PortTransport>,
 ) -> Result<(), Stopped> {
-    let bus = spmi
-        .open()
-        .map_err(Stopped::Startup)?
-        .client()
-        .with_wait(CALL_TIMEOUT);
     let platform = platform
         .open()
         .map_err(Stopped::Startup)?
@@ -337,7 +362,7 @@ pub fn run(
 
     let mut source = Source {
         key,
-        bus,
+        spmi,
         platform,
         attached: false,
         refused: false,

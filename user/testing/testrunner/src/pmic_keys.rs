@@ -1,7 +1,7 @@
 //! Библиотека кнопок PON `driver-pm8941-pwrkey` на синтетических входах и кнопки PMIC на
 //! описанной плате.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use component_abi::RequirementDeclaration;
 use driver_pm8941_pwrkey::{Generation, Key, PWRKEY, RESIN, usage};
@@ -9,13 +9,13 @@ use input_abi::{AttachError, DeviceLayout, Kind, Usage, input, input_inject, inp
 use ipc::{CallError, Protocol};
 use kernel_objects::Session;
 use runtime::{PortTransport, Timeout};
-use spmi_abi::{DeviceError, spmi_device};
+use spmi_abi::DeviceError;
 
 use crate::{
     composition::{Import, Importer},
     rootkeeper_system::{finish, platform_has_compatible, with_drivers},
     source_fixture::with_key_descriptor,
-    spmi::{SPMI_IMPORTS, spmi_session},
+    spmi::{SPMI_IMPORTS, described_device, open, spmi_bus},
 };
 
 const INPUT: &str = "input";
@@ -79,12 +79,12 @@ fn added(consumer: &Consumer, layouts: &[DeviceLayout]) -> Vec<Option<u16>> {
     numbers
 }
 
-fn pull_up_bits(importer: &Importer) -> Result<u8, CallError<DeviceError>> {
-    let bus = spmi_session(importer);
-    let pon = bus.open(PON).expect("pon session");
-    let pon = Session::<spmi_device::Protocol>::from_session(pon)
-        .client()
-        .with_wait(REPLY_TIMEOUT);
+fn pull_up_bits(
+    importer: &Importer,
+    (pon, controller): &(String, Vec<String>),
+) -> Result<u8, CallError<DeviceError>> {
+    let bus = spmi_bus(importer, controller);
+    let pon = open(&bus, pon).expect("pon session");
     let value = pon.read(PON_PULL_CTL, 1)?;
     Ok(u8::try_from(value).unwrap_or_default() & (PWRKEY.pull_up_bit | RESIN.pull_up_bit))
 }
@@ -118,6 +118,8 @@ fn the_board_buttons_are_attached_input_sources_with_their_keys() {
         test_harness::skip!("{} is not described", PWRKEY.compatible);
     }
 
+    let pon = described_device(PON).expect("pon described");
+
     let composition = with_drivers();
     let importer = composition.importer(IMPORTS);
     let input = importer.session::<input::Protocol>(INPUT);
@@ -142,7 +144,7 @@ fn the_board_buttons_are_attached_input_sources_with_their_keys() {
         })
         .collect();
 
-    let pull_up = pull_up_bits(&composition.importer(SPMI_IMPORTS));
+    let pull_up = pull_up_bits(&composition.importer(SPMI_IMPORTS), &pon);
 
     test_harness::check!(numbers.iter().all(Option::is_some));
     test_harness::check!(!reattached.is_empty());
