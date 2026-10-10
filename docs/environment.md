@@ -19,6 +19,7 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 | C/C++ toolchain | Линковка host-программ, сборка зависимостей и fuzz-целей |
 | `clang`, `lld` | Сборка библиотеки C и C-исходников программ userland |
 | `meson`, `ninja-build`, `xz-utils` | Сборка библиотеки C из архива релиза |
+| `unzip` | Распаковка архивов стороннего кода |
 | `mkbootimg` | Сборка Android boot image |
 | `similarity-rs` | Проверка дублирования |
 | `cargo-fuzz` | Сборка и запуск fuzz-целей |
@@ -27,7 +28,7 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 
 ```bash
 cargo install cargo-binutils
-sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build xz-utils
+sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build unzip xz-utils
 ```
 
 `clang` должен быть доступен в `PATH` под именем `clang`, а компоновщик `lld` той же

@@ -9,6 +9,7 @@ mod artifacts;
 mod build;
 mod check;
 mod context;
+mod fetch;
 mod fmt;
 mod fuzz;
 mod layers;
@@ -21,6 +22,7 @@ mod similarity;
 mod sources;
 mod std_src;
 mod style;
+mod third_party;
 mod userland;
 
 use std::{path::PathBuf, process::ExitCode};
@@ -148,6 +150,12 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Fetch the pinned third-party sources and data under target/third-party
+    ThirdParty {
+        /// Prepare every entry again even when its pin is unchanged
+        #[arg(long)]
+        force: bool,
+    },
     /// Check the code style conventions
     Style(StyleArgs),
     /// Check the duplicate functions against the accepted baseline
@@ -209,6 +217,7 @@ fn main() -> Result<ExitCode> {
             }
         }
         Commands::LibcSrc { force } => libc_src::run(force)?,
+        Commands::ThirdParty { force } => third_party::run(force)?,
         Commands::Similarity(args) => similarity::run(args)?,
         Commands::Style(args) => {
             let code = style::run(args)?;

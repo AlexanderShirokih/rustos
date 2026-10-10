@@ -20,6 +20,7 @@
 | Cargo в userland | `cargo xtask userland <аргументы cargo>` |
 | Исходники стандартной библиотеки | `cargo xtask std-src` |
 | Библиотека C | `cargo xtask libc-src` |
+| Сторонний код | `cargo xtask third-party` |
 | Тесты под QEMU | `cargo xtask qemu-test` |
 | Замеры под QEMU | `cargo xtask bench` |
 | Стресс-тесты под QEMU | `cargo xtask stress` |
@@ -203,11 +204,24 @@ cargo xtask std-src [--force] [--verify [--arch <name>]]
 cargo xtask libc-src [--force]
 ```
 
-Команда загружает закреплённый релиз picolibc в `target/libc-src`, сверяет
+Команда раскладывает закреплённый релиз picolibc в `target/libc-src`, сверяет
 его сумму и собирает библиотеку под зарегистрированные архитектуры в
 `target/libc-sysroot`. Команда пересобирает библиотеку при смене релиза, версии
 `clang`, архиватора или флагов, а с `--force` — всегда. Команды, которые собирают
 userland, готовят библиотеку перед сборкой.
+
+## Сторонний код
+
+```text
+cargo xtask third-party [--force]
+```
+
+Команда раскладывает закреплённый сторонний код реестра
+[third_party.rs](../xtask/src/third_party.rs) в `target/third-party/<имя>`.
+`--force` раскладывает каждую запись заново.
+
+Команды, которые собирают userland, готовят исходники записей перед сборкой. Данные
+записи готовит сборка образа, манифест или `--file` которой берёт файл из её каталога.
 
 ## Clippy и rustdoc
 

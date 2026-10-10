@@ -1,14 +1,14 @@
 //! Подготовка библиотеки C программ userland: picolibc из закреплённого релиза, собранная под
 //! каждую архитектуру реестра.
 //!
-//! Архив релиза ложится в `target/libc-src` и сверяется с закреплённой суммой до распаковки.
-//! Сборка каждой архитектуры кладёт в `target/libc-sysroot/<arch>` заголовки, `lib/libc.a`,
-//! файл `cflags` с флагами компилятора, под которыми собрана библиотека, и файл `ar` с
-//! архиватором. К заголовкам библиотеки добавляется `pthread.h` системного слоя `c-library`.
+//! Загрузка закреплённого кода раскладывает исходники релиза в `target/libc-src`. Сборка
+//! каждой архитектуры кладёт в `target/libc-sysroot/<arch>` заголовки, `lib/libc.a`, файл
+//! `cflags` с флагами компилятора, под которыми собрана библиотека, и файл `ar` с архиватором.
+//! К заголовкам библиотеки добавляется `pthread.h` системного слоя `c-library`.
 //!
 //! Отпечаток релиза, версии `clang`, пути архиватора, опций сборки, флагов архитектур и
 //! содержимого `pthread.h` лежит в `target/libc-sysroot/.stamp`, и повторный вызов с тем же
-//! отпечатком ничего не делает. Одновременные вызовы разводит замок `target/libc-src.lock`.
+//! отпечатком ничего не делает. Одновременные вызовы разводит замок `target/libc-sysroot.lock`.
 //!
 //! Библиотека собирается многопоточной, без своей кучи, `crt0` и semihosting, с консолью поверх
 //! `read`/`write`, замком на каждый вызов ввода-вывода и конструкторами через
@@ -31,23 +31,28 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     context::{lock_tree, project_root},
+    fetch::{self, Format, Pin},
     layers::{ArchEntry, arch_registry},
     shell,
 };
 
 const VERSION: &str = "1.8.12";
-
 const ARCHIVE_SHA256: &str = "64e8c412e1c40fa6eb1a72d2b5cdbcbfe6ceca4cbea454edbad54557ffc747fa";
-
-const RELEASES_URL: &str = "https://github.com/picolibc/picolibc/releases/download";
+const RELEASE: Pin = Pin::Archive {
+    url: "https://github.com/picolibc/picolibc/releases/download/1.8.12/picolibc-1.8.12.tar.xz",
+    sha256: ARCHIVE_SHA256,
+    format: Format::TarXz,
+};
 
 const MIN_CLANG_MAJOR: u32 = 18;
 
 const SOURCE_DIR: &str = "target/libc-src";
 
+const BUILD_DIR: &str = "target/libc-build";
+
 const SYSROOT_DIR: &str = "target/libc-sysroot";
 
-const LOCK: &str = "target/libc-src.lock";
+const LOCK: &str = "target/libc-sysroot.lock";
 
 const CFLAGS_FILE: &str = "cflags";
 
@@ -115,15 +120,15 @@ pub(crate) fn materialize(force: bool) -> Result<PathBuf> {
         return Ok(sysroot);
     }
 
-    let source_dir = root.join(SOURCE_DIR);
-    let sources = unpack(&source_dir)?;
+    let sources = fetch::materialize("picolibc", &root.join(SOURCE_DIR), &RELEASE, force)?
+        .join(format!("picolibc-{VERSION}"));
     if sysroot.exists() {
         fs::remove_dir_all(&sysroot)
             .with_context(|| format!("Failed to clear {}", sysroot.display()))?;
     }
     for arch in &archs {
         let prefix = sysroot.join(arch.name);
-        build_arch(arch, &archiver, &sources, &source_dir, &prefix)?;
+        build_arch(arch, &archiver, &sources, &root.join(BUILD_DIR), &prefix)?;
         install_threads_header(&header, &prefix)?;
     }
     fs::write(&stamp_path, &stamp)
@@ -207,71 +212,14 @@ fn stamp_for(clang: &str, archiver: &str, header: &[u8], archs: &[&ArchFlags]) -
     stamp
 }
 
-fn archive_name() -> String {
-    format!("picolibc-{VERSION}.tar.xz")
-}
-
-fn unpack(source_dir: &Path) -> Result<PathBuf> {
-    fs::create_dir_all(source_dir)
-        .with_context(|| format!("Failed to create {}", source_dir.display()))?;
-    let archive = source_dir.join(archive_name());
-    if !archive.is_file() {
-        download(&archive)?;
-    }
-    let bytes =
-        fs::read(&archive).with_context(|| format!("Failed to read {}", archive.display()))?;
-    verify_sha256(&bytes, ARCHIVE_SHA256).with_context(|| {
-        format!(
-            "{} does not match the pinned release; delete it to download again",
-            archive.display()
-        )
-    })?;
-
-    let sources = source_dir.join(format!("picolibc-{VERSION}"));
-    if sources.exists() {
-        fs::remove_dir_all(&sources)
-            .with_context(|| format!("Failed to clear {}", sources.display()))?;
-    }
-    let mut command = Command::new("tar");
-    command.arg("-xJf").arg(&archive).arg("-C").arg(source_dir);
-    shell::run(&mut command, &format!("tar -xJf {}", archive.display()))?;
-    Ok(sources)
-}
-
-fn download(archive: &Path) -> Result<()> {
-    let url = format!("{RELEASES_URL}/{VERSION}/{}", archive_name());
-    let partial = archive.with_extension("part");
-    let mut command = Command::new("curl");
-    command
-        .args(["--proto", "=https", "--tlsv1.2", "-sSfL", "-o"])
-        .arg(&partial)
-        .arg(&url);
-    shell::run(&mut command, &format!("curl {url}")).with_context(|| {
-        format!(
-            "Failed to download picolibc; put {url} at {} by hand",
-            archive.display()
-        )
-    })?;
-    fs::rename(&partial, archive)
-        .with_context(|| format!("Failed to move the archive to {}", archive.display()))
-}
-
-fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
-    let actual = format!("{:x}", Sha256::digest(bytes));
-    if actual != expected {
-        bail!("SHA-256 mismatch: expected {expected}, got {actual}");
-    }
-    Ok(())
-}
-
 fn build_arch(
     arch: &ArchFlags,
     archiver: &str,
     sources: &Path,
-    source_dir: &Path,
+    build_root: &Path,
     prefix: &Path,
 ) -> Result<()> {
-    let build = source_dir.join(format!("build-{}", arch.name));
+    let build = build_root.join(arch.name);
     if build.exists() {
         fs::remove_dir_all(&build)
             .with_context(|| format!("Failed to clear {}", build.display()))?;
@@ -359,19 +307,6 @@ fn cross_file_text(arch: &ArchFlags, archiver: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_mismatching_archive_names_both_sums() {
-        let expected = "0".repeat(64);
-        let error = verify_sha256(b"picolibc", &expected)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&expected), "{error}");
-        assert!(
-            error.contains(&format!("{:x}", Sha256::digest(b"picolibc"))),
-            "{error}"
-        );
-    }
 
     #[test]
     fn the_clang_major_comes_from_the_dumped_version() {

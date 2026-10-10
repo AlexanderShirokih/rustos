@@ -15,7 +15,7 @@ use clap::Args;
 use crate::{
     context::project_root,
     layers::{ArchEntry, Profile, Workspace, arch_registry, registered, workspaces},
-    libc_src, race, shell, std_src,
+    race, shell, userland,
 };
 
 #[derive(Args)]
@@ -281,8 +281,7 @@ fn run_all(invocations: &[Invocation], what: &str) -> Result<()> {
         let mut command = Command::new("cargo");
         command.args(&invocation.args).current_dir(&invocation.dir);
         if invocation.std_src {
-            command.env("__CARGO_TESTS_ONLY_SRC_ROOT", std_src::materialize(false)?);
-            libc_src::materialize(false)?;
+            command.env("__CARGO_TESTS_ONLY_SRC_ROOT", userland::prepare_build()?);
         }
         if invocation.rustdoc_flags {
             command.env("RUSTDOCFLAGS", RUSTDOC_FLAGS);
