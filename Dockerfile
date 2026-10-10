@@ -12,9 +12,11 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 #   gcc/g++/libc6-dev — линкер для host-сборок, build-скриптов и libFuzzer
 #   git/ca-certs/curl — checkout, rustup, загрузка crates
 #   meson/ninja/xz    — сборка picolibc из релизного архива (xtask libc-src)
+#   cmake             — сборка рантаймов C++ LLVM из релизного архива (xtask libc-src)
 #   unzip             — распаковка архивов стороннего кода (xtask third-party)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        cmake \
         curl \
         gcc \
         g++ \

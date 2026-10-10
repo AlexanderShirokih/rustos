@@ -21,7 +21,7 @@ pub enum Error {
     SysrootVariableUnset,
     /// `cargo xtask libc-src` не собрал библиотеку C, и в sysroot нет файла архитектуры.
     LibcNotBuilt { path: PathBuf },
-    /// Путь C-исходника не задаёт имени объектного файла.
+    /// Путь исходника не задаёт имени объектного файла.
     SourceName(String),
     /// Файл сборки не записан.
     Write { path: PathBuf, source: io::Error },
@@ -44,7 +44,7 @@ impl Display for Error {
                 "{} is missing: run `{PREPARE_COMMAND}` to build the C library",
                 path.display()
             ),
-            Self::SourceName(source) => write!(f, "C source `{source}` has no file name"),
+            Self::SourceName(source) => write!(f, "source `{source}` has no file name"),
             Self::Write { path, source } => {
                 write!(f, "failed to write {}: {source}", path.display())
             }

@@ -26,9 +26,10 @@ _BEGIN_STD_C
 #define PTHREAD_MUTEX_ERRORCHECK 2
 #define PTHREAD_MUTEX_DEFAULT    PTHREAD_MUTEX_NORMAL
 
-#define PTHREAD_MUTEX_INITIALIZER {{0}}
-#define PTHREAD_COND_INITIALIZER  {{0}}
-#define PTHREAD_ONCE_INIT         0
+#define PTHREAD_MUTEX_INITIALIZER  {{0}}
+#define PTHREAD_COND_INITIALIZER   {{0}}
+#define PTHREAD_RWLOCK_INITIALIZER {{0}}
+#define PTHREAD_ONCE_INIT          0
 
 typedef struct __pthread *pthread_t;
 
@@ -57,6 +58,15 @@ typedef struct {
     int __clock;
 } pthread_condattr_t;
 
+typedef union {
+    unsigned char __bytes[20];
+    unsigned int  __align;
+} pthread_rwlock_t;
+
+typedef struct {
+    int __reserved;
+} pthread_rwlockattr_t;
+
 typedef int pthread_once_t;
 
 #ifndef __cplusplus
@@ -66,6 +76,8 @@ _Static_assert(sizeof(pthread_mutex_t) == 32 && _Alignof(pthread_mutex_t) == 8,
                "pthread_mutex_t layout is shared with c-library");
 _Static_assert(sizeof(pthread_cond_t) == 12 && _Alignof(pthread_cond_t) == 4,
                "pthread_cond_t layout is shared with c-library");
+_Static_assert(sizeof(pthread_rwlock_t) == 20 && _Alignof(pthread_rwlock_t) == 4,
+               "pthread_rwlock_t layout is shared with c-library");
 #endif
 
 int pthread_create(pthread_t *__restrict thread, const pthread_attr_t *__restrict attr,
@@ -110,6 +122,9 @@ int pthread_cond_destroy(pthread_cond_t *cond);
 int pthread_cond_wait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex);
 int pthread_cond_timedwait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex,
                            const struct timespec *__restrict abstime);
+/* Срок отсчитывается по часам clock независимо от часов переменной. */
+int pthread_cond_clockwait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex,
+                           clockid_t clock, const struct timespec *__restrict abstime);
 int pthread_cond_signal(pthread_cond_t *cond);
 int pthread_cond_broadcast(pthread_cond_t *cond);
 
@@ -119,7 +134,18 @@ int pthread_condattr_setclock(pthread_condattr_t *attr, clockid_t clock);
 int pthread_condattr_getclock(const pthread_condattr_t *__restrict attr,
                               clockid_t *__restrict clock);
 
+/* Блокировка ведёт себя одинаково при любых атрибутах. */
+int pthread_rwlock_init(pthread_rwlock_t *__restrict rwlock,
+                        const pthread_rwlockattr_t *__restrict attr);
+int pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+int pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
+int pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+
 int pthread_once(pthread_once_t *once, void (*init)(void));
+
+/* sched.h picolibc объявляет sched_yield только для RTEMS. */
+int sched_yield(void);
 
 _END_STD_C
 

@@ -1,18 +1,25 @@
 //! Потоки POSIX библиотеки C: запись потока, его жизненный цикл и атрибуты.
 //!
 //! `pthread_t` - адрес записи потока. Запись хранит `errno` потока, значение выхода, состояние
-//! отсоединения и `JoinHandle` потока. Поток находит свою запись по ключу идентичности
-//! `runtime::tls`, пустой слот означает главный поток со статической записью.
+//! отсоединения, `JoinHandle` потока, массив его экземпляров thread-local переменных emutls и
+//! список деструкторов `thread_local`.
+//! Поток находит свою запись по ключу идентичности `runtime::tls`, пустой слот означает главный
+//! поток со статической записью.
 //!
-//! Запись существует до терминации потока, в том числе во время деструкторов его ключей.
+//! Деструкторы `thread_local` выполняются при выходе потока до деструкторов его ключей, а при
+//! `exit` - для вызвавшего потока.
+//!
+//! Запись существует до терминации потока, в том числе во время деструкторов его ключей, и
+//! освобождается вместе с массивом экземпляров.
 //! Запись отсоединённого потока при выходе встаёт в список завершившихся. Список проходят
 //! `pthread_create`, `pthread_join` и `pthread_detach` и освобождают записи терминированных
 //! потоков.
 
 #![allow(unsafe_code)]
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use core::{
+    cell::UnsafeCell,
     ffi::{c_int, c_void},
     mem::MaybeUninit,
     ptr,
@@ -25,9 +32,11 @@ use core::{
 use runtime::{JoinHandle, Mutex, Timeout, thread::Builder, tls};
 use syscall::PAGE_SIZE;
 
-use crate::{errno::Errno, process};
+use crate::{emutls::Instances, errno::Errno, process};
 
 type Start = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+
+type Destructor = unsafe extern "C" fn(*mut c_void);
 
 const JOINABLE: u32 = 0;
 const DETACHED: u32 = 1;
@@ -50,6 +59,10 @@ static IDENTITY: AtomicUsize = AtomicUsize::new(0);
 
 static EXITED: Mutex<Exited> = Mutex::new(Exited { head: ptr::null() });
 
+#[used]
+#[unsafe(link_section = ".fini_thread_local")]
+static FINI_THREAD_LOCAL: extern "C" fn() = run_current_thread_locals;
+
 pub(crate) struct Record {
     errno: AtomicI32,
     value: AtomicPtr<c_void>,
@@ -58,6 +71,8 @@ pub(crate) struct Record {
     next: AtomicPtr<Record>,
     start: Option<Start>,
     arg: *mut c_void,
+    instances: Instances,
+    destructors: UnsafeCell<Vec<(Destructor, *mut c_void)>>,
 }
 
 #[repr(C)]
@@ -71,7 +86,8 @@ struct Exited {
 }
 
 // SAFETY: `start` и `arg` пишет создатель до запуска потока и затем только читает сам поток;
-// остальные поля атомарны или под мьютексом.
+// массив экземпляров и список деструкторов меняет только сам поток; остальные поля атомарны
+// или под мьютексом.
 unsafe impl Sync for Record {}
 
 // SAFETY: список хранит адреса записей из кучи процесса, доступные любому потоку; звенья
@@ -88,11 +104,40 @@ impl Record {
             next: AtomicPtr::new(ptr::null_mut()),
             start,
             arg,
+            instances: Instances::new(),
+            destructors: UnsafeCell::new(Vec::new()),
         }
     }
 
     pub(crate) const fn errno(&self) -> *mut c_int {
         self.errno.as_ptr()
+    }
+
+    pub(crate) const fn instances(&self) -> &Instances {
+        &self.instances
+    }
+
+    unsafe fn push_destructor(&self, destructor: Destructor, object: *mut c_void) -> bool {
+        // SAFETY: вызывающий - поток записи; список меняет только он, и ссылка не покидает
+        // вызов.
+        let destructors = unsafe { &mut *self.destructors.get() };
+        if destructors.try_reserve(1).is_err() {
+            return false;
+        }
+        destructors.push((destructor, object));
+        true
+    }
+
+    unsafe fn run_destructors(&self) {
+        loop {
+            // SAFETY: вызывающий - поток записи; ссылка на список не покидает выражение и не
+            // держится во время деструктора, который может пополнить список.
+            let Some((destructor, object)) = (unsafe { &mut *self.destructors.get() }).pop() else {
+                return;
+            };
+            // SAFETY: пару передал `__cxa_thread_atexit_impl` по контракту C++ ABI.
+            unsafe { destructor(object) };
+        }
     }
 
     fn take_terminated(&self) -> Option<JoinHandle> {
@@ -196,6 +241,8 @@ fn finish(record: &Record, value: *mut c_void) -> ! {
         process::abort_with("pthread_exit called from the main thread");
     }
 
+    // SAFETY: `finish` исполняет поток записи.
+    unsafe { record.run_destructors() };
     record.value.store(value, Release);
     if record
         .state
@@ -209,6 +256,25 @@ fn finish(record: &Record, value: *mut c_void) -> ! {
 
 fn reap() {
     EXITED.lock().reap();
+}
+
+extern "C" fn run_current_thread_locals() {
+    // SAFETY: запись `current` принадлежит вызывающему потоку.
+    unsafe { current().run_destructors() };
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __cxa_thread_atexit_impl(
+    destructor: Destructor,
+    object: *mut c_void,
+    _dso_symbol: *mut c_void,
+) -> c_int {
+    // SAFETY: запись `current` принадлежит вызывающему потоку.
+    if unsafe { current().push_destructor(destructor, object) } {
+        0
+    } else {
+        -1
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -317,6 +383,12 @@ unsafe extern "C" fn pthread_detach(thread: *const Record) -> c_int {
 #[unsafe(no_mangle)]
 extern "C" fn pthread_exit(value: *mut c_void) -> ! {
     finish(current(), value)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn sched_yield() -> c_int {
+    runtime::thread_yield();
+    0
 }
 
 #[unsafe(no_mangle)]

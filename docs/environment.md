@@ -17,8 +17,9 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 | `cargo-binutils` | Извлечение бинарного образа через `cargo objcopy` |
 | `qemu-system-aarch64` | Запуск и тесты QEMU |
 | C/C++ toolchain | Линковка host-программ, сборка зависимостей и fuzz-целей |
-| `clang`, `lld` | Сборка библиотеки C и C-исходников программ userland |
+| `clang`, `lld` | Сборка библиотек C и C++ и C/C++-исходников программ userland |
 | `meson`, `ninja-build`, `xz-utils` | Сборка библиотеки C из архива релиза |
+| `cmake` | Сборка рантаймов C++ из архива релиза LLVM |
 | `unzip` | Распаковка архивов стороннего кода |
 | `mkbootimg` | Сборка Android boot image |
 | `similarity-rs` | Проверка дублирования |
@@ -28,15 +29,15 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 
 ```bash
 cargo install cargo-binutils
-sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build unzip xz-utils
+sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build cmake unzip xz-utils
 ```
 
 `clang` должен быть доступен в `PATH` под именем `clang`, а компоновщик `lld` той же
 версии — под именем `ld.lld`. Минимальную версию `clang` задаёт `MIN_CLANG_MAJOR` в
 [libc_src.rs](../xtask/src/libc_src.rs).
-Архиватором библиотеки C и C-исходников служит `llvm-ar`, если его находит `clang`
-(`clang -print-prog-name=llvm-ar`), иначе `ar`. Архиватор должен понимать ELF-объекты:
-GNU `ar` из binutils подходит, `ar` macOS — нет.
+Архиватором библиотек C и C++ и исходников программ служит `llvm-ar`, если его
+находит `clang` (`clang -print-prog-name=llvm-ar`), иначе `ar`. Архиватор должен
+понимать ELF-объекты: GNU `ar` из binutils подходит, `ar` macOS — нет.
 
 `mkbootimg` должен быть доступен в `PATH` при сборке Android-образа.
 Нужную версию `similarity-rs` задаёт
@@ -51,7 +52,7 @@ GNU `ar` из binutils подходит, `ar` macOS — нет.
 ставит программы в `PATH`, его каталог `bin` добавляется вручную:
 
 ```bash
-brew install meson ninja lld llvm
+brew install meson ninja cmake lld llvm
 export PATH="$PATH:$(brew --prefix llvm)/bin"
 ```
 

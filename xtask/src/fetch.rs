@@ -1,7 +1,8 @@
 //! Загрузка закреплённого стороннего кода: архив релиза со сверкой суммы sha256 и дерево git
 //! на заданном коммите.
 //!
-//! Запись раскладывается в свой каталог целиком. Отпечаток пина лежит в `<dir>/.pin`, и
+//! Запись раскладывается в свой каталог. Архив с пустым списком `members` распаковывается
+//! целиком, а с непустым - только каталоги из списка. Отпечаток пина лежит в `<dir>/.pin`, и
 //! подготовка без `force` с тем же пином оставляет каталог как есть. Одновременные подготовки
 //! одной записи разводит замок `<dir>.lock`.
 //!
@@ -30,6 +31,7 @@ pub(crate) enum Pin {
         url: &'static str,
         sha256: &'static str,
         format: Format,
+        members: &'static [&'static str],
     },
     GitCommit {
         repo: &'static str,
@@ -58,7 +60,8 @@ pub(crate) fn materialize(name: &str, dir: &Path, pin: &Pin, force: bool) -> Res
             url,
             sha256,
             format,
-        } => unpack(name, dir, url, sha256, format)?,
+            members,
+        } => unpack(name, dir, url, sha256, format, members)?,
         Pin::GitCommit { repo, commit } => checkout(name, dir, repo, commit)?,
     }
     fs::write(&pin_path, &fingerprint)
@@ -81,7 +84,14 @@ fn recreate(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))
 }
 
-fn unpack(name: &str, dir: &Path, url: &str, sha256: &str, format: &Format) -> Result<()> {
+fn unpack(
+    name: &str,
+    dir: &Path,
+    url: &str,
+    sha256: &str,
+    format: &Format,
+    members: &[&str],
+) -> Result<()> {
     let file_name = url
         .rsplit('/')
         .next()
@@ -104,12 +114,23 @@ fn unpack(name: &str, dir: &Path, url: &str, sha256: &str, format: &Format) -> R
     let mut command = match format {
         Format::TarXz => {
             let mut command = Command::new("tar");
-            command.arg("-xJf").arg(&archive).arg("-C").arg(dir);
+            command
+                .arg("-xJf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(dir)
+                .arg("--")
+                .args(members);
             command
         }
         Format::Zip => {
             let mut command = Command::new("unzip");
-            command.arg("-q").arg(&archive).arg("-d").arg(dir);
+            command
+                .arg("-q")
+                .arg(&archive)
+                .args(members.iter().map(|member| format!("{member}/*")))
+                .arg("-d")
+                .arg(dir);
             command
         }
     };
@@ -228,6 +249,7 @@ mod tests {
             url: "https://example.invalid/entry.zip",
             sha256: "0",
             format: Format::Zip,
+            members: &[],
         };
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("kept"), b"").unwrap();
@@ -247,6 +269,7 @@ mod tests {
             url: "https://example.invalid/entry.zip",
             sha256: "0",
             format: Format::Zip,
+            members: &[],
         };
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(PIN_FILE), format!("{pin:?}")).unwrap();
@@ -254,6 +277,39 @@ mod tests {
 
         assert_eq!(materialize("entry", &dir, &pin, false).unwrap(), dir);
         assert!(dir.join("kept").is_file());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn named_members_are_the_only_unpacked_directories() {
+        let root = std::env::temp_dir().join(format!("xtask-fetch-members-{}", std::process::id()));
+        let content = root.join("content");
+        for member in ["release/kept", "release/skipped"] {
+            fs::create_dir_all(content.join(member)).unwrap();
+            fs::write(content.join(member).join("file"), member).unwrap();
+        }
+        let archive = root.join("entry.tar.xz");
+        let packed = Command::new("tar")
+            .arg("-cJf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&content)
+            .arg("release")
+            .status()
+            .unwrap();
+        assert!(packed.success());
+        let sha256 = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
+        let pin = Pin::Archive {
+            url: "https://example.invalid/entry.tar.xz",
+            sha256: Box::leak(sha256.into_boxed_str()),
+            format: Format::TarXz,
+            members: &["release/kept"],
+        };
+
+        let dir = materialize("entry", &root.join("entry"), &pin, false).unwrap();
+        assert!(dir.join("release/kept/file").is_file());
+        assert!(!dir.join("release/skipped").exists());
 
         fs::remove_dir_all(&root).unwrap();
     }

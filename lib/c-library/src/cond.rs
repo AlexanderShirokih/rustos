@@ -101,14 +101,22 @@ extern "C" fn pthread_cond_wait(cond: Option<&Cond>, mutex: Option<&Mutex>) -> c
 extern "C" fn c_library_cond_timedwait(
     cond: Option<&Cond>,
     mutex: Option<&Mutex>,
+    deadline_clock_id: Option<&ClockId>,
     seconds: i64,
     nanoseconds: i64,
 ) -> c_int {
     let (Some(cond), Some(mutex)) = (cond, mutex) else {
         return Errno::InvalidArgument.code();
     };
+    let deadline_clock = match deadline_clock_id {
+        Some(&id) => match Clock::from_id(id) {
+            Some(clock) => clock,
+            None => return Errno::InvalidArgument.code(),
+        },
+        None => clock(cond.clock),
+    };
 
-    let timeout = match clock::remaining(clock(cond.clock), seconds, nanoseconds) {
+    let timeout = match clock::remaining(deadline_clock, seconds, nanoseconds) {
         Ok(timeout) => timeout,
         Err(error) => return error.code(),
     };

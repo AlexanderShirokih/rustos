@@ -37,6 +37,8 @@ mod c_selftest;
 mod child_steps_protocol;
 mod clock;
 mod composition;
+mod cxx_exit;
+mod cxx_selftest;
 mod display;
 mod display_fixture_protocol;
 mod failing_filesystem;
@@ -76,6 +78,7 @@ mod ring_transport;
 mod rootkeeper_system;
 mod search_limits;
 mod selftest_clock;
+mod selftest_run;
 mod signal;
 #[cfg(target_arch = "aarch64")]
 mod simd_state;

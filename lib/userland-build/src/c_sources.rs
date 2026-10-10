@@ -1,8 +1,9 @@
-//! Компиляция C-исходников пакета userland под библиотеку C.
+//! Компиляция C- и C++-исходников пакета userland под библиотеку C.
 //!
 //! Корень sysroot библиотеки задаёт переменная `MOLECULAR_LIBC_SYSROOT`. Подкаталог архитектуры
 //! содержит заголовки, `lib/libc.a`, файл `cflags` с флагами, под которыми собрана библиотека,
-//! и файл `ar` с архиватором.
+//! и файл `ar` с архиватором. Там же лежат заголовки и архивы стандартной библиотеки C++ и
+//! файл `cxxflags` с флагами C++-кода.
 //! Sysroot должна подготовить `cargo xtask libc-src` до сборки пакета.
 
 use std::{
@@ -17,11 +18,16 @@ use crate::{Error, error::cargo_variable};
 
 pub(crate) const SYSROOT_VARIABLE: &str = "MOLECULAR_LIBC_SYSROOT";
 
-/// C-исходники пакета, которые компилируются в его статическую библиотеку.
+const CXX_EXTENSIONS: &[&str] = &["cpp", "cc"];
+
+const CXX_LIBRARIES: &[&str] = &["c++", "c++abi", "unwind"];
+
+/// C- и C++-исходники пакета, которые компилируются в его статическую библиотеку.
 ///
 /// Исходники компилируются с флагами архитектуры из sysroot и заголовками библиотеки C.
-/// Уровень оптимизации и отладочная информация следуют профилю cargo. Пути исходников и
-/// каталогов заголовков берутся от каталога пакета.
+/// Исходники `.cpp` и `.cc` компилируются как C++, и пакет с ними компонуется со стандартной
+/// библиотекой C++. Уровень оптимизации и отладочная информация следуют профилю cargo. Пути
+/// исходников и каталогов заголовков берутся от каталога пакета.
 pub struct CSources<'a> {
     name: &'a str,
     sources: &'a [&'a str],
@@ -33,6 +39,7 @@ pub struct CSources<'a> {
 struct ArchSysroot {
     dir: PathBuf,
     cflags: Vec<String>,
+    cxxflags: Vec<String>,
     archiver: String,
 }
 
@@ -91,17 +98,27 @@ impl<'a> CSources<'a> {
         }
 
         let mut objects = Vec::new();
+        let mut has_cxx = false;
         for source in self.sources {
             println!("cargo:rerun-if-changed={source}");
-            let stem = Path::new(source)
+            let path = Path::new(source);
+            let stem = path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .ok_or_else(|| Error::SourceName((*source).to_string()))?;
             let object = out_dir.join(format!("{name}-{stem}.o"));
             let mut clang = Command::new("clang");
+            clang.args(&arch.cflags).arg("-nostdlibinc");
+
+            let cxx = path
+                .extension()
+                .is_some_and(|extension| CXX_EXTENSIONS.iter().any(|cxx| extension == *cxx));
+            if cxx {
+                clang.args(["-x", "c++"]).args(&arch.cxxflags);
+                has_cxx = true;
+            }
+
             clang
-                .args(&arch.cflags)
-                .arg("-nostdlibinc")
                 .args(
                     self.include_dirs
                         .iter()
@@ -135,6 +152,15 @@ impl<'a> CSources<'a> {
 
         println!("cargo:rustc-link-search=native={}", out_dir.display());
         println!("cargo:rustc-link-lib=static={name}");
+        if has_cxx {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                arch.dir.join("lib").display()
+            );
+            for library in CXX_LIBRARIES {
+                println!("cargo:rustc-link-lib=static:-bundle={library}");
+            }
+        }
         Ok(())
     }
 }
@@ -150,10 +176,12 @@ impl ArchSysroot {
         println!("cargo:rerun-if-changed={}", root.join(".stamp").display());
 
         let cflags = read_sysroot_file(dir.join("cflags"))?;
+        let cxxflags = read_sysroot_file(dir.join("cxxflags"))?;
         let archiver = read_sysroot_file(dir.join("ar"))?;
         Ok(Self {
             dir,
             cflags: cflags.split_whitespace().map(String::from).collect(),
+            cxxflags: cxxflags.split_whitespace().map(String::from).collect(),
             archiver: archiver.trim().to_string(),
         })
     }

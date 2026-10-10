@@ -24,6 +24,8 @@ members = [
     "system/spmi-pmic-arb",
     "system/virtio-mmio",
     "testing/c-selftest",
+    "testing/cxx-exit",
+    "testing/cxx-selftest",
     "testing/std-selftest",
     "testing/testrunner",
     "../lib/c-library",

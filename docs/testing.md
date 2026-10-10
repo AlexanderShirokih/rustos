@@ -84,10 +84,7 @@ Seed задаёт последовательность операций. Пор�
 или журналом. Определение протокола используется обеими сторонами.
 
 Стандартную библиотеку проверяет
-[std-selftest](../user/testing/std-selftest/src/main.rs).
-Testrunner запускает её с отдельной лог-сессией и проверяет код выхода.
-Паника даёт ненулевой код и диагностику через `stderr`.
-
-Библиотеку C проверяет
-[c-selftest](../user/testing/c-selftest/src/selftest.c). Testrunner
-проверяет код выхода и строки журнала, которые выводит завершение через `exit`.
+[std-selftest](../user/testing/std-selftest/src/main.rs), библиотеку C —
+[c-selftest](../user/testing/c-selftest/src/selftest.c), стандартную библиотеку
+C++ — [cxx-selftest](../user/testing/cxx-selftest/src/selftest.cpp) и
+[cxx-exit](../user/testing/cxx-exit/src/exit.cpp).

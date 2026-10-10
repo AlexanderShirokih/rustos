@@ -5,9 +5,14 @@
 //! между `__tests_start` и `__tests_end`: её читает сам процесс.
 //!
 //! Массивы конструкторов и деструкторов C лежат в начале `.data` в раскладке picolibc: в
-//! `.fini_array` сначала идут деструкторы по приоритету, последней - `.fini_array_onexit` с
-//! обработчиками `atexit`. Обход массива с конца вызывает обработчики `atexit` раньше
-//! деструкторов библиотеки. Таблица адресов `.got` C-кода лежит там же, в `.data`.
+//! `.fini_array` сначала идут деструкторы по приоритету, затем `.fini_array_onexit` с
+//! обработчиками `atexit`, последней - `.fini_thread_local` с деструкторами `thread_local`.
+//! Массив обходится с конца. Таблица адресов `.got` C-кода лежит там же, в `.data`.
+//!
+//! Таблицы раскрутки стека `.eh_frame`, их индекс `.eh_frame_hdr` и таблицы обработчиков
+//! `.gcc_except_table` лежат в сегменте только для чтения. Раскрутчик C++ находит таблицы по
+//! символам `__eh_frame_start`/`__eh_frame_end` и `__eh_frame_hdr_start`/`__eh_frame_hdr_end`.
+//! Без индекса границы `__eh_frame_hdr_*` нулевые.
 
 use std::{fs, path::PathBuf};
 
@@ -31,6 +36,19 @@ SECTIONS
     __tests_end = .;
 
     *(.rodata .rodata.*)
+    *(.gcc_except_table .gcc_except_table.*)
+  }
+
+  .eh_frame_hdr : {
+    KEEP(*(.eh_frame_hdr))
+  }
+  __eh_frame_hdr_start = SIZEOF(.eh_frame_hdr) > 0 ? ADDR(.eh_frame_hdr) : 0;
+  __eh_frame_hdr_end = SIZEOF(.eh_frame_hdr) > 0 ? ADDR(.eh_frame_hdr) + SIZEOF(.eh_frame_hdr) : 0;
+
+  .eh_frame : {
+    __eh_frame_start = .;
+    KEEP(*(.eh_frame))
+    __eh_frame_end = .;
   }
 
   .data ALIGN(0x1000) : {
@@ -48,6 +66,7 @@ SECTIONS
     KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*)))
     KEEP(*(.fini_array))
     KEEP(*(.fini_array*))
+    KEEP(*(.fini_thread_local))
     PROVIDE_HIDDEN(__fini_array_end = .);
 
     *(.got .got.*)
@@ -64,7 +83,6 @@ SECTIONS
   }
 
   /DISCARD/ : {
-    *(.eh_frame*)
     *(.comment*)
     *(.note*)
   }
@@ -73,7 +91,8 @@ SECTIONS
 
 const GENERATED_NAME: &str = "userland.ld";
 
-/// Кладёт в сборку стандартный linker script программы userspace и передаёт его компоновщику.
+/// Кладёт в сборку стандартный linker script программы userspace и передаёт его компоновщику
+/// вместе с запросом индекса `.eh_frame_hdr`.
 pub fn emit_linker_script() -> Result<(), Error> {
     let linker_script = PathBuf::from(cargo_variable("OUT_DIR")?).join(GENERATED_NAME);
     fs::write(&linker_script, LINKER_SCRIPT).map_err(|source| Error::Write {
@@ -81,5 +100,6 @@ pub fn emit_linker_script() -> Result<(), Error> {
         source,
     })?;
     println!("cargo:rustc-link-arg=-T{}", linker_script.display());
+    println!("cargo:rustc-link-arg=--eh-frame-hdr");
     Ok(())
 }

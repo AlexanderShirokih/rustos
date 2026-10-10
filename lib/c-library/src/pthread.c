@@ -13,8 +13,9 @@ const int c_library_pthread_mutex_errorcheck = PTHREAD_MUTEX_ERRORCHECK;
 const int c_library_pthread_mutex_default = PTHREAD_MUTEX_DEFAULT;
 
 int c_library_mutex_timedlock(pthread_mutex_t *mutex, int64_t seconds, int64_t nanoseconds);
-int c_library_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, int64_t seconds,
-                             int64_t nanoseconds);
+/* Пустые часы clock означают часы переменной. */
+int c_library_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, const clockid_t *clock,
+                             int64_t seconds, int64_t nanoseconds);
 
 int pthread_mutex_timedlock(pthread_mutex_t *__restrict mutex,
                             const struct timespec *__restrict abstime)
@@ -25,5 +26,11 @@ int pthread_mutex_timedlock(pthread_mutex_t *__restrict mutex,
 int pthread_cond_timedwait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex,
                            const struct timespec *__restrict abstime)
 {
-    return c_library_cond_timedwait(cond, mutex, abstime->tv_sec, abstime->tv_nsec);
+    return c_library_cond_timedwait(cond, mutex, NULL, abstime->tv_sec, abstime->tv_nsec);
+}
+
+int pthread_cond_clockwait(pthread_cond_t *__restrict cond, pthread_mutex_t *__restrict mutex,
+                           clockid_t clock, const struct timespec *__restrict abstime)
+{
+    return c_library_cond_timedwait(cond, mutex, &clock, abstime->tv_sec, abstime->tv_nsec);
 }

@@ -45,6 +45,10 @@
 #define SYNC_THREADS 4
 #define SYNC_ROUNDS  200
 
+/* Thread-local переменная: начальное значение и значение, которое оставляет поток. */
+#define THREAD_COUNTER_INITIAL 5
+#define THREAD_COUNTER_LEFT    42
+
 /* Файлы из потоков: серия блоков байта потока и строки общего потока `FILE`. */
 #define FILE_BLOCKS      8
 #define FILE_BLOCK_BYTES 512u
@@ -106,6 +110,18 @@ static pthread_mutex_t gate_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  gate_changed = PTHREAD_COND_INITIALIZER;
 static int             gate_waiters;
 static int             gate_open;
+
+static atomic_int yield_flag;
+
+/* Блокировка чтения-записи и признак, что писатель её освободил. */
+static pthread_rwlock_t static_rwlock = PTHREAD_RWLOCK_INITIALIZER;
+static atomic_int       writer_released;
+
+static _Thread_local int thread_counter = THREAD_COUNTER_INITIAL;
+
+/* Ключ, деструктор которого читает thread-local переменную, и прочитанное им значение. */
+static pthread_key_t counter_key;
+static int           destructor_saw_counter;
 
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static atomic_int     once_calls;
@@ -601,6 +617,63 @@ static void check_thread_keys(void)
           "a key destructor runs in the exiting thread");
 }
 
+static void *count_locally(void *arg)
+{
+    (void)arg;
+
+    int started = thread_counter;
+
+    for (int i = 0; i < SYNC_ROUNDS; i++) {
+        thread_counter++;
+    }
+
+    int ended = thread_counter == THREAD_COUNTER_INITIAL + SYNC_ROUNDS;
+
+    return (void *)(intptr_t)(started == THREAD_COUNTER_INITIAL && ended);
+}
+
+static void read_counter(void *value)
+{
+    (void)value;
+
+    destructor_saw_counter = thread_counter;
+}
+
+static void *leave_counter(void *arg)
+{
+    thread_counter = THREAD_COUNTER_LEFT;
+    pthread_setspecific(counter_key, arg);
+
+    return NULL;
+}
+
+static void check_thread_locals(void)
+{
+    pthread_t threads[SYNC_THREADS];
+    int       created = 0;
+
+    for (int i = 0; i < SYNC_THREADS && pthread_create(&threads[i], NULL, count_locally, NULL) == 0; i++) {
+        created++;
+    }
+
+    int own = 0;
+
+    for (int i = 0; i < created; i++) {
+        own += joined_with(threads[i], (void *)1);
+    }
+
+    check(created == SYNC_THREADS && own == created && thread_counter == THREAD_COUNTER_INITIAL,
+          "each thread starts a _Thread_local variable from its initializer and sees only its changes");
+
+    pthread_t thread;
+    int       keyed = pthread_key_create(&counter_key, read_counter) == 0;
+
+    keys_created += keyed;
+    check(keyed && pthread_create(&thread, NULL, leave_counter, EXIT_VALUE) == 0 && joined_with(thread, NULL) &&
+              destructor_saw_counter == THREAD_COUNTER_LEFT,
+          "a key destructor reads the _Thread_local value of its exiting thread");
+}
+
 static void check_concurrent_output(void)
 {
     pthread_t threads[PRINTING_THREADS];
@@ -790,6 +863,60 @@ static void check_conditions(void)
     check(started == SYNC_THREADS && joined == started, "pthread_cond_broadcast releases every waiter");
 }
 
+static void *raise_flag(void *arg)
+{
+    (void)arg;
+
+    atomic_store(&yield_flag, 1);
+
+    return NULL;
+}
+
+static void check_yield(void)
+{
+    pthread_t thread;
+    int       yielded = 1;
+    int       created = pthread_create(&thread, NULL, raise_flag, NULL) == 0;
+
+    while (created && !atomic_load(&yield_flag)) {
+        yielded &= sched_yield() == 0;
+    }
+
+    check(created && joined_with(thread, NULL) && yielded, "sched_yield lets another thread raise a flag");
+}
+
+/* Захват на чтение и снятие: 1 - захват до освобождения писателем, 2 - после, NULL - отказ. */
+static void *read_shared(void *arg)
+{
+    if (pthread_rwlock_rdlock(arg) != 0) {
+        return NULL;
+    }
+
+    int released = atomic_load(&writer_released);
+
+    return pthread_rwlock_unlock(arg) == 0 ? (void *)(intptr_t)(1 + released) : NULL;
+}
+
+static void check_rwlocks(void)
+{
+    pthread_rwlock_t rwlock;
+    pthread_t        thread;
+
+    check(pthread_rwlock_init(&rwlock, NULL) == 0 && pthread_rwlock_rdlock(&rwlock) == 0 &&
+              pthread_create(&thread, NULL, read_shared, &rwlock) == 0 && joined_with(thread, (void *)1) &&
+              pthread_rwlock_unlock(&rwlock) == 0 && pthread_rwlock_destroy(&rwlock) == 0,
+          "a second reader takes a read-held rwlock without waiting");
+
+    struct timespec interval = { .tv_sec = 0, .tv_nsec = SHORT_WAIT_NS };
+    int             locked = pthread_rwlock_wrlock(&static_rwlock) == 0;
+    int             created = locked && pthread_create(&thread, NULL, read_shared, &static_rwlock) == 0;
+
+    nanosleep(&interval, NULL);
+    atomic_store(&writer_released, 1);
+    check(locked && pthread_rwlock_unlock(&static_rwlock) == 0 && created && joined_with(thread, (void *)2),
+          "a reader of PTHREAD_RWLOCK_INITIALIZER waits for the writer to unlock");
+}
+
 static void initialize_once(void)
 {
     atomic_fetch_add(&once_calls, 1);
@@ -960,9 +1087,12 @@ static void check_threads(void)
     check_thread_attributes();
     check_detached_threads();
     check_thread_keys();
+    check_thread_locals();
     check_concurrent_output();
     check_mutexes();
     check_conditions();
+    check_yield();
+    check_rwlocks();
     check_once();
     check_thread_files();
     check_key_exhaustion();
@@ -1110,12 +1240,31 @@ static void check_timed_conditions(void)
     pthread_mutex_destroy(&condition.mutex);
 }
 
+/* Ожидание по часам аргумента на переменной с часами по умолчанию, до установки часов. */
+static void check_clockwait(void)
+{
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond = PTHREAD_COND_INITIALIZER;
+    struct timespec deadline = deadline_after(CLOCK_MONOTONIC, 0, SHORT_WAIT_NS);
+
+    check(init_kind(&mutex, PTHREAD_MUTEX_ERRORCHECK) && pthread_mutex_lock(&mutex) == 0 &&
+              pthread_cond_clockwait(&cond, &mutex, CLOCK_MONOTONIC, &deadline) == ETIMEDOUT &&
+              passed(CLOCK_MONOTONIC, &deadline) && pthread_mutex_unlock(&mutex) == 0,
+          "pthread_cond_clockwait by CLOCK_MONOTONIC times out on PTHREAD_COND_INITIALIZER holding the mutex");
+    check(pthread_mutex_lock(&mutex) == 0 &&
+              pthread_cond_clockwait(&cond, &mutex, CLOCK_PROCESS_CPUTIME_ID, &deadline) == EINVAL &&
+              pthread_mutex_unlock(&mutex) == 0,
+          "pthread_cond_clockwait rejects an unknown clock with EINVAL");
+    pthread_mutex_destroy(&mutex);
+}
+
 void selftest_before_clock(void)
 {
     check_monotonic_clock();
     check_sleep();
     check_realtime_before_clock();
     check_timed_conditions();
+    check_clockwait();
 }
 
 /* `pthread_mutex_timedlock` из чужого потока со сроком через SHORT_WAIT_NS. Отказ по сроку раньше

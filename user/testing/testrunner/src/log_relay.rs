@@ -35,13 +35,19 @@ pub(crate) const SELFTEST_BADGE: NonZeroU64 =
 pub(crate) const C_SELFTEST_BADGE: NonZeroU64 =
     NonZeroU64::new(0x0400_0001).expect("badge is non-zero");
 pub(crate) const STEPS_BADGE: NonZeroU64 = NonZeroU64::new(0x0400_0002).expect("badge is non-zero");
+pub(crate) const CXX_SELFTEST_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x0400_0003).expect("badge is non-zero");
+pub(crate) const CXX_EXIT_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x0400_0004).expect("badge is non-zero");
 
 pub(crate) const STEPS_SOURCE: &str = "child-steps";
 
-const SHARED_SOURCES: [(NonZeroU64, &str); 3] = [
+const SHARED_SOURCES: [(NonZeroU64, &str); 5] = [
     (SELFTEST_BADGE, "std-selftest"),
     (C_SELFTEST_BADGE, "c-selftest"),
     (STEPS_BADGE, STEPS_SOURCE),
+    (CXX_SELFTEST_BADGE, "cxx-selftest"),
+    (CXX_EXIT_BADGE, "cxx-exit"),
 ];
 
 pub(crate) struct SharedSourceNames;

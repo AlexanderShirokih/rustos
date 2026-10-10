@@ -257,3 +257,11 @@ path = "/std-selftest"
 [[programs]]
 package = "c-selftest"
 path = "/c-selftest"
+
+[[programs]]
+package = "cxx-selftest"
+path = "/cxx-selftest"
+
+[[programs]]
+package = "cxx-exit"
+path = "/cxx-exit"

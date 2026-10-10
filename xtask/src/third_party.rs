@@ -41,6 +41,7 @@ const ENTRIES: &[Entry] = &[
             url: "https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip",
             sha256: "3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59",
             format: Format::Zip,
+            members: &[],
         },
     },
 ];

@@ -2,9 +2,9 @@
 //!
 //! Крейт даёт C-программе точку входа, кучу, завершение, стандартные потоки в журнале процесса,
 //! файлы по абсолютным путям от файлового корня [`install_filesystem_root`], монотонные часы,
-//! сон и часы реального времени от [`install_realtime_clock`], потоки POSIX, их синхронизацию и
-//! замки библиотеки C. Функции библиотеки C должны вызывать главный поток программы и потоки
-//! `pthread_create`.
+//! сон и часы реального времени от [`install_realtime_clock`], потоки POSIX, их синхронизацию,
+//! thread-local переменные и замки библиотеки C. Функции библиотеки C должны вызывать главный
+//! поток программы и потоки `pthread_create`.
 //!
 //! Программа подключает крейт макросом [`c_program!`] в корне своего no_std-пакета. Её
 //! C-функция `main` получает `argc`, равный 1, и имя bin-таргета в `argv[0]`. Требования
@@ -18,6 +18,7 @@ extern crate alloc;
 mod clock;
 mod cond;
 mod descriptor;
+mod emutls;
 mod errno;
 mod files;
 mod key;
@@ -28,6 +29,7 @@ mod once;
 mod process;
 mod program;
 mod root;
+mod rwlock;
 mod startup;
 mod stdio;
 mod thread;
