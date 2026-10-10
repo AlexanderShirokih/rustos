@@ -438,9 +438,9 @@ pub fn process_resource_self() -> Result<IssuedHandle<kind::Resource>, SyscallEr
 /// Загружает образ в процесс `handle` из сериализованного `UserImageDescAbi` в `desc`.
 ///
 /// Длина `desc` обязана равняться [`USER_IMAGE_DESC_SIZE`](syscall::USER_IMAGE_DESC_SIZE),
-/// иначе вызов даёт `InvalidArgument`. Требует `Rights::WRITE` на `handle` и на каждом
-/// region-handle сегмента, а сверх того - права по флагам самого сегмента. Region-handle
-/// сегментов остаются у вызывающего.
+/// иначе вызов даёт `InvalidArgument`. Требует `Rights::WRITE` на `handle`, а на каждом
+/// region-handle сегмента - `Rights::TRANSFER` и права по флагам самого сегмента.
+/// Region-handle сегментов остаются у вызывающего.
 /// Возврат: 0 либо `-(SyscallError)`.
 pub fn process_load_image(handle: Handle<kind::Process>, desc: &[u8]) -> i64 {
     // SAFETY: svc-immediate содержит номер операции. Аргументы в x0..x2: process_handle, desc_va,

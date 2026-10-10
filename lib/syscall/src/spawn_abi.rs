@@ -56,8 +56,8 @@ pub struct UserImageDescAbi {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UserSegmentAbi {
     /// `HandleId` региона в таблице вызывающего `ProcessLoadImage`. Handle остаётся у
-    /// вызывающего, ядро устанавливает регион в child AS по нему. Требует `Rights::WRITE`
-    /// и права по `flags`.
+    /// вызывающего, ядро устанавливает регион в child AS по нему. Требует `Rights::TRANSFER`
+    /// и права по `flags`: `READ | WRITE` для RW, `READ` для RO, `READ | EXECUTE` для RX.
     pub region_handle: u32,
     /// Флаги: `0 = RW`, `1 = RO`, `2 = RX` (см. [`UserMemFlags`](crate::UserMemFlags)).
     /// Значение вне этих трёх даёт `InvalidArgument`.

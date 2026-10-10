@@ -7,7 +7,7 @@ use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE};
 use userland_image::component_name;
 use userland_loader::load_program;
 
-use crate::fixture::FIXTURE_ENTRY;
+use crate::{composition::image, fixture::FIXTURE_ENTRY};
 
 const ROLLBACK_PROBE_NAME: &str = "load-image-rollback";
 
@@ -47,6 +47,7 @@ fn load_image_error_reclaims_each_created_process() {
                 let initial = Signal::create().expect("initial capability");
                 load_program(
                     &invalid,
+                    None,
                     ProcessName::new(ROLLBACK_PROBE_NAME).expect("fixture process name"),
                     &resource,
                     initial,
@@ -74,6 +75,7 @@ fn start_error_reclaims_each_loaded_process() {
                 let initial = Signal::create().expect("initial capability");
                 load_program(
                     &child,
+                    Some(&image().pages()),
                     ProcessName::new(component_name(FIXTURE_ENTRY)).expect("fixture process name"),
                     &write_only,
                     initial,

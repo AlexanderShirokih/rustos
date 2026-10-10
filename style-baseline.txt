@@ -5,7 +5,6 @@ code_in_crate_root|kernel/drivers-aarch64/src/lib.rs|register_driver|e2499797
 code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|<AsidAllocatorState as Default>|76c9b637
 code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|<GlobalAsidAllocator<CPUS> as core::fmt::Debug>|76c9b637
 code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|ASID_MASK|bcd9ed09
-code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AcquireOutcome|095e3801
 code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidAllocatorState|76c9b637
 code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidAllocatorState|fc430f6e
 code_in_crate_root|kernel/hal-aarch64-asid/src/lib.rs|AsidBitmap|41129bb3
@@ -85,15 +84,6 @@ code_in_crate_root|lib/log-abi/src/lib.rs|LOG_SOURCE_MAX|4c17d616
 code_in_crate_root|lib/log-abi/src/lib.rs|TERMINATOR_SIZE|049ef224
 code_in_crate_root|lib/log-abi/src/lib.rs|tests|4dfda322
 code_in_crate_root|lib/rtc-abi/src/lib.rs|<file-root>|98c71a2d
-code_in_crate_root|lib/userland-loader/src/lib.rs|<PendingProcess as Drop>|76c9b637
-code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|76c9b637
-code_in_crate_root|lib/userland-loader/src/lib.rs|PendingProcess|c7c338b1
-code_in_crate_root|lib/userland-loader/src/lib.rs|STARTUP_FAILURE_EXIT_CODE|b339c684
-code_in_crate_root|lib/userland-loader/src/lib.rs|load_program|f1190502
-code_in_crate_root|lib/userland-loader/src/lib.rs|permissions_to_flags|7ef9b161
-code_in_crate_root|lib/userland-loader/src/lib.rs|round_up_to_page|54ca5bdb
-code_in_crate_root|lib/userland-loader/src/lib.rs|state_taken|b2044f72
-code_in_crate_root|lib/userland-loader/src/lib.rs|terminate_and_join|4d8d9b4f
 expect_in_kernel|kernel/capability/src/runtime.rs|runtime|7190aad8
 expect_in_kernel|kernel/syscall/src/runtime.rs|runtime|7190aad8
 tuple_in_public_signature|kernel/capability/src/api.rs|signal_wait_many|6aa77431

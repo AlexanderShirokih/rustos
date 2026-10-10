@@ -208,7 +208,7 @@ impl<'a> RootSystem<'a> {
         log_sources: LogSources,
     ) -> Result<Self, BudgetFailure> {
         let resource = Resource::self_resource().map_err(|_| BudgetFailure::Root)?;
-        let children = Children::new().map_err(|_| BudgetFailure::StartupPort)?;
+        let children = Children::new(image.pages()).map_err(|_| BudgetFailure::StartupPort)?;
         let bootstrap = bootstrap::Client::new(PortTransport::new(kernel));
         let hardware = bootstrap
             .acquire_hardware()

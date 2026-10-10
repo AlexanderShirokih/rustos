@@ -350,10 +350,13 @@ pub unsafe fn update_l3_flags(
 
 /// Колбэки для путей `unmap_range` и `free_all`.
 pub trait UnmapVisitor {
-    /// Снятая leaf-запись по `va` уровня `leaf_shift`
+    /// Снимаемая leaf-запись по `va` уровня `leaf_shift`
     /// (`L3::SHIFT`/`L2::SHIFT`/`L1::SHIFT`). `raw` - старое значение PTE.
+    /// В `unmap_range` вызов предшествует обнулению записи, а записи, снятые раньше, уже
+    /// обнулены. `free_all` записей не обнуляет.
     fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, raw: u64);
-    /// Опустевшая дочерняя таблица.
+    /// Опустевшая дочерняя таблица. В `unmap_range` ссылающаяся на неё запись родителя
+    /// уже обнулена.
     fn on_free_table(&mut self, pa: PageAlignedAddress);
 }
 

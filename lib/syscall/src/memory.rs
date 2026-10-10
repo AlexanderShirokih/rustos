@@ -19,6 +19,7 @@ impl MemoryAccess {
     pub const WRITE: Self = Self(2);
     pub const EXECUTE: Self = Self(4);
     pub const RW: Self = Self(Self::READ.0 | Self::WRITE.0);
+    pub const RX: Self = Self(Self::READ.0 | Self::EXECUTE.0);
     pub const RWX: Self = Self(Self::READ.0 | Self::WRITE.0 | Self::EXECUTE.0);
 
     const ALL_BITS: u64 = Self::READ.0 | Self::WRITE.0 | Self::EXECUTE.0;

@@ -505,6 +505,34 @@ mod tests {
     }
 
     #[test]
+    fn encoded_image_ends_on_a_page_boundary_with_a_zero_tail() {
+        let program = program_blob();
+        let bytes = image_bytes();
+        let image = decode(&bytes).expect("decode");
+
+        let data_end = image
+            .entries()
+            .map(|entry| entry.data_offset() as usize + entry.data().len())
+            .max()
+            .expect("image carries records");
+        assert_eq!(bytes.len() as u64 % USERLAND_PAGE_SIZE, 0);
+        assert!(data_end < bytes.len());
+        assert!(bytes[data_end..].iter().all(|&byte| byte == 0));
+
+        let records: Vec<_> = image
+            .entries()
+            .map(|entry| (entry.path(), entry.data()))
+            .collect();
+        assert_eq!(
+            records,
+            [
+                (BOOT_PATH, program.as_slice()),
+                ("/data/sample", b"hello".as_slice())
+            ]
+        );
+    }
+
+    #[test]
     fn entry_reports_the_offset_of_its_data() {
         let bytes = image_bytes();
         let image = decode(&bytes).expect("decode");
@@ -585,7 +613,7 @@ mod tests {
         assert_eq!(record_alias(&bytes, 1), 0);
         assert_eq!(record_alias(&bytes, 2), 2);
         // Повторившееся содержимое своей страницы образа не занимает.
-        assert_eq!(bytes.len() as u64, first.data_offset() + 4);
+        assert_eq!(bytes.len() as u64, first.data_offset() + USERLAND_PAGE_SIZE);
     }
 
     #[test]

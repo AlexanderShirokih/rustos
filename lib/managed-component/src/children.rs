@@ -12,7 +12,7 @@ use kernel_objects::{
 use runtime::{Instant, Timeout};
 use syscall::{ProcessName, Rights, SyscallError};
 use userland::ProgramView;
-use userland_loader::load_program;
+use userland_loader::{ImagePages, load_program};
 
 const SESSION_CLOSED_EXIT_CODE: u32 = 0xFFFF_FFFD;
 
@@ -25,9 +25,10 @@ type AcceptDebt = component_startup::accept::Reply<IssuedHandle<kind::Reply>>;
 /// Записи дочерних компонентов с ключом `C` и отложенные ответы на их запросы `ComponentStartup`.
 ///
 /// [`launch_due`](Self::launch_due) загружает процесс компонента из записи образа `V` с его
-/// исполняемым файлом. Один поток обслуживает порт [`port`](Self::port). Уход значения
-/// завершает процессы компонентов.
+/// исполняемым файлом и отображает сегменты без записи из страниц образа. Один поток обслуживает
+/// порт [`port`](Self::port). Уход значения завершает процессы компонентов.
 pub struct Children<'a, C, V> {
+    pages: ImagePages<'a>,
     port: Port,
     next_badge: AtomicU64,
     entries: Vec<Entry<'a, C, V>>,
@@ -155,9 +156,10 @@ impl From<GrantError> for SessionError {
 }
 
 impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
-    /// Создаёт порт `ComponentStartup` без записей.
-    pub fn new() -> Result<Self, Error> {
+    /// Создаёт порт `ComponentStartup` без записей. Запуски берут код программ из `pages`.
+    pub fn new(pages: ImagePages<'a>) -> Result<Self, Error> {
         Ok(Self {
+            pages,
             port: Port::create()?,
             next_badge: AtomicU64::new(0),
             entries: Vec::new(),
@@ -216,7 +218,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .iter_mut()
             .filter(|entry| launchable(entry.child))
         {
-            if let Some(outcome) = entry.launch(&self.port, &self.next_badge) {
+            if let Some(outcome) = entry.launch(&self.pages, &self.port, &self.next_badge) {
                 entry.state = State::Departed;
                 return Some(Departure {
                     child: entry.child,
@@ -596,7 +598,12 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
         }))
     }
 
-    fn launch(&mut self, port: &Port, next_badge: &AtomicU64) -> Option<Outcome> {
+    fn launch(
+        &mut self,
+        pages: &ImagePages<'_>,
+        port: &Port,
+        next_badge: &AtomicU64,
+    ) -> Option<Outcome> {
         let State::Waiting { exhausted_since } = &mut self.state else {
             return None;
         };
@@ -616,7 +623,7 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
         let Ok(session) = ::component_startup::mint_session(port, next_badge) else {
             return Some(Outcome::LaunchFailed);
         };
-        match load_program(&self.program, self.name, reserve, session.port) {
+        match load_program(&self.program, Some(pages), self.name, reserve, session.port) {
             Ok(process) => {
                 self.state = State::Running {
                     badge: session.badge.get(),

@@ -1,5 +1,5 @@
-//! E2E проверка загрузчика: загрузка синтетической программы, передача bootstrap-хэндла и
-//! локализация исключения в дочернем процессе.
+//! E2E проверка загрузчика: загрузка синтетической программы вне страниц образа копией,
+//! передача bootstrap-хэндла и локализация исключения в дочернем процессе.
 //!
 //! Машинный код фикстур использует AArch64, соответствующий target этого
 //! `testrunner`.
@@ -9,6 +9,8 @@ use runtime::{Timeout, signal_set};
 use syscall::{ProcessName, SIGNALED, SyscallError, SyscallOp, WakeCount};
 use userland::{Program, Segment, SegmentPermissions};
 use userland_loader::load_program;
+
+use crate::composition::image;
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const CHILD_CODE_VA: u64 = 0x2000_0000;
@@ -48,7 +50,7 @@ fn load_synthetic_child(
 ) -> Process {
     let segments = [Segment {
         va_base: CHILD_CODE_VA,
-        mem_size: PAGE_SIZE,
+        mem_size: u64::try_from(code.len()).expect("code length fits u64"),
         permissions: SegmentPermissions::ReadExecute,
         bytes: code,
     }];
@@ -60,6 +62,7 @@ fn load_synthetic_child(
     };
     load_program(
         &program,
+        Some(&image().pages()),
         ProcessName::new(name).expect("fixture process name"),
         resource,
         bootstrap,

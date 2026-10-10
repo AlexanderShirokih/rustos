@@ -3,13 +3,12 @@
 
 use core::num::NonZeroU64;
 
-use bootstrap_abi::bootstrap;
-use kernel_objects::{MemoryRegion, ObjectKind, OwnedHandle, Port, Process, Resource, Result};
-use runtime::{PortTransport, Timeout};
+use kernel_objects::{ObjectKind, OwnedHandle, Port, Process, Resource, Result};
+use runtime::Timeout;
 use syscall::ProcessName;
-use userland::{DecodedProgram, ProgramView, SegmentView, USERLAND_PAGE_SIZE};
-use userland_image::{component_name, decode};
-use userland_loader::load_program;
+use userland::{DecodedProgram, ProgramView, SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE};
+use userland_image::component_name;
+use userland_loader::{ImagePages, load_program};
 
 use crate::{composition::image, fixture_protocol::encode_request, ipc_raw};
 
@@ -22,7 +21,7 @@ const FIXTURE_SESSION_BADGE: NonZeroU64 = NonZeroU64::new(1).expect("badge is no
 
 pub(crate) enum Metering<'a> {
     Inherited,
-    SplitWithSlack(u64),
+    Split(u64),
     Provided(&'a Resource),
 }
 
@@ -34,7 +33,8 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) fn spawn() -> Self {
-        Self::spawn_metered_by(&Metering::Inherited).expect("spawn port fixture")
+        Self::spawn_metered_by(&Metering::Inherited, Some(&image().pages()))
+            .expect("spawn port fixture")
     }
 
     pub(crate) fn spawn_with_slack(slack_bytes: u64) -> Self {
@@ -42,11 +42,17 @@ impl Fixture {
     }
 
     pub(crate) fn try_spawn_with_slack(slack_bytes: u64) -> Result<Self> {
-        Self::spawn_metered_by(&Metering::SplitWithSlack(slack_bytes))
+        let budget_bytes = writable_bytes(&program(FIXTURE_ENTRY)) + slack_bytes;
+        Self::spawn_split(budget_bytes, Some(&image().pages()))
+    }
+
+    pub(crate) fn spawn_split(budget_bytes: u64, pages: Option<&ImagePages<'_>>) -> Result<Self> {
+        Self::spawn_metered_by(&Metering::Split(budget_bytes), pages)
     }
 
     pub(crate) fn spawn_on(resource: &Resource) -> Self {
-        Self::spawn_metered_by(&Metering::Provided(resource)).expect("spawn port fixture")
+        Self::spawn_metered_by(&Metering::Provided(resource), Some(&image().pages()))
+            .expect("spawn port fixture")
     }
 
     pub(crate) fn budget_bytes(&self) -> u64 {
@@ -54,18 +60,8 @@ impl Fixture {
             .expect("fixture spawned on a split budget")
     }
 
-    fn spawn_metered_by(metering: &Metering<'_>) -> Result<Self> {
-        let client = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
-        let cap = client.acquire_userland_image().expect("vend ok");
-
-        let region = MemoryRegion::from(cap);
-        let mapping = region.map_full_read_only().expect("map image read-only");
-        let image = decode(mapping.as_bytes()).expect("decode acquired image");
-        let entry = image
-            .entry(FIXTURE_ENTRY)
-            .expect("image carries the port fixture");
-        let program =
-            userland::decode_program(entry.data()).expect("fixture record carries a program");
+    fn spawn_metered_by(metering: &Metering<'_>, pages: Option<&ImagePages<'_>>) -> Result<Self> {
+        let program = program(FIXTURE_ENTRY);
 
         let mut budget_bytes = None;
         let own_resource;
@@ -78,17 +74,17 @@ impl Fixture {
                 own_resource = Resource::self_resource().expect("self metering resource");
                 &own_resource
             }
-            Metering::SplitWithSlack(slack_bytes) => {
-                let bytes = image_bytes(&program) + slack_bytes;
-                budget_bytes = Some(bytes);
+            Metering::Split(bytes) => {
+                budget_bytes = Some(*bytes);
                 split_parent = Resource::self_resource().expect("self metering resource");
-                own_resource = split_parent.split(bytes).expect("split the child budget");
+                own_resource = split_parent.split(*bytes).expect("split the child budget");
                 &own_resource
             }
         };
         let service = Port::create_service(Some(FIXTURE_SESSION_BADGE))?;
         let process = load_program(
             &program,
+            pages,
             ProcessName::new(component_name(FIXTURE_ENTRY)).expect("fixture process name"),
             resource,
             service.server,
@@ -130,9 +126,24 @@ impl Fixture {
     }
 }
 
-fn image_bytes<'a, E: ProgramView<'a>>(program: &E) -> u64 {
-    program
-        .segments()
+fn writable_bytes<'a, E: ProgramView<'a>>(program: &E) -> u64 {
+    page_bytes(
+        program
+            .segments()
+            .filter(|segment| segment.permissions() == SegmentPermissions::ReadWrite),
+    )
+}
+
+pub(crate) fn shared_bytes<'a, E: ProgramView<'a>>(program: &E) -> u64 {
+    page_bytes(
+        program
+            .segments()
+            .filter(|segment| segment.permissions() != SegmentPermissions::ReadWrite),
+    )
+}
+
+fn page_bytes<'a>(segments: impl Iterator<Item = impl SegmentView<'a>>) -> u64 {
+    segments
         .map(|segment| segment.mem_size().next_multiple_of(USERLAND_PAGE_SIZE))
         .sum()
 }
@@ -150,6 +161,7 @@ pub(crate) fn spawn_entry<K: ObjectKind>(path: &str, start: OwnedHandle<K>) -> P
     let resource = Resource::self_resource().expect("self metering resource");
     load_program(
         &program(path),
+        Some(&image().pages()),
         ProcessName::new(component_name(path)).expect("fixture process name"),
         &resource,
         start,
@@ -158,5 +170,5 @@ pub(crate) fn spawn_entry<K: ObjectKind>(path: &str, start: OwnedHandle<K>) -> P
 }
 
 pub(crate) fn process_bytes<'a, E: ProgramView<'a>>(program: &E) -> u64 {
-    image_bytes(program) + program.stack_size().next_multiple_of(USERLAND_PAGE_SIZE)
+    writable_bytes(program) + program.stack_size().next_multiple_of(USERLAND_PAGE_SIZE)
 }

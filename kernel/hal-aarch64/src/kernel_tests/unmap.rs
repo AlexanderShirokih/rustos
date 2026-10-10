@@ -40,7 +40,9 @@ use crate::{
     consts::HIGHER_HALF_BASE,
     memory::{
         address_space_factory::UserAarch64MemoryMapper,
-        memory_mapper::{Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc},
+        memory_mapper::{
+            Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc, UNMAP_PENDING_FRAMES,
+        },
     },
 };
 
@@ -294,6 +296,25 @@ fn mapper_unmap_releases_empty_tables() {
     let _ = runtime_frame_allocator().deallocate_frame(root_frame);
 }
 
+/// Снятие диапазона, который переполняет буфер отложенных фреймов, возвращает их все.
+#[test_harness::test]
+fn mapper_unmap_releases_frames_past_pending_buffer() {
+    let (mapper, capped, root_frame) = build_capped_mapper();
+    let baseline = capped.outstanding();
+
+    let base = va(PROBE_BASE + 0x70_0000);
+    let pages = UNMAP_PENDING_FRAMES * 2 + 1;
+    mapper
+        .map(base, pages, &[], MemFlags::user_rw())
+        .expect("initial map");
+    mapper
+        .unmap(base, pages * PAGE_SIZE)
+        .expect("unmap the whole range");
+    test_harness::check!(capped.outstanding() == baseline);
+
+    let _ = runtime_frame_allocator().deallocate_frame(root_frame);
+}
+
 /// Partial unmap внутри L2 block-leaf отбивается без модификации таблиц.
 #[test_harness::test]
 fn mapper_unmap_partial_block_rejected() {
@@ -489,8 +510,6 @@ fn mapper_map_partial_oom_rollback() {
         let p = va(base.as_usize() + i * PAGE_SIZE);
         test_harness::check!(mapper.query_leaf_raw(p).is_none());
     }
-
-    // Drop mapper вернёт root + intermediate L1/L2/L3 в реальный FA через
-    // делегирование `deallocate_frame`. Leaf-фреймов 0..2 уже нет в дереве -
-    // их откатил rollback до возврата ошибки.
+    // Откат возвращает и leaf-фреймы, и опустевшие L1/L2/L3.
+    test_harness::check!(capped.outstanding() == 0);
 }

@@ -1,7 +1,8 @@
 //! E2E проверка `ResourceSplit` из EL0: бюджет производного ресурса
 //! возвращается исходному его закрытием, а потомок, стартованный с явным
-//! `resource_h`, метерится именно им. Границу самого производного бюджета
-//! снимает проба в `resource_exhaustion`.
+//! `resource_h`, метерится именно им и не оплачивает сегменты без записи из
+//! страниц образа. Границу самого производного бюджета снимает проба в
+//! `resource_exhaustion`.
 
 use kernel_objects::{Process, Resource, Signal, ThreadEntry};
 use runtime::{MemoryAccess, Priority};
@@ -9,7 +10,8 @@ use syscall::{ProcessName, Rights, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::{
-    fixture::Fixture,
+    composition::image,
+    fixture::{FIXTURE_ENTRY, Fixture, process_bytes, program, shared_bytes},
     fixture_protocol::{
         OP_ALLOCATE_PAGES, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, REPLY_ACCESS_DENIED,
         REPLY_BUDGET_EXHAUSTED, REPLY_OK,
@@ -93,6 +95,29 @@ fn child_stack_is_charged_to_the_image_budget() {
 }
 
 #[test_harness::test]
+fn image_pages_spare_the_child_budget_its_read_only_segments() {
+    let entry = program(FIXTURE_ENTRY);
+    let shared_pages = shared_bytes(&entry) / USERLAND_PAGE_SIZE;
+    test_harness::check!(shared_pages > 0);
+    let budget = process_bytes(&entry) + shared_bytes(&entry) + FIXTURE_SLACK_BYTES;
+
+    let pages = image().pages();
+    let copied = Fixture::spawn_split(budget, None).expect("spawn fixture without image pages");
+    let first = Fixture::spawn_split(budget, Some(&pages)).expect("spawn first fixture");
+    let second = Fixture::spawn_split(budget, Some(&pages)).expect("spawn second fixture");
+
+    let copied_spare = spare_pages(&copied);
+    let first_spare = spare_pages(&first);
+    let second_spare = spare_pages(&second);
+    test_harness::check_eq!(first_spare, copied_spare + shared_pages);
+    test_harness::check_eq!(second_spare, copied_spare + shared_pages);
+
+    for fixture in [copied, first, second] {
+        test_harness::check_eq!(fixture.request_status(OP_EXIT, 0, &[]), REPLY_OK);
+    }
+}
+
+#[test_harness::test]
 fn starting_a_child_on_a_write_only_resource_is_denied() {
     let resource = Resource::self_resource().expect("self metering resource");
     let write_only = resource
@@ -170,4 +195,18 @@ fn split_of_zero_bytes_is_rejected() {
             SyscallError::InvalidArgument
         ))
     ));
+}
+
+fn spare_pages(fixture: &Fixture) -> u64 {
+    let mut granted = 0;
+    let mut refused = fixture.budget_bytes().div_ceil(USERLAND_PAGE_SIZE) + 1;
+    while refused - granted > 1 {
+        let probe = granted + (refused - granted) / 2;
+        match fixture.request_status(OP_ALLOCATE_PAGES, probe, &[]) {
+            REPLY_OK => granted = probe,
+            REPLY_BUDGET_EXHAUSTED => refused = probe,
+            reply => panic!("allocation probe answered {reply}"),
+        }
+    }
+    granted
 }

@@ -1,6 +1,7 @@
 //! Валидация spawn-ABI в `sys_process_load_image` (`SyscallOp::ProcessLoadImage`):
 //! неверная версия, `segment_count` вне границ, `reserved != 0`,
-//! несовпадение `mapped_size`, `AccessDenied` при слабой access-mask.
+//! несовпадение `mapped_size`, `AccessDenied` без `TRANSFER`, без прав по флагу сегмента и
+//! при слабой access-mask.
 
 #![allow(clippy::unwrap_used)]
 #![allow(
@@ -206,17 +207,53 @@ fn rejects_access_denied_when_region_mask_too_weak() {
     let (rt, _) = runtimes();
     let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
     let pid = insert_process(&table);
-    // Хендл содержит READ|WRITE|EXECUTE (проходит проверку прав на строке :178),
-    // но access-mask региона - только RW, поэтому проверка маски на :184
-    // отвергает запрос сегмента на RX (flags=2) именно как AccessDenied.
+    // Хендл содержит права RX-сегмента и TRANSFER, а access-mask региона - только RW, поэтому
+    // сегмент RX (flags=2) отвергает именно проверка маски.
     let region = insert_region_with_rights(
         &table,
         REGION_SIZE,
         AccessMask::RW,
-        Some(Rights::READ | Rights::WRITE | Rights::EXECUTE),
+        Some(Rights::READ | Rights::WRITE | Rights::EXECUTE | Rights::TRANSFER),
     );
     rt.set_handle_table(table);
     let seg = encode_segment(region.raw().get(), 2, REGION_SIZE as u64, 0);
+    set_bytes(&canned_buffer(
+        encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
+        Some(seg),
+    ));
+    assert_eq!(load_image(pid), expect(SyscallError::AccessDenied));
+}
+
+#[test]
+fn rejects_access_denied_without_transfer_right() {
+    let _g = test_lock();
+    let (rt, _) = runtimes();
+    let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
+    let pid = insert_process(&table);
+    let region = insert_region_with_rights(&table, REGION_SIZE, AccessMask::R, Some(Rights::READ));
+    rt.set_handle_table(table);
+    let seg = encode_segment(region.raw().get(), 1, REGION_SIZE as u64, 0);
+    set_bytes(&canned_buffer(
+        encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
+        Some(seg),
+    ));
+    assert_eq!(load_image(pid), expect(SyscallError::AccessDenied));
+}
+
+#[test]
+fn rejects_access_denied_for_read_write_segment_without_write_right() {
+    let _g = test_lock();
+    let (rt, _) = runtimes();
+    let table = Arc::new(MutexCell::new(HandleTable::with_capacity(8)));
+    let pid = insert_process(&table);
+    let region = insert_region_with_rights(
+        &table,
+        REGION_SIZE,
+        AccessMask::RW,
+        Some(Rights::READ | Rights::TRANSFER),
+    );
+    rt.set_handle_table(table);
+    let seg = encode_segment(region.raw().get(), 0, REGION_SIZE as u64, 0);
     set_bytes(&canned_buffer(
         encode_desc(1, 1, (BASE_VA + USER_IMAGE_DESC_SIZE) as u64),
         Some(seg),

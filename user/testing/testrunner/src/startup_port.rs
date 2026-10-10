@@ -854,7 +854,8 @@ fn a_repeated_key_in_add_is_refused() {
     let resource = Resource::self_resource().expect("self metering resource");
     let program = crate::fixture::program(EXPORT_ENTRY);
     let budget = crate::fixture::process_bytes(&program);
-    let mut children = managed_component::Children::new().expect("startup port created");
+    let mut children = managed_component::Children::new(crate::composition::image().pages())
+        .expect("startup port created");
     children
         .add(
             0u16,
@@ -884,7 +885,8 @@ fn next_launch_is_poll_only_for_a_fresh_launchable_record() {
     let resource = Resource::self_resource().expect("self metering resource");
     let program = crate::fixture::program(EXPORT_ENTRY);
     let budget = crate::fixture::process_bytes(&program);
-    let mut children = managed_component::Children::new().expect("startup port created");
+    let mut children = managed_component::Children::new(crate::composition::image().pages())
+        .expect("startup port created");
     test_harness::check_eq!(children.next_launch(|_| true), Timeout::INFINITE);
 
     children

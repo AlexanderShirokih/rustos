@@ -4,6 +4,7 @@ use bootstrap_abi::bootstrap;
 use component_abi::{PROTOCOL_ID_MAX, decode_manifest};
 use kernel_objects::{MemoryRegion, kind};
 use log_relay::{KernelLogSink, LogRelayThread};
+use managed_component::ImagePages;
 use runtime::{Mutex, PortTransport, Timeout};
 use syscall::{Handle, ProcessName};
 use userland::{DecodedProgram, ProgramView};
@@ -74,6 +75,12 @@ impl SystemImage {
             .map_full_read_only()
             .map_err(|_| BootFailure::BadImage)?;
         Ok(Self { region, mapping })
+    }
+
+    /// Страницы образа, из которых запуск отображает код программ образа.
+    #[must_use]
+    pub const fn pages(&self) -> ImagePages<'_> {
+        ImagePages::new(&self.region, &self.mapping)
     }
 
     /// Таблица записей образа.

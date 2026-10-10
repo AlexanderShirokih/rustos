@@ -6,13 +6,14 @@
 //! держит в своём `AtomicU64`.
 //!
 //! `acquire` берёт общий лок аллокатора на каждом вызове. Под локом тег текущего поколения
-//! принимается как есть, а устаревший заменяется свежевыделенным. Свежий тег публикуется в
-//! слоте владельца по CAS. Проигранный CAS означает чужой параллельный `acquire`, и вызов
-//! повторяется с новым значением слота.
+//! принимается как есть. Устаревший тег, ещё активный на каком-либо CPU, переходит в текущее
+//! поколение с тем же ASID, остальные заменяются свежевыделенным. Слот владельца читается и
+//! обновляется под тем же локом. Параллельные `acquire` одного адресного пространства получают
+//! один тег.
 //!
-//! Когда свободные ASID кончаются, номер поколения растёт, набор свободных обнуляется и
-//! вызывается заданный callback. На железе этот callback сбрасывает TLB во всём
-//! inner-shareable домене.
+//! Когда свободные ASID кончаются, номер поколения растёт, а набор свободных обнуляется. Каждый
+//! CPU сбрасывает свой TLB callback из [`GlobalAsidAllocator::new`] в первом `acquire` после
+//! смены поколения, до записи выданного тега в TTBR0.
 //!
 //! Ширину ASID определяет платформенный слой и передаёт её в `init` до первого `acquire`.
 
@@ -20,7 +21,7 @@
 #![cfg_attr(test, allow(clippy::std_instead_of_core))]
 #![allow(clippy::cast_possible_truncation)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kbase::{BitSet, LockCell, MutexCell, bits_to_words};
 
@@ -100,9 +101,10 @@ pub const fn unpack_asid(tag: u64) -> u16 {
 pub struct GlobalAsidAllocator<const CPUS: usize> {
     state: MutexCell<AsidAllocatorState>,
     max_asid: AtomicU64,
-    on_rollover: fn(),
+    flush_local_tlb: fn(),
     initialized: AtomicU64,
     active: [AtomicU64; CPUS],
+    flush_pending: [AtomicBool; CPUS],
 }
 
 impl<const CPUS: usize> core::fmt::Debug for GlobalAsidAllocator<CPUS> {
@@ -115,16 +117,17 @@ impl<const CPUS: usize> core::fmt::Debug for GlobalAsidAllocator<CPUS> {
 }
 
 impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
-    /// `on_rollover` выполняется под локом аллокатора, на CPU, чей `acquire` довёл диапазон
-    /// ASID до исчерпания. Вызов внутри него `acquire`/`release` этого же аллокатора
-    /// повторно берёт тот же лок и приводит к deadlock.
-    pub const fn new(on_rollover: fn()) -> Self {
+    /// `flush_local_tlb` сбрасывает TLB исполняющего CPU. Аллокатор вызывает его под своим
+    /// локом в первом `acquire` каждого CPU после rollover. Вызов внутри callback
+    /// `acquire`/`release` этого же аллокатора повторно берёт тот же лок и приводит к deadlock.
+    pub const fn new(flush_local_tlb: fn()) -> Self {
         Self {
             state: MutexCell::new(AsidAllocatorState::new()),
             max_asid: AtomicU64::new(0),
-            on_rollover,
+            flush_local_tlb,
             initialized: AtomicU64::new(0),
             active: [const { AtomicU64::new(0) }; CPUS],
+            flush_pending: [const { AtomicBool::new(false) }; CPUS],
         }
     }
 
@@ -150,56 +153,54 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
     ///  - `tag_slot` - `AtomicU64`, в котором владелец AS хранит свой тег,
     ///  - `cpu_id` - индекс текущего CPU.
     ///
-    /// Тег из `tag_slot` переиспользуется, пока его поколение совпадает с текущим. Иначе
-    /// выделяется свежий ASID. Возвращается пара `(asid, raw_tag)`.
+    /// Тег из `tag_slot` переиспользуется, пока его поколение совпадает с текущим. Устаревший
+    /// тег, активный на каком-либо CPU, сохраняет ASID в текущем поколении. Иначе выделяется
+    /// свежий ASID. Возвращается пара `(asid, raw_tag)`.
     ///
-    /// Оба пути идут под общим локом. Вместе с состоянием аллокатора вызов меняет и
-    /// `active[cpu_id]`, а эти две записи обязаны быть атомарны относительно rollover,
-    /// идущего на другом CPU.
+    /// Все пути идут под общим локом. Вместе с состоянием аллокатора вызов меняет `tag_slot` и
+    /// `active[cpu_id]`, а эти записи обязаны быть атомарны относительно rollover и
+    /// параллельного `acquire` того же адресного пространства на другом CPU.
+    ///
+    /// Вызывающий исполняется на CPU `cpu_id`. Первый вызов на CPU после rollover сбрасывает TLB
+    /// этого CPU функцией из [`Self::new`].
     ///
     /// Вызов с `cpu_id` вне диапазона `0..CPUS` паникует в debug-сборке (`debug_assert`). В
     /// release он возвращает `(0, 0)` вместо выделения ASID. Ноль здесь - тот же резерв, что
     /// и в [`AsidWidth::max_asid`], и успешный вызов его не отдаёт.
     pub fn acquire(&self, tag_slot: &AtomicU64, cpu_id: u16) -> (u16, u64) {
-        let Some(active_slot) = self.active.get(cpu_id as usize) else {
+        let (Some(active_slot), Some(flush_pending)) = (
+            self.active.get(cpu_id as usize),
+            self.flush_pending.get(cpu_id as usize),
+        ) else {
             debug_assert!(false, "cpu_id is outside the per-CPU table");
             return (0, 0);
         };
-        loop {
+        let tag = self.state.with_lock(|s| {
             let cached = tag_slot.load(Ordering::Acquire);
-            let outcome = self.state.with_lock(|s| {
-                let cached_gen = unpack_generation(cached);
-                let cached_asid = unpack_asid(cached);
-                if cached_asid != 0 && cached_gen == s.generation {
-                    active_slot.store(cached, Ordering::Release);
-                    AcquireOutcome::Hit(cached)
-                } else {
-                    let new_tag = self.allocate_locked(s);
-                    active_slot.store(new_tag, Ordering::Release);
-                    AcquireOutcome::Allocated(new_tag)
-                }
-            });
-            match outcome {
-                AcquireOutcome::Hit(tag) => return (unpack_asid(tag), tag),
-                AcquireOutcome::Allocated(new_tag) => {
-                    if tag_slot
-                        .compare_exchange(cached, new_tag, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        return (unpack_asid(new_tag), new_tag);
-                    }
-                    // CAS провален - параллельный acquire поставил другой тег.
-                    // Наш `new_tag` уже записан в active[cpu]; на следующей
-                    // итерации мы перепишем его актуальным значением. Бит в
-                    // bitmap осядет до ближайшего rollover - приемлемая
-                    // плата за редкий contention.
-                }
+            let tag = if unpack_asid(cached) != 0 && unpack_generation(cached) == s.generation {
+                cached
+            } else if let Some(adopted) = self.adopt_active_locked(s, cached) {
+                adopted
+            } else {
+                self.allocate_locked(s)
+            };
+            tag_slot.store(tag, Ordering::Release);
+            active_slot.store(tag, Ordering::Release);
+            // После rollover TLB этого CPU может держать записи прошлого поколения под ASID,
+            // которые новое поколение отдаёт другим адресным пространствам. Вызывающий записывает
+            // `tag` в TTBR0 после возврата, и сброс предшествует первой трансляции под ним. До
+            // этой записи TTBR0 держит прежний тег `active_slot`, который rollover зарезервировал,
+            // и записи, загруженные после сброса, принадлежат адресному пространству этого тега.
+            if flush_pending.swap(false, Ordering::Relaxed) {
+                (self.flush_local_tlb)();
             }
-        }
+            tag
+        });
+        (unpack_asid(tag), tag)
     }
 
-    /// Освобождает ASID, описанный `raw_tag`. Не вызывает TLB-flush - записи
-    /// будут переиспользованы на следующем rollover (lazy reclaim).
+    /// Освобождает ASID, описанный `raw_tag`, без сброса TLB. ASID не выдаётся повторно до
+    /// rollover, а записи под ним каждый CPU сбрасывает в первом `acquire` после rollover.
     pub fn release(&self, raw_tag: u64) {
         if raw_tag == 0 {
             return;
@@ -210,15 +211,40 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
             return;
         }
         self.state.with_lock(|s| {
-            // Освобождать имеет смысл только если поколение не сменилось.
-            if s.generation == tag_gen {
-                // Снимать бит безопасно даже без TLB-flush: AS, который раньше
-                // владел этим тегом, уже мёртв, а MMU не поднимет stale-запись
-                // - мы не отдаём этот ASID никому до сброса bitmap или ручной
-                // выдачи через next_asid.
+            // Бит, пройденный `next_asid`, снимается без TLB-flush, и до rollover этот ASID
+            // никому не выдаётся. ASID, перенятый из прошлого поколения, может лежать впереди
+            // `next_asid` и остаётся занятым до rollover.
+            if s.generation == tag_gen && u32::from(tag_asid) < s.next_asid {
                 s.in_use.clear(tag_asid as usize);
             }
         });
+    }
+
+    fn adopt_active_locked(&self, s: &mut AsidAllocatorState, cached: u64) -> Option<u64> {
+        let asid = unpack_asid(cached);
+        if asid == 0 {
+            return None;
+        }
+        // CPU, на котором адресное пространство работает, держит прежний ASID в TTBR0 до
+        // следующего переключения. Адресное пространство сохраняет этот ASID, и инвалидация
+        // TLB по его тегу покрывает записи всех CPU. Слоты получают новый тег, и следующий
+        // rollover находит адресное пространство по нему.
+        let adopted = pack_tag(s.generation, asid);
+        let mut found = false;
+        for slot in &self.active {
+            if slot.load(Ordering::Acquire) == cached {
+                slot.store(adopted, Ordering::Release);
+                found = true;
+            }
+        }
+        if !found {
+            return None;
+        }
+        debug_assert!(
+            s.in_use.is_set(asid as usize),
+            "rollover did not reserve an active ASID"
+        );
+        Some(adopted)
     }
 
     fn allocate_locked(&self, s: &mut AsidAllocatorState) -> u64 {
@@ -240,9 +266,9 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
             s.generation = 1;
         }
         s.in_use.clear_all();
-        // Резервируем ASID-ы, которые сейчас активны на других CPU: их TLB
-        // и TTBR0 ещё ссылаются на старый root, и переиспользование разорвало
-        // бы изоляцию AS до того, как этот CPU сделает следующий context-switch.
+        // Тег из `active` остаётся занятым. Он стоит в TTBR0 своего CPU либо записывается туда
+        // до следующего `acquire` этого CPU. В следующем `acquire` CPU сбрасывает свои записи TLB
+        // прошлого поколения.
         for slot in &self.active {
             let active_raw = slot.load(Ordering::Acquire);
             let active_asid = unpack_asid(active_raw);
@@ -252,7 +278,9 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
             }
         }
         s.next_asid = 1;
-        (self.on_rollover)();
+        for pending in &self.flush_pending {
+            pending.store(true, Ordering::Relaxed);
+        }
         // Ищем первый свободный после резервирования active-ASID. Поскольку
         // активных CPU не больше `CPUS` << max_asid, свободный гарантированно
         // существует.
@@ -268,11 +296,6 @@ impl<const CPUS: usize> GlobalAsidAllocator<CPUS> {
         s.next_asid += 1;
         pack_tag(s.generation, asid)
     }
-}
-
-enum AcquireOutcome {
-    Hit(u64),
-    Allocated(u64),
 }
 
 #[cfg(test)]
@@ -291,18 +314,24 @@ mod tests {
 
     type TestAsidAllocator = GlobalAsidAllocator<TEST_CPUS>;
 
-    fn make(width: AsidWidth, on_rollover: fn()) -> TestAsidAllocator {
-        let alloc = TestAsidAllocator::new(on_rollover);
+    fn make(width: AsidWidth, flush_local_tlb: fn()) -> TestAsidAllocator {
+        let alloc = TestAsidAllocator::new(flush_local_tlb);
         alloc.init(width);
         alloc
     }
 
     fn noop() {}
 
-    static ROLLOVER_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static ROLLOVER_FLUSHES: AtomicUsize = AtomicUsize::new(0);
 
-    fn count_rollover() {
-        ROLLOVER_COUNT.fetch_add(1, Ordering::SeqCst);
+    fn count_rollover_flush() {
+        ROLLOVER_FLUSHES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    static WINDOW_FLUSHES: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_window_flush() {
+        WINDOW_FLUSHES.fetch_add(1, Ordering::SeqCst);
     }
 
     const RACE_HOLDERS: usize = 3;
@@ -311,18 +340,12 @@ mod tests {
     const RACE_ROLLOVER_TARGET: usize = 8;
     const RACE_CHURN_LIMIT: usize = 1_000_000;
 
-    static RACE_ROLLOVERS: AtomicUsize = AtomicUsize::new(0);
-
-    fn count_race_rollover() {
-        RACE_ROLLOVERS.fetch_add(1, Ordering::SeqCst);
-    }
-
     #[test]
     fn race_rollover_never_reuses_an_asid_active_on_another_cpu() {
         // Узкий диапазон: rollover наступает за сотни выдач, а не за 65 тысяч,
         // и держатели проходят его многократно за прогон.
-        let alloc = Arc::new(make(AsidWidth::Bits8, count_race_rollover));
-        RACE_ROLLOVERS.store(0, Ordering::SeqCst);
+        let alloc = Arc::new(make(AsidWidth::Bits8, noop));
+        let first_generation = alloc.state.with_lock(|s| s.generation);
 
         // Активные ASID держателей: слот на держателя, `0` - между выдачами.
         let active: Arc<Vec<AtomicU64>> = Arc::new(
@@ -353,7 +376,7 @@ mod tests {
                     // будет выдан второму адресному пространству. Отметку
                     // сосед ставит после своей выдачи, а аллокатор учитывает её с
                     // самой выдачи, поэтому опубликованный ASID активен.
-                    alloc.state.with_lock(|state| {
+                    let generation = alloc.state.with_lock(|state| {
                         for (other, slot) in active.iter().enumerate() {
                             if other == index {
                                 continue;
@@ -363,12 +386,13 @@ mod tests {
                                 reused.push(foreign);
                             }
                         }
+                        state.generation
                     });
 
                     // Держатель работает, пока диапазон не пройден нужное
                     // число раз. На медленной машине это дольше, а не реже.
                     if iteration >= RACE_MIN_ITERS
-                        && RACE_ROLLOVERS.load(Ordering::SeqCst) >= RACE_ROLLOVER_TARGET
+                        && (generation - first_generation) as usize >= RACE_ROLLOVER_TARGET
                     {
                         break;
                     }
@@ -405,8 +429,9 @@ mod tests {
             "ASIDs {reused:?} were taken from a live holder across a rollover"
         );
         // Прогон без единого rollover проверил бы только обычную выдачу.
+        let rollovers = alloc.state.with_lock(|s| s.generation) - first_generation;
         assert!(
-            RACE_ROLLOVERS.load(Ordering::SeqCst) >= 2,
+            rollovers >= 2,
             "the run must cross a rollover at least twice"
         );
     }
@@ -435,21 +460,41 @@ mod tests {
     }
 
     #[test]
-    fn rollover_bumps_generation_and_calls_callback() {
-        ROLLOVER_COUNT.store(0, Ordering::SeqCst);
-        let alloc = make(AsidWidth::Bits8, count_rollover);
+    fn rollover_bumps_generation_and_flushes_acquiring_cpu() {
+        let alloc = make(AsidWidth::Bits8, count_rollover_flush);
         let max = AsidWidth::Bits8.max_asid() as usize;
         let gen_before = alloc.state.with_lock(|s| s.generation);
         for _ in 0..max {
             let slot = AtomicU64::new(0);
             let _ = alloc.acquire(&slot, 0);
         }
-        assert_eq!(ROLLOVER_COUNT.load(Ordering::SeqCst), 0);
+        assert_eq!(ROLLOVER_FLUSHES.load(Ordering::SeqCst), 0);
         let slot = AtomicU64::new(0);
         let (_asid, _tag) = alloc.acquire(&slot, 0);
-        assert_eq!(ROLLOVER_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(ROLLOVER_FLUSHES.load(Ordering::SeqCst), 1);
         let gen_after = alloc.state.with_lock(|s| s.generation);
         assert_ne!(gen_before, gen_after);
+
+        let _ = alloc.acquire(&slot, 0);
+        assert_eq!(ROLLOVER_FLUSHES.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cpu_flushes_tlb_on_first_acquire_after_rollover_elsewhere() {
+        // TTBR0 CPU0 ещё держит ASID A, когда rollover на CPU1 отдаёт этот ASID в свободные.
+        // Записи A, загруженные после rollover, CPU0 сбрасывает до первой записи TTBR0.
+        let alloc = make(AsidWidth::Bits8, count_window_flush);
+        let slot_a = AtomicU64::new(0);
+        let slot_b = AtomicU64::new(0);
+        let _ = alloc.acquire(&slot_a, 0);
+        let _ = alloc.acquire(&slot_b, 0);
+        let _ = drive_to_rollover(&alloc, 1);
+        let flushes = WINDOW_FLUSHES.load(Ordering::SeqCst);
+
+        let _ = alloc.acquire(&slot_b, 0);
+        assert_eq!(WINDOW_FLUSHES.load(Ordering::SeqCst), flushes + 1);
+        let _ = alloc.acquire(&slot_b, 0);
+        assert_eq!(WINDOW_FLUSHES.load(Ordering::SeqCst), flushes + 1);
     }
 
     #[test]
@@ -513,6 +558,59 @@ mod tests {
             assert_ne!(
                 asid, asid_active_on_cpu0,
                 "ASID {asid_active_on_cpu0} must not be reused after rollover"
+            );
+        }
+    }
+
+    #[test]
+    fn rollover_keeps_asid_of_address_space_running_on_another_cpu() {
+        // Адресное пространство работает на CPU1 и после rollover продолжается на другом CPU.
+        // Новый ASID оставил бы на CPU1 записи TLB под прежним, которые инвалидация по тегу
+        // адресного пространства не снимает.
+        let alloc = make(AsidWidth::Bits8, noop);
+        let slot = AtomicU64::new(0);
+        let (asid, _) = alloc.acquire(&slot, 1);
+
+        for continued_on in [0, 3] {
+            let _ = drive_to_rollover(&alloc, 2);
+            let (continued, tag) = alloc.acquire(&slot, continued_on);
+            assert_eq!(continued, asid);
+            assert_eq!(
+                unpack_generation(tag),
+                alloc.state.with_lock(|s| s.generation)
+            );
+
+            // Тег остаётся только в слоте CPU1, и следующий rollover находит его там.
+            let _ = alloc.acquire(&AtomicU64::new(0), continued_on);
+        }
+    }
+
+    #[test]
+    fn release_of_adopted_asid_waits_for_rollover() {
+        // Перенятый ASID лежит впереди `next_asid`. Снятый `release` бит отдал бы его другому
+        // адресному пространству в том же поколении поверх записей TLB прежнего.
+        let alloc = make(AsidWidth::Bits8, noop);
+        for _ in 0..8 {
+            let _ = alloc.acquire(&AtomicU64::new(0), 2);
+        }
+        let slot = AtomicU64::new(0);
+        let (asid, _) = alloc.acquire(&slot, 1);
+        let (_, generation) = drive_to_rollover(&alloc, 2);
+        let (_, tag) = alloc.acquire(&slot, 0);
+
+        for cpu_id in [0, 1] {
+            let _ = alloc.acquire(&AtomicU64::new(0), cpu_id);
+        }
+        alloc.release(tag);
+
+        loop {
+            let (other, other_tag) = alloc.acquire(&AtomicU64::new(0), 2);
+            if unpack_generation(other_tag) != generation {
+                break;
+            }
+            assert_ne!(
+                other, asid,
+                "released ASID {asid} was reused before rollover"
             );
         }
     }

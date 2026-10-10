@@ -12,3 +12,4 @@ mod children;
 pub use children::{
     Children, Departure, GrantError, IMPORTER_REQUESTS_PER_EXPORT_MAX, Outcome, Purpose, Status,
 };
+pub use userland_loader::ImagePages;

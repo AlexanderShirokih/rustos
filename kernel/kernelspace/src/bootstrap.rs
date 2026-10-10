@@ -91,8 +91,8 @@ pub enum BootstrapSpawnError {
     InterruptsUnavailable,
 }
 
-/// Разбирает байты `image` и спавнит процесс. Поверх физбазы `image` выдаётся read-only регион
-/// образа.
+/// Разбирает байты `image` и спавнит процесс. Поверх физбазы `image` выдаётся регион образа без
+/// права записи.
 pub fn spawn_process(
     launcher: &dyn UserProcessLauncher,
     image: UserlandImage,
@@ -131,10 +131,12 @@ pub fn spawn_process(
         .clone();
     let irq_control = IrqControl::new(interrupts, irq_lines.first.raw(), irq_lines.last.raw());
 
-    // Read-only Normal-регион поверх байт образа; размер округлён до страницы
+    // Normal-регион поверх байт образа; размер округлён до страницы
     // для маппинга. blob непуст (decode прошёл), поэтому размер ненулевой.
     // Потребитель читает регион с нулевого смещения, поэтому база обязана
-    // совпадать с началом страницы.
+    // совпадать с началом страницы. Маска R|X не допускает запись и позволяет
+    // загрузочной программе ставить потомкам код программ образа исполняемыми
+    // срезами этого региона.
     let image_base =
         PageAlignedAddress::new(image_phys).ok_or(BootstrapSpawnError::ImageGeometry)?;
     let image_size = NonZeroUsize::new(blob.len())
@@ -143,7 +145,7 @@ pub fn spawn_process(
     let image_region = Arc::new(MemoryRegion::create_physical_normal(
         image_base,
         image_size,
-        AccessMask::R,
+        AccessMask::RX,
     ));
 
     // Read-only Normal-регион поверх страниц с байтами DTB. Память DTB зарезервирована раскладкой

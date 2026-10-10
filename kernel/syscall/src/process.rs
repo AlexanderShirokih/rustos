@@ -197,7 +197,7 @@ pub(crate) fn sys_process_load_image(
         }
         let flags = UserMemFlags::from_raw(u64::from(seg.flags))
             .map_err(|_| SyscallError::InvalidArgument)?;
-        let needed_rights = Rights::WRITE | rights_for_access(flags);
+        let needed_rights = Rights::TRANSFER | rights_for_access(flags);
         let region_handle_id = handle_id_from_raw(seg.region_handle)?;
         let region = loader_table
             .with_lock(|tbl| tbl.get_object::<MemoryRegion>(region_handle_id, needed_rights))

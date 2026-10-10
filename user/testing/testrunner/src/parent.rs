@@ -18,7 +18,7 @@ use syscall::{Handle, ProcessName, Rights};
 use userland::DecodedProgram;
 
 use crate::{
-    composition::{TurnThread, pause},
+    composition::{TurnThread, image, pause},
     fixture::{process_bytes, program},
     log_relay::SharedLogSessions,
 };
@@ -143,7 +143,7 @@ impl Child {
 
 impl Parent {
     pub(crate) fn start() -> Self {
-        let children = Children::new().expect("startup port created");
+        let children = Children::new(image().pages()).expect("startup port created");
         let port = children.port().as_raw();
         let state = Arc::new(Mutex::new(State {
             children,

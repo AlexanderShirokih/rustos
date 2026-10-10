@@ -85,7 +85,8 @@ pub struct VirtualBacking {
 /// Ошибки [`MemoryRegion::create_virtual`] и [`MemoryRegion::create_contiguous`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionCreateError {
-    /// Аллокатор `fa` не выделил фреймы. Конструктор вернул уже выделенные фреймы в `fa`.
+    /// Аллокатор `fa` не выделил фреймы либо куча ядра не вместила их список. Конструктор
+    /// вернул уже выделенные фреймы в `fa`.
     OutOfMemory,
 }
 
@@ -128,7 +129,7 @@ impl MemoryRegion {
         pages: NonZeroUsize,
         access: AccessMask,
     ) -> Result<Self, RegionCreateError> {
-        let mut frames: Vec<Frame> = Vec::with_capacity(pages.get());
+        let mut frames = reserve_frame_list(pages)?;
         for _ in 0..pages.get() {
             if let Some(frame) = fa.allocate_frame() {
                 frames.push(frame);
@@ -150,10 +151,11 @@ impl MemoryRegion {
         pages: NonZeroUsize,
         access: AccessMask,
     ) -> Result<Self, RegionCreateError> {
+        let mut frames = reserve_frame_list(pages)?;
         let first = fa
             .allocate_frames(pages)
             .ok_or(RegionCreateError::OutOfMemory)?;
-        let frames = (0..pages.get()).map(|index| first.add(index)).collect();
+        frames.extend((0..pages.get()).map(|index| first.add(index)));
         Ok(Self::from_frames(fa, frames, true, access))
     }
 
@@ -427,6 +429,16 @@ fn contains_range(origin: usize, origin_size: usize, nested: usize, nested_size:
         return false;
     };
     origin <= nested && nested_end <= origin_end
+}
+
+fn reserve_frame_list(pages: NonZeroUsize) -> Result<Vec<Frame>, RegionCreateError> {
+    // Куча ядра растёт из того же пула кадров, что и регионы. При исчерпанном пуле список
+    // кадров большого региона не помещается в кучу.
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(pages.get())
+        .map_err(|_| RegionCreateError::OutOfMemory)?;
+    Ok(frames)
 }
 
 impl Drop for MemoryRegion {

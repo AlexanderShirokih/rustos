@@ -29,7 +29,9 @@ pub enum ImageEncodeError {
 
 /// Собирает образ: заголовок, таблица записей в порядке пути, байты путей и
 /// данные, выровненные на [`USERLAND_PAGE_SIZE`]. Записи с одинаковым
-/// содержимым делят одно окно данных. `boot_path` задаёт boot-запись.
+/// содержимым делят одно окно данных. `boot_path` задаёт boot-запись. Длина образа кратна
+/// [`USERLAND_PAGE_SIZE`]: хвост последней страницы заполнен нулями, как промежутки между
+/// записями.
 pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, ImageEncodeError> {
     if records.is_empty() {
         return Err(ImageEncodeError::NoRecords);
@@ -109,7 +111,8 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
             alias_of: 0,
         });
     }
-    let total_size = usize::try_from(data_cursor).map_err(|_| ImageEncodeError::SizeOverflow)?;
+    let image_end = align_up_to_page(data_cursor).ok_or(ImageEncodeError::SizeOverflow)?;
+    let total_size = usize::try_from(image_end).map_err(|_| ImageEncodeError::SizeOverflow)?;
 
     let mut image = Vec::with_capacity(total_size);
     image.extend_from_slice(&USERLAND_IMAGE_MAGIC);
@@ -117,7 +120,7 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
     image.extend_from_slice(&entry_count.to_le_bytes());
     image.extend_from_slice(&boot_index.to_le_bytes());
     image.extend_from_slice(&0u16.to_le_bytes());
-    image.extend_from_slice(&data_cursor.to_le_bytes());
+    image.extend_from_slice(&image_end.to_le_bytes());
 
     for (&(path_offset, path_len), window) in table.iter().zip(&data_layout) {
         image.extend_from_slice(&path_offset.to_le_bytes());
@@ -134,6 +137,7 @@ pub fn encode(records: &[ImageRecord<'_>], boot_path: &str) -> Result<Vec<u8>, I
         image.resize(data_offset, 0);
         image.extend_from_slice(data);
     }
+    image.resize(total_size, 0);
     Ok(image)
 }
 

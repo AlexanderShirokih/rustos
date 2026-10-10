@@ -3,7 +3,6 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use hal_aarch64_paging::{
-    entry::{Entry, Invalid as InvalidEntry},
     level::{L0, L1, L2, L3, Level},
     mapper::{
         self, MapError, MapLeaf, PageMapper, UnmapError, UnmapVisitor, WalkError, extract_table_pa,
@@ -36,6 +35,13 @@ const OWNED_BY_FA_BIT: u64 = 1 << 55;
 
 const AP_USER_BIT: u64 = 1 << 6;
 const AP_RO_BIT: u64 = 1 << 7;
+
+const TLBI_BY_VA_MAX_PAGES: usize = 16;
+
+pub(crate) const UNMAP_PENDING_FRAMES: usize = 64;
+const UNMAP_MAX_FREED_TABLES: usize = 2 * 3;
+
+const _: () = assert!(TLBI_BY_VA_MAX_PAGES + UNMAP_MAX_FREED_TABLES <= UNMAP_PENDING_FRAMES);
 
 enum CopyDirection<'a> {
     In(&'a mut [u8]),
@@ -252,82 +258,83 @@ where
         va: PageAlignedVirtualAddress,
         mapped_pages: usize,
     ) {
-        // Промежуточные L1/L2/L3-таблицы этого же цикла остаются на месте. Пустая
-        // таблица не меняет семантику маппинга и уходит при Drop AS.
-        for i in 0..mapped_pages {
-            let page_va = va.add_blocks(i);
-            // Ошибка walker по только что замапленной странице означает, что
-            // таблицы уже несогласованы - откат останавливается здесь.
-            let Ok((l3, idx)) = mapper.walk_to_l3_leaf(page_va) else {
-                break;
-            };
-            // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
-            // mapper-lock держится этим with_lock - эксклюзивный доступ.
-            let raw = unsafe { (*l3).get_raw(idx) };
-            // SAFETY: см. выше.
-            unsafe { (*l3).set(idx, Entry::<L3, InvalidEntry>::invalid()) };
-            if raw & OWNED_BY_FA_BIT != 0 {
-                let pa = extract_table_pa(raw);
-                let _ = self
-                    .frame_allocator
-                    .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
-            }
-            self.invalidate_tlb_page(page_va.as_usize());
-        }
+        // Страницы `0..mapped_pages` замаплены этим же вызовом `map` под тем же lock.
+        // Отказ обхода по ним означает, что таблицы уже несогласованы, и откат
+        // останавливается на нём.
+        let _ = self.unmap_locked(mapper, va, mapped_pages * PageAlignedAddress::ALIGNMENT);
     }
 
-    fn invalidate_tlb_page(&self, va: usize) {
+    fn unmap_locked(
+        &self,
+        mapper: &mut PageMapper<FrameTableAlloc<'a, FA>>,
+        address: PageAlignedVirtualAddress,
+        size: usize,
+    ) -> Result<(), UnmapError> {
+        let mut visitor = UnmapPath::new(self);
+        let root = mapper.root_ptr();
+        // SAFETY: caller держит mapper-lock, `root` - корень этого AS.
+        let result =
+            unsafe { unmap_range(root, mapper.alloc(), address.as_usize(), size, &mut visitor) };
+        // Отказ на середине оставляет снятым префикс диапазона, поэтому инвалидация и
+        // возврат фреймов выполняются и при ошибке.
+        if visitor.cleared {
+            self.invalidate_tlb_range(address.as_usize(), size);
+            visitor.release();
+        }
+        result
+    }
+
+    fn invalidate_tlb_range(&self, va: usize, size: usize) {
+        let pages = size.div_ceil(PageAlignedAddress::ALIGNMENT);
+        if pages == 0 {
+            return;
+        }
+        // Каждый широковещательный `tlbi` синхронизирует все CPU домена, а сброс ASID
+        // заставляет заново заполнять TLB всего адресного пространства. Под QEMU на 8 CPU
+        // снятие до 16 страниц по VA обходится не дороже сброса ASID, с 64 страниц дороже в
+        // разы. Диапазон не длиннее порога освобождает не больше двух таблиц на каждом уровне
+        // ниже корня, и его кадры помещаются в буфер `UnmapPath` без промежуточного сброса.
+        if pages > TLBI_BY_VA_MAX_PAGES {
+            self.invalidate_tlb_all();
+            return;
+        }
         match self.kind {
             AddressSpaceKind::User => {
-                let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
-                // Нулевой тег означает AS, который ни разу не активировался, поэтому TLB не
-                // содержит его трансляций.
+                let asid = self.user_asid_after_clear();
                 if asid != 0 {
-                    TranslationLookasideBuffer::<EL1>::invalidate_va_asid(va, asid);
+                    TranslationLookasideBuffer::<EL1>::invalidate_va_range_asid(va, pages, asid);
                 }
             }
             AddressSpaceKind::Kernel => {
-                TranslationLookasideBuffer::<EL1>::invalidate_va_global(va);
+                TranslationLookasideBuffer::<EL1>::invalidate_va_range_global(va, pages);
             }
         }
     }
 
-    fn invalidate_tlb_leaf(&self, va: usize, leaf_shift: u8) {
-        if leaf_shift == L1::SHIFT {
-            match self.kind {
-                AddressSpaceKind::User => {
-                    let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
-                    if asid != 0 {
-                        TranslationLookasideBuffer::<EL1>::invalidate_asid_inner_shareable(asid);
-                    }
-                }
-                AddressSpaceKind::Kernel => {
-                    TranslationLookasideBuffer::<EL1>::invalidate_global_inner_shareable();
+    fn invalidate_tlb_all(&self) {
+        match self.kind {
+            AddressSpaceKind::User => {
+                let asid = self.user_asid_after_clear();
+                if asid != 0 {
+                    TranslationLookasideBuffer::<EL1>::invalidate_asid_inner_shareable(asid);
                 }
             }
-            return;
-        }
-        let leaf_size = 1usize << leaf_shift;
-        let mut offset = 0;
-        while offset < leaf_size {
-            self.invalidate_tlb_page(va + offset);
-            offset += PageAlignedAddress::ALIGNMENT;
+            // Kernel-маппинги global: `aside1is` их не снимает.
+            AddressSpaceKind::Kernel => {
+                TranslationLookasideBuffer::<EL1>::invalidate_global_inner_shareable();
+            }
         }
     }
 
-    fn dealloc_owned_leaf(&self, raw: u64) {
-        // Leaf без software-бита пришёл через `map_exact`: его PA (MMIO, image,
-        // identity) в RAM-bitmap не числится и в FA не возвращается.
-        if raw & OWNED_BY_FA_BIT == 0 {
-            return;
-        }
-        let pa = extract_table_pa(raw);
-        let _ = self
-            .frame_allocator
-            .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
+    fn user_asid_after_clear(&self) -> u16 {
+        // Пара с барьером `activate_handle`. Обнулённые записи видимы до чтения тега. Тег 0
+        // означает, что AS ещё не активирован, и его первый обход таблиц читает уже
+        // обнулённые записи. Ненулевой тег инвалидируется вызывающим.
+        publish_translation_tables();
+        unpack_asid(self.asid_tag.load(Ordering::Acquire))
     }
 
-    fn dealloc_table_pa(&self, pa: PageAlignedAddress) {
+    fn deallocate(&self, pa: PageAlignedAddress) {
         let _ = self
             .frame_allocator
             .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
@@ -481,6 +488,47 @@ where
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
     mapper: &'m Aarch64MemoryMapper<'a, FA, L>,
+    pending: [PageAlignedAddress; UNMAP_PENDING_FRAMES],
+    pending_len: usize,
+    cleared: bool,
+}
+
+impl<'m, 'a, FA, L> UnmapPath<'m, 'a, FA, L>
+where
+    FA: FrameAllocator,
+    L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
+{
+    fn new(mapper: &'m Aarch64MemoryMapper<'a, FA, L>) -> Self {
+        Self {
+            mapper,
+            pending: [PageAlignedAddress::ZERO; UNMAP_PENDING_FRAMES],
+            pending_len: 0,
+            cleared: false,
+        }
+    }
+
+    fn defer(&mut self, pa: PageAlignedAddress) {
+        // До инвалидации TLB другой CPU обращается к фрейму по закэшированной трансляции, а
+        // обходчик читает освобождённую таблицу. Буфер лежит на стеке ядра.
+        if self.pending_len == UNMAP_PENDING_FRAMES {
+            // Записи отложенных фреймов уже обнулены. Запись текущего фрейма
+            // войдёт в инвалидацию диапазона после обхода.
+            self.mapper.invalidate_tlb_all();
+            self.release();
+        }
+        if let Some(slot) = self.pending.get_mut(self.pending_len) {
+            *slot = pa;
+            self.pending_len += 1;
+        }
+    }
+
+    fn release(&mut self) {
+        // Вызывающий уже выполнил инвалидацию, покрывающую записи отложенных фреймов.
+        for &pa in self.pending.iter().take(self.pending_len) {
+            self.mapper.deallocate(pa);
+        }
+        self.pending_len = 0;
+    }
 }
 
 impl<'a, FA, L> UnmapVisitor for UnmapPath<'_, 'a, FA, L>
@@ -488,12 +536,20 @@ where
     FA: FrameAllocator,
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
 {
-    fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, raw: u64) {
-        self.mapper.invalidate_tlb_leaf(va.as_usize(), leaf_shift);
-        self.mapper.dealloc_owned_leaf(raw);
+    fn on_leaf(&mut self, _va: PageAlignedVirtualAddress, _leaf_shift: u8, raw: u64) {
+        self.cleared = true;
+        // Leaf без software-бита пришёл через `map_exact`: его PA (MMIO, image,
+        // identity) в RAM-bitmap не числится и в FA не возвращается.
+        if raw & OWNED_BY_FA_BIT != 0 {
+            self.defer(extract_table_pa(raw));
+        }
     }
     fn on_free_table(&mut self, pa: PageAlignedAddress) {
-        self.mapper.dealloc_table_pa(pa);
+        // Таблица освобождается после инвалидации по VA своего диапазона: `tlbi` по VA
+        // без суффикса последнего уровня снимает и закэшированные дескрипторы
+        // промежуточных уровней. Диапазон освобождённой таблицы пересекается со
+        // снимаемым.
+        self.defer(pa);
     }
 }
 
@@ -646,19 +702,9 @@ where
             return Err(MemoryUnmappingError::MisalignedRange);
         }
 
-        self.mapper.with_lock(|mapper_inner| {
-            let mut visitor = UnmapPath { mapper: self };
-            // SAFETY: mapper-lock держится этим with_lock.
-            unsafe {
-                unmap_range(
-                    mapper_inner.root_ptr(),
-                    mapper_inner.alloc(),
-                    address.as_usize(),
-                    size,
-                    &mut visitor,
-                )
-            }
-            .map_err(|e| unmap_to_unmap_err(&e))
+        self.mapper.with_lock(|mapper| {
+            self.unmap_locked(mapper, address, size)
+                .map_err(|e| unmap_to_unmap_err(&e))
         })
     }
 
@@ -669,6 +715,9 @@ where
             }
             AddressSpaceKind::User => {
                 let (_, raw) = asid::acquire(&self.asid_tag);
+                // Пара с барьером `user_asid_after_clear`. Тег видим другим CPU до первого
+                // обхода таблиц под ним.
+                publish_translation_tables();
                 AddressSpaceHandle::new(self.root_pa, AddressSpaceTag(raw))
             }
         }
@@ -708,42 +757,28 @@ where
             return Err(MemoryRemappingError::MisalignedRange);
         }
         let aarch64_flags = self.leaf_flags(Aarch64MemFlags::from_memflags(new_flags));
-        let asid = unpack_asid(self.asid_tag.load(Ordering::Acquire));
 
         self.mapper.with_lock(|mapper| {
-            let mut va = start_address.as_virtual();
-            let mut left = size;
-            while left != 0 {
-                let page = PageAlignedVirtualAddress::new_unchecked(va);
-                let (l3, idx) = mapper
-                    .walk_to_l3_leaf(page)
-                    .map_err(|e| walk_to_remap_err(&e))?;
-                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
-                // mapper-lock держится этим with_lock - эксклюзивный доступ к таблицам.
-                unsafe { mapper::update_l3_flags(l3, idx, aarch64_flags) }
-                    .map_err(|e| walk_to_remap_err(&e))?;
-
-                match self.kind {
-                    AddressSpaceKind::User => {
-                        // Если AS ещё ни разу не активировался (asid == 0),
-                        // TLB для него заведомо пуст - `tlbi` не нужен.
-                        if asid != 0 {
-                            TranslationLookasideBuffer::<EL1>::invalidate_va_asid(
-                                page.as_usize(),
-                                asid,
-                            );
-                        }
-                    }
-                    AddressSpaceKind::Kernel => {
-                        // Kernel-маппинги global - инвалидируем VA во всех ASID.
-                        TranslationLookasideBuffer::<EL1>::invalidate_va_global(page.as_usize());
-                    }
+            let mut updated = 0;
+            let mut result = Ok(());
+            while updated != size {
+                let page = PageAlignedVirtualAddress::new_unchecked(
+                    start_address.as_virtual().offset(updated),
+                );
+                let update = mapper.walk_to_l3_leaf(page).and_then(|(l3, idx)| {
+                    // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) для leaf-Page;
+                    // mapper-lock держится этим with_lock - эксклюзивный доступ к таблицам.
+                    unsafe { mapper::update_l3_flags(l3, idx, aarch64_flags) }
+                });
+                if let Err(e) = update {
+                    result = Err(walk_to_remap_err(&e));
+                    break;
                 }
-
-                va = va.offset(page_size);
-                left -= page_size;
+                updated += page_size;
             }
-            Ok::<(), MemoryRemappingError>(())
+            // Отказ на середине оставляет обновлённым префикс диапазона.
+            self.invalidate_tlb_range(start_address.as_usize(), updated);
+            result
         })
     }
 }

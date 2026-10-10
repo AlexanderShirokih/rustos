@@ -19,7 +19,7 @@ use runtime::{Mutex, PortTransport, Timeout, spawn, spawn_owned};
 use syscall::{Handle, ProcessName, kind as object_kind};
 use userland_loader::load_program;
 
-use crate::{fixture::program, watched_capability::Watched};
+use crate::{composition::image, fixture::program, watched_capability::Watched};
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -391,6 +391,7 @@ fn a_receive_refused_after_the_transfer_releases_the_delivered_capability() {
     let resource = Resource::self_resource().expect("self metering resource");
     let _fixture = load_program(
         &program(TABLE_FULL_ENTRY),
+        Some(&image().pages()),
         ProcessName::new(TABLE_FULL_NAME).expect("fixture process name"),
         &resource,
         service.server,
