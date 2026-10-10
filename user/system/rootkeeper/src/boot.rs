@@ -14,7 +14,8 @@ use userland_image::{
 };
 
 use crate::{
-    AddFailure, BudgetFailure, Component, RootSystem, Stopped, SystemImage,
+    AddFailure, BudgetFailure, Component, RootSystem, SEARCH_LIMITS, SearchLimits, Stopped,
+    SystemImage,
     relay::{ComponentNames, LogSources},
     system::log_line,
     turn,
@@ -107,13 +108,14 @@ impl SystemImage {
 impl<'a> RootSystem<'a> {
     /// Добавляет начальные компоненты через API родителя. План нужен только этому адаптеру.
     /// Программы индекса `index` становятся провайдерами по заявке, журналы записей выдаёт
-    /// `logs`.
+    /// `logs`, пределы состояния запросов задают `limits`.
     pub fn bring_up(
         image: &'a SystemImage,
         plan: BootPlan<'a>,
         index: ExportIndex<'a>,
         kernel: Handle<kind::Port>,
         logs: LogSources,
+        limits: SearchLimits,
     ) -> Result<Self, BootFailure> {
         let boot = plan.component(0).ok_or(BootFailure::PlanMissing)?;
         let program = image
@@ -127,8 +129,8 @@ impl<'a> RootSystem<'a> {
         {
             return Err(BootFailure::BadImage);
         }
-        let mut system =
-            Self::new(image, kernel, boot, manifest, index, logs).map_err(BootFailure::Budget)?;
+        let mut system = Self::new(image, kernel, boot, manifest, index, logs, limits)
+            .map_err(BootFailure::Budget)?;
 
         for (record, component) in plan.components().enumerate().skip(1) {
             let record = u16::try_from(record).map_err(|_| BootFailure::ProgramMissing)?;
@@ -189,7 +191,7 @@ pub fn run(kernel: Handle<kind::Port>) -> Stopped {
         return Stopped::Startup;
     };
     let logs = LogSources::new(names, relay);
-    let system = match RootSystem::bring_up(&image, plan, index, kernel, logs) {
+    let system = match RootSystem::bring_up(&image, plan, index, kernel, logs, SEARCH_LIMITS) {
         Ok(system) => Mutex::new(system),
         Err(failure) => return refuse_boot(kernel, failure),
     };

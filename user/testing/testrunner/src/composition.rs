@@ -16,8 +16,10 @@ use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace}
 use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
-use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SystemImage, relay::LogSources, turn};
-use runtime::{JoinHandle, Mutex, PortTransport, Timeout, spawn_owned};
+use rootkeeper::{
+    BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::LogSources, turn,
+};
+use runtime::{JoinHandle, Mutex, MutexGuard, PortTransport, Timeout, spawn_owned};
 use spin::Once;
 use syscall::{Handle, SIGNALED, SyscallError, kind};
 use userland_image::{BootPlan, ComponentSpec, ExportIndex, decode_plan, encode_plan};
@@ -100,11 +102,19 @@ impl Composition {
         plan: BootPlan<'static>,
         index: ExportIndex<'static>,
         logs: LogSources,
+        limits: SearchLimits,
     ) -> Self {
         await_budget(&plan);
 
-        let system = RootSystem::bring_up(image(), plan, index, crate::bootstrap_handle(), logs)
-            .expect("composition started");
+        let system = RootSystem::bring_up(
+            image(),
+            plan,
+            index,
+            crate::bootstrap_handle(),
+            logs,
+            limits,
+        )
+        .expect("composition started");
         let system = Arc::new(Mutex::new(system));
         let turned = Arc::clone(&system);
         Self {
@@ -152,6 +162,10 @@ impl Composition {
 
     pub(crate) fn terminate(&self, name: &str, code: u32) {
         self.system.lock().terminate(name, code);
+    }
+
+    pub(crate) fn hold(&self) -> MutexGuard<'_, RootSystem<'static>> {
+        self.system.lock()
     }
 }
 

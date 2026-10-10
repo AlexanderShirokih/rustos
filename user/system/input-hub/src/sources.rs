@@ -2,18 +2,21 @@
 //! экспорту новой сессии `InputInject`.
 
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use component_startup::{
     Attributes, Found, IpcError, Providers, Session, StartupError, StartupFailure,
 };
 use input_abi::input_source;
 use kernel_objects::{Port, SessionTransport};
-use runtime::log_fmt;
+use runtime::{log_fmt, sleep};
 use syscall::Timeout;
 
 use crate::hub::open_source;
 
 const RETRY_INTERVAL: Timeout = Timeout::from_secs(1);
+
+const NO_SPACE_PAUSE: Duration = Duration::from_secs(1);
 
 const ATTACH_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -44,6 +47,7 @@ pub(crate) fn attach_sources(
                     attach(providers, sources, found, &mut late, &mut attached);
                 }
             }
+            Err(error) if error.failure == StartupFailure::NoSpace => sleep(NO_SPACE_PAUSE),
             Err(error) => return error,
         }
     }

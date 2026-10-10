@@ -74,6 +74,7 @@ mod resource_exhaustion;
 mod resource_split;
 mod ring_transport;
 mod rootkeeper_system;
+mod search_limits;
 mod selftest_clock;
 mod signal;
 #[cfg(target_arch = "aarch64")]

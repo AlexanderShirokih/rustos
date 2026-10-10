@@ -18,8 +18,8 @@ pub struct Providers<P> {
     protocol: PhantomData<P>,
 }
 
-/// Результаты поиска одного перечисления в порядке выдачи родителем. Отказ выдаётся
-/// последним элементом перебора.
+/// Результаты поиска одного перечисления в порядке выдачи родителем. Отказ, кроме `NoSpace`,
+/// выдаётся последним элементом перебора. После `NoSpace` следующий элемент повторяет запрос.
 pub struct ProviderSessions {
     enumeration: Option<Session<component_startup::Protocol>>,
     requirement: &'static str,
@@ -106,7 +106,17 @@ impl Iterator for ProviderSessions {
     fn next(&mut self) -> Option<Self::Item> {
         let answer = next(self.enumeration.as_ref()?, STARTUP_REQUEST_TIMEOUT);
         let item = answered(self.requirement, answer).transpose();
-        if !matches!(item, Some(Ok(_))) {
+        let continues = matches!(
+            item,
+            Some(
+                Ok(_)
+                    | Err(StartupError {
+                        failure: StartupFailure::NoSpace,
+                        ..
+                    })
+            )
+        );
+        if !continues {
             self.enumeration = None;
         }
         item

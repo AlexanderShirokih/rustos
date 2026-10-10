@@ -127,6 +127,7 @@ fn start_namespace() -> Namespace {
         plan,
         ExportIndex::EMPTY,
         LogSources::new(ComponentNames::of(&plan), SharedLogSessions),
+        rootkeeper::SEARCH_LIMITS,
     );
     let importer = composition.importer(NAMESPACE_REQUIREMENTS);
     for (requirement, text) in [(ROOT_VIEW, IMAGE_MOUNT), (RAM_VIEW, Path::ROOT.as_str())] {

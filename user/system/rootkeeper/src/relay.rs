@@ -9,6 +9,8 @@ use log_relay::{LogRelayThread, SourceNames};
 use runtime::Mutex;
 use userland_image::BootPlan;
 
+use crate::system::owned;
+
 /// Общий список имён источников. Relay использует его при обработке сообщения.
 #[derive(Clone)]
 pub struct ComponentNames(Arc<Mutex<Vec<String>>>);
@@ -42,15 +44,19 @@ impl ComponentNames {
         )))
     }
 
-    /// Добавляет имя источника следующей записи и возвращает значок её сессии журнала. `None`,
-    /// если имя не помещается в источник журнала либо номера записей исчерпаны.
+    /// Добавляет имя источника следующей записи и возвращает значок её сессии журнала. `None`:
+    /// - имя не помещается в источник журнала;
+    /// - номера записей исчерпаны;
+    /// - памяти имени не хватило.
     pub fn add(&self, name: &str) -> Option<NonZeroU64> {
         if name.len() > LOG_SOURCE_MAX {
             return None;
         }
+        let name = owned(name)?;
         let mut names = self.0.lock();
         let record = u16::try_from(names.len()).ok()?;
-        names.push(String::from(name));
+        names.try_reserve(1).ok()?;
+        names.push(name);
         Some(log_badge(record))
     }
 

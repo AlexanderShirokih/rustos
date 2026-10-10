@@ -19,7 +19,7 @@ use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
 use platform_abi::{Description, MmioWindow, PlatformError, platform};
 use rootkeeper::{
-    BootFailure, Stopped,
+    BootFailure, SEARCH_LIMITS, SearchLimits, Stopped,
     relay::{ComponentNames, LogSessions as _, LogSources, log_badge},
 };
 use rtc_abi::rtc;
@@ -43,7 +43,7 @@ use crate::{
 
 const MIB: u64 = 1024 * 1024;
 
-const PROBE: &str = "probe";
+pub(crate) const PROBE: &str = "probe";
 const HELD: &str = "held";
 const STARVED: &str = "starved";
 const FILES: &str = "files";
@@ -73,9 +73,9 @@ const BOOT_REFUSAL: &str = "mount table line 2 /boot: filesystem refused: Remote
 const TMP_MOUNT: &str = "mount /tmp";
 const TMP_ENDED: &str = "mount /tmp ended";
 
-const COMPONENT_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
+pub(crate) const COMPONENT_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 const PARENT_REFUSAL_TIMEOUT: Timeout = Timeout::from_secs(1);
-const IDLE_PROVIDER_REQUEST_TIMEOUT: Timeout = Timeout::from_millis(500);
+pub(crate) const IDLE_PROVIDER_REQUEST_TIMEOUT: Timeout = Timeout::from_millis(500);
 const STALE_VIEW_TIMEOUT: Timeout = Timeout::from_millis(500);
 const REQUEST_DELIVERY_PAUSE: Timeout = Timeout::from_millis(200);
 const SERVED_CHILD_REPLY_TIMEOUT: Timeout = Timeout::from_millis(200);
@@ -120,12 +120,13 @@ const PARENT: ComponentSpec<'static> = ComponentSpec {
     restarts: 0,
 };
 
-const EXPORT: ComponentSpec<'static> = fixture("/export-fixture", "export-fixture");
+pub(crate) const EXPORT: ComponentSpec<'static> = fixture("/export-fixture", "export-fixture");
 const EXPORT_ENTRY: &str = "/export-fixture/exec";
 
-const IDLE_EXPORT: ComponentSpec<'static> = fixture("/idle-export-fixture", "idle-export-fixture");
+pub(crate) const IDLE_EXPORT: ComponentSpec<'static> =
+    fixture("/idle-export-fixture", "idle-export-fixture");
 
-const FILTERED: ComponentSpec<'static> =
+pub(crate) const FILTERED: ComponentSpec<'static> =
     fixture("/filtered-export-fixture", "filtered-export-fixture");
 
 const REFUSAL_PROBE: ComponentSpec<'static> =
@@ -134,7 +135,7 @@ const REFUSAL_PROBE: ComponentSpec<'static> =
 const LOG_DUPLICATE: ComponentSpec<'static> =
     fixture("/log-duplicate-fixture", "log-duplicate-fixture");
 
-const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
+pub(crate) const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
     name: "neighbour",
     ..EXPORT
 };
@@ -222,7 +223,7 @@ pub(crate) const fn fixture(
     }
 }
 
-const fn probe_of(name: &'static str) -> crate::composition::Import {
+pub(crate) const fn probe_of(name: &'static str) -> crate::composition::Import {
     crate::composition::Import {
         declaration: RequirementDeclaration::all(name, probe::Protocol::ID),
 
@@ -231,11 +232,20 @@ const fn probe_of(name: &'static str) -> crate::composition::Import {
 }
 
 pub(crate) fn scenario(components: &[ComponentSpec<'_>]) -> Composition {
-    started(&[&[PARENT], components].concat(), ExportIndex::EMPTY).0
+    limited(components, SEARCH_LIMITS)
+}
+
+pub(crate) fn limited(components: &[ComponentSpec<'_>], limits: SearchLimits) -> Composition {
+    started(
+        &[&[PARENT], components].concat(),
+        ExportIndex::EMPTY,
+        limits,
+    )
+    .0
 }
 
 pub(crate) fn with_drivers() -> Composition {
-    let composition = started(&[PARENT, PLATFORM], image_index()).0;
+    let composition = started(&[PARENT, PLATFORM], image_index(), SEARCH_LIMITS).0;
     // `platform` отвечает на сессии после публикации признаков, и запрос к драйверу их учитывает.
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     platform_session(&importer, PLATFORM_REQUIREMENT)
@@ -245,7 +255,11 @@ pub(crate) fn with_drivers() -> Composition {
 }
 
 pub(crate) fn indexed(components: &[ComponentSpec<'_>]) -> (Composition, ComponentNames) {
-    started(&[&[PARENT], components].concat(), image_index())
+    started(
+        &[&[PARENT], components].concat(),
+        image_index(),
+        SEARCH_LIMITS,
+    )
 }
 
 fn image_index() -> ExportIndex<'static> {
@@ -255,6 +269,7 @@ fn image_index() -> ExportIndex<'static> {
 fn started(
     records: &[ComponentSpec<'_>],
     index: ExportIndex<'static>,
+    limits: SearchLimits,
 ) -> (Composition, ComponentNames) {
     let plan = encoded(records);
     let names = ComponentNames::of(&plan);
@@ -263,6 +278,7 @@ fn started(
         plan,
         index,
         LogSources::new(names.clone(), ScenarioLogSessions),
+        limits,
     );
     (composition, names)
 }
@@ -338,7 +354,7 @@ fn enumerated(importer: &Importer, requirement: &str) -> Session<startup_contrac
         .expect("enumeration granted")
 }
 
-const fn pair(key: &'static str, value: &'static str) -> Attribute<'static> {
+pub(crate) const fn pair(key: &'static str, value: &'static str) -> Attribute<'static> {
     Attribute {
         key: key.as_bytes(),
         value: value.as_bytes(),
@@ -375,7 +391,7 @@ fn patched(data: &[u8], patch: impl FnOnce(&mut [u8])) -> userland::DecodedProgr
     userland::decode_program(Vec::leak(bytes)).expect("program boundaries remain valid")
 }
 
-fn requested<P: Protocol>(
+pub(crate) fn requested<P: Protocol>(
     importer: &Importer,
     requirement: &str,
     wait: Timeout,
@@ -768,6 +784,7 @@ fn a_session_of_another_protocol_exported_by_record_zero_is_refused() {
             ..PARENT
         }],
         ExportIndex::EMPTY,
+        SEARCH_LIMITS,
     )
     .0;
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -1106,7 +1123,8 @@ fn a_session_to_a_hidden_export_is_unbound_until_the_feature_is_published() {
 
 #[test_harness::test]
 fn a_record_waits_for_a_restarted_publisher_and_starts_once_it_is_removed() {
-    let (composition, names) = started(&[PARENT, FEATURE_HOLDER], ExportIndex::EMPTY);
+    let (composition, names) =
+        started(&[PARENT, FEATURE_HOLDER], ExportIndex::EMPTY, SEARCH_LIMITS);
     let holding = await_component_lines(FEATURE_HOLDER.name, 1);
 
     registered(&composition, &names, EXPORT).expect("record added");
@@ -1144,7 +1162,7 @@ fn an_enumeration_finds_a_featured_export_only_while_its_publisher_lives() {
 
 #[test_harness::test]
 fn registration_refuses_a_plan_record_with_a_feature() {
-    let (composition, names) = started(&[PARENT], ExportIndex::EMPTY);
+    let (composition, names) = started(&[PARENT], ExportIndex::EMPTY, SEARCH_LIMITS);
 
     let added = registered(&composition, &names, FEATURED);
 
@@ -1718,7 +1736,7 @@ fn a_started_consumer_discovers_a_provider_added_at_runtime() {
     let consumer = ComponentSpec {
         ..fixture("/multiplicity-fixture", "multiplicity")
     };
-    let (composition, names) = started(&[PARENT, consumer], ExportIndex::EMPTY);
+    let (composition, names) = started(&[PARENT, consumer], ExportIndex::EMPTY, SEARCH_LIMITS);
     let started = await_component_lines(consumer.name, 5);
 
     registered(&composition, &names, EXPORT).expect("runtime component added");
@@ -1757,6 +1775,7 @@ fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
         plan,
         ExportIndex::EMPTY,
         LogSources::new(names.clone(), ScenarioLogSessions),
+        SEARCH_LIMITS,
     );
     let importer = composition.importer(&[probe_of(PROBE)]);
     let entry = image()

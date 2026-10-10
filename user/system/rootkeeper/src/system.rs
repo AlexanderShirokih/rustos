@@ -3,6 +3,7 @@
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::{
     fmt::{Arguments, Write as _},
+    mem::size_of,
     ops::ControlFlow,
 };
 
@@ -24,9 +25,9 @@ use kernel_objects::{
     Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, kind,
 };
 use log_abi::{LogBuffer, log};
-use managed_component::{Children, Departure, GrantError, Outcome, Purpose, Status};
+use managed_component::{Children, Departure, GrantError, Held, Outcome, Purpose, Status};
 use runtime::{Mutex, PortTransport, Termination, Timeout};
-use syscall::{Handle, ProcessName, Rights};
+use syscall::{Handle, ProcessName, Rights, SyscallError};
 use userland::{DecodedProgram, ProgramView};
 use userland_image::{ExportIndex, IndexedExport, PlanComponent};
 
@@ -50,7 +51,18 @@ const FEATURES_MAX: usize = 256;
 /// Срок возврата бюджета перед перезапуском записи.
 pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
+/// Пределы поиска композиции загрузочного плана.
+pub const SEARCH_LIMITS: SearchLimits = SearchLimits {
+    owner_states: 64,
+    owner_bytes: 64 * 1024,
+    total_states: 1024,
+    total_bytes: 1024 * 1024,
+};
+
+const NO_MEMORY: Error = Error::Syscall(SyscallError::OutOfMemory);
+
 type Debt = IssuedHandle<kind::Reply>;
+type Records<'a> = Children<'a, Holder, DecodedProgram<'a>>;
 
 /// Код, с которым завершается процесс rootkeeper. Паника завершает его кодом
 /// `runtime::FAILED_EXIT_CODE`, равным коду [`Stopped::Startup`].
@@ -90,6 +102,21 @@ pub enum ImporterRefusal {
     Importer(Error),
 }
 
+/// Пределы состояния, которое rootkeeper держит по запросам `ComponentStartup`. Расход
+/// относится к incarnation либо импортёру, чей запрос создал состояние. Запрос сверх предела
+/// получает `SessionError::NoSpace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchLimits {
+    /// Число состояний одного владельца.
+    pub owner_states: usize,
+    /// Память состояний одного владельца в байтах.
+    pub owner_bytes: usize,
+    /// Число состояний всех владельцев.
+    pub total_states: usize,
+    /// Память состояний всех владельцев в байтах.
+    pub total_bytes: usize,
+}
+
 /// Отказ [`RootSystem::add`].
 #[derive(Debug)]
 pub enum AddFailure {
@@ -99,7 +126,7 @@ pub enum AddFailure {
     Capacity,
     /// Описание требований, экспортов или бюджета недопустимо либо программа требует признак.
     Declaration,
-    /// Резерв бюджета записи не создан.
+    /// Резерв бюджета либо память записи не выделены.
     Resource(Error),
 }
 
@@ -174,7 +201,7 @@ enum ExportKey<'a> {
 
 /// Родитель зарегистрированных компонентов. Поток обслуживает записи повтором [`turn`].
 pub struct RootSystem<'a> {
-    children: Children<'a, Holder, DecodedProgram<'a>>,
+    children: Records<'a>,
     records: Vec<Record<'a>>,
     logs: Vec<Session<log::Protocol>>,
     pub(crate) log_sources: LogSources,
@@ -188,6 +215,7 @@ pub struct RootSystem<'a> {
     importers: Vec<Vec<ImporterBinding>>,
     searches: Vec<Search<'a>>,
     next_search: u64,
+    limits: SearchLimits,
     features: Vec<Feature>,
     resource: Resource,
 }
@@ -206,6 +234,7 @@ impl<'a> RootSystem<'a> {
         manifest: ComponentManifest<'a>,
         index: ExportIndex<'a>,
         log_sources: LogSources,
+        limits: SearchLimits,
     ) -> Result<Self, BudgetFailure> {
         let resource = Resource::self_resource().map_err(|_| BudgetFailure::Root)?;
         let children = Children::new(image.pages()).map_err(|_| BudgetFailure::StartupPort)?;
@@ -242,6 +271,7 @@ impl<'a> RootSystem<'a> {
             importers: Vec::new(),
             searches: Vec::new(),
             next_search: 0,
+            limits,
             features: Vec::new(),
             resource,
         })
@@ -257,13 +287,22 @@ impl<'a> RootSystem<'a> {
         self.insert(component, Origin::Plan, log)
     }
 
+    /// Память состояния перечисления из `matches` совпадений по требованию `requirement`
+    /// вместе с его выдачей. Перечисление без совпадений и результат поиска занимают
+    /// `enumeration_bytes(requirement, 0)`.
+    #[must_use]
+    pub const fn enumeration_bytes(requirement: &str, matches: usize) -> usize {
+        (size_of::<Search<'_>>() + requirement.len() + Records::ISSUE_BYTES)
+            .saturating_add(matches.saturating_mul(size_of::<Export<'_>>()))
+    }
+
     fn insert(
         &mut self,
         component: Component<'a>,
         origin: Origin,
         log: Session<log::Protocol>,
     ) -> Result<u16, AddFailure> {
-        let name = String::from(component.name.as_str());
+        let name = owned(component.name.as_str()).ok_or(AddFailure::Resource(NO_MEMORY))?;
 
         if self.record_named(&name).is_some() {
             return Err(AddFailure::Name);
@@ -285,6 +324,15 @@ impl<'a> RootSystem<'a> {
         }
 
         let record = u16::try_from(self.records.len()).map_err(|_| AddFailure::Capacity)?;
+
+        let reserved = self.records.try_reserve(1).is_ok()
+            && self.logs.try_reserve(1).is_ok()
+            && self.restarts_used.try_reserve(1).is_ok()
+            && self.features_closed.try_reserve(1).is_ok();
+        if !reserved {
+            return Err(AddFailure::Resource(NO_MEMORY));
+        }
+
         self.children
             .add(
                 Holder::Record(record),
@@ -632,6 +680,14 @@ impl<'a> RootSystem<'a> {
         attributes: Attributes<'_>,
         reply: component_startup::session::Reply<Debt>,
     ) {
+        if !matches!(export.provider, Provider::Record(BOOT_RECORD))
+            && let Err(error) =
+                self.admit(owner, Records::request_bytes(requirement, export.protocol))
+        {
+            let _ = reply.send(Err::<Port, _>(error));
+            return;
+        }
+
         let provider = match export.provider {
             Provider::Record(record) => record,
             Provider::Program {
@@ -723,6 +779,8 @@ impl<'a> RootSystem<'a> {
 
     fn answer_watch(&mut self, index: usize) {
         let Some(Search {
+            owner,
+            requirement,
             attributes,
             state: SearchState::Watch(watch),
             ..
@@ -737,6 +795,10 @@ impl<'a> RootSystem<'a> {
             return;
         };
         let key = self.key(&export);
+        let admitted = self.admit(
+            *owner,
+            Self::enumeration_bytes(requirement, 0) + size_of::<ExportKey<'_>>(),
+        );
 
         let Some(Search {
             state: SearchState::Watch(watch),
@@ -748,8 +810,14 @@ impl<'a> RootSystem<'a> {
         let Some(reply) = watch.waiting.take() else {
             return;
         };
-        if watch.delivered.try_reserve(1).is_err() {
-            let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::NoSpace));
+        let reserved = admitted.and_then(|()| {
+            watch
+                .delivered
+                .try_reserve_exact(1)
+                .map_err(|_| SessionError::NoSpace)
+        });
+        if let Err(error) = reserved {
+            let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
             return;
         }
 
@@ -789,9 +857,14 @@ impl<'a> RootSystem<'a> {
 
     fn found(&mut self, index: usize, export: Export<'a>) -> Result<Found<Port>, SessionError> {
         let search = self.searches.get(index).ok_or(SessionError::Refused)?;
+        self.admit(
+            search.owner,
+            Self::enumeration_bytes(&search.requirement, 0),
+        )?;
+
         let (owner, requirement, attributes) = (
             search.owner,
-            search.requirement.clone(),
+            owned(&search.requirement).ok_or(SessionError::NoSpace)?,
             search.attributes.clone(),
         );
         let session =
@@ -851,6 +924,39 @@ impl<'a> RootSystem<'a> {
         self.searches
             .binary_search_by_key(&id, |search| search.id)
             .ok()
+    }
+
+    fn usage(&self, owner: u64) -> Held {
+        self.searches
+            .iter()
+            .filter(|search| search.owner == owner)
+            .fold(self.children.held(owner), add_search)
+    }
+
+    fn usage_total(&self) -> Held {
+        self.searches
+            .iter()
+            .fold(self.children.held_total(), add_search)
+    }
+
+    fn headroom(&self, owner: u64) -> Result<usize, SessionError> {
+        let limits = self.limits;
+        let owner = self.usage(owner);
+        let total = self.usage_total();
+        if owner.states >= limits.owner_states || total.states >= limits.total_states {
+            return Err(SessionError::NoSpace);
+        }
+
+        let owner_left = limits.owner_bytes.saturating_sub(owner.bytes);
+        let total_left = limits.total_bytes.saturating_sub(total.bytes);
+        Ok(owner_left.min(total_left))
+    }
+
+    fn admit(&self, owner: u64, bytes: usize) -> Result<(), SessionError> {
+        if bytes > self.headroom(owner)? {
+            return Err(SessionError::NoSpace);
+        }
+        Ok(())
     }
 
     fn issue_search(
@@ -941,18 +1047,24 @@ impl<'a> RootSystem<'a> {
                 self.system_info.handle().borrow(),
                 Rights::WRITE | Rights::TRANSFER,
             ),
-            image::Protocol::ID => self.children.issue(
-                badge,
-                requirement,
-                Purpose::Requirement,
-                Holder::Image(badge),
-            ),
-            features::Protocol::ID if self.planned(record) => self.children.issue(
-                badge,
-                requirement,
-                Purpose::Requirement,
-                Holder::Features(badge),
-            ),
+            image::Protocol::ID => {
+                self.admit(badge, Records::ISSUE_BYTES)?;
+                self.children.issue(
+                    badge,
+                    requirement,
+                    Purpose::Requirement,
+                    Holder::Image(badge),
+                )
+            }
+            features::Protocol::ID if self.planned(record) => {
+                self.admit(badge, Records::ISSUE_BYTES)?;
+                self.children.issue(
+                    badge,
+                    requirement,
+                    Purpose::Requirement,
+                    Holder::Features(badge),
+                )
+            }
             _ => return Err(SessionError::Refused),
         };
         session.map_err(SessionError::from)
@@ -1043,9 +1155,23 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
         let attributes = self.all_query(frame.badge, requirement, attributes)?;
 
+        let mut count = 0usize;
+        let _ = self.matches(requirement.protocol, attributes, &mut |_| {
+            count += 1;
+            ControlFlow::Continue(())
+        });
+        self.admit(
+            frame.badge,
+            Self::enumeration_bytes(requirement.name, count),
+        )?;
+
+        let name = owned(requirement.name).ok_or(SessionError::NoSpace)?;
         let mut snapshot = VecDeque::new();
-        let listed = self.matches(requirement.protocol, attributes, &mut |export| {
-            if snapshot.try_reserve(1).is_err() {
+        snapshot
+            .try_reserve_exact(count)
+            .map_err(|_| SessionError::NoSpace)?;
+        let _ = self.matches(requirement.protocol, attributes, &mut |export| {
+            if snapshot.len() == count {
                 return ControlFlow::Break(());
             }
 
@@ -1053,13 +1179,9 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             ControlFlow::Continue(())
         });
 
-        if listed.is_break() {
-            return Err(SessionError::NoSpace);
-        }
-
         self.issue_search(
             frame.badge,
-            String::from(requirement.name),
+            name,
             AttributeSet::new(attributes),
             SearchState::Enumeration(snapshot),
         )
@@ -1072,15 +1194,19 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         attributes: QueryAttributes<'_>,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
         let attributes = self.all_query(frame.badge, requirement, attributes)?;
+        self.admit(
+            frame.badge,
+            Self::enumeration_bytes(requirement.name, 0) + requirement.protocol.len(),
+        )?;
+
         let watch = Watch {
-            protocol: String::from(requirement.protocol),
+            protocol: owned(requirement.protocol).ok_or(SessionError::NoSpace)?,
             delivered: Vec::new(),
             waiting: None,
         };
-
         self.issue_search(
             frame.badge,
-            String::from(requirement.name),
+            owned(requirement.name).ok_or(SessionError::NoSpace)?,
             AttributeSet::new(attributes),
             SearchState::Watch(watch),
         )
@@ -1117,8 +1243,11 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
             return;
         };
 
-        let (owner, requirement, attributes, export) =
-            (*owner, requirement.clone(), attributes.clone(), *export);
+        let (owner, attributes, export) = (*owner, attributes.clone(), *export);
+        let Some(requirement) = owned(requirement) else {
+            let _ = reply.send(Err::<Port, _>(SessionError::NoSpace));
+            return;
+        };
         self.open_export(
             owner,
             &requirement,
@@ -1223,6 +1352,25 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
     // Видимость меняют кадры, уходы и записи, добавленные другими потоками.
     system.lock().answer_watches();
     ControlFlow::Continue(())
+}
+
+fn add_search(mut held: Held, search: &Search<'_>) -> Held {
+    let state = match &search.state {
+        SearchState::Enumeration(snapshot) => snapshot.capacity() * size_of::<Export<'_>>(),
+        SearchState::Watch(watch) => {
+            watch.protocol.capacity() + watch.delivered.capacity() * size_of::<ExportKey<'_>>()
+        }
+        SearchState::Found(_) => 0,
+    };
+    held.bytes += size_of::<Search<'_>>() + search.requirement.capacity() + state;
+    held
+}
+
+pub(crate) fn owned(text: &str) -> Option<String> {
+    let mut owned = String::new();
+    owned.try_reserve_exact(text.len()).ok()?;
+    owned.push_str(text);
+    Some(owned)
 }
 
 fn launchable(records: &[Record<'_>], publication_pending: bool, child: Holder) -> bool {

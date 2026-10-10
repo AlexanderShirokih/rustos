@@ -14,6 +14,6 @@ mod system;
 pub use boot::{BootFailure, run};
 pub use component::{Component, ImporterRequirement};
 pub use system::{
-    AddFailure, BUDGET_RETURN_TIMEOUT, BudgetFailure, ImporterRefusal, RootSystem, Stopped,
-    SystemImage, turn,
+    AddFailure, BUDGET_RETURN_TIMEOUT, BudgetFailure, ImporterRefusal, RootSystem, SEARCH_LIMITS,
+    SearchLimits, Stopped, SystemImage, turn,
 };

@@ -1,6 +1,7 @@
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::{
     any::TypeId,
+    mem::size_of,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -15,6 +16,8 @@ use userland::ProgramView;
 use userland_loader::{ImagePages, load_program};
 
 const SESSION_CLOSED_EXIT_CODE: u32 = 0xFFFF_FFFD;
+
+const NO_MEMORY: Error = Error::Syscall(SyscallError::OutOfMemory);
 
 /// Предел ожидающих заявок одного импортёра на один экспорт по одному требованию.
 pub const IMPORTER_REQUESTS_PER_EXPORT_MAX: usize = 16;
@@ -32,8 +35,8 @@ pub struct Children<'a, C, V> {
     port: Port,
     next_badge: AtomicU64,
     entries: Vec<Entry<'a, C, V>>,
-    importers: BTreeMap<u64, Importer<C>>,
-    holdings: BTreeMap<u64, Holdings>,
+    importers: Vec<(u64, Importer<C>)>,
+    holdings: Vec<(u64, Holdings)>,
     requests: Vec<PendingRequest<C>>,
     accepts: Vec<PendingAccept<C>>,
 }
@@ -86,8 +89,17 @@ pub enum Purpose {
 pub enum GrantError {
     /// Значок не принадлежит работающей incarnation либо импортёру.
     NotRunning,
-    /// Копия capability не создана либо вид `K` отличается от прежней выдачи требования.
+    /// Выдача не создана либо вид `K` отличается от прежней выдачи требования.
     Kernel(Error),
+}
+
+/// Записи [`Children`] за владельцем: выданные клиентские capability и ожидающие заявки.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Held {
+    /// Число выданных клиентских capability и ожидающих заявок.
+    pub states: usize,
+    /// Память записей выдач и заявок с их строками.
+    pub bytes: usize,
 }
 
 struct Entry<'a, C, V> {
@@ -107,7 +119,6 @@ enum State {
     Removed,
 }
 
-#[derive(Default)]
 struct Holdings {
     roots: Vec<Grant>,
 }
@@ -163,8 +174,8 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             port: Port::create()?,
             next_badge: AtomicU64::new(0),
             entries: Vec::new(),
-            importers: BTreeMap::new(),
-            holdings: BTreeMap::new(),
+            importers: Vec::new(),
+            holdings: Vec::new(),
             requests: Vec::new(),
             accepts: Vec::new(),
         })
@@ -178,7 +189,10 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
 
     /// Заводит запись `child` в [`Status::Waiting`] с бюджетом `budget_bytes` из `parent_resource`.
     /// Закрытие `parent_resource` отзывает бюджет записи. `budget_deadline` - срок возврата
-    /// бюджета прежней incarnation. Занятый ключ даёт `SyscallError::InvalidArgument`.
+    /// бюджета прежней incarnation. Отказы:
+    /// - `SyscallError::InvalidArgument` - ключ занят;
+    /// - `SyscallError::OutOfMemory` - памяти записи не хватило;
+    /// - ошибка ядра при выделении бюджета.
     pub fn add(
         &mut self,
         child: C,
@@ -191,6 +205,8 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         if self.entries.iter().any(|entry| entry.child == child) {
             return Err(Error::Syscall(SyscallError::InvalidArgument));
         }
+
+        self.entries.try_reserve(1).map_err(|_| NO_MEMORY)?;
 
         let reserve = parent_resource.split(budget_bytes)?;
         drop(reserve.split(budget_bytes)?);
@@ -249,7 +265,29 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .iter()
             .find(|entry| entry.running_badge() == Some(badge))
             .map(|entry| entry.child)
-            .or_else(|| self.importers.get(&badge).map(|importer| importer.key))
+            .or_else(|| self.importer_of(badge).map(|importer| importer.key))
+    }
+
+    /// Записи за владельцем со значком `owner`.
+    #[must_use]
+    pub fn held(&self, owner: u64) -> Held {
+        self.held_where(|holder| holder == owner)
+    }
+
+    /// Записи за всеми владельцами.
+    #[must_use]
+    pub fn held_total(&self) -> Held {
+        self.held_where(|_| true)
+    }
+
+    /// Прирост [`Held::bytes`] владельца от одной выдачи [`issue`](Self::issue).
+    pub const ISSUE_BYTES: usize = size_of::<(u64, Importer<C>)>();
+
+    /// Прирост [`Held::bytes`] импортёра от заявки [`request`](Self::request) по требованию
+    /// `requirement` на экспорт `protocol`.
+    #[must_use]
+    pub const fn request_bytes(requirement: &str, protocol: &str) -> usize {
+        size_of::<PendingRequest<C>>() + requirement.len() + protocol.len()
     }
 
     /// Ставит заявку импортёра со значком `importer` и атрибутами его запроса `attributes` по
@@ -266,11 +304,19 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         attributes: AttributeSet,
         reply: ImporterDebt,
     ) {
+        let prepared = owned(protocol)
+            .zip(owned(requirement))
+            .filter(|_| self.requests.try_reserve(1).is_ok());
+        let Some((protocol_name, requirement)) = prepared else {
+            let _ = reply.send(Err::<IssuedHandle<kind::Port>, _>(SessionError::NoSpace));
+            return;
+        };
+
         let request = PendingRequest {
             provider,
-            protocol: String::from(protocol),
+            protocol: protocol_name,
             importer,
-            requirement: String::from(requirement),
+            requirement,
             attributes,
             reply,
         };
@@ -284,13 +330,18 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     }
 
     /// Отвечает провайдеру `provider` первой заявкой на экспорт `protocol` либо ставит его запрос
-    /// в очередь. Повторный запрос того же значка заменяет прежний, и прежний получает
-    /// `AcceptError::NoSpace`.
+    /// в очередь.
     pub fn accept(&mut self, provider: C, badge: u64, protocol: &str, reply: AcceptDebt) {
+        let prepared = owned(protocol).filter(|_| self.accepts.try_reserve(1).is_ok());
+        let Some(protocol_name) = prepared else {
+            let _ = reply.send(Err::<SessionRequest<ImporterDebt>, _>(AcceptError::NoSpace));
+            return;
+        };
+
         let accept = PendingAccept {
             provider,
             badge,
-            protocol: String::from(protocol),
+            protocol: protocol_name,
             reply,
         };
         let pending = self
@@ -315,7 +366,8 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     /// выданное им. Живой процесс завершается с исходом [`Outcome::TakenDown`]. Клиентская
     /// capability и чужой значок дают `None`.
     pub fn depart(&mut self, badge: u64) -> Option<Departure<C>> {
-        if let Some(importer) = self.importers.remove(&badge) {
+        if let Ok(index) = self.importer_index(badge) {
+            let (_, importer) = self.importers.remove(index);
             if importer.owner.is_none() {
                 self.release(badge);
             }
@@ -388,8 +440,10 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     }
 
     /// Выдаёт incarnation со значком `badge` копию `source` с правами `rights` под требование
-    /// `requirement`. [`depart`](Self::depart) отзывает выданное. Вид `K`, отличный от прежней
-    /// выдачи того же требования, даёт `SyscallError::WrongType`.
+    /// `requirement`. [`depart`](Self::depart) отзывает выданное. Отказы [`GrantError::Kernel`]:
+    /// - `SyscallError::WrongType` - вид `K` отличается от прежней выдачи того же требования;
+    /// - `SyscallError::OutOfMemory` - памяти корня выдачи не хватило;
+    /// - ошибка ядра при копировании `source`.
     pub fn grant<K: ObjectKind + 'static>(
         &mut self,
         badge: u64,
@@ -401,7 +455,9 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             return Err(GrantError::NotRunning);
         }
 
-        let copy = self.holdings.entry(badge).or_default().copy_root::<K>(
+        let copy = copy_root::<K>(
+            &mut self.holdings,
+            badge,
             requirement,
             Purpose::Requirement,
             rights,
@@ -414,7 +470,9 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     /// Создаёт для incarnation либо импортёра со значком `owner` клиентскую capability к
     /// [`port`](Self::port) под требование `requirement` с назначением `purpose`. Запросы по ней
     /// [`caller`](Self::caller) называет ключом `key`. Каждая копия получает свой значок, и уход
-    /// одной копии не закрывает другие. Уход владельца отзывает все копии его выдачи.
+    /// одной копии не закрывает другие. Уход владельца отзывает все копии его выдачи. Отказ
+    /// отменяет подготовленные записи выдачи. Отказы [`GrantError::Kernel`] те же, что у
+    /// [`grant`](Self::grant).
     pub fn issue(
         &mut self,
         owner: u64,
@@ -424,16 +482,17 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     ) -> Result<Port, GrantError> {
         let owner_alive = self.running(owner)
             || self
-                .importers
-                .get(&owner)
+                .importer_of(owner)
                 .is_some_and(|importer| importer.owner.is_none());
         if !owner_alive {
             return Err(GrantError::NotRunning);
         }
 
+        self.importers.try_reserve(1).map_err(|_| NO_MEMORY)?;
+
         // Запись импортёра существует до минта значка, чтобы обработать событие его ухода.
         let badge = NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed));
-        self.importers.insert(
+        let index = self.insert_importer(
             badge.get(),
             Importer {
                 key,
@@ -443,15 +502,19 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
 
         let rights = Rights::WRITE | Rights::TRANSFER;
         let port = &self.port;
-        let holdings = self.holdings.entry(owner).or_default();
-        let copy =
-            holdings.copy_root::<kind::Port>(requirement, purpose, rights, Some(badge), || {
-                port.duplicate(rights | Rights::DUPLICATE, None)
-            });
+        let copy = copy_root::<kind::Port>(
+            &mut self.holdings,
+            owner,
+            requirement,
+            purpose,
+            rights,
+            Some(badge),
+            || port.duplicate(rights | Rights::DUPLICATE, None),
+        );
         match copy {
             Ok(copy) => Ok(Port::from(copy.assume_kind::<kind::Port>())),
             Err(error) => {
-                self.importers.remove(&badge.get());
+                self.importers.remove(index);
                 Err(error)
             }
         }
@@ -459,12 +522,14 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
 
     /// Создаёт клиентскую capability к [`port`](Self::port), запросы которой
     /// [`caller`](Self::caller) называет ключом `key`. Поток, который обслуживает порт, по ней
-    /// не вызывает.
+    /// не вызывает. Отказы:
+    /// - `SyscallError::OutOfMemory` - памяти записи не хватило;
+    /// - ошибка ядра при копировании порта.
     pub fn importer(&mut self, key: C) -> Result<Port, Error> {
+        self.importers.try_reserve(1).map_err(|_| NO_MEMORY)?;
         let badge = NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed));
         let port = self.port.duplicate(Rights::WRITE, Some(badge))?;
-        self.importers
-            .insert(badge.get(), Importer { key, owner: None });
+        self.insert_importer(badge.get(), Importer { key, owner: None });
         Ok(port)
     }
 
@@ -488,6 +553,46 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
 
     fn entry_mut(&mut self, child: C) -> Option<&mut Entry<'a, C, V>> {
         self.entries.iter_mut().find(|entry| entry.child == child)
+    }
+
+    fn importer_index(&self, badge: u64) -> Result<usize, usize> {
+        self.importers
+            .binary_search_by_key(&badge, |(badge, _)| *badge)
+    }
+
+    fn importer_of(&self, badge: u64) -> Option<&Importer<C>> {
+        let index = self.importer_index(badge).ok()?;
+        self.importers.get(index).map(|(_, importer)| importer)
+    }
+
+    fn insert_importer(&mut self, badge: u64, importer: Importer<C>) -> usize {
+        let index = self.importer_index(badge).unwrap_or_else(|index| index);
+        self.importers.insert(index, (badge, importer));
+        index
+    }
+
+    fn held_where(&self, owned_by: impl Fn(u64) -> bool) -> Held {
+        let issued = self
+            .importers
+            .iter()
+            .filter(|(_, importer)| importer.owner.is_some_and(&owned_by))
+            .count();
+        let requests = self
+            .requests
+            .iter()
+            .filter(|request| owned_by(request.importer));
+
+        let mut held = Held {
+            states: issued,
+            bytes: issued * Self::ISSUE_BYTES,
+        };
+        for request in requests {
+            held.states += 1;
+            held.bytes += size_of::<PendingRequest<C>>()
+                + request.protocol.capacity()
+                + request.requirement.capacity();
+        }
+        held
     }
 
     fn match_pair(&mut self, provider: C, protocol: &str) {
@@ -541,41 +646,8 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         self.requests.retain(|request| request.importer != owner);
         self.accepts.retain(|accept| accept.badge != owner);
         self.importers
-            .retain(|_, importer| importer.owner != Some(owner));
-        self.holdings.remove(&owner);
-    }
-}
-
-impl Holdings {
-    fn copy_root<K: ObjectKind + 'static>(
-        &mut self,
-        requirement: &str,
-        purpose: Purpose,
-        rights: Rights,
-        badge: Option<NonZeroU64>,
-        source: impl FnOnce() -> Result<OwnedHandle<K>, Error>,
-    ) -> Result<OwnedHandle<kind::Any>, GrantError> {
-        let root = self
-            .roots
-            .iter()
-            .find(|grant| grant.requirement == requirement && grant.purpose == purpose);
-        match root {
-            Some(grant) if grant.kind != TypeId::of::<K>() => {
-                Err(GrantError::Kernel(Error::Syscall(SyscallError::WrongType)))
-            }
-            Some(grant) => Ok(grant.held.borrow().duplicate(rights, badge)?),
-            None => {
-                let held = source()?.erase();
-                let copy = held.borrow().duplicate(rights, badge)?;
-                self.roots.push(Grant {
-                    requirement: String::from(requirement),
-                    purpose,
-                    kind: TypeId::of::<K>(),
-                    held,
-                });
-                Ok(copy)
-            }
-        }
+            .retain(|(_, importer)| importer.owner != Some(owner));
+        self.holdings.retain(|(holder, _)| *holder != owner);
     }
 }
 
@@ -649,6 +721,75 @@ fn outcome_of(process: &Process) -> Outcome {
         // `exit_code` отказывает, если процесс не завершился и после `terminate`.
         Err(_) => Outcome::TakenDown,
     }
+}
+
+fn copy_root<K: ObjectKind + 'static>(
+    holdings: &mut Vec<(u64, Holdings)>,
+    owner: u64,
+    requirement: &str,
+    purpose: Purpose,
+    rights: Rights,
+    badge: Option<NonZeroU64>,
+    source: impl FnOnce() -> Result<OwnedHandle<K>, Error>,
+) -> Result<OwnedHandle<kind::Any>, GrantError> {
+    let slot = holdings.binary_search_by_key(&owner, |(owner, _)| *owner);
+    let root = slot
+        .ok()
+        .and_then(|index| holdings.get(index))
+        .and_then(|(_, holdings)| {
+            holdings
+                .roots
+                .iter()
+                .find(|grant| grant.requirement == requirement && grant.purpose == purpose)
+        });
+
+    match root {
+        Some(grant) if grant.kind != TypeId::of::<K>() => {
+            return Err(GrantError::Kernel(Error::Syscall(SyscallError::WrongType)));
+        }
+        Some(grant) => return Ok(grant.held.borrow().duplicate(rights, badge)?),
+        None => {}
+    }
+
+    let requirement = owned(requirement).ok_or(NO_MEMORY)?;
+    let mut fresh = Vec::new();
+    let reserved = match slot {
+        Ok(index) => holdings
+            .get_mut(index)
+            .is_some_and(|(_, holdings)| holdings.roots.try_reserve(1).is_ok()),
+        Err(_) => holdings.try_reserve(1).is_ok() && fresh.try_reserve_exact(1).is_ok(),
+    };
+    if !reserved {
+        return Err(GrantError::Kernel(NO_MEMORY));
+    }
+
+    let held = source()?.erase();
+    let copy = held.borrow().duplicate(rights, badge)?;
+    let grant = Grant {
+        requirement,
+        purpose,
+        kind: TypeId::of::<K>(),
+        held,
+    };
+    match slot {
+        Ok(index) => {
+            if let Some((_, holdings)) = holdings.get_mut(index) {
+                holdings.roots.push(grant);
+            }
+        }
+        Err(index) => {
+            fresh.push(grant);
+            holdings.insert(index, (owner, Holdings { roots: fresh }));
+        }
+    }
+    Ok(copy)
+}
+
+fn owned(text: &str) -> Option<String> {
+    let mut owned = String::new();
+    owned.try_reserve_exact(text.len()).ok()?;
+    owned.push_str(text);
+    Some(owned)
 }
 
 fn queue_request<C: PartialEq>(

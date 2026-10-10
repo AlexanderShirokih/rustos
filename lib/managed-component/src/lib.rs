@@ -10,6 +10,7 @@ extern crate alloc;
 mod children;
 
 pub use children::{
-    Children, Departure, GrantError, IMPORTER_REQUESTS_PER_EXPORT_MAX, Outcome, Purpose, Status,
+    Children, Departure, GrantError, Held, IMPORTER_REQUESTS_PER_EXPORT_MAX, Outcome, Purpose,
+    Status,
 };
 pub use userland_loader::ImagePages;
