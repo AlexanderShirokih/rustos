@@ -18,7 +18,11 @@
 //! чужое адресное пространство меняет во время такой копии, приходят в произвольной смеси
 //! старых и новых значений.
 
-use core::{mem, ops::Range};
+use core::{
+    borrow::Borrow,
+    fmt, mem,
+    ops::{Deref, Range},
+};
 
 const _: () = assert!(
     usize::BITS >= u64::BITS,
@@ -143,11 +147,37 @@ pub type Resource = OwnedHandle<kind::Resource>;
 /// Владеет хэндлом региона памяти и закрывает его на drop.
 pub type MemoryRegion = OwnedHandle<kind::MemoryRegion>;
 
-/// Маппинг региона в текущий AS. Освобождается в `Drop` через `memory_free`.
+/// Страницы, отображённые в текущее AS: базовый VA и размер. Даёт операции чтения и записи
+/// байтов отображения.
 #[derive(Debug)]
-pub struct Mapping {
+pub struct MappedPages {
     va: u64,
     size_bytes: u64,
+}
+
+#[derive(Debug)]
+struct MappedRange(MappedPages);
+
+/// Отображение региона в текущее AS. Отображение держит регион `R` всё время своего
+/// существования. Регион бывает собственным `MemoryRegion` или заимствованным `&MemoryRegion`.
+/// Операции над байтами даёт [`MappedPages`], к которому отображение разыменовывается.
+///
+/// Сброс сначала снимает отображение, а затем отпускает регион. Собственный регион
+/// закрывается, заимствованный остаётся у владельца.
+#[derive(Debug)]
+pub struct Mapping<R = MemoryRegion> {
+    pages: MappedRange,
+    region: R,
+}
+
+/// Отказ отображения вместе с регионом или окном, которое забрал конструктор. Возвращённый
+/// регион открыт.
+#[derive(Debug)]
+pub struct MapError<R> {
+    /// Причина отказа.
+    pub error: Error,
+    /// Регион или окно, переданные конструктору.
+    pub region: R,
 }
 
 /// Окно устройства: регион, смещение начала устройства от начала региона и размер устройства в
@@ -159,11 +189,14 @@ pub struct MmioWindow {
     pub size: u64,
 }
 
-/// Маппинг страниц устройства. Держит срез этих страниц, через который сделан маппинг.
+/// Отображение страниц устройства. Отображение держит окно всё время своего существования.
+/// Страницы отображены через срез региона окна, который держит внутреннее отображение.
+///
+/// Сброс снимает страницы и закрывает срез до закрытия окна.
 #[derive(Debug)]
 pub struct MmioMapping {
     mapping: Mapping,
-    _pages: MemoryRegion,
+    window: MmioWindow,
     start: usize,
     head: usize,
     size: usize,
@@ -176,11 +209,12 @@ pub struct WriteCombiningMapping {
     device: MmioMapping,
 }
 
-/// Маппинг региона, чья маска доступа не допускает запись. Страницы неизменны во всех адресных
-/// пространствах. Содержимое читается безопасным срезом.
+/// Отображение региона, чья маска доступа не допускает запись. Страницы неизменны во всех
+/// адресных пространствах. Содержимое читается безопасным срезом. Держит регион `R`, как
+/// [`Mapping`].
 #[derive(Debug)]
-pub struct ReadOnlyMapping {
-    mapping: Mapping,
+pub struct ReadOnlyMapping<R = MemoryRegion> {
+    mapping: Mapping<R>,
 }
 
 /// Анонимный маппинг (allocate-fastpath). Освобождается в `Drop` через
@@ -238,30 +272,6 @@ impl OwnedHandle<kind::Resource> {
 }
 
 impl OwnedHandle<kind::MemoryRegion> {
-    /// Маппит регион на свободный VA: `size_bytes` байт с флагами `flags`.
-    pub fn map(&self, size_bytes: u64, flags: UserMemFlags) -> Result<Mapping> {
-        let va = value(svc::memory_map(self.as_raw(), size_bytes, flags.raw()))?;
-        Ok(Mapping { va, size_bytes })
-    }
-
-    /// Маппит регион целиком (размер из `inspect`) с флагами `flags`.
-    pub fn map_full(&self, flags: UserMemFlags) -> Result<Mapping> {
-        let info = self.inspect()?;
-        self.map(info.size_bytes, flags)
-    }
-
-    /// Маппит регион целиком на чтение, удостоверяя неизменность его страниц. Регион, чья маска
-    /// доступа допускает запись, отвергается `AccessDenied`. Под другим отображением такие
-    /// страницы меняются, и неизменность обещать нечем.
-    pub fn map_full_read_only(&self) -> Result<ReadOnlyMapping> {
-        let info = self.inspect()?;
-        if info.access.raw() & MemoryAccess::WRITE.raw() != 0 {
-            return Err(Error::Syscall(SyscallError::AccessDenied));
-        }
-        let mapping = self.map(info.size_bytes, UserMemFlags::ReadOnly)?;
-        Ok(ReadOnlyMapping { mapping })
-    }
-
     /// Деривация под-региона `[offset, offset+size_bytes)` с маской `access`
     /// (не шире текущей). Требует `DUPLICATE` на хэндле региона.
     pub fn slice(
@@ -317,117 +327,7 @@ impl DeviceWindow<syscall_user::IssuedHandle<kind::MemoryRegion>> for MemoryRegi
     }
 }
 
-impl MmioWindow {
-    /// Маппит страницы устройства на чтение и запись с профилем региона. Требует `READ`,
-    /// `WRITE` и `DUPLICATE` на хэндле региона. Для устройства за концом региона возвращает
-    /// `InvalidArgument`.
-    pub fn map(&self) -> Result<MmioMapping> {
-        self.map_pages(0)
-    }
-
-    /// Маппит страницы устройства на чтение и запись с профилем
-    /// [`MemoryProfile::WriteCombining`]. Требует `READ`, `WRITE` и `DUPLICATE` на хэндле
-    /// региона. Для региона профиля `Cached` и для устройства за концом региона возвращает
-    /// `InvalidArgument`.
-    pub fn map_write_combining(&self) -> Result<WriteCombiningMapping> {
-        self.map_pages(MEMORY_REGION_WRITE_COMBINING)
-            .map(|device| WriteCombiningMapping { device })
-    }
-
-    fn map_pages(&self, region_flags: u64) -> Result<MmioMapping> {
-        let page = syscall::PAGE_SIZE as u64;
-        let first = self.offset - self.offset % page;
-        let size_bytes = self
-            .offset
-            .checked_add(self.size)
-            .and_then(|end| end.checked_next_multiple_of(page))
-            .map(|end| end - first)
-            .ok_or(Error::Syscall(SyscallError::InvalidArgument))?;
-        let pages =
-            self.region
-                .slice_with_flags(first, size_bytes, MemoryAccess::RW, region_flags)?;
-        let mapping = pages.map(size_bytes, UserMemFlags::ReadWrite)?;
-        let invalid = || Error::Syscall(SyscallError::InvalidArgument);
-        let head = usize::try_from(self.offset - first).map_err(|_| invalid())?;
-        let start = usize::try_from(mapping.va)
-            .ok()
-            .and_then(|va| va.checked_add(head))
-            .ok_or_else(invalid)?;
-        let size = usize::try_from(self.size).map_err(|_| invalid())?;
-        Ok(MmioMapping {
-            mapping,
-            _pages: pages,
-            start,
-            head,
-            size,
-        })
-    }
-}
-
-impl MmioMapping {
-    /// MMIO-хэндлер по началу устройства.
-    pub fn mmio(&self) -> Mmio {
-        Mmio::new(self.start)
-    }
-
-    /// Копирует в `dst` байты устройства со смещения `offset` от его начала операциями
-    /// [`Mapping::copy_out_at`]. Если диапазон выходит за границы области, выданной устройству,
-    /// возвращает ошибку `OutOfBounds`.
-    pub fn copy_out_at(&self, offset: usize, dst: &mut [u8]) -> Result<()> {
-        let offset = self.device_offset(offset, dst.len())?;
-        self.mapping.copy_out_at(offset, dst)
-    }
-
-    /// Копирует `src` в устройство со смещения `offset` от его начала операциями
-    /// [`Mapping::copy_in_at`]. Если диапазон выходит за границы области, выданной устройству,
-    /// возвращает ошибку `OutOfBounds`.
-    pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
-        let offset = self.device_offset(offset, src.len())?;
-        self.mapping.copy_in_at(offset, src)
-    }
-
-    fn device_offset(&self, offset: usize, len: usize) -> Result<usize> {
-        let end = offset.checked_add(len).ok_or(Error::OutOfBounds)?;
-        if end > self.size {
-            return Err(Error::OutOfBounds);
-        }
-        Ok(self.head + offset)
-    }
-}
-
-impl WriteCombiningMapping {
-    /// MMIO-хэндлер по началу устройства.
-    pub fn mmio(&self) -> Mmio {
-        self.device.mmio()
-    }
-
-    /// Копирует `src` в устройство со смещения `offset` от его начала, как
-    /// [`MmioMapping::copy_in_at`].
-    pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
-        self.device.copy_in_at(offset, src)
-    }
-
-    /// Копирует `len` байт маппинга `source` со смещения `source_offset` в устройство со смещения
-    /// `offset` от его начала обычной копией памяти. Если диапазон выходит за границы области,
-    /// выданной устройству, или за конец `source`, возвращает `OutOfBounds` без копирования.
-    ///
-    /// `source` - маппинг обычной памяти профиля `Cached`, физически не перекрытый с
-    /// устройством. Маппинг устройства в роли источника копия читает обращениями той ширины и в
-    /// том числе, которые выбирает реализация копии. Источник с теми же физическими страницами,
-    /// что и устройство, даёт на устройстве произвольные байты.
-    pub fn copy_from(
-        &self,
-        offset: usize,
-        source: &Mapping,
-        source_offset: usize,
-        len: usize,
-    ) -> Result<()> {
-        let offset = self.device.device_offset(offset, len)?;
-        source.copy_plain_to(source_offset, &self.device.mapping, offset, len)
-    }
-}
-
-impl Mapping {
+impl MappedPages {
     /// Базовый VA маппинга.
     pub fn va(&self) -> u64 {
         self.va
@@ -520,7 +420,7 @@ impl Mapping {
     pub fn copy_to(
         &self,
         offset: usize,
-        destination: &Mapping,
+        destination: &MappedPages,
         destination_offset: usize,
         len: usize,
     ) -> Result<()> {
@@ -556,7 +456,7 @@ impl Mapping {
     fn copy_plain_to(
         &self,
         offset: usize,
-        destination: &Mapping,
+        destination: &MappedPages,
         destination_offset: usize,
         len: usize,
     ) -> Result<()> {
@@ -567,7 +467,7 @@ impl Mapping {
             return Err(Error::Syscall(SyscallError::InvalidArgument));
         }
         // SAFETY: оба диапазона проверены `range_ptr` и лежат в маппингах, установленных ядром на
-        // время жизни объектов `Mapping`. Приёмник отображён на запись, потому что обычный
+        // время жизни отображений. Приёмник отображён на запись, потому что обычный
         // маппинг пишущего и маппинг устройства `map_pages` ставят с `UserMemFlags::ReadWrite`.
         // Перекрытие по виртуальным адресам исключено проверкой выше. Параллельная запись чужого
         // адресного пространства в источник даёт в приёмнике смесь старых и новых байт. Такая
@@ -635,27 +535,253 @@ impl Mapping {
         let base = usize::try_from(self.va).map_err(|_| Error::OutOfBounds)?;
         Ok((base + offset) as *mut u8)
     }
+}
+
+impl Deref for MappedRange {
+    type Target = MappedPages;
+
+    fn deref(&self) -> &MappedPages {
+        &self.0
+    }
+}
+
+impl Drop for MappedRange {
+    fn drop(&mut self) {
+        let _ = svc::memory_free(self.0.va, self.0.size_bytes);
+    }
+}
+
+impl<R: Borrow<MemoryRegion>> Mapping<R> {
+    /// Отображает `size_bytes` байт региона `region` на свободный VA с флагами `flags` и
+    /// забирает регион. С `&MemoryRegion` отображение существует не дольше заимствования. Отказ
+    /// `memory_map` возвращает регион в [`MapError`].
+    pub fn new(
+        region: R,
+        size_bytes: u64,
+        flags: UserMemFlags,
+    ) -> core::result::Result<Self, MapError<R>> {
+        let mapped = value(svc::memory_map(
+            region.borrow().as_raw(),
+            size_bytes,
+            flags.raw(),
+        ));
+        match mapped {
+            Ok(va) => Ok(Self {
+                pages: MappedRange(MappedPages { va, size_bytes }),
+                region,
+            }),
+            Err(error) => Err(MapError { error, region }),
+        }
+    }
+
+    /// Отображает регион `region` целиком (размер из `inspect`) с флагами `flags`, как
+    /// [`Mapping::new`]. Отказ `inspect` или `memory_map` возвращает регион в [`MapError`].
+    pub fn full(region: R, flags: UserMemFlags) -> core::result::Result<Self, MapError<R>> {
+        match region.borrow().inspect() {
+            Ok(info) => Self::new(region, info.size_bytes, flags),
+            Err(error) => Err(MapError { error, region }),
+        }
+    }
+
+    /// Регион, который держит отображение.
+    pub fn region(&self) -> &MemoryRegion {
+        self.region.borrow()
+    }
+
+    /// Снимает отображение и возвращает регион открытым.
+    pub fn into_region(self) -> R {
+        let Self { pages, region } = self;
+        drop(pages);
+        region
+    }
 
     /// Меняет флаги маппинга на `flags`.
     pub fn remap(&self, flags: UserMemFlags) -> Result<()> {
         unit(svc::memory_remap(self.va, self.size_bytes, flags.raw()))
     }
+}
 
-    /// Снимает маппинг, подавляя освобождение в `Drop` (без двойного `memory_free`).
-    pub fn unmap(self) -> Result<()> {
-        let (va, size_bytes) = (self.va, self.size_bytes);
-        mem::forget(self);
-        unit(svc::memory_free(va, size_bytes))
+impl<R> Deref for Mapping<R> {
+    type Target = MappedPages;
+
+    fn deref(&self) -> &MappedPages {
+        &self.pages
     }
 }
 
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        let _ = svc::memory_free(self.va, self.size_bytes);
+impl<R> fmt::Display for MapError<R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "mapping refused: {}", self.error)
     }
 }
 
-impl ReadOnlyMapping {
+impl<R: fmt::Debug> core::error::Error for MapError<R> {}
+
+impl<R> From<MapError<R>> for Error {
+    fn from(value: MapError<R>) -> Self {
+        value.error
+    }
+}
+
+impl MmioMapping {
+    /// Отображает страницы устройства из окна `window` на чтение и запись с профилем региона и
+    /// забирает окно. Требует `READ`, `WRITE` и `DUPLICATE` на хэндле региона окна. Отказы
+    /// возвращают окно в [`MapError`]:
+    /// - `InvalidArgument` - устройство за концом региона;
+    /// - ошибка `memory_slice` или `memory_map`.
+    pub fn new(window: MmioWindow) -> core::result::Result<Self, MapError<MmioWindow>> {
+        Self::with_region_flags(window, 0)
+    }
+
+    fn with_region_flags(
+        window: MmioWindow,
+        region_flags: u64,
+    ) -> core::result::Result<Self, MapError<MmioWindow>> {
+        match Self::map_pages(&window, region_flags) {
+            Ok((mapping, start, head, size)) => Ok(Self {
+                mapping,
+                window,
+                start,
+                head,
+                size,
+            }),
+            Err(error) => Err(MapError {
+                error,
+                region: window,
+            }),
+        }
+    }
+
+    fn map_pages(window: &MmioWindow, region_flags: u64) -> Result<(Mapping, usize, usize, usize)> {
+        let invalid = || Error::Syscall(SyscallError::InvalidArgument);
+        let page = syscall::PAGE_SIZE as u64;
+        let first = window.offset - window.offset % page;
+        let size_bytes = window
+            .offset
+            .checked_add(window.size)
+            .and_then(|end| end.checked_next_multiple_of(page))
+            .map(|end| end - first)
+            .ok_or_else(invalid)?;
+        let head = usize::try_from(window.offset - first).map_err(|_| invalid())?;
+        let size = usize::try_from(window.size).map_err(|_| invalid())?;
+
+        let pages =
+            window
+                .region
+                .slice_with_flags(first, size_bytes, MemoryAccess::RW, region_flags)?;
+        let mapping = Mapping::new(pages, size_bytes, UserMemFlags::ReadWrite)?;
+        let start = usize::try_from(mapping.va())
+            .ok()
+            .and_then(|va| va.checked_add(head))
+            .ok_or_else(invalid)?;
+        Ok((mapping, start, head, size))
+    }
+
+    /// Окно устройства, которое держит отображение.
+    pub fn window(&self) -> &MmioWindow {
+        &self.window
+    }
+
+    /// MMIO-хэндлер по началу устройства.
+    pub fn mmio(&self) -> Mmio {
+        Mmio::new(self.start)
+    }
+
+    /// Копирует в `dst` байты устройства со смещения `offset` от его начала операциями
+    /// [`MappedPages::copy_out_at`]. Если диапазон выходит за границы области, выданной устройству,
+    /// возвращает ошибку `OutOfBounds`.
+    pub fn copy_out_at(&self, offset: usize, dst: &mut [u8]) -> Result<()> {
+        let offset = self.device_offset(offset, dst.len())?;
+        self.mapping.copy_out_at(offset, dst)
+    }
+
+    /// Копирует `src` в устройство со смещения `offset` от его начала операциями
+    /// [`MappedPages::copy_in_at`]. Если диапазон выходит за границы области, выданной устройству,
+    /// возвращает ошибку `OutOfBounds`.
+    pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
+        let offset = self.device_offset(offset, src.len())?;
+        self.mapping.copy_in_at(offset, src)
+    }
+
+    fn device_offset(&self, offset: usize, len: usize) -> Result<usize> {
+        let end = offset.checked_add(len).ok_or(Error::OutOfBounds)?;
+        if end > self.size {
+            return Err(Error::OutOfBounds);
+        }
+        Ok(self.head + offset)
+    }
+}
+
+impl WriteCombiningMapping {
+    /// Отображает страницы устройства из окна `window` на чтение и запись с профилем
+    /// [`MemoryProfile::WriteCombining`] и забирает окно. Требует `READ`, `WRITE` и `DUPLICATE` на
+    /// хэндле региона окна. Отказы возвращают окно в [`MapError`]:
+    /// - `InvalidArgument` - регион профиля `Cached`;
+    /// - `InvalidArgument` - устройство за концом региона;
+    /// - ошибка `memory_slice` или `memory_map`.
+    pub fn new(window: MmioWindow) -> core::result::Result<Self, MapError<MmioWindow>> {
+        MmioMapping::with_region_flags(window, MEMORY_REGION_WRITE_COMBINING)
+            .map(|device| Self { device })
+    }
+
+    /// Окно устройства, которое держит отображение.
+    pub fn window(&self) -> &MmioWindow {
+        self.device.window()
+    }
+
+    /// MMIO-хэндлер по началу устройства.
+    pub fn mmio(&self) -> Mmio {
+        self.device.mmio()
+    }
+
+    /// Копирует `src` в устройство со смещения `offset` от его начала, как
+    /// [`MmioMapping::copy_in_at`].
+    pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
+        self.device.copy_in_at(offset, src)
+    }
+
+    /// Копирует `len` байт маппинга `source` со смещения `source_offset` в устройство со смещения
+    /// `offset` от его начала обычной копией памяти. Если диапазон выходит за границы области,
+    /// выданной устройству, или за конец `source`, возвращает `OutOfBounds` без копирования.
+    ///
+    /// `source` - маппинг обычной памяти профиля `Cached`, физически не перекрытый с
+    /// устройством. Маппинг устройства в роли источника копия читает обращениями той ширины и в
+    /// том числе, которые выбирает реализация копии. Источник с теми же физическими страницами,
+    /// что и устройство, даёт на устройстве произвольные байты.
+    pub fn copy_from(
+        &self,
+        offset: usize,
+        source: &MappedPages,
+        source_offset: usize,
+        len: usize,
+    ) -> Result<()> {
+        let offset = self.device.device_offset(offset, len)?;
+        source.copy_plain_to(source_offset, &self.device.mapping, offset, len)
+    }
+}
+
+impl<R: Borrow<MemoryRegion>> ReadOnlyMapping<R> {
+    /// Отображает регион `region` целиком на чтение, удостоверяя неизменность его страниц, и
+    /// забирает регион, как [`Mapping::new`]. Отказы возвращают регион в [`MapError`]:
+    /// - `AccessDenied` - маска доступа региона допускает запись;
+    /// - ошибка `inspect` или `memory_map`.
+    pub fn new(region: R) -> core::result::Result<Self, MapError<R>> {
+        let info = match region.borrow().inspect() {
+            Ok(info) => info,
+            Err(error) => return Err(MapError { error, region }),
+        };
+
+        if info.access.raw() & MemoryAccess::WRITE.raw() != 0 {
+            return Err(MapError {
+                error: Error::Syscall(SyscallError::AccessDenied),
+                region,
+            });
+        }
+
+        Mapping::new(region, info.size_bytes, UserMemFlags::ReadOnly)
+            .map(|mapping| Self { mapping })
+    }
+
     /// Содержимое маппинга. Срез заимствован на время его жизни.
     pub fn as_bytes(&self) -> &[u8] {
         // SAFETY: маска доступа региона не допускает запись, так что отображений на запись у его
@@ -666,6 +792,16 @@ impl ReadOnlyMapping {
     /// Размер маппинга в байтах.
     pub fn size_bytes(&self) -> u64 {
         self.mapping.size_bytes()
+    }
+
+    /// Регион, который держит отображение.
+    pub fn region(&self) -> &MemoryRegion {
+        self.mapping.region()
+    }
+
+    /// Снимает отображение и возвращает регион открытым.
+    pub fn into_region(self) -> R {
+        self.mapping.into_region()
     }
 }
 
@@ -701,8 +837,6 @@ impl Drop for AnonymousMapping {
 
 #[cfg(test)]
 mod tests {
-    use core::mem::ManuallyDrop;
-
     use super::*;
 
     const BUFFER_BYTES: usize = 64;
@@ -722,10 +856,10 @@ mod tests {
             self.0.as_mut_ptr()
         }
 
-        fn mapping(&mut self) -> ManuallyDrop<Mapping> {
+        fn mapping(&mut self) -> MappedPages {
             let va = u64::try_from(self.base().expose_provenance()).unwrap();
             let size_bytes = u64::try_from(BUFFER_BYTES).unwrap();
-            ManuallyDrop::new(Mapping { va, size_bytes })
+            MappedPages { va, size_bytes }
         }
     }
 

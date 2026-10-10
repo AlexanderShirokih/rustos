@@ -3,7 +3,7 @@
 
 use bootstrap_abi::{SystemSnapshot, system_info};
 use fdt::{devicetree::DeviceTree, devicetreeext::NodeExt};
-use kernel_objects::{MemoryRegion, Resource, SessionTransport};
+use kernel_objects::{MemoryRegion, ReadOnlyMapping, Resource, SessionTransport};
 use runtime::{Timeout, UserMemFlags};
 
 use crate::composition::pause;
@@ -52,9 +52,7 @@ fn available_cpu_nodes() -> u32 {
         .expect("boot fdt granted");
     let offset = usize::try_from(fdt.offset).expect("fdt offset fits usize");
     let region = MemoryRegion::from(fdt.region);
-    let mapping = region
-        .map_full_read_only()
-        .expect("boot fdt maps read-only");
+    let mapping = ReadOnlyMapping::new(region).expect("boot fdt maps read-only");
     let tree = mapping
         .as_bytes()
         .get(offset..)

@@ -18,7 +18,7 @@ use filesystem_abi::{
     FileSystemError, MountEnded, Path, file_system, file_system_mount, namespace,
 };
 use ipc::CallError;
-use kernel_objects::{MemoryRegion, Port, Session};
+use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Session};
 use runtime::{log_fmt, spawn_owned};
 use syscall::{Handle, Timeout, kind};
 
@@ -55,7 +55,7 @@ pub(crate) fn read(image: &Import<image::Protocol>) -> Vec<MountLine> {
         log_fmt(format_args!("mount table skipped: image region refused"));
         return Vec::new();
     };
-    let Ok(mapping) = region.map_full_read_only() else {
+    let Ok(mapping) = ReadOnlyMapping::new(region) else {
         log_fmt(format_args!("mount table skipped: image not mapped"));
         return Vec::new();
     };

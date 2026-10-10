@@ -13,7 +13,8 @@ use input_abi::{
 };
 use ipc::{CallError, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{
-    Delivery, IssuedHandle, MemoryRegion, Port, Session, SessionTransport, Signal, kind,
+    Delivery, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Session, SessionTransport, Signal,
+    kind,
 };
 use platform_abi::{Description, DescriptionError, PlatformError, platform};
 use runtime::{FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_owned};
@@ -148,8 +149,8 @@ impl input_source::Service<Delivery> for Source {
 impl Node {
     fn find(key: &Key, platform: &platform::Client<SessionTransport>) -> Result<Self, Failure> {
         let description = platform.description().map_err(Failure::Platform)?;
-        let region = MemoryRegion::from(description.region);
-        let mapping = region.map_full_read_only().map_err(Failure::Mapping)?;
+        let mapping = ReadOnlyMapping::new(MemoryRegion::from(description.region))
+            .map_err(|refused| Failure::Mapping(refused.error))?;
         let description = Description::new(mapping.as_bytes(), description.offset)
             .map_err(Failure::Description)?;
 

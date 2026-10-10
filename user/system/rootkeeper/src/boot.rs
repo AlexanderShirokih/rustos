@@ -2,7 +2,7 @@ use alloc::format;
 
 use bootstrap_abi::bootstrap;
 use component_abi::{PROTOCOL_ID_MAX, decode_manifest};
-use kernel_objects::{MemoryRegion, kind};
+use kernel_objects::{MemoryRegion, ReadOnlyMapping, kind};
 use log_relay::{KernelLogSink, LogRelayThread};
 use managed_component::ImagePages;
 use runtime::{Mutex, PortTransport, Timeout};
@@ -72,16 +72,14 @@ impl SystemImage {
             .acquire_userland_image()
             .map(MemoryRegion::from)
             .map_err(|_| BootFailure::BadImage)?;
-        let mapping = region
-            .map_full_read_only()
-            .map_err(|_| BootFailure::BadImage)?;
-        Ok(Self { region, mapping })
+        let mapping = ReadOnlyMapping::new(region).map_err(|_| BootFailure::BadImage)?;
+        Ok(Self { mapping })
     }
 
     /// Страницы образа, из которых запуск отображает код программ образа.
     #[must_use]
     pub const fn pages(&self) -> ImagePages<'_> {
-        ImagePages::new(&self.region, &self.mapping)
+        ImagePages::new(&self.mapping)
     }
 
     /// Таблица записей образа.

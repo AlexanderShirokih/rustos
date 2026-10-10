@@ -22,7 +22,7 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
-    Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, kind,
+    Delivery, Error, IssuedHandle, Port, ReadOnlyMapping, Resource, Session, kind,
 };
 use log_abi::{LogBuffer, log};
 use managed_component::{Children, Departure, GrantError, Held, Outcome, Purpose, Status};
@@ -132,7 +132,6 @@ pub enum AddFailure {
 
 /// Userland-образ, отображённый в адресное пространство rootkeeper.
 pub struct SystemImage {
-    pub(crate) region: MemoryRegion,
     pub(crate) mapping: ReadOnlyMapping,
 }
 
@@ -1301,7 +1300,7 @@ impl image::Service<Delivery> for RootSystem<'_> {
             .grant(
                 incarnation,
                 IMAGE_REGION_GRANT,
-                self.image.region.borrow(),
+                self.image.mapping.region().borrow(),
                 Rights::READ | Rights::DUPLICATE | Rights::TRANSFER,
             )
             .map_err(|error| match error {

@@ -4,23 +4,22 @@ use alloc::vec::Vec;
 
 use filesystem::{ByteStore, StoreId, Window, insert_store};
 use filesystem_abi::{AccessMode, FileSystemError};
-use kernel_objects::{Mapping, MemoryRegion, RegionKind, Resource};
+use kernel_objects::{MappedPages, Mapping, MemoryRegion, ReadOnlyMapping, RegionKind, Resource};
 use runtime::{MemoryAccess, UserMemFlags};
-use syscall::Rights;
+use syscall::{Rights, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::{error::no_space, service::access_for};
 
 enum Store {
-    Initial(MemoryRegion),
-    Owned {
-        region: MemoryRegion,
-        mapping: Mapping,
-    },
-    Imported {
-        region: MemoryRegion,
-        mapping: Option<Mapping>,
-    },
+    Initial(&'static ReadOnlyMapping),
+    Owned(Mapping),
+    Imported(Imported),
+}
+
+enum Imported {
+    Mapped(Mapping),
+    Unmapped(MemoryRegion),
 }
 
 pub(crate) struct StoreTable {
@@ -29,11 +28,11 @@ pub(crate) struct StoreTable {
 }
 
 impl StoreTable {
-    pub(crate) fn new(resource: Resource, initial: Option<MemoryRegion>) -> Self {
+    pub(crate) fn new(resource: Resource, initial: Option<&'static ReadOnlyMapping>) -> Self {
         let mut stores = Vec::new();
         // Регион точки монтирования ложится первым. Окна бекенда адресуют его как `StoreId::MOUNT`.
-        if let Some(region) = initial {
-            stores.push(Some(Store::Initial(region)));
+        if let Some(image) = initial {
+            stores.push(Some(Store::Initial(image)));
         }
         Self { stores, resource }
     }
@@ -61,10 +60,13 @@ impl StoreTable {
         drop(probe);
         // Маппинг существует вместе с именем. Отказ ядра регистрацию не срывает. Такой регион
         // отображается на время операции.
-        let mapping = region.map_full(UserMemFlags::ReadWrite).ok();
+        let imported = match Mapping::full(region, UserMemFlags::ReadWrite) {
+            Ok(mapping) => Imported::Mapped(mapping),
+            Err(refused) => Imported::Unmapped(refused.region),
+        };
 
         let size = info.size_bytes;
-        let id = self.insert(Store::Imported { region, mapping })?;
+        let id = self.insert(Store::Imported(imported))?;
         Ok((id, size))
     }
 
@@ -75,9 +77,9 @@ impl StoreTable {
     ) -> Result<MemoryRegion, FileSystemError> {
         let store = self.store(window.store)?;
         let region = match store {
-            Store::Initial(region)
-            | Store::Owned { region, .. }
-            | Store::Imported { region, .. } => region,
+            Store::Initial(image) => image.region(),
+            Store::Owned(mapping) | Store::Imported(Imported::Mapped(mapping)) => mapping.region(),
+            Store::Imported(Imported::Unmapped(region)) => region,
         };
         let info = region.inspect().map_err(no_space)?;
         let size = window.size.div_ceil(USERLAND_PAGE_SIZE) * USERLAND_PAGE_SIZE;
@@ -112,18 +114,19 @@ impl StoreTable {
         &self,
         id: StoreId,
         flags: UserMemFlags,
-        access: impl FnOnce(&Mapping) -> Result<T, FileSystemError>,
+        access: impl FnOnce(&MappedPages) -> Result<T, FileSystemError>,
     ) -> Result<T, FileSystemError> {
         match self.store(id)? {
-            Store::Owned { mapping, .. }
-            | Store::Imported {
-                mapping: Some(mapping),
-                ..
-            } => access(mapping),
-            Store::Initial(region) | Store::Imported { region, .. } => {
-                let mapping = region.map_full(flags).map_err(no_space)?;
+            Store::Owned(mapping) | Store::Imported(Imported::Mapped(mapping)) => access(mapping),
+            Store::Imported(Imported::Unmapped(region)) => {
+                let mapping =
+                    Mapping::full(region, flags).map_err(|refused| no_space(refused.error))?;
                 access(&mapping)
             }
+            // Маска доступа образа не допускает запись.
+            Store::Initial(_) => Err(no_space(kernel_objects::Error::Syscall(
+                SyscallError::AccessDenied,
+            ))),
         }
     }
 }
@@ -138,13 +141,20 @@ impl ByteStore for StoreTable {
             .resource
             .create_virtual(size, MemoryAccess::RW)
             .map_err(no_space)?;
-        let mapping = region
-            .map(size, UserMemFlags::ReadWrite)
-            .map_err(no_space)?;
-        self.insert(Store::Owned { region, mapping })
+        let mapping = Mapping::new(region, size, UserMemFlags::ReadWrite)
+            .map_err(|refused| no_space(refused.error))?;
+        self.insert(Store::Owned(mapping))
     }
 
     fn read(&self, store: StoreId, offset: usize, out: &mut [u8]) -> Result<(), FileSystemError> {
+        if let Store::Initial(image) = self.store(store)? {
+            let bytes = offset
+                .checked_add(out.len())
+                .and_then(|end| image.as_bytes().get(offset..end))
+                .ok_or_else(|| no_space(kernel_objects::Error::OutOfBounds))?;
+            out.copy_from_slice(bytes);
+            return Ok(());
+        }
         self.with_mapping(store, UserMemFlags::ReadOnly, |mapping| {
             mapping.copy_out_at(offset, out).map_err(no_space)
         })

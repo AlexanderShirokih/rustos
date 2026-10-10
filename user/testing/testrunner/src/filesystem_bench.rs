@@ -7,7 +7,7 @@
 use alloc::vec;
 
 use filesystem_abi::{AccessMode, OpenFlags, Opened, file_system};
-use kernel_objects::{MemoryRegion, Resource, SessionTransport};
+use kernel_objects::{Mapping, MemoryRegion, Resource, SessionTransport};
 use runtime::{Instant, MemoryAccess, UserMemFlags};
 use userland::USERLAND_PAGE_SIZE;
 
@@ -149,9 +149,7 @@ fn bench_ramfs_promoted_plane() {
         fill(&client, &opened, size);
         let backing =
             MemoryRegion::from(client.backing_memory(opened.fd).expect("backing granted"));
-        let mapped = backing
-            .map_full(UserMemFlags::ReadWrite)
-            .expect("map promoted backing");
+        let mapped = Mapping::full(backing, UserMemFlags::ReadWrite).expect("map promoted backing");
 
         measure_frame_plane(&client, &opened, "promoted", size);
 

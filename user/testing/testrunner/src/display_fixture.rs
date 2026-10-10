@@ -37,12 +37,10 @@ component_manifest! {
 struct Surface {
     badge: u64,
     mapping: Mapping,
-    _region: MemoryRegion,
 }
 
 struct Screen {
     pixels: Mapping,
-    _region: MemoryRegion,
     surface_size: u64,
     surfaces: Vec<Surface>,
     budget: Resource,
@@ -56,13 +54,11 @@ impl Screen {
         let budget = origin.split(surface_size).ok()?;
 
         let region = origin.create_virtual(surface_size, MemoryAccess::RW).ok()?;
-        let pixels = region.map(surface_size, UserMemFlags::ReadWrite).ok()?;
+        let pixels = Mapping::new(region, surface_size, UserMemFlags::ReadWrite).ok()?;
 
-        // Маппинг экрана действует, пока открыт `region`. Бюджет `budget` действует, пока открыт
-        // `origin`.
+        // Бюджет `budget` действует, пока открыт `origin`.
         Some(Self {
             pixels,
-            _region: region,
             surface_size,
             surfaces: Vec::new(),
             budget,
@@ -79,23 +75,16 @@ impl Screen {
             .budget
             .create_virtual(self.surface_size, MemoryAccess::RW)
             .map_err(|_| DisplayError::NoSpace)?;
-        let mapping = region
-            .map(self.surface_size, UserMemFlags::ReadWrite)
+        let mapping = Mapping::new(region, self.surface_size, UserMemFlags::ReadWrite)
             .map_err(|_| DisplayError::NoSpace)?;
 
-        // Закрытие `_region` в `close` отзывает эту копию у клиента.
-        let granted = region
+        // Закрытие региона отображения в `close` отзывает эту копию у клиента.
+        let granted = mapping
+            .region()
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(|_| DisplayError::NoSpace)?;
 
-        // Закрытие региона снимает маппинг этого региона. Освободившийся диапазон VA может занять
-        // другой маппинг. Поле `mapping` объявлено в `Surface` раньше `_region` и освобождается
-        // первым.
-        self.surfaces.push(Surface {
-            badge,
-            mapping,
-            _region: region,
-        });
+        self.surfaces.push(Surface { badge, mapping });
         Ok(granted)
     }
 

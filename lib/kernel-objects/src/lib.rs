@@ -24,9 +24,9 @@ mod session_transport;
 pub use error::{Error, Result};
 pub use handle::{BorrowedHandle, OwnedHandle};
 pub use object::{
-    AnonymousMapping, IrqControl, IrqLine, Mapping, MemoryRegion, MmioMapping, MmioWindow, Port,
-    Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply, Resource, ServicePort, Signal, Thread,
-    ThreadEntry, WriteCombiningMapping, wait_any,
+    AnonymousMapping, IrqControl, IrqLine, MapError, MappedPages, Mapping, MemoryRegion,
+    MmioMapping, MmioWindow, Port, Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply,
+    Resource, ServicePort, Signal, Thread, ThreadEntry, WriteCombiningMapping, wait_any,
 };
 pub use ring_transport::{RingConsumer, RingProducer};
 pub use session_transport::SessionTransport;

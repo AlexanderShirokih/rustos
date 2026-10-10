@@ -12,7 +12,9 @@ use core::sync::atomic::AtomicU64;
 use component_startup::{SessionError, component_manifest, mint_session, serve_export};
 use io::mmio::Reg;
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, SessionTransport};
+use kernel_objects::{
+    IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, ReadOnlyMapping, SessionTransport,
+};
 use platform_abi::{Description, platform};
 use rtc_abi::rtc;
 use runtime::{
@@ -49,7 +51,6 @@ struct Shared {
 
 struct Pl031 {
     registers: MmioMapping,
-    _window: MmioWindow,
     line: IrqLine,
 }
 
@@ -96,8 +97,8 @@ impl Shared {
 impl Pl031 {
     fn bind(platform: &platform::Client<SessionTransport>) -> Result<Self> {
         let description = platform.description()?;
-        let region = MemoryRegion::from(description.region);
-        let mapping = region.map_full_read_only()?;
+        let mapping = ReadOnlyMapping::new(MemoryRegion::from(description.region))
+            .map_err(kernel_objects::Error::from)?;
         let id = Description::new(mapping.as_bytes(), description.offset)?
             .compatible_devices(COMPATIBLE)
             .next()
@@ -110,11 +111,8 @@ impl Pl031 {
             offset: window.offset,
             size: window.size,
         };
-        // Устройство держит окно до конца процесса, и закрытие окна отзывает выведенные из него
-        // страницы.
         Ok(Self {
-            registers: window.map()?,
-            _window: window,
+            registers: MmioMapping::new(window).map_err(kernel_objects::Error::from)?,
             line,
         })
     }

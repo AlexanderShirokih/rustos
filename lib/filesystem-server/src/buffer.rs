@@ -1,4 +1,4 @@
-//! Буфер данных сессии: регион сервера, его маппинг и производная капа клиента.
+//! Буфер данных сессии: отображение региона сервера и производная капа клиента.
 
 use alloc::vec::Vec;
 
@@ -14,7 +14,6 @@ const BUFFER_MAX: u64 = 64 * 1024;
 
 pub(crate) struct DataBuffer {
     mapping: Mapping,
-    region: MemoryRegion,
     staging: Vec<u8>,
 }
 
@@ -27,26 +26,22 @@ impl DataBuffer {
         let region = resource
             .create_virtual(bytes, MemoryAccess::RW)
             .map_err(no_space)?;
-        let mapping = region
-            .map(bytes, UserMemFlags::ReadWrite)
-            .map_err(no_space)?;
+        let mapping = Mapping::new(region, bytes, UserMemFlags::ReadWrite)
+            .map_err(|refused| no_space(refused.error))?;
         let len = usize::try_from(bytes).map_err(|_| FileSystemError::NoSpace)?;
         let mut staging = Vec::new();
         staging
             .try_reserve_exact(len)
             .map_err(|_| FileSystemError::NoSpace)?;
         staging.resize(len, 0);
-        Ok(Self {
-            mapping,
-            region,
-            staging,
-        })
+        Ok(Self { mapping, staging })
     }
 
     pub(crate) fn share(&self) -> Result<MemoryRegion, FileSystemError> {
         // Права клиента без `DUPLICATE`: производную капу он не переминчивает, и закрытие корневой
         // капы сервером отзывает её.
-        self.region
+        self.mapping
+            .region()
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(no_space)
     }

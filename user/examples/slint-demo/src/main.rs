@@ -280,7 +280,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .acquire_surface()
             .map_err(|error| format!("surface refused: {error:?}"))?,
     );
-    let mut mapping = region.map_full(UserMemFlags::ReadWrite)?;
+    let mut mapping = kernel_objects::Mapping::full(region, UserMemFlags::ReadWrite)?;
     let pixels = surface_pixels(&mut mapping, dimension)?;
 
     let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);

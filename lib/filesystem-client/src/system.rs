@@ -20,10 +20,9 @@ impl FileSystem<FileSystemEnvironment> {
     }
 }
 
-/// Отображённый регион данных сессии вместе с capability самого региона.
+/// Отображённый регион данных сессии.
 pub struct SessionRegion {
     mapping: Mapping,
-    _region: MemoryRegion,
 }
 
 impl SharedRegion for SessionRegion {
@@ -62,14 +61,8 @@ impl Environment for FileSystemEnvironment {
         &self,
         region: IssuedHandle<kind::MemoryRegion>,
     ) -> Result<SessionRegion, FileSystemError> {
-        // Маппинг жив, пока открыта капа региона.
-        let region = MemoryRegion::from(region);
-        let mapping = region
-            .map_full(UserMemFlags::ReadWrite)
+        let mapping = Mapping::full(MemoryRegion::from(region), UserMemFlags::ReadWrite)
             .map_err(|_| FileSystemError::NoSpace)?;
-        Ok(SessionRegion {
-            mapping,
-            _region: region,
-        })
+        Ok(SessionRegion { mapping })
     }
 }

@@ -11,7 +11,9 @@ use filesystem_abi::{
     Opened, PATH_MAX, Path, Written, file_system, rebase,
 };
 use ipc::{IntoWireValue, wire::Cap};
-use kernel_objects::{Delivery, IssuedHandle, MemoryRegion, OwnedHandle, Port, Resource, kind};
+use kernel_objects::{
+    Delivery, IssuedHandle, MemoryRegion, OwnedHandle, Port, ReadOnlyMapping, Resource, kind,
+};
 use runtime::MemoryAccess;
 
 use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};
@@ -72,7 +74,7 @@ fn scoped_entry<'a>(
 impl FileSystemState {
     pub(crate) fn new(
         backend: Box<dyn FileSystemBackend + Send>,
-        backing: Option<MemoryRegion>,
+        backing: Option<&'static ReadOnlyMapping>,
         resource: Resource,
     ) -> Self {
         Self {

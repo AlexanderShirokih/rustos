@@ -40,15 +40,15 @@ pub fn serve<B>(
 where
     B: FileSystemBackend + Send + 'static,
 {
-    let bytes = match backing.as_ref() {
+    let image = match backing {
         Some(backing) => {
-            let mapping = backing.map_full_read_only()?;
-            Some(IMAGE.call_once(|| mapping).as_bytes())
+            let mapping = ReadOnlyMapping::new(backing).map_err(kernel_objects::Error::from)?;
+            Some(IMAGE.call_once(|| mapping))
         }
         None => None,
     };
-    let backend = found(bytes)?;
-    let state = FileSystemState::new(Box::new(backend), backing, Resource::self_resource()?);
+    let backend = found(image.map(ReadOnlyMapping::as_bytes))?;
+    let state = FileSystemState::new(Box::new(backend), image, Resource::self_resource()?);
 
     run(start, state, |shared, _| {
         session::open_session(shared, DEFAULT_VOLUME)

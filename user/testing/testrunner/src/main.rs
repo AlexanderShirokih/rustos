@@ -76,6 +76,7 @@ mod resource_exhaustion;
 mod resource_split;
 mod ring_transport;
 mod rootkeeper_system;
+mod screen;
 mod search_limits;
 mod selftest_clock;
 mod selftest_run;

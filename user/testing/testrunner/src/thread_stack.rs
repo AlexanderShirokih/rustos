@@ -5,7 +5,7 @@
 
 use core::sync::atomic::Ordering::Relaxed;
 
-use kernel_objects::Resource;
+use kernel_objects::{Mapping, Resource};
 use runtime::{MemoryAccess, UserMemFlags};
 use syscall::Rights;
 use userland::USERLAND_PAGE_SIZE;
@@ -40,8 +40,7 @@ fn overflow_lands_on_the_guard_page(frame_bytes: usize) {
     let region = resource
         .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
         .expect("create report region");
-    let mapping = region
-        .map(USERLAND_PAGE_SIZE, UserMemFlags::ReadWrite)
+    let mapping = Mapping::new(region, USERLAND_PAGE_SIZE, UserMemFlags::ReadWrite)
         .expect("map report region");
 
     let va = usize::try_from(mapping.va()).expect("positive va fits usize");
@@ -50,7 +49,8 @@ fn overflow_lands_on_the_guard_page(frame_bytes: usize) {
     let report = unsafe { &*(va as *const StackReport) };
     report.frame_bytes.store(frame_bytes, Relaxed);
 
-    let lease = region
+    let lease = mapping
+        .region()
         .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
         .expect("report region for the fixture");
     let process = spawn_entry(OVERFLOW_FIXTURE, lease);

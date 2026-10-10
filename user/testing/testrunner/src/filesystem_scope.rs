@@ -8,7 +8,7 @@ use filesystem_abi::{
     AccessMode, FileSystemError, NAME_MAX, NodeKind, OpenFlags, PATH_MAX, file_system,
 };
 use ipc::CallError;
-use kernel_objects::{Session, SessionTransport};
+use kernel_objects::{Mapping, Session, SessionTransport};
 use runtime::UserMemFlags;
 
 use crate::filesystem::{
@@ -47,9 +47,7 @@ fn filesystem_scopes_a_session_to_an_image_directory() {
     test_harness::check_eq!(unread, Err(CallError::Remote(FileSystemError::NoBuffer)));
 
     let region = acquire_buffer(&scoped);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
     let count = scoped.read(opened.fd, 0, BUFFER_SIZE).expect("read ok");
     test_harness::check_eq!(buffer_head(&buffer, count as usize), IMAGE_FILE_BODY);
 
@@ -91,9 +89,7 @@ fn filesystem_scoped_session_stays_inside_its_window() {
 fn filesystem_scoped_windows_narrow_and_compose() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let outer = format!("{CHAIN_WINDOW}/outer");
     let inner = format!("{outer}/inner");
@@ -140,9 +136,7 @@ fn filesystem_scoped_session_writes_through_its_window() {
 
     let scoped = connect(window_of(&client, WRITE_WINDOW));
     let region = acquire_buffer(&scoped);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let created = open(&scoped, "/fresh", AccessMode::ReadWrite, OpenFlags::CREATE);
     let payload = b"through the window";

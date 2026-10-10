@@ -14,7 +14,10 @@ use filesystem_abi::{
     AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, file_system_mount, namespace,
 };
 use ipc::{CallError, Protocol, wire::IpcError};
-use kernel_objects::{Error, IrqLine, MemoryRegion, Port, Session, SessionTransport};
+use kernel_objects::{
+    Error, IrqLine, MemoryRegion, MmioMapping, Port, ReadOnlyMapping, Session, SessionTransport,
+    WriteCombiningMapping,
+};
 use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
 use platform_abi::{Description, MmioWindow, PlatformError, platform};
@@ -33,7 +36,7 @@ use crate::{
         BOOT_PLAN_ENTRY, Composition, Importer, Mounted, ROUTER_NAME, admin, drained, encoded,
         image, pause, request, view,
     },
-    filesystem::{IMAGE_FILE, connect, open},
+    filesystem::{IMAGE_FILE, LEAK_ROUNDS, connect, open},
     log_relay::{
         ScenarioLogSessions, await_component_lines, await_component_lines_with_prefix,
         await_component_sources, start_component_relay, stop_component_relay,
@@ -527,9 +530,7 @@ fn with_description<T>(inspect: impl FnOnce(&Description<'_>) -> T) -> T {
 
     let inspected = {
         let (region, offset) = description(&session).expect("description granted");
-        let mapping = region
-            .map_full_read_only()
-            .expect("description maps read-only");
+        let mapping = ReadOnlyMapping::new(region).expect("description maps read-only");
         inspect(&Description::new(mapping.as_bytes(), offset).expect("description parses"))
     };
 
@@ -1331,16 +1332,38 @@ fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
         size: granted.size,
     };
 
-    let mapping = device
-        .map_write_combining()
-        .expect("device window maps write-combining");
+    let mapping = WriteCombiningMapping::new(device).expect("device window maps write-combining");
     let magic: u32 = mapping.mmio().read(0);
-    let device_end = usize::try_from(device.size).expect("window size fits usize");
+    let device_end = usize::try_from(mapping.window().size).expect("window size fits usize");
     let past_end = mapping.copy_in_at(device_end - 1, &[0u8; 2]);
 
     test_harness::check_eq!(magic, VIRTIO_MAGIC);
     test_harness::check_eq!(past_end, Err(Error::OutOfBounds));
     drop(mapping);
+    drop(session);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn mapping_and_releasing_a_window_does_not_exhaust_the_handle_table() {
+    if !platform_describes(SECOND_VIRTIO) {
+        test_harness::skip!("{} is not described", SECOND_VIRTIO);
+    }
+
+    let composition = scenario(&[PLATFORM]);
+    let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
+    let session = platform_session(&importer, PLATFORM_REQUIREMENT);
+    for _ in 0..LEAK_ROUNDS {
+        let granted = window(&session, SECOND_VIRTIO).expect("second window");
+        let mapping = MmioMapping::new(kernel_objects::MmioWindow {
+            region: granted.region,
+            offset: granted.offset,
+            size: granted.size,
+        })
+        .expect("device window maps");
+
+        test_harness::check_eq!(mapping.mmio().read::<u32>(0), VIRTIO_MAGIC);
+    }
     drop(session);
     finish(composition);
 }
@@ -1383,18 +1406,16 @@ fn sessions_read_one_description_through_read_only_copies() {
     let (repeated, repeated_offset) = description(&first).expect("repeated description");
     let (other, other_offset) = description(&second).expect("second description");
     let writable = region.duplicate(Rights::WRITE, None).map(drop);
-    let mapping = region
-        .map_full_read_only()
-        .expect("description maps read-only");
+    let mapping = ReadOnlyMapping::new(region).expect("description maps read-only");
     let tree = Description::new(mapping.as_bytes(), offset).expect("description parses");
 
     test_harness::check_eq!(
         (region_base(&repeated), repeated_offset),
-        (region_base(&region), offset)
+        (region_base(mapping.region()), offset)
     );
     test_harness::check_eq!(
         (region_base(&other), other_offset),
-        (region_base(&region), offset)
+        (region_base(mapping.region()), offset)
     );
     test_harness::check_eq!(writable, Err(Error::Syscall(SyscallError::AccessDenied)));
     test_harness::check!(tree.devices().next().is_some());

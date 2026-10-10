@@ -2,7 +2,7 @@
 //! регион передаётся потомку по порту отдельной capability и виден там как тот же
 //! физический фрейм, но по своему VA.
 
-use kernel_objects::Resource;
+use kernel_objects::{Mapping, Resource};
 use runtime::{MemoryAccess, UserMemFlags, signal_set};
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, kind};
 
@@ -20,9 +20,8 @@ fn memory_region_shared_with_child() {
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
         .expect("create shared region");
-    let mapping = region
-        .map(PAGE_SIZE, UserMemFlags::ReadWrite)
-        .expect("map region in parent");
+    let mapping =
+        Mapping::new(region, PAGE_SIZE, UserMemFlags::ReadWrite).expect("map region in parent");
 
     let slot = usize::try_from(mapping.va()).expect("positive va fits usize") as *mut u64;
     // SAFETY: map выдал RW-окно в PAGE_SIZE байт; 8-байтные доступы по его базе
@@ -33,7 +32,8 @@ fn memory_region_shared_with_child() {
 
     let fixture = Fixture::spawn();
 
-    let lease = region
+    let lease = mapping
+        .region()
         .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
         .expect("duplicate region handle for child");
     let leased_raw = lease.as_raw();

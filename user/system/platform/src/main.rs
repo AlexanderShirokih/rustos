@@ -21,7 +21,7 @@ use component_startup::{
 use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
 use fdt::devicetree::DeviceTree;
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{IrqControl, MemoryRegion, Port, SessionTransport};
+use kernel_objects::{IrqControl, MemoryRegion, Port, ReadOnlyMapping, SessionTransport};
 use platform_abi::{Description, platform};
 use runtime::{FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, spawn_owned};
 
@@ -88,11 +88,8 @@ fn start(requirements: PlatformStartup) -> Result<(&'static Port, Platform), Sto
     );
     let fdt = hardware.acquire_boot_fdt().map_err(|_| Stopped::Hardware)?;
     let offset = usize::try_from(fdt.offset).map_err(|_| Stopped::Description)?;
-    let region: &'static MemoryRegion = Box::leak(Box::new(MemoryRegion::from(fdt.region)));
-    let mapping = Box::leak(Box::new(
-        region
-            .map_full_read_only()
-            .map_err(|_| Stopped::Description)?,
+    let mapping: &'static ReadOnlyMapping = Box::leak(Box::new(
+        ReadOnlyMapping::new(MemoryRegion::from(fdt.region)).map_err(|_| Stopped::Description)?,
     ));
     let tree = mapping
         .as_bytes()
@@ -126,7 +123,7 @@ fn start(requirements: PlatformStartup) -> Result<(&'static Port, Platform), Sto
             &shared.sessions,
             DeviceTreePlatform::new(tree, PLATFORM_BINDINGS),
             HardwareDescription {
-                region,
+                region: mapping.region(),
                 offset: u64::from(fdt.offset),
             },
             lines,

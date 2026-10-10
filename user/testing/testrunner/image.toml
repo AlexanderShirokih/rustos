@@ -188,6 +188,10 @@ package = "driver-simplefb"
 path = "/driver-simplefb"
 
 [[programs]]
+package = "driver-virtio-gpu"
+path = "/driver-virtio-gpu"
+
+[[programs]]
 package = "virtio-mmio"
 path = "/virtio-mmio"
 

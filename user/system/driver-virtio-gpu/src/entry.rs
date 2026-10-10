@@ -71,7 +71,6 @@ struct Session {
 
 struct Surface {
     mapping: Mapping,
-    _region: MemoryRegion,
 }
 
 struct Served<'a> {
@@ -158,17 +157,14 @@ impl Served<'_> {
         let region = Resource::self_resource()
             .and_then(|budget| budget.create_virtual(size, MemoryAccess::RW))
             .map_err(|_| DisplayError::NoSpace)?;
-        let mapping = region
-            .map(size, UserMemFlags::ReadWrite)
+        let mapping = Mapping::new(region, size, UserMemFlags::ReadWrite)
             .map_err(|_| DisplayError::NoSpace)?;
-        let granted = region
+        let granted = mapping
+            .region()
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(|_| DisplayError::NoSpace)?;
 
-        self.session.surface = Some(Surface {
-            mapping,
-            _region: region,
-        });
+        self.session.surface = Some(Surface { mapping });
         Ok(granted)
     }
 }

@@ -1,28 +1,12 @@
-//! Геометрия и перенос пикселей `driver-simplefb` на обычных буферах и вывод на описанные
-//! платформой буферы кадра через экспорт `Display` на каждый экран.
+//! Геометрия и перенос пикселей `driver-simplefb` на обычных буферах.
 
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use component_abi::RequirementDeclaration;
-use component_startup::Found;
-use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
+use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 use fdt_test::Token;
-use ipc::{CallError, Protocol};
-use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
 use platform_abi::{Description, DeviceId};
-use runtime::{Timeout, UserMemFlags};
-use userland::USERLAND_PAGE_SIZE;
-
-use crate::{
-    composition::Importer,
-    rootkeeper_system::{finish, with_drivers},
-};
-
-const DISPLAY_REQUIREMENT: &str = "displays";
-
-const SIMPLEFB_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const UNTOUCHED_SCREEN_BYTE: u8 = 0xAA;
 
@@ -30,19 +14,6 @@ const A8R8G8B8_PIXEL_BYTES: usize = 4;
 const R8G8B8_PIXEL_BYTES: usize = 3;
 
 const SURFACE_FULL_RED_HALF_BLUE_TOP_5A: u32 = 0x5AFF_0080;
-
-const SURFACE_CHANNEL_MAX: u64 = 0xFF;
-const SURFACE_RED_SHIFT: u32 = 16;
-const SURFACE_GREEN_SHIFT: u32 = 8;
-
-const RECTANGLE_COLOR: u32 = 0x00FF_00FF;
-
-const SIMPLEFB_MEMORY: u64 = 16 * 1024 * 1024;
-
-const DISPLAY_IMPORTS: &[crate::composition::Import] = &[crate::composition::Import {
-    declaration: RequirementDeclaration::all(DISPLAY_REQUIREMENT, display::Protocol::ID),
-    namespace_root: None,
-}];
 
 const TREE: &[Token<'static>] = &fdt_test::tree! {
     phone@1000 {
@@ -180,50 +151,6 @@ fn present(
             write(screen_offset, source)
         },
     )
-}
-
-fn screens(importer: &Importer) -> Vec<Found> {
-    importer.found::<display::Protocol>(DISPLAY_REQUIREMENT)
-}
-
-fn opened(screen: &Found) -> display::Client<SessionTransport> {
-    component_startup::open::<display::Protocol>(screen, SIMPLEFB_REPLY_TIMEOUT)
-        .expect("framebuffer opens")
-        .client()
-        .with_wait(SIMPLEFB_REPLY_TIMEOUT)
-}
-
-fn fill(
-    surface: &Mapping,
-    dimension: DisplayDimension,
-    area: Area,
-    color: impl Fn(u32, u32) -> u32,
-) {
-    let stride = dimension.surface_stride();
-    let mut row = Vec::with_capacity(area.width as usize * SURFACE_PIXEL_BYTES as usize);
-    for y in area.y..area.y + area.height {
-        row.clear();
-        for x in area.x..area.x + area.width {
-            row.extend_from_slice(&color(x, y).to_le_bytes());
-        }
-        let offset = u64::from(y) * stride + u64::from(area.x) * u64::from(SURFACE_PIXEL_BYTES);
-        surface
-            .copy_in_at(offset as usize, &row)
-            .expect("row inside the surface");
-    }
-}
-
-fn channel(position: u32, side: u32) -> u32 {
-    (u64::from(position) * SURFACE_CHANNEL_MAX / u64::from(side)) as u32
-}
-
-fn whole(dimension: DisplayDimension) -> Area {
-    Area {
-        x: 0,
-        y: 0,
-        width: dimension.width,
-        height: dimension.height,
-    }
 }
 
 #[test_harness::test]
@@ -409,81 +336,4 @@ fn present_of_an_area_past_the_screen_is_out_of_bounds_before_any_copy() {
 
     test_harness::check_eq!(presented, Err(DisplayError::OutOfBounds));
     test_harness::check_eq!(copies.get(), 0);
-}
-
-#[test_harness::test]
-fn each_described_framebuffer_shows_a_gradient_and_a_rectangle() {
-    let composition = with_drivers();
-    let importer = composition.importer(DISPLAY_IMPORTS);
-    let framebuffers = screens(&importer);
-
-    for found in &framebuffers {
-        let screen = opened(found);
-        let dimension = screen.dimension().expect("dimension call");
-        let region = MemoryRegion::from(screen.acquire_surface().expect("surface granted"));
-        let surface = region
-            .map_full(UserMemFlags::ReadWrite)
-            .expect("surface maps");
-        let rectangle = Area {
-            x: dimension.width / 4,
-            y: dimension.height / 4,
-            width: dimension.width / 2,
-            height: dimension.height / 2,
-        };
-
-        fill(&surface, dimension, whole(dimension), |x, y| {
-            (channel(x, dimension.width) << SURFACE_RED_SHIFT)
-                | (channel(y, dimension.height) << SURFACE_GREEN_SHIFT)
-        });
-        let gradient = screen.present(whole(dimension));
-        fill(&surface, dimension, rectangle, |_, _| RECTANGLE_COLOR);
-        let shown = screen.present(rectangle);
-
-        test_harness::check_eq!(gradient, Ok(()));
-        test_harness::check_eq!(shown, Ok(()));
-        test_harness::report!("the framebuffer shows the gradient and the rectangle");
-    }
-    finish(composition);
-
-    if framebuffers.is_empty() {
-        test_harness::skip!("no simple-framebuffer described");
-    }
-}
-
-#[test_harness::test]
-fn surfaces_of_a_framebuffer_end_with_the_budget_and_return_with_their_sessions() {
-    let composition = with_drivers();
-    let importer = composition.importer(DISPLAY_IMPORTS);
-    let framebuffers = screens(&importer);
-
-    for found in &framebuffers {
-        let mut screens = Vec::new();
-        // Каждая поверхность занимает не меньше страницы бюджета драйвера.
-        let refusal = (0..=SIMPLEFB_MEMORY / USERLAND_PAGE_SIZE).find_map(|_| {
-            let screen = opened(found);
-            let before = screen.present(whole(screen.dimension().expect("dimension call")));
-            test_harness::check_eq!(before, Err(CallError::Remote(DisplayError::NoSurface)));
-            match screen.acquire_surface() {
-                Ok(region) => {
-                    screens.push((screen, MemoryRegion::from(region)));
-                    None
-                }
-                Err(error) => Some(error),
-            }
-        });
-        let held = screens.len();
-        drop(screens);
-        let reopened = opened(found);
-        let regained = reopened.acquire_surface().map(drop);
-
-        test_harness::check_eq!(refusal, Some(CallError::Remote(DisplayError::NoSpace)));
-        test_harness::check!(held >= 1);
-        test_harness::check_eq!(regained, Ok(()));
-        test_harness::report!("the framebuffer held {} surfaces", held);
-    }
-    finish(composition);
-
-    if framebuffers.is_empty() {
-        test_harness::skip!("no simple-framebuffer described");
-    }
 }

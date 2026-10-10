@@ -1,9 +1,14 @@
 //! E2E проверка `CapabilityTarget::Memory` через типизированные обёртки
 //! `Resource`/`MemoryRegion`/`Mapping` из EL0.
 
-use kernel_objects::{Error, MmioWindow, RegionInfo, RegionKind, Resource};
+use kernel_objects::{
+    Error, Mapping, MemoryRegion, MmioWindow, ReadOnlyMapping, RegionInfo, RegionKind, Resource,
+    WriteCombiningMapping,
+};
 use runtime::{MemoryAccess, MemoryProfile, UserMemFlags};
 use syscall::SyscallError;
+
+use crate::filesystem::LEAK_ROUNDS;
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const PATTERN: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -15,7 +20,7 @@ fn memory_capability_target_map_and_inspect() {
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
         .expect("region");
 
-    let mapping = region.map(PAGE_SIZE, UserMemFlags::ReadWrite).expect("map");
+    let mapping = Mapping::new(region, PAGE_SIZE, UserMemFlags::ReadWrite).expect("map");
 
     let slot = usize::try_from(mapping.va()).expect("positive va fits usize") as *mut u64;
     // SAFETY: map выдал RW-маппинг размером PAGE_SIZE; запись и чтение первых
@@ -25,7 +30,7 @@ fn memory_capability_target_map_and_inspect() {
         test_harness::check_eq!(slot.read_volatile(), PATTERN);
     }
 
-    let info = region.inspect().expect("inspect");
+    let info = mapping.region().inspect().expect("inspect");
     test_harness::check_eq!(
         info,
         RegionInfo {
@@ -51,18 +56,98 @@ fn contiguous_region_reports_its_physical_base() {
 }
 
 #[test_harness::test]
-fn a_write_combining_mapping_refuses_a_cached_region() {
+fn a_write_combining_mapping_refuses_a_cached_region_and_returns_the_window() {
     let resource = Resource::self_resource().expect("self metering resource");
-    let window = MmioWindow {
-        region: resource
-            .create_virtual(PAGE_SIZE, MemoryAccess::RW)
-            .expect("region"),
-        offset: 0,
-        size: PAGE_SIZE,
-    };
 
-    test_harness::check!(matches!(
-        window.map_write_combining(),
-        Err(Error::Syscall(SyscallError::InvalidArgument))
-    ));
+    for _ in 0..LEAK_ROUNDS {
+        let window = MmioWindow {
+            region: resource
+                .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+                .expect("region"),
+            offset: 0,
+            size: PAGE_SIZE,
+        };
+
+        let refused = WriteCombiningMapping::new(window).expect_err("cached window refused");
+
+        test_harness::check_eq!(refused.error, Error::Syscall(SyscallError::InvalidArgument));
+        test_harness::check!(refused.region.region.inspect().is_ok());
+    }
+}
+
+#[test_harness::test]
+fn a_mapping_outlives_the_function_that_built_it() {
+    let mapping = mapped_page();
+
+    mapping.copy_in(&PATTERN.to_ne_bytes()).expect("write");
+    let mut read = [0; 8];
+    mapping.copy_out(&mut read).expect("read");
+
+    test_harness::check_eq!(u64::from_ne_bytes(read), PATTERN);
+}
+
+#[test_harness::test]
+fn a_mapping_returns_its_region_open() {
+    let mapping = mapped_page();
+    mapping.copy_in(&PATTERN.to_ne_bytes()).expect("write");
+
+    let region = mapping.into_region();
+    let remapped = Mapping::full(region, UserMemFlags::ReadOnly).expect("region maps again");
+    let mut read = [0; 8];
+    remapped.copy_out(&mut read).expect("read");
+
+    test_harness::check_eq!(u64::from_ne_bytes(read), PATTERN);
+}
+
+#[test_harness::test]
+fn mapping_and_releasing_an_own_region_does_not_exhaust_the_handle_table() {
+    for _ in 0..LEAK_ROUNDS {
+        drop(mapped_page());
+    }
+}
+
+#[test_harness::test]
+fn a_writable_region_refused_read_only_comes_back_mappable_for_writing() {
+    let region = page_region();
+
+    let refused = ReadOnlyMapping::new(region).expect_err("writable region refused");
+    let writable = Mapping::full(refused.region, UserMemFlags::ReadWrite);
+
+    test_harness::check_eq!(refused.error, Error::Syscall(SyscallError::AccessDenied));
+    test_harness::check!(writable.is_ok());
+}
+
+#[test_harness::test]
+fn a_refused_mapping_does_not_exhaust_the_handle_table() {
+    for _ in 0..LEAK_ROUNDS {
+        let refused = ReadOnlyMapping::new(page_region()).expect_err("writable region refused");
+
+        test_harness::check_eq!(refused.error, Error::Syscall(SyscallError::AccessDenied));
+    }
+}
+
+#[test_harness::test]
+fn a_temporary_mapping_leaves_its_region_open() {
+    let region = page_region();
+
+    let first = Mapping::full(&region, UserMemFlags::ReadWrite).expect("first mapping");
+    first.copy_in(&PATTERN.to_ne_bytes()).expect("write");
+    drop(first);
+    let second = Mapping::full(&region, UserMemFlags::ReadOnly).expect("second mapping");
+    let mut read = [0; 8];
+    second.copy_out(&mut read).expect("read");
+
+    test_harness::check_eq!(u64::from_ne_bytes(read), PATTERN);
+    test_harness::check!(region.inspect().is_ok());
+}
+
+fn page_region() -> MemoryRegion {
+    Resource::self_resource()
+        .expect("self metering resource")
+        .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+        .expect("region")
+}
+
+fn mapped_page() -> Mapping {
+    Mapping::full(page_region(), UserMemFlags::ReadWrite).expect("map")
 }

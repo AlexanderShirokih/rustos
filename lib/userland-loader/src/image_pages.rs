@@ -2,23 +2,21 @@ use kernel_objects::{MemoryRegion, ReadOnlyMapping, Result};
 use runtime::MemoryAccess;
 use userland::{SegmentPermissions, SegmentView, USERLAND_PAGE_SIZE};
 
-/// Регион userland-образа и его отображение только для чтения, заимствованные у владельца.
-/// Вызывающий строит оба над одним регионом. Смещение байтов сегмента в отображении загрузчик
-/// берёт за смещение в регионе.
+/// Отображение userland-образа только для чтения, заимствованное у владельца. Смещение байтов
+/// сегмента в отображении загрузчик берёт за смещение в регионе образа.
 #[derive(Debug, Clone, Copy)]
 pub struct ImagePages<'a> {
-    region: &'a MemoryRegion,
     mapping: &'a ReadOnlyMapping,
 }
 
 impl<'a> ImagePages<'a> {
-    /// Страницы образа из региона `region` и его отображения `mapping`.
-    pub const fn new(region: &'a MemoryRegion, mapping: &'a ReadOnlyMapping) -> Self {
-        Self { region, mapping }
+    /// Страницы образа из его отображения `mapping`.
+    pub const fn new(mapping: &'a ReadOnlyMapping) -> Self {
+        Self { mapping }
     }
 
     pub(crate) fn segment_slice<'s>(
-        &self,
+        self,
         segment: impl SegmentView<'s>,
         mapped: u64,
     ) -> Result<Option<MemoryRegion>> {
@@ -38,10 +36,13 @@ impl<'a> ImagePages<'a> {
             return Ok(None);
         }
 
-        self.region.slice(offset, mapped, access).map(Some)
+        self.mapping
+            .region()
+            .slice(offset, mapped, access)
+            .map(Some)
     }
 
-    fn offset_of(&self, bytes: &[u8]) -> Option<u64> {
+    fn offset_of(self, bytes: &[u8]) -> Option<u64> {
         let image = self.mapping.as_bytes();
         let offset = bytes.as_ptr().addr().checked_sub(image.as_ptr().addr())?;
         let end = offset.checked_add(bytes.len())?;

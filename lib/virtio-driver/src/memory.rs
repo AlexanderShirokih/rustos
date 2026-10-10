@@ -1,6 +1,6 @@
 //! Непрерывный регион памяти, доступный устройству.
 
-use kernel_objects::{Mapping, MemoryRegion, Resource};
+use kernel_objects::{MappedPages, Mapping, Resource};
 use runtime::{MemoryAccess, UserMemFlags};
 use syscall::PAGE_SIZE;
 use virtio::{DeviceMemory, OutOfRange};
@@ -11,7 +11,6 @@ const HALF_WORD: usize = 2;
 pub struct DmaRegion {
     mapping: Mapping,
     address: u64,
-    _region: MemoryRegion,
 }
 
 impl DmaRegion {
@@ -22,22 +21,19 @@ impl DmaRegion {
             .ok_or(kernel_objects::Error::OutOfBounds)?;
         let region = Resource::self_resource()?.create_contiguous(size, MemoryAccess::RW)?;
         let address = region.inspect()?.base;
-        let mapping = region.map(size, UserMemFlags::ReadWrite)?;
-        Ok(Self {
-            mapping,
-            address,
-            _region: region,
-        })
+        let mapping = Mapping::new(region, size, UserMemFlags::ReadWrite)?;
+        Ok(Self { mapping, address })
     }
 
-    /// Копирует `len` байт с `offset` отображения `source` по тому же смещению региона.
+    /// Копирует `len` байт с `source_offset` отображения `source` в регион со смещения `offset`.
     pub fn copy_from(
         &mut self,
-        source: &Mapping,
         offset: usize,
+        source: &MappedPages,
+        source_offset: usize,
         len: usize,
     ) -> Result<(), kernel_objects::Error> {
-        source.copy_to(offset, &self.mapping, offset, len)
+        source.copy_to(source_offset, &self.mapping, offset, len)
     }
 }
 

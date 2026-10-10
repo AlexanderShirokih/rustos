@@ -22,6 +22,9 @@ const RESPONSE_BYTES: usize = 512;
 const COMMANDS_REGION_BYTES: u64 = (RESPONSE_OFFSET + RESPONSE_BYTES) as u64;
 const PIXEL_BYTES: u64 = SURFACE_PIXEL_BYTES as u64;
 
+const TRANSFER_BUFFER_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const TRANSFER_HEAD_BYTES: u64 = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BindRefusal {
     Bus(VirtioMmioError),
@@ -57,7 +60,13 @@ struct Device {
     queue: Option<SplitQueue>,
     queue_memory: DmaRegion,
     commands: DmaRegion,
-    framebuffer: Option<DmaRegion>,
+    transfer: Option<TransferBuffer>,
+}
+
+struct TransferBuffer {
+    region: DmaRegion,
+    rows: u32,
+    length: u32,
 }
 
 impl From<SlotFailure> for CommandFailure {
@@ -118,55 +127,50 @@ impl Gpu {
 
     pub(crate) fn present(&mut self, surface: &Mapping, area: Area) -> Result<(), DisplayError> {
         self.dimension.check_area(area)?;
-        if self.device.queue.is_none() {
+
+        let area = if self.device.queue.is_none() {
             self.device
                 .initialize()
                 .and_then(|()| self.device.attach_resource(self.scanout, self.dimension))
-                .and_then(|()| {
-                    self.device
-                        .present(
-                            Rect {
-                                x: 0,
-                                y: 0,
-                                width: self.dimension.width,
-                                height: self.dimension.height,
-                            },
-                            0,
-                        )
-                        .map_err(BindRefusal::from)
-                })
                 .map_err(|refusal| {
                     log_fmt(format_args!("gpu recovery refused: {refusal:?}"));
                     DisplayError::Hardware
                 })?;
-        }
-        let stride = self.dimension.surface_stride();
-        let first = start_offset(area, stride).ok_or(DisplayError::OutOfBounds)?;
-        let first_byte = usize::try_from(first).map_err(|_| DisplayError::OutOfBounds)?;
-        let row = usize::try_from(u64::from(area.width) * PIXEL_BYTES)
-            .map_err(|_| DisplayError::OutOfBounds)?;
-        let stride = usize::try_from(stride).map_err(|_| DisplayError::OutOfBounds)?;
-        let height = usize::try_from(area.height).map_err(|_| DisplayError::OutOfBounds)?;
-        let framebuffer = self
-            .device
-            .framebuffer
-            .as_mut()
-            .ok_or(DisplayError::Hardware)?;
-        for line in 0..height {
-            framebuffer
-                .copy_from(surface, first_byte + line * stride, row)
-                .map_err(|_| DisplayError::OutOfBounds)?;
-        }
-        let rect = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: area.height,
+            Area {
+                x: 0,
+                y: 0,
+                width: self.dimension.width,
+                height: self.dimension.height,
+            }
+        } else {
+            area
         };
-        self.device.present(rect, first).map_err(|failure| {
-            log_fmt(format_args!("present refused by the device: {failure:?}"));
-            DisplayError::Hardware
-        })
+
+        let stride = self.dimension.surface_stride();
+        let mut top = 0;
+        while top < area.height {
+            let transfer = self
+                .device
+                .transfer
+                .as_mut()
+                .ok_or(DisplayError::Hardware)?;
+            let chunk = Area {
+                y: area.y + top,
+                height: (area.height - top).min(transfer.rows),
+                ..area
+            };
+
+            let offset = transfer
+                .stage(surface, chunk, stride)
+                .ok_or(DisplayError::OutOfBounds)?;
+            self.device
+                .transfer_to_host(chunk, offset)
+                .map_err(refused)?;
+
+            top += chunk.height;
+        }
+
+        self.device.flush(area).map_err(refused)
     }
 
     pub(crate) fn release(self) {
@@ -193,7 +197,7 @@ impl Device {
             queue: None,
             queue_memory,
             commands,
-            framebuffer: None,
+            transfer: None,
         };
         if let Err(refusal) = device.initialize() {
             device.release();
@@ -225,13 +229,7 @@ impl Device {
             width: rect.width,
             height: rect.height,
         };
-        let geometry = BindRefusal::Geometry(rect.width, rect.height);
-        let size = dimension
-            .surface_size()
-            .filter(|size| *size != 0)
-            .ok_or(geometry)?;
-        u32::try_from(size).map_err(|_| geometry)?;
-        self.framebuffer = Some(DmaRegion::new(size)?);
+        self.transfer = Some(TransferBuffer::new(dimension)?);
         self.attach_resource(scanout, dimension)?;
         Ok((scanout, dimension))
     }
@@ -241,15 +239,10 @@ impl Device {
         scanout: u32,
         dimension: DisplayDimension,
     ) -> Result<(), BindRefusal> {
-        let geometry = BindRefusal::Geometry(dimension.width, dimension.height);
-        let length = dimension
-            .surface_size()
-            .and_then(|size| u32::try_from(size).ok())
-            .ok_or(geometry)?;
-        let framebuffer = self.framebuffer.as_ref().ok_or(CommandFailure::NotReady)?;
+        let transfer = self.transfer.as_ref().ok_or(CommandFailure::NotReady)?;
         let backing = [Buffer {
-            address: framebuffer.physical_address(),
-            length,
+            address: transfer.region.physical_address(),
+            length: transfer.length,
         }];
         self.execute(Command::ResourceCreate2d {
             resource_id: RESOURCE_ID,
@@ -278,7 +271,7 @@ impl Device {
         if let Err(refusal) = self.transport.reset() {
             // Устройство может обращаться к DMA-регионам до подтверждённого сброса.
             log_fmt(format_args!("reset failed: {refusal:?}"));
-            core::mem::forget((self.queue_memory, self.commands, self.framebuffer));
+            core::mem::forget((self.queue_memory, self.commands, self.transfer));
         }
     }
 
@@ -292,15 +285,29 @@ impl Device {
             .ok_or(BindRefusal::NoScanout)
     }
 
-    fn present(&mut self, rect: Rect, offset: u64) -> Result<(), CommandFailure> {
+    fn transfer_to_host(&mut self, area: Area, offset: u64) -> Result<(), CommandFailure> {
         self.execute(Command::TransferToHost2d {
             resource_id: RESOURCE_ID,
-            rect,
+            rect: Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: area.height,
+            },
             offset,
         })?;
+        Ok(())
+    }
+
+    fn flush(&mut self, area: Area) -> Result<(), CommandFailure> {
         self.execute(Command::ResourceFlush {
             resource_id: RESOURCE_ID,
-            rect,
+            rect: Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: area.height,
+            },
         })?;
         Ok(())
     }
@@ -365,8 +372,51 @@ impl Device {
     }
 }
 
-fn start_offset(area: Area, stride: u64) -> Option<u64> {
-    u64::from(area.y)
-        .checked_mul(stride)?
-        .checked_add(u64::from(area.x) * PIXEL_BYTES)
+impl TransferBuffer {
+    fn new(dimension: DisplayDimension) -> Result<Self, BindRefusal> {
+        let geometry = BindRefusal::Geometry(dimension.width, dimension.height);
+
+        let rows = (TRANSFER_BUFFER_MAX_BYTES - TRANSFER_HEAD_BYTES)
+            .checked_div(dimension.surface_stride())
+            .map(|rows| rows.min(u64::from(dimension.height)))
+            .and_then(|rows| u32::try_from(rows).ok())
+            .filter(|rows| *rows != 0)
+            .ok_or(geometry)?;
+        let length = TRANSFER_HEAD_BYTES + u64::from(rows) * dimension.surface_stride();
+
+        Ok(Self {
+            region: DmaRegion::new(length)?,
+            rows,
+            length: u32::try_from(length).map_err(|_| geometry)?,
+        })
+    }
+
+    fn stage(&mut self, surface: &Mapping, chunk: Area, stride: u64) -> Option<u64> {
+        let left = u64::from(chunk.x) * PIXEL_BYTES;
+        let row = usize::try_from(u64::from(chunk.width) * PIXEL_BYTES).ok()?;
+        let offset = TRANSFER_HEAD_BYTES + left;
+
+        for line in 0..chunk.height {
+            let source = (u64::from(chunk.y) + u64::from(line))
+                .checked_mul(stride)?
+                .checked_add(left)?;
+            let destination = offset + u64::from(line) * stride;
+
+            self.region
+                .copy_from(
+                    usize::try_from(destination).ok()?,
+                    surface,
+                    usize::try_from(source).ok()?,
+                    row,
+                )
+                .ok()?;
+        }
+
+        Some(offset)
+    }
+}
+
+fn refused(failure: CommandFailure) -> DisplayError {
+    log_fmt(format_args!("present refused by the device: {failure:?}"));
+    DisplayError::Hardware
 }

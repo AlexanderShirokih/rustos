@@ -29,7 +29,8 @@ type AcceptDebt = component_startup::accept::Reply<IssuedHandle<kind::Reply>>;
 ///
 /// [`launch_due`](Self::launch_due) загружает процесс компонента из записи образа `V` с его
 /// исполняемым файлом и отображает сегменты без записи из страниц образа. Один поток обслуживает
-/// порт [`port`](Self::port). Уход значения завершает процессы компонентов.
+/// порт [`port`](Self::port). Уход значения завершает процессы компонентов в порядке, обратном
+/// добавлению записей, и затем закрывает порт.
 pub struct Children<'a, C, V> {
     pages: ImagePages<'a>,
     port: Port,
@@ -234,7 +235,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .iter_mut()
             .filter(|entry| launchable(entry.child))
         {
-            if let Some(outcome) = entry.launch(&self.pages, &self.port, &self.next_badge) {
+            if let Some(outcome) = entry.launch(self.pages, &self.port, &self.next_badge) {
                 entry.state = State::Departed;
                 return Some(Departure {
                     child: entry.child,
@@ -651,6 +652,16 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     }
 }
 
+impl<C, V> Drop for Children<'_, C, V> {
+    fn drop(&mut self) {
+        // Компонент поздней записи может держать отображение региона, выданного компонентом
+        // ранней. Если ранний завершится первым, регион отзовётся, и поздний упадёт на обращении.
+        while let Some(entry) = self.entries.pop() {
+            drop(entry);
+        }
+    }
+}
+
 impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
     const fn running_badge(&self) -> Option<u64> {
         match self.state {
@@ -672,7 +683,7 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
 
     fn launch(
         &mut self,
-        pages: &ImagePages<'_>,
+        pages: ImagePages<'_>,
         port: &Port,
         next_badge: &AtomicU64,
     ) -> Option<Outcome> {
@@ -695,7 +706,13 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
         let Ok(session) = ::component_startup::mint_session(port, next_badge) else {
             return Some(Outcome::LaunchFailed);
         };
-        match load_program(&self.program, Some(pages), self.name, reserve, session.port) {
+        match load_program(
+            &self.program,
+            Some(&pages),
+            self.name,
+            reserve,
+            session.port,
+        ) {
             Ok(process) => {
                 self.state = State::Running {
                     badge: session.badge.get(),

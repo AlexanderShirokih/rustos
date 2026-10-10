@@ -13,7 +13,8 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
-    Delivery, IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, SessionTransport,
+    Delivery, IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, ReadOnlyMapping,
+    SessionTransport,
 };
 use platform_abi::{Description, DeviceId, PlatformError, platform};
 use runtime::{PortTransport, Timeout, log_fmt};
@@ -43,7 +44,6 @@ struct Transport {
     id: DeviceId,
     device_type: u32,
     registers: MmioMapping,
-    window: MmioWindow,
     line: IrqLine,
     slot: Slot,
 }
@@ -69,8 +69,7 @@ enum Refusal {
 impl Bus {
     pub(crate) fn take(platform: &platform::Client<SessionTransport>) -> Option<Self> {
         let description = platform.description().ok()?;
-        let region = MemoryRegion::from(description.region);
-        let mapping = region.map_full_read_only().ok()?;
+        let mapping = ReadOnlyMapping::new(MemoryRegion::from(description.region)).ok()?;
         let description = Description::new(mapping.as_bytes(), description.offset).ok()?;
 
         let mut transports = Vec::new();
@@ -135,16 +134,13 @@ impl Transport {
             offset: window.offset,
             size: window.size,
         };
-        let registers = window.map().map_err(|_| Refusal::Map)?;
+        let registers = MmioMapping::new(window).map_err(|_| Refusal::Map)?;
         let device_type = registers.mmio().read::<u32>(register::DEVICE_ID);
 
-        // Транспорт держит окно до конца процесса, потому что закрытие окна отзывает выведенные
-        // из него страницы.
         Ok(Self {
             id: id.clone(),
             device_type,
             registers,
-            window,
             line: IrqLine::from(line),
             slot: Slot::Free,
         })
@@ -184,7 +180,7 @@ impl Transport {
 
     fn access(&self, offset: u64, bytes: u64) -> Result<usize, SlotError> {
         let aligned = offset.is_multiple_of(bytes);
-        let inside = offset + bytes <= self.window.size;
+        let inside = offset + bytes <= self.registers.window().size;
 
         match usize::try_from(offset) {
             Ok(offset) if aligned && inside => Ok(offset),

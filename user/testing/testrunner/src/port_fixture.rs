@@ -16,7 +16,7 @@ use fixture_protocol::{
     REPLY_HOLD_FAILED, REPLY_MAP_FAILED, REPLY_OK, REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED,
     REQUEST_LEN, decode_request,
 };
-use kernel_objects::{Error, MemoryRegion, Port, Process, Reply, Resource, Signal, kind};
+use kernel_objects::{Error, Mapping, MemoryRegion, Port, Process, Reply, Resource, Signal, kind};
 use runtime::{
     ExitCode, IssuedHandle, MemoryAccess, Timeout, UserMemFlags, process_exit, signal_set,
     spawn_owned, thread_exit,
@@ -182,7 +182,7 @@ fn map_check(cap: Option<IssuedHandle<kind::Any>>, expected: u64) -> u8 {
         return REPLY_MAP_FAILED;
     };
     let region = MemoryRegion::from(region.assume_kind());
-    let Ok(mapping) = region.map_full(UserMemFlags::ReadWrite) else {
+    let Ok(mapping) = Mapping::full(region, UserMemFlags::ReadWrite) else {
         return REPLY_MAP_FAILED;
     };
 

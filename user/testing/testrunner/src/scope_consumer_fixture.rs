@@ -4,7 +4,7 @@
 use component_startup::{Requirements as _, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, namespace};
 use ipc::CallError;
-use kernel_objects::{MemoryRegion, SessionTransport};
+use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
 use runtime::{Timeout, UserMemFlags, log_line};
 use syscall::{Handle, kind};
 
@@ -55,7 +55,7 @@ fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
         return false;
     };
     let region = MemoryRegion::from(cap);
-    let Ok(buffer) = region.map_full(UserMemFlags::ReadWrite) else {
+    let Ok(buffer) = Mapping::full(region, UserMemFlags::ReadWrite) else {
         return false;
     };
 

@@ -77,10 +77,9 @@ pub fn load_program<'a, E: ProgramView<'a>, K: ObjectKind>(
     resource: &Resource,
     initial: OwnedHandle<K>,
 ) -> Result<Process> {
-    // Регионы, маппинги и буфер сегментов держим живыми до возврата из
-    // `start`: регионы должны существовать до установки в child-AS.
+    // Регионы и буфер сегментов держим живыми до возврата из `start`: регионы должны
+    // существовать до установки в child-AS.
     let mut regions: Vec<MemoryRegion> = Vec::new();
-    let mut mappings: Vec<Mapping> = Vec::new();
     let mut segment_abi: Vec<u8> = Vec::new();
     let mut segment_count: u32 = 0;
 
@@ -92,7 +91,7 @@ pub fn load_program<'a, E: ProgramView<'a>, K: ObjectKind>(
         };
         let region = match slice {
             Some(slice) => slice,
-            None => copy_segment(seg, mapped, resource, &mut mappings)?,
+            None => copy_segment(seg, mapped, resource)?,
         };
 
         let abi = UserSegmentAbi {
@@ -162,10 +161,9 @@ pub fn load_program<'a, E: ProgramView<'a>, K: ObjectKind>(
         Err(error) => return pending.fail(error),
     };
 
-    // Регионы и маппинги прочитаны ядром при load_image/start; thread-handle
+    // Регионы прочитаны ядром при load_image/start; thread-handle
     // здесь не нужен (процесс ждут по его handle).
     drop(thread);
-    drop(mappings);
     drop(regions);
     pending.finish()
 }
@@ -175,10 +173,9 @@ fn copy_segment<'a>(
     seg: impl SegmentView<'a>,
     mapped: u64,
     resource: &Resource,
-    mappings: &mut Vec<Mapping>,
 ) -> Result<MemoryRegion> {
     let region = resource.create_virtual(mapped, MemoryAccess::RWX)?;
-    let mapping = region.map(mapped, UserMemFlags::ReadWrite)?;
+    let mapping = Mapping::new(&region, mapped, UserMemFlags::ReadWrite)?;
 
     let bytes = seg.bytes();
     let dst = mapping.va() as *mut u8;
@@ -188,7 +185,7 @@ fn copy_segment<'a>(
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
     }
-    mappings.push(mapping);
+    drop(mapping);
     Ok(region)
 }
 

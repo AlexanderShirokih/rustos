@@ -48,7 +48,6 @@ struct Attacher {
     platform: platform::Client<SessionTransport>,
     description: ReadOnlyMapping,
     description_offset: u64,
-    _description_region: MemoryRegion,
     next_badge: AtomicU64,
     screen: Option<&'static Screen>,
 }
@@ -57,7 +56,6 @@ struct Screen {
     id: DeviceId,
     framebuffer: Framebuffer,
     pixels: WriteCombiningMapping,
-    _window: MmioWindow,
 }
 
 struct Session {
@@ -68,7 +66,6 @@ struct Session {
 
 struct Surface {
     mapping: Mapping,
-    _region: MemoryRegion,
 }
 
 #[derive(Debug)]
@@ -161,12 +158,11 @@ impl Attacher {
             offset: window.offset,
             size: window.size,
         };
-        let pixels = window.map_write_combining().map_err(|_| OpenRefusal::Map)?;
+        let pixels = WriteCombiningMapping::new(window).map_err(|_| OpenRefusal::Map)?;
         Ok(Screen {
             id,
             framebuffer,
             pixels,
-            _window: window,
         })
     }
 }
@@ -219,18 +215,14 @@ impl Session {
         let region = Resource::self_resource()
             .and_then(|budget| budget.create_virtual(size, MemoryAccess::RW))
             .map_err(|_| DisplayError::NoSpace)?;
-        let mapping = region
-            .map(size, UserMemFlags::ReadWrite)
+        let mapping = Mapping::new(region, size, UserMemFlags::ReadWrite)
             .map_err(|_| DisplayError::NoSpace)?;
-        let granted = region
+        let granted = mapping
+            .region()
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(|_| DisplayError::NoSpace)?;
 
-        // Поле `mapping` объявлено в `Surface` раньше `_region` и снимается до закрытия региона.
-        self.surface = Some(Surface {
-            mapping,
-            _region: region,
-        });
+        self.surface = Some(Surface { mapping });
         Ok(granted)
     }
 
@@ -281,16 +273,12 @@ fn start(requirements: SimplefbStartup) -> Result<&'static Shared, Stopped> {
         .client();
     let description = platform.description().map_err(|_| Stopped::Description)?;
     let description_offset = description.offset;
-    // Драйвер держит регион описания до выхода, и закрытие хендла региона сняло бы отображение.
-    let description_region = MemoryRegion::from(description.region);
-    let description = description_region
-        .map_full_read_only()
+    let description = ReadOnlyMapping::new(MemoryRegion::from(description.region))
         .map_err(|_| Stopped::Description)?;
     let mut attacher = Attacher {
         platform,
         description,
         description_offset,
-        _description_region: description_region,
         next_badge: AtomicU64::new(0),
         screen: None,
     };

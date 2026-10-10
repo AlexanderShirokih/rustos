@@ -15,7 +15,6 @@ pub(crate) struct Windows {
 struct Region {
     mapping: MmioMapping,
     size: usize,
-    _window: MmioWindow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,16 +68,10 @@ impl Region {
             size: window.size,
         };
 
-        let mapping = window.map().map_err(|_| Refusal::Map)?;
         let size = usize::try_from(window.size).map_err(|_| Refusal::Map)?;
+        let mapping = MmioMapping::new(window).map_err(|_| Refusal::Map)?;
 
-        // Закрытие окна отзывает выведенные из него страницы, и `Region` хранит окно до сброса
-        // отображения.
-        Ok(Self {
-            mapping,
-            size,
-            _window: window,
-        })
+        Ok(Self { mapping, size })
     }
 }
 

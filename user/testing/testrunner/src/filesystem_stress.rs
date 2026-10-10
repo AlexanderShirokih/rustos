@@ -55,7 +55,6 @@ enum Mismatch {
 struct Session {
     client: file_system::Client<SessionTransport>,
     buffer: Mapping,
-    _region: MemoryRegion,
 }
 
 struct Descriptor {
@@ -102,14 +101,9 @@ impl Session {
             .acquire_buffer(BUFFER_SIZE)
             .map_err(Mismatch::refused("acquire_buffer"))?;
         let region = MemoryRegion::from(granted);
-        let buffer = region
-            .map_full(UserMemFlags::ReadWrite)
+        let buffer = Mapping::full(region, UserMemFlags::ReadWrite)
             .map_err(|_| Mismatch::Model("data buffer is not mapped"))?;
-        Ok(Self {
-            client,
-            buffer,
-            _region: region,
-        })
+        Ok(Self { client, buffer })
     }
 
     fn put(&self, bytes: &[u8]) -> Step {

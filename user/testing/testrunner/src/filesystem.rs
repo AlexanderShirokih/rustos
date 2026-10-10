@@ -15,7 +15,7 @@ use ipc::{
     },
 };
 use kernel_objects::{
-    Delivery, MemoryRegion, OwnedHandle, Port, Resource, Session, SessionTransport, Signal,
+    Delivery, Mapping, MemoryRegion, OwnedHandle, Port, Resource, Session, SessionTransport, Signal,
 };
 use rootkeeper::relay::{ComponentNames, LogSources};
 use runtime::{PortTransport, Timeout, UserMemFlags, port_send, spawn_owned};
@@ -102,7 +102,7 @@ const IMAGE_EMPTY_FILE: &str = "/testrunner/empty";
 
 const UNANSWERED_PATH: &str = "/unanswered";
 
-const LEAK_FRAMES: usize = syscall::HANDLE_TABLE_CAPACITY as usize + 128;
+pub(crate) const LEAK_ROUNDS: usize = syscall::HANDLE_TABLE_CAPACITY as usize + 128;
 
 const REAP_SESSIONS: usize = 40;
 
@@ -352,7 +352,7 @@ fn close(client: &file_system::Client<SessionTransport>, opened: &Opened) {
 
 pub(crate) fn write_all(
     client: &file_system::Client<SessionTransport>,
-    buffer: &kernel_objects::Mapping,
+    buffer: &kernel_objects::MappedPages,
     opened: &Opened,
     offset: u64,
     payload: &[u8],
@@ -364,13 +364,13 @@ pub(crate) fn write_all(
     written.count
 }
 
-pub(crate) fn buffer_head(buffer: &kernel_objects::Mapping, len: usize) -> Vec<u8> {
+pub(crate) fn buffer_head(buffer: &kernel_objects::MappedPages, len: usize) -> Vec<u8> {
     let mut bytes = vec![0; len];
     buffer.copy_out(&mut bytes).expect("buffer head");
     bytes
 }
 
-fn buffer_bytes(buffer: &kernel_objects::Mapping) -> Vec<u8> {
+fn buffer_bytes(buffer: &kernel_objects::MappedPages) -> Vec<u8> {
     buffer_head(
         buffer,
         usize::try_from(buffer.size_bytes()).expect("buffer size fits usize"),
@@ -392,7 +392,7 @@ fn entry_name(index: usize) -> String {
 
 pub(crate) fn walk_directory(
     client: &file_system::Client<SessionTransport>,
-    buffer: &kernel_objects::Mapping,
+    buffer: &kernel_objects::MappedPages,
     fd: NodeDescriptor,
 ) -> Vec<String> {
     let mut names = Vec::new();
@@ -412,9 +412,7 @@ pub(crate) fn walk_directory(
 fn filesystem_creates_and_writes_a_file() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(
         &client,
@@ -447,9 +445,7 @@ fn filesystem_creates_and_writes_a_file() {
 fn filesystem_reads_at_offset() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(&client, "/digits", AccessMode::ReadWrite, OpenFlags::CREATE);
     let payload = b"0123456789";
@@ -472,9 +468,7 @@ fn filesystem_reads_at_offset() {
 fn filesystem_stats_file_and_directory() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let directory = open(
         &client,
@@ -506,9 +500,7 @@ fn filesystem_stats_file_and_directory() {
 fn filesystem_lists_directory_across_batches() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let directory = open(
         &client,
@@ -571,9 +563,7 @@ fn filesystem_unlinks_a_file() {
 fn filesystem_rejects_write_through_a_read_only_descriptor() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(&client, "/read-only", AccessMode::Read, OpenFlags::CREATE);
     let payload = b"deny";
@@ -816,7 +806,7 @@ fn namespace_opens_no_session_for_a_call_without_a_reply_channel() {
         },
     })
     .with_wait(FILE_SYSTEM_REPLY_TIMEOUT);
-    for _ in 0..LEAK_FRAMES {
+    for _ in 0..LEAK_ROUNDS {
         let _ = without_reply.resolve_pair("/tmp/first", "/tmp/second");
     }
 
@@ -1002,9 +992,7 @@ fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
 fn filesystem_reads_a_file_from_the_image() {
     let client = connect(image_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(&client, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(opened.kind, NodeKind::File);
@@ -1019,9 +1007,7 @@ fn filesystem_reads_a_file_from_the_image() {
 fn filesystem_lists_the_image_directory() {
     let client = connect(image_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let directory = open(
         &client,
@@ -1071,24 +1057,20 @@ fn filesystem_mounts_hold_separate_trees() {
 fn filesystem_hands_out_the_backing_window_of_an_image_file() {
     let client = connect(image_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(&client, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
     let count = client.read(opened.fd, 0, BUFFER_SIZE).expect("read ok");
 
     let window = MemoryRegion::from(client.backing_memory(opened.fd).expect("window granted"));
-    let mapped = window
-        .map_full(UserMemFlags::ReadOnly)
-        .expect("map backing window");
+    let mapped = Mapping::full(&window, UserMemFlags::ReadOnly).expect("map backing window");
     test_harness::check!(mapped.size_bytes() >= opened.size);
     test_harness::check_eq!(
         buffer_head(&mapped, opened.size as usize),
         buffer_head(&buffer, count as usize)
     );
 
-    test_harness::check!(window.map_full(UserMemFlags::ReadWrite).is_err());
+    test_harness::check!(Mapping::full(&window, UserMemFlags::ReadWrite).is_err());
 }
 
 #[test_harness::test]
@@ -1135,9 +1117,7 @@ fn filesystem_has_no_backing_window_for_an_empty_ramfs_file() {
 fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     let client = connect(ram_session());
     let data_region = acquire_buffer(&client);
-    let data = data_region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let data = Mapping::full(data_region, UserMemFlags::ReadWrite).expect("map data buffer");
     let opened = open(
         &client,
         "/region-backed",
@@ -1147,9 +1127,7 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
     write_all(&client, &data, &opened, 0, b"before");
 
     let backing = MemoryRegion::from(client.backing_memory(opened.fd).expect("backing granted"));
-    let mapped = backing
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map ramfs backing");
+    let mapped = Mapping::full(backing, UserMemFlags::ReadWrite).expect("map ramfs backing");
     mapped.copy_in(b"mapped").expect("write through mapping");
     let count = client.read(opened.fd, 0, 6).expect("read ok");
     test_harness::check_eq!(count, 6);
@@ -1178,16 +1156,12 @@ fn filesystem_ramfs_backing_is_shared_and_pins_capacity() {
 fn filesystem_ramfs_zeroes_the_gap_of_a_sparse_write() {
     let client = connect(ram_session());
     let data_region = acquire_buffer(&client);
-    let data = data_region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let data = Mapping::full(data_region, UserMemFlags::ReadWrite).expect("map data buffer");
     let opened = open(&client, "/sparse", AccessMode::ReadWrite, OpenFlags::CREATE);
     write_all(&client, &data, &opened, 0, b"head");
 
     let backing = MemoryRegion::from(client.backing_memory(opened.fd).expect("backing granted"));
-    let mapped = backing
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map ramfs backing");
+    let mapped = Mapping::full(backing, UserMemFlags::ReadWrite).expect("map ramfs backing");
     mapped.copy_in_at(4, b"stale").expect("stale bytes");
 
     data.copy_in(b"tail").expect("payload into data buffer");
@@ -1208,19 +1182,22 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
     let region = resource
         .create_virtual(2 * USERLAND_PAGE_SIZE, runtime::MemoryAccess::RW)
         .expect("create shared region");
-    let mapped = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map shared region");
+    let mapped = Mapping::full(region, UserMemFlags::ReadWrite).expect("map shared region");
     mapped.copy_in(b"client").expect("initialize region");
+    let handed = mapped
+        .region()
+        .duplicate(
+            Rights::READ | Rights::WRITE | Rights::DUPLICATE | Rights::TRANSFER,
+            None,
+        )
+        .expect("region copy for the server");
     creator
-        .create_backed("/client-region", region, 6)
+        .create_backed("/client-region", handed, 6)
         .expect("create backed file");
 
     let reader = connect(ram_session());
     let data_region = acquire_buffer(&reader);
-    let data = data_region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let data = Mapping::full(data_region, UserMemFlags::ReadWrite).expect("map data buffer");
     let opened = open(
         &reader,
         "/client-region",
@@ -1249,7 +1226,7 @@ fn filesystem_ramfs_accepts_a_client_region_without_copying() {
 
 fn create_filler_tree(
     client: &file_system::Client<SessionTransport>,
-    data: &kernel_objects::Mapping,
+    data: &kernel_objects::MappedPages,
     names: &[String],
 ) {
     for name in names {
@@ -1299,9 +1276,7 @@ fn region_carrying(payload: &[u8]) -> MemoryRegion {
     let region = resource
         .create_virtual(USERLAND_PAGE_SIZE, runtime::MemoryAccess::RW)
         .expect("create imported region");
-    let mapped = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map imported region");
+    let mapped = Mapping::full(&region, UserMemFlags::ReadWrite).expect("map imported region");
     mapped.copy_in(payload).expect("payload into the region");
     drop(mapped);
     region
@@ -1318,9 +1293,7 @@ fn filesystem_serves_an_imported_region_left_without_a_mapping() {
 
     let client = connect(resolved(importer(), SPARE_VIEW, Path::ROOT.as_str()));
     let data_region = acquire_buffer(&client);
-    let data = data_region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let data = Mapping::full(data_region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let names: Vec<String> = (0..FILLER_LIMIT)
         .map(|index| format!("/filler-{index}"))
@@ -1410,9 +1383,7 @@ fn filesystem_refuses_to_change_the_image() {
 fn filesystem_holds_a_descriptor_to_its_mode() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(&client, "/write-only", AccessMode::Write, OpenFlags::CREATE);
     let payload = b"mode";
@@ -1445,9 +1416,7 @@ fn filesystem_holds_a_descriptor_to_its_mode() {
 fn filesystem_appends_to_the_end_of_a_file() {
     let client = connect(ram_session());
     let region = acquire_buffer(&client);
-    let buffer = region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(
         &client,
@@ -1590,7 +1559,7 @@ fn send_unparsed_frame_with_capability<K: kernel_objects::ObjectKind>(
 fn filesystem_closes_the_capability_of_an_unparsed_frame() {
     let capability = ram_port();
     let signal = Signal::create().expect("signal to ride the frames");
-    for _ in 0..LEAK_FRAMES {
+    for _ in 0..LEAK_ROUNDS {
         let rider = signal
             .duplicate(Rights::READ | Rights::TRANSFER, None)
             .expect("capability for the frame");
@@ -1604,7 +1573,7 @@ fn filesystem_vends_nothing_for_a_call_without_a_reply_channel() {
     let opened = open(&client, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
 
     let without_reply = connect_without_reply(client);
-    for _ in 0..LEAK_FRAMES {
+    for _ in 0..LEAK_ROUNDS {
         let _ = without_reply.backing_memory(opened.fd);
     }
     test_harness::check!(vends_a_buffer());
@@ -1616,9 +1585,7 @@ fn filesystem_does_not_pin_a_backing_for_a_call_without_a_reply_channel() {
 
     let client = connect(ram_session());
     let data_region = acquire_buffer(&client);
-    let data = data_region
-        .map_full(UserMemFlags::ReadWrite)
-        .expect("map data buffer");
+    let data = Mapping::full(data_region, UserMemFlags::ReadWrite).expect("map data buffer");
     let opened = open(&client, BACKED, AccessMode::ReadWrite, OpenFlags::CREATE);
     write_all(&client, &data, &opened, 0, b"body");
 

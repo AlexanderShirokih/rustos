@@ -8,7 +8,7 @@
 //! (повтор на `Full`). Проверяем, что все кадры получены по порядку.
 
 use io::{RingError, SpscRing};
-use kernel_objects::{Resource, RingConsumer, RingProducer, Signal, kind};
+use kernel_objects::{Mapping, Resource, RingConsumer, RingProducer, Signal, kind};
 use runtime::{MemoryAccess, Timeout, UserMemFlags, spawn};
 use syscall::Handle;
 
@@ -62,9 +62,7 @@ fn ring_transport_round_trip() {
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
         .expect("region");
-    let mapping = region
-        .map(PAGE_SIZE, UserMemFlags::ReadWrite)
-        .expect("map region");
+    let mapping = Mapping::new(region, PAGE_SIZE, UserMemFlags::ReadWrite).expect("map region");
     test_harness::check!(mapping.va() > 0);
 
     let data_signal = Signal::create().expect("signal create");
