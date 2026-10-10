@@ -4,17 +4,14 @@ use alloc::boxed::Box;
 use core::{convert::Infallible, sync::atomic::AtomicU64};
 
 use component_abi::Attributes;
-use component_startup::SessionError;
+use component_startup::{SessionError, SessionEvent, SessionEvents};
 use filesystem::FileSystemBackend;
 use filesystem_abi::file_system;
-use ipc::{
-    Listener, RecvError,
-    wire::{IpcError, MESSAGE_INLINE_MAX},
-};
+use ipc::wire::IpcError;
 use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Resource};
 use runtime::{Mutex, PortTransport, log_line, process_exit, spawn_owned};
 use spin::Once;
-use syscall::{Handle, Timeout, kind};
+use syscall::{Handle, kind};
 
 use crate::{
     error::{Error, Result, no_space},
@@ -109,19 +106,16 @@ fn run(
 }
 
 fn serve_sessions(shared: &Shared) {
-    let transport = PortTransport::new(shared.service.borrow());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    loop {
-        let incoming = match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(incoming) => incoming,
+    let mut events = SessionEvents::new(&shared.service);
+
+    while let Some(event) = events.recv() {
+        let incoming = match event {
+            SessionEvent::Frame(incoming) => incoming,
             // Сессия ушедшей стороны убирается, а приём продолжается.
-            Err(RecvError::SenderGone(badge)) => {
+            SessionEvent::Gone(badge) => {
                 shared.volumes.lock().remove_session(badge);
                 continue;
             }
-            // Отброшенный кадр относится к одному вызову, а бессрочный приём срока не имеет.
-            Err(RecvError::Discarded | RecvError::Timeout) => continue,
-            Err(RecvError::Closed) => break,
         };
         // Том выбирает значок сессии до разбора кадра. Кадр без известной сессии получает
         // отказ `NoSession` от первого тома. Таблица при кадре не пуста, потому что значок

@@ -24,7 +24,10 @@ use runtime::{PortTransport, Timeout, port_send};
 use spin::Mutex;
 use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
 
-use crate::{fixture::spawn_entry, ipc_raw, log_fixture_protocol::FIXTURE_LINE};
+use crate::{
+    fixture::spawn_entry, ipc_raw, log_fixture_protocol::FIXTURE_LINE,
+    resource_exhaustion::exhaust_handle_table,
+};
 
 const NAMED_BADGE: NonZeroU64 = NonZeroU64::new(0x0101_0101_0101_0101).expect("badge is non-zero");
 const UNNAMED_BADGE: NonZeroU64 =
@@ -316,24 +319,6 @@ fn send_log_frame_with_cap(session: &Port, cap: Port) -> i64 {
         let _ = cap.into_raw();
     }
     sent
-}
-
-fn exhaust_handle_table() -> (Port, Vec<Port>) {
-    let source = Port::create().expect("filler port");
-    let mut handles = Vec::new();
-    loop {
-        match source.duplicate(Rights::TRANSFER, None) {
-            Ok(handle) => handles.push(handle),
-            Err(error) => {
-                test_harness::check!(matches!(
-                    error,
-                    kernel_objects::Error::Syscall(SyscallError::OutOfHandles)
-                ));
-                break;
-            }
-        }
-    }
-    (source, handles)
 }
 
 #[test_harness::test]

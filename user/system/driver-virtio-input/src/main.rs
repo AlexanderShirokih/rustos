@@ -10,15 +10,14 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 use core::{convert::Infallible, fmt};
 
-use component_startup::{StartupError, component_manifest, serve_export, whole_export};
+use component_startup::{
+    SessionEvent, SessionEvents, StartupError, component_manifest, serve_export, whole_export,
+};
 use driver_virtio_input::Device;
 use input_abi::{AttachError, RecordsError, UpdateError, input_inject, input_source};
-use ipc::{
-    CallError, Listener, RecvError,
-    wire::{MESSAGE_INLINE_MAX, Session},
-};
+use ipc::{CallError, wire::Session};
 use kernel_objects::{Delivery, IrqLine, IssuedHandle, Port, SessionTransport, kind};
-use runtime::{FAILED_EXIT_CODE, PortTransport, Timeout, exit, log_fmt, spawn_owned};
+use runtime::{FAILED_EXIT_CODE, Timeout, exit, log_fmt, spawn_owned};
 use syscall::PAGE_SIZE;
 use virtio::{
     Buffer, DeviceMemory, DeviceType, QUEUE_REGION_BYTES, QueueError, SplitQueue, Token, Transport,
@@ -277,18 +276,16 @@ fn run(requirements: VirtioInputStartup) -> Result<(), Stopped> {
         attached: false,
         refused: false,
     };
-    let transport = PortTransport::new(export.borrow());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
-                let _ = input_source::dispatch(&mut source, frame);
-                if source.refused {
-                    return Err(Stopped::NoDevice);
-                }
+    let mut events = SessionEvents::new(export);
+
+    while let Some(event) = events.recv() {
+        if let SessionEvent::Frame(frame) = event {
+            let _ = input_source::dispatch(&mut source, frame);
+            if source.refused {
+                return Err(Stopped::NoDevice);
             }
-            Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => return Err(Stopped::ServicePortClosed),
         }
     }
+
+    Err(Stopped::ServicePortClosed)
 }

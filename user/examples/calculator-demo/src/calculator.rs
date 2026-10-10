@@ -6,10 +6,9 @@ use core::error::Error;
 use std::{process, thread};
 
 use calculator_demo::calculator;
-use component_startup::{serve_export, whole_export};
+use component_startup::{SessionEvent, SessionEvents, serve_export, whole_export};
 use components::component_manifest;
-use ipc::{Listener, RecvError, Timeout, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{Port, PortTransport};
+use kernel_objects::Port;
 
 component_manifest! {
     struct CalculatorStartup {
@@ -44,18 +43,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn serve(service: &Port) {
-    let transport = PortTransport::new(service);
     let mut calculator = Calculator;
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    // Порт остаётся открытым, пока кадр доставлен, значок ушёл либо кадр отброшен.
-    // Закрытие порта заканчивает обслуживание.
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
-                let _ = calculator::dispatch(&mut calculator, frame);
-            }
-            Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => break,
+    let mut events = SessionEvents::new(service);
+
+    while let Some(event) = events.recv() {
+        if let SessionEvent::Frame(frame) = event {
+            let _ = calculator::dispatch(&mut calculator, frame);
         }
     }
     println!("service port closed");

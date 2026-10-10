@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use kernel_objects::{Error, MemoryRegion, Resource, Signal};
+use kernel_objects::{Error, MemoryRegion, Port, Resource, Signal};
 use runtime::{MemoryAccess, SUCCESS_EXIT_CODE};
 use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
@@ -129,6 +129,21 @@ fn a_partial_release_returns_exactly_what_was_freed() {
         Some(Error::Syscall(SyscallError::ResourceExhausted))
     );
     drop(regained);
+}
+
+pub(crate) fn exhaust_handle_table() -> (Port, Vec<Port>) {
+    let source = Port::create().expect("filler port");
+    let mut handles = Vec::new();
+    loop {
+        match source.duplicate(Rights::TRANSFER, None) {
+            Ok(handle) => handles.push(handle),
+            Err(error) => {
+                test_harness::check!(matches!(error, Error::Syscall(SyscallError::OutOfHandles)));
+                break;
+            }
+        }
+    }
+    (source, handles)
 }
 
 fn fill_handle_table() -> (Vec<Signal>, Option<Error>) {

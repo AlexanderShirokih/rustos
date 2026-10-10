@@ -6,14 +6,13 @@
 
 use alloc::boxed::Box;
 
-use component_startup::{component_startup as startup_contract, serve_export, whole_export};
+use component_startup::{
+    SessionEvent, SessionEvents, component_startup as startup_contract, serve_export, whole_export,
+};
 use input_abi::{
     AttachError, AxisList, Binding, DeviceDescriptor, KeyList, Usage, input_inject, input_source,
 };
-use ipc::{
-    Listener as _, RecvError,
-    wire::{MESSAGE_INLINE_MAX, Session},
-};
+use ipc::wire::Session;
 use kernel_objects::{Delivery, IssuedHandle, Port, SessionTransport, kind};
 use runtime::{PortTransport, Timeout, process_exit, spawn_owned};
 
@@ -108,15 +107,13 @@ pub(crate) fn serve_source(
         attach,
         inject: None,
     };
-    let transport = PortTransport::new(export.as_raw());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
-                let _ = input_source::dispatch(&mut source, frame);
-            }
-            Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => process_exit(1),
+    let mut events = SessionEvents::new(export);
+
+    while let Some(event) = events.recv() {
+        if let SessionEvent::Frame(frame) = event {
+            let _ = input_source::dispatch(&mut source, frame);
         }
     }
+
+    process_exit(1)
 }

@@ -9,15 +9,14 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::sync::atomic::AtomicU64;
 
-use component_startup::{SessionError, component_manifest, mint_session, serve_export};
+use component_startup::{
+    SessionError, SessionEvent, SessionEvents, component_manifest, mint_session, serve_export,
+};
 use io::mmio::Reg;
-use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqLine, MmioMapping, Port, SessionTransport};
 use platform_abi::{MappedDescription, platform};
 use rtc_abi::rtc;
-use runtime::{
-    FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, log_line, spawn_owned,
-};
+use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, log_line, spawn_owned};
 
 mod error;
 
@@ -75,18 +74,14 @@ impl Shared {
     }
 
     fn serve(&self) {
-        let transport = PortTransport::new(self.service.borrow());
-        let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        loop {
-            match transport.recv(&mut bytes, Timeout::INFINITE) {
-                Ok(frame) => {
-                    let device = *self.device.lock();
-                    if let Some(mut device) = device {
-                        let _ = rtc::dispatch(&mut device, frame);
-                    }
+        let mut events = SessionEvents::new(&self.service);
+
+        while let Some(event) = events.recv() {
+            if let SessionEvent::Frame(frame) = event {
+                let device = *self.device.lock();
+                if let Some(mut device) = device {
+                    let _ = rtc::dispatch(&mut device, frame);
                 }
-                Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-                Err(RecvError::Closed) => break,
             }
         }
     }

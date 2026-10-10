@@ -16,14 +16,14 @@ use core::{fmt, sync::atomic::AtomicU64};
 
 use bootstrap_abi::{features, hardware};
 use component_startup::{
-    MintedSession, SessionError, StartupError, component_manifest, mint_session, serve_export,
+    MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
+    mint_session, serve_export,
 };
 use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
 use fdt::devicetree::DeviceTree;
-use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{IrqControl, MemoryRegion, Port, ReadOnlyMapping, SessionTransport};
 use platform_abi::{Description, platform};
-use runtime::{FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, spawn_owned};
+use runtime::{FAILED_EXIT_CODE, Mutex, exit, log_fmt, spawn_owned};
 
 mod sessions;
 
@@ -162,16 +162,14 @@ fn open(shared: &Shared) -> Result<Port, SessionError> {
 }
 
 fn serve(service: &Port, mut platform: Platform) {
-    let transport = PortTransport::new(service.borrow());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
+    let mut events = SessionEvents::new(service);
+
+    while let Some(event) = events.recv() {
+        match event {
+            SessionEvent::Frame(frame) => {
                 let _ = platform::dispatch(&mut platform, frame);
             }
-            Err(RecvError::SenderGone(badge)) => platform.close(badge),
-            Err(RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => break,
+            SessionEvent::Gone(badge) => platform.close(badge),
         }
     }
 }

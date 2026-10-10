@@ -7,16 +7,14 @@
 use alloc::format;
 use core::num::NonZeroU64;
 
+use component_startup::{SessionEvent, SessionEvents};
 use filesystem_abi::{
     AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
     Opened, Written, file_system,
 };
-use ipc::{
-    IntoWireValue, Listener as _, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX},
-};
+use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, IssuedHandle, Port, Session, kind};
-use runtime::{JoinHandle, PortTransport, Timeout, spawn_owned};
+use runtime::{JoinHandle, spawn_owned};
 use syscall::Rights;
 
 use crate::{
@@ -207,19 +205,20 @@ pub(crate) fn mount_failing() -> FailingMount {
 }
 
 fn serve_failing(server: &Port) -> u32 {
-    let transport = PortTransport::new(server);
     let mut failing = Failing { server };
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    let mut events = SessionEvents::new(server);
 
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
+    while let Some(event) = events.recv() {
+        match event {
+            SessionEvent::Frame(frame) => {
                 let _ = file_system::dispatch(&mut failing, frame);
             }
-            Err(RecvError::SenderGone(MOUNT_BADGE) | RecvError::Closed) => return 0,
-            Err(_) => {}
+            SessionEvent::Gone(MOUNT_BADGE) => return 0,
+            SessionEvent::Gone(_) => {}
         }
     }
+
+    0
 }
 
 fn error_of(frame: &Delivery) -> FileSystemError {

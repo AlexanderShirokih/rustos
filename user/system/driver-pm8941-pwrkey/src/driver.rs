@@ -5,14 +5,14 @@ use alloc::boxed::Box;
 use core::fmt;
 
 use component_startup::{
-    AnyOf, Import, Providers, StartupError, component_startup as startup_contract, serve_export,
-    whole_export,
+    AnyOf, Import, Providers, SessionEvent, SessionEvents, StartupError,
+    component_startup as startup_contract, serve_export, whole_export,
 };
 use input_abi::{
     AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, KeyList, UpdateError,
     Usage, input_inject, input_source,
 };
-use ipc::{CallError, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
+use ipc::CallError;
 use kernel_objects::{Delivery, IssuedHandle, Port, Session, SessionTransport, Signal, kind};
 use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
 use runtime::{FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_owned};
@@ -367,22 +367,19 @@ pub fn run(
         attached: false,
         refused: false,
     };
-    let transport = PortTransport::new(export.borrow());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    let mut events = SessionEvents::new(export);
 
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
-                let _ = input_source::dispatch(&mut source, frame);
-                // Процесс завершается после ответа `Refused`.
-                if source.refused {
-                    exit(FAILED_EXIT_CODE)
-                }
+    while let Some(event) = events.recv() {
+        if let SessionEvent::Frame(frame) = event {
+            let _ = input_source::dispatch(&mut source, frame);
+            // Процесс завершается после ответа `Refused`.
+            if source.refused {
+                exit(FAILED_EXIT_CODE)
             }
-            Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => return Err(Stopped::ExportPortClosed),
         }
     }
+
+    Err(Stopped::ExportPortClosed)
 }
 
 fn stop(failure: &Failure) -> ! {

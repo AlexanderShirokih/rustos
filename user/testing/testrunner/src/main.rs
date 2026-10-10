@@ -83,6 +83,7 @@ mod screen;
 mod search_limits;
 mod selftest_clock;
 mod selftest_run;
+mod session_events;
 mod signal;
 #[cfg(target_arch = "aarch64")]
 mod simd_state;

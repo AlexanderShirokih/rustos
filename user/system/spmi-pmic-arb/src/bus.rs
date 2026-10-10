@@ -5,10 +5,10 @@
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU64;
 
-use component_startup::mint_session;
-use ipc::{IntoWireValue, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
+use component_startup::{SessionEvent, SessionEvents, mint_session};
+use ipc::IntoWireValue;
 use kernel_objects::{Delivery, Port, Signal};
-use runtime::{Mutex, PortTransport, Timeout, log_fmt};
+use runtime::{Mutex, log_fmt};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use spmi_pmic_arb::{Arbiter, Interrupt, Peripheral};
 use syscall::{Rights, SIGNALED, WakeCount};
@@ -241,12 +241,11 @@ impl spmi_device::Service<Delivery> for Held<'_> {
 }
 
 pub(crate) fn serve(bus: &Mutex<Bus>, sessions: &Sessions) {
-    let transport = PortTransport::new(sessions.service.borrow());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+    let mut events = SessionEvents::new(&sessions.service);
 
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
+    while let Some(event) = events.recv() {
+        match event {
+            SessionEvent::Frame(frame) => {
                 let badge = frame.resources.badge;
                 let mut bus = bus.lock();
                 let Bus { arbiter, devices } = &mut *bus;
@@ -276,9 +275,7 @@ pub(crate) fn serve(bus: &Mutex<Bus>, sessions: &Sessions) {
                     let _ = spmi::dispatch(&mut opener, frame);
                 }
             }
-            Err(RecvError::SenderGone(badge)) => bus.lock().release(badge),
-            Err(RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => break,
+            SessionEvent::Gone(badge) => bus.lock().release(badge),
         }
     }
 }

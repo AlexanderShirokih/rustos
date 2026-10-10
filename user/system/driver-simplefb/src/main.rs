@@ -12,22 +12,17 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    MintedSession, SessionError, StartupError, component_manifest, mint_session, serve_export,
+    MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
+    mint_session, serve_export,
 };
 use display_abi::{Area, DisplayDimension, DisplayError, display};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
-use ipc::{
-    IntoWireValue, Listener, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX},
-};
+use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{
     Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport, WriteCombiningMapping,
 };
 use platform_abi::{DeviceId, MappedDescription, PlatformError, platform};
-use runtime::{
-    FAILED_EXIT_CODE, MemoryAccess, Mutex, PortTransport, Timeout, UserMemFlags, exit, log_fmt,
-    spawn_owned,
-};
+use runtime::{FAILED_EXIT_CODE, MemoryAccess, Mutex, UserMemFlags, exit, log_fmt, spawn_owned};
 use syscall::{PAGE_SIZE, Rights, kind};
 
 component_manifest! {
@@ -164,11 +159,11 @@ impl Attacher {
 
 impl Shared {
     fn serve(&self) {
-        let transport = PortTransport::new(self.service.borrow());
-        let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        loop {
-            match transport.recv(&mut bytes, Timeout::INFINITE) {
-                Ok(frame) => {
+        let mut events = SessionEvents::new(&self.service);
+
+        while let Some(event) = events.recv() {
+            match event {
+                SessionEvent::Frame(frame) => {
                     let badge = frame.resources.badge;
 
                     if let Some(session) = self
@@ -181,13 +176,11 @@ impl Shared {
                     }
                     // Кадр значка без сессии отвергается закрытием его ответа.
                 }
-                Err(RecvError::SenderGone(badge)) => {
+                SessionEvent::Gone(badge) => {
                     self.sessions
                         .lock()
                         .retain(|session| session.badge != badge);
                 }
-                Err(RecvError::Discarded | RecvError::Timeout) => {}
-                Err(RecvError::Closed) => break,
             }
         }
     }

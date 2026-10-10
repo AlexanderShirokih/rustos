@@ -6,9 +6,9 @@ use core::{
 };
 
 use component_abi::{AcceptError, Attributes, SessionError, component_startup};
-use ipc::CallError;
-use kernel_objects::{Error, Port, PortTransport};
-use syscall::Rights;
+use ipc::{CallError, FrameBytes, Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
+use kernel_objects::{Delivery, Error, Port, PortTransport};
+use syscall::{Rights, Timeout};
 
 use crate::request::accept;
 
@@ -17,6 +17,55 @@ use crate::request::accept;
 pub struct MintedSession {
     pub badge: NonZeroU64,
     pub port: Port,
+}
+
+/// Событие порта сессий экспорта из [`SessionEvents::recv`].
+pub enum SessionEvent<'b> {
+    /// Кадр сессии со значком отправителя. Разрушение кадра без `dispatch` отменяет ответ, и
+    /// вызыватель получает отказ.
+    Frame(Incoming<'b, Delivery>),
+    /// Ушли последние отправители значка.
+    Gone(u64),
+}
+
+/// Бессрочный приём порта сессий экспорта в собственный буфер кадра.
+///
+/// Кадр, отброшенный ядром из-за нехватки места под его capability, пропускается.
+pub struct SessionEvents<'p> {
+    port: &'p Port,
+    bytes: FrameBytes,
+}
+
+impl<'p> SessionEvents<'p> {
+    #[must_use]
+    pub const fn new(port: &'p Port) -> Self {
+        Self {
+            port,
+            bytes: [0; MESSAGE_INLINE_MAX],
+        }
+    }
+
+    /// Возвращает следующий кадр сессии либо уход значка. `None` означает, что кадров порта
+    /// больше не будет.
+    pub fn recv(&mut self) -> Option<SessionEvent<'_>> {
+        let transport = PortTransport::new(self.port.borrow());
+
+        // Из цикла выходят длина и ресурсы кадра, поэтому заём буфера не переходит на следующий
+        // приём.
+        let (len, resources) = loop {
+            match transport.recv(&mut self.bytes, Timeout::INFINITE) {
+                Ok(frame) => break (frame.bytes.len(), frame.resources),
+                Err(RecvError::SenderGone(badge)) => return Some(SessionEvent::Gone(badge)),
+                Err(RecvError::Discarded | RecvError::Timeout) => {}
+                Err(RecvError::Closed) => return None,
+            }
+        };
+
+        Some(SessionEvent::Frame(Incoming {
+            bytes: self.bytes.get(..len).unwrap_or_default(),
+            resources,
+        }))
+    }
 }
 
 /// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`. `open`

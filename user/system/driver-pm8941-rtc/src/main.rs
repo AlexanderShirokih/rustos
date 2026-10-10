@@ -14,13 +14,14 @@ use alloc::boxed::Box;
 use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    AnyOf, Providers, SessionError, StartupError, component_manifest, mint_session, serve_export,
+    AnyOf, Providers, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
+    mint_session, serve_export,
 };
-use ipc::{CallError, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
+use ipc::CallError;
 use kernel_objects::{Port, Session, SessionTransport, Signal};
 use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
 use rtc_abi::rtc;
-use runtime::{FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, spawn_owned};
+use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, spawn_owned};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use syscall::SIGNALED;
 
@@ -125,19 +126,14 @@ impl Shared {
     }
 
     fn serve(&self) {
-        let transport = PortTransport::new(self.service.borrow());
-        let mut bytes = [0u8; MESSAGE_INLINE_MAX];
+        let mut events = SessionEvents::new(&self.service);
 
-        loop {
-            match transport.recv(&mut bytes, Timeout::INFINITE) {
-                Ok(frame) => {
-                    let clock = *self.clock.lock();
-                    if let Some(mut clock) = clock {
-                        let _ = rtc::dispatch(&mut clock, frame);
-                    }
+        while let Some(event) = events.recv() {
+            if let SessionEvent::Frame(frame) = event {
+                let clock = *self.clock.lock();
+                if let Some(mut clock) = clock {
+                    let _ = rtc::dispatch(&mut clock, frame);
                 }
-                Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-                Err(RecvError::Closed) => break,
             }
         }
     }

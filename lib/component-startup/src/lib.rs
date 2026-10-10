@@ -2,7 +2,8 @@
 //!
 //! Макрос [`component_manifest!`] объявляет требования и экспорты компонента и порождает поле
 //! на каждое требование. Поле запрашивает сессию требования у родителя по вызову. Провайдер
-//! обслуживает экспорт циклом [`serve_export`].
+//! отвечает на заявки экспорта циклом [`serve_export`] и принимает кадры порта сессий через
+//! [`SessionEvents`].
 //!
 //! Программа на Rust со стандартной библиотекой получает стартовый handle от
 //! `components`.
@@ -27,7 +28,9 @@ pub use component_abi::{
 #[doc(hidden)]
 pub use declare::start_parent;
 pub use declare::{Requirements, StartupError, StartupFailure};
-pub use export::{MintedSession, mint_session, serve_export, whole_export};
+pub use export::{
+    MintedSession, SessionEvent, SessionEvents, mint_session, serve_export, whole_export,
+};
 pub use import::Import;
 pub use ipc::wire::IpcError;
 pub use kernel_objects::{OwnedHandle, Port, PortTransport, Session, kind};

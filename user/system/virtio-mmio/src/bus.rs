@@ -7,14 +7,11 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering, fence};
 
-use component_startup::mint_session;
-use ipc::{
-    IntoWireValue, Listener, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX},
-};
+use component_startup::{SessionEvent, SessionEvents, mint_session};
+use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, IrqLine, MmioMapping, Port, SessionTransport};
 use platform_abi::{DeviceId, MappedDescription, PlatformError, platform};
-use runtime::{PortTransport, Timeout, log_fmt};
+use runtime::log_fmt;
 use syscall::{Rights, kind};
 use virtio::register;
 use virtio_mmio_abi::{AccessWidth, SlotError, VirtioMmioError, virtio_mmio, virtio_slot};
@@ -83,11 +80,11 @@ impl Bus {
     }
 
     pub(crate) fn serve(&mut self, sessions: &Sessions) {
-        let transport = PortTransport::new(sessions.service.borrow());
-        let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        loop {
-            match transport.recv(&mut bytes, Timeout::INFINITE) {
-                Ok(frame) => {
+        let mut events = SessionEvents::new(&sessions.service);
+
+        while let Some(event) = events.recv() {
+            match event {
+                SessionEvent::Frame(frame) => {
                     let badge = frame.resources.badge;
                     if let Some(slot) = self.slot(badge) {
                         let _ = virtio_slot::dispatch(slot, frame);
@@ -99,13 +96,11 @@ impl Bus {
                         let _ = virtio_mmio::dispatch(&mut opener, frame);
                     }
                 }
-                Err(RecvError::SenderGone(badge)) => {
+                SessionEvent::Gone(badge) => {
                     if let Some(slot) = self.slot(badge) {
                         slot.release();
                     }
                 }
-                Err(RecvError::Discarded | RecvError::Timeout) => {}
-                Err(RecvError::Closed) => break,
             }
         }
     }

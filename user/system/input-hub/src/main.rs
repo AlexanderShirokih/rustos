@@ -12,14 +12,13 @@ use alloc::boxed::Box;
 use core::fmt;
 
 use component_startup::{
-    Requirements as _, SessionError, component_manifest, component_startup as startup_contract,
-    serve_export,
+    Requirements as _, SessionError, SessionEvent, SessionEvents, component_manifest,
+    component_startup as startup_contract, serve_export,
 };
 use input_abi::{input, input_inject, input_source};
-use ipc::{Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{Delivery, Port};
+use kernel_objects::Port;
 use runtime::{FAILED_EXIT_CODE, PortTransport, exit, log_fmt, log_line, spawn_owned};
-use syscall::{Handle, SyscallError, Timeout, kind};
+use syscall::{Handle, SyscallError, kind};
 
 mod hub;
 mod queue;
@@ -73,9 +72,16 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let watched = requirements.sources;
     let sources_parent = startup_contract::Client::new(PortTransport::new(parent));
     let _ = spawn_owned(move || {
-        listen(sources, source_gone, |frame| {
-            let _ = input_inject::dispatch(&mut Source, frame);
-        });
+        let mut events = SessionEvents::new(sources);
+
+        while let Some(event) = events.recv() {
+            match event {
+                SessionEvent::Frame(frame) => {
+                    let _ = input_inject::dispatch(&mut Source, frame);
+                }
+                SessionEvent::Gone(badge) => source_gone(badge),
+            }
+        }
         log_line("source port closed");
         exit(FAILED_EXIT_CODE)
     })?;
@@ -90,24 +96,18 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
         exit(FAILED_EXIT_CODE)
     })?;
 
-    listen(consumers, input_gone, |frame| {
-        let _ = input::dispatch(&mut Consumer, frame);
-    });
-    Err(Stopped::ConsumerPortClosed)
-}
+    let mut events = SessionEvents::new(consumers);
 
-fn listen(port: &Port, gone: fn(u64), mut received: impl FnMut(Incoming<'_, Delivery>)) {
-    let transport = PortTransport::new(port.borrow());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => received(frame),
-            Err(RecvError::SenderGone(badge)) => gone(badge),
-            // Отброшенный кадр и пробуждение без кадра не закрывают порт.
-            Err(RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => return,
+    while let Some(event) = events.recv() {
+        match event {
+            SessionEvent::Frame(frame) => {
+                let _ = input::dispatch(&mut Consumer, frame);
+            }
+            SessionEvent::Gone(badge) => input_gone(badge),
         }
     }
+
+    Err(Stopped::ConsumerPortClosed)
 }
 
 fn export<P: ipc::Protocol>(

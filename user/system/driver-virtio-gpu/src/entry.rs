@@ -6,17 +6,15 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{fmt, sync::atomic::AtomicU64};
 
 use component_startup::{
-    MintedSession, SessionError, StartupError, component_manifest, mint_session, serve_export,
+    MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
+    mint_session, serve_export,
 };
 use display_abi::{Area, DisplayDimension, DisplayError, display};
-use ipc::{
-    IntoWireValue, Listener, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX},
-};
+use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport};
 use runtime::{
-    FAILED_EXIT_CODE, MemoryAccess, Mutex, PortTransport, Timeout, UserMemFlags, exit, log_fmt,
-    log_line, spawn_owned,
+    FAILED_EXIT_CODE, MemoryAccess, Mutex, Timeout, UserMemFlags, exit, log_fmt, log_line,
+    spawn_owned,
 };
 use syscall::{PAGE_SIZE, Rights, kind};
 use virtio_mmio_abi::virtio_mmio;
@@ -104,11 +102,11 @@ impl Shared {
     }
 
     fn serve(&self) {
-        let transport = PortTransport::new(self.service.borrow());
-        let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        loop {
-            match transport.recv(&mut bytes, Timeout::INFINITE) {
-                Ok(frame) => {
+        let mut events = SessionEvents::new(&self.service);
+
+        while let Some(event) = events.recv() {
+            match event {
+                SessionEvent::Frame(frame) => {
                     let badge = frame.resources.badge;
                     let mut state = self.state.lock();
                     let State { gpu, sessions } = &mut *state;
@@ -118,13 +116,11 @@ impl Shared {
                         let _ = display::dispatch(&mut Served { gpu, session }, frame);
                     }
                 }
-                Err(RecvError::SenderGone(badge)) => {
+                SessionEvent::Gone(badge) => {
                     let mut state = self.state.lock();
                     state.sessions.retain(|session| session.badge != badge);
                     state.release_when_unused();
                 }
-                Err(RecvError::Discarded | RecvError::Timeout) => {}
-                Err(RecvError::Closed) => break,
             }
         }
     }

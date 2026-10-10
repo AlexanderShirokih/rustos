@@ -6,10 +6,10 @@
 use core::fmt;
 
 use component_abi::{Attributes, component_startup as startup_contract};
-use component_startup::{accept, whole_export};
-use ipc::{Listener as _, ReceivedResources, RecvError, wire::MESSAGE_INLINE_MAX};
+use component_startup::{SessionEvent, SessionEvents, accept, whole_export};
+use ipc::ReceivedResources;
 use kernel_objects::Port;
-use runtime::{PortTransport, Timeout, log_fmt, process_exit, spawn_owned};
+use runtime::{PortTransport, log_fmt, process_exit, spawn_owned};
 use syscall::{Handle, kind};
 
 ipc::protocol! {
@@ -63,15 +63,13 @@ pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> 
         process_exit(1)
     }
 
-    let transport = PortTransport::new(export.as_raw());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
-                let _ = probe::dispatch(&mut Echo, frame);
-            }
-            Err(RecvError::SenderGone(_) | RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => process_exit(1),
+    let mut events = SessionEvents::new(export);
+
+    while let Some(event) = events.recv() {
+        if let SessionEvent::Frame(frame) = event {
+            let _ = probe::dispatch(&mut Echo, frame);
         }
     }
+
+    process_exit(1)
 }

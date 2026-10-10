@@ -11,19 +11,15 @@ mod failed;
 
 use alloc::{boxed::Box, vec::Vec};
 
-use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
+use component_startup::{
+    Requirements as _, SessionEvent, SessionEvents, component_manifest, serve_export, whole_export,
+};
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
 use display_fixture_protocol::DIMENSION;
 use failed::Failed;
-use ipc::{
-    IntoWireValue, Listener, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX},
-};
+use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource};
-use runtime::{
-    FAILED_EXIT_CODE, MemoryAccess, PortTransport, Timeout, UserMemFlags, exit, log_fmt, log_line,
-    spawn_owned,
-};
+use runtime::{FAILED_EXIT_CODE, MemoryAccess, UserMemFlags, exit, log_fmt, log_line, spawn_owned};
 use syscall::{Handle, Rights, kind};
 
 const ROW_MAX_BYTES: usize = DIMENSION.width as usize * SURFACE_PIXEL_BYTES as usize;
@@ -164,16 +160,14 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
 }
 
 fn serve(service: &Port, screen: &mut Screen) {
-    let transport = PortTransport::new(service.borrow());
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    loop {
-        match transport.recv(&mut bytes, Timeout::INFINITE) {
-            Ok(frame) => {
+    let mut events = SessionEvents::new(service);
+
+    while let Some(event) = events.recv() {
+        match event {
+            SessionEvent::Frame(frame) => {
                 let _ = display::dispatch(screen, frame);
             }
-            Err(RecvError::SenderGone(badge)) => screen.close(badge),
-            Err(RecvError::Discarded | RecvError::Timeout) => {}
-            Err(RecvError::Closed) => break,
+            SessionEvent::Gone(badge) => screen.close(badge),
         }
     }
 }
