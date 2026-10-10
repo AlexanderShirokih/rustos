@@ -1,0 +1,504 @@
+export struct Place {
+    path: string,
+    note: string,
+}
+
+export struct Line {
+    number: string,
+    text: string,
+}
+
+export struct Body {
+    x: length,
+    y: length,
+    size: length,
+    tint: color,
+}
+
+export struct Entry {
+    name: string,
+    size: string,
+    folder: bool,
+}
+
+global Palette {
+    out property <color> desk: #d9dee7;
+    out property <color> page: #ffffff;
+    out property <color> bar: #eceef2;
+    out property <color> sidebar: #f6f7f9;
+    out property <color> line: #e3e6eb;
+    out property <color> text: #1d2330;
+    out property <color> muted: #6b7280;
+    out property <color> faint: #a3a9b5;
+    out property <color> selection: #dbe7fb;
+    out property <color> inactive: #e8eaee;
+}
+
+component PlaceRow inherits Rectangle {
+    in property <Place> place;
+    in property <bool> selected;
+
+    callback clicked;
+
+    height: 52px;
+    border-radius: 6px;
+    background: root.selected ? Palette.selection : transparent;
+
+    VerticalLayout {
+        padding-left: 12px;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: root.place.path;
+            color: Palette.text;
+            font-size: 15px;
+        }
+        Text {
+            text: root.place.note;
+            color: Palette.muted;
+            font-size: 12px;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component EntryRow inherits Rectangle {
+    in property <Entry> entry;
+    in property <bool> selected;
+    in property <bool> active;
+    in property <bool> open;
+    in property <length> indent;
+
+    callback clicked;
+
+    height: 34px;
+    background: !root.selected ? transparent : root.active ? Palette.selection : Palette.inactive;
+
+    HorizontalLayout {
+        padding-left: 16px + root.indent;
+        padding-right: 16px;
+        spacing: 12px;
+        Text {
+            text: root.entry.name;
+            color: Palette.text;
+            font-size: 15px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: root.entry.size;
+            color: Palette.muted;
+            font-size: 13px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        Text {
+            text: !root.entry.folder ? "" : root.open ? "⌄" : "›";
+            color: Palette.muted;
+            font-size: 15px;
+            width: 8px;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Palette.line;
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component Column inherits Rectangle {
+    in property <[Entry]> entries;
+    in property <string> selected;
+    in property <bool> active;
+
+    callback clicked(Entry);
+
+    VerticalLayout {
+        alignment: start;
+        for entry in root.entries: EntryRow {
+            entry: entry;
+            selected: entry.name == root.selected;
+            active: root.active;
+            clicked => {
+                root.clicked(entry);
+            }
+        }
+    }
+}
+
+component LineRow inherits HorizontalLayout {
+    in property <Line> line;
+
+    height: 20px;
+    spacing: 14px;
+    Text {
+        width: 20px;
+        text: root.line.number;
+        color: Palette.faint;
+        font-size: 14px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.line.text;
+        color: Palette.text;
+        font-size: 14px;
+        vertical-alignment: center;
+    }
+}
+
+component Divider inherits Rectangle {
+    width: 1px;
+    background: Palette.line;
+}
+
+export global Desktop {
+    in property <string> clock;
+    in property <string> frame-rate;
+    in property <[Place]> places;
+    in property <string> mount;
+    in property <[Entry]> root-entries;
+    in property <string> folder;
+    in property <[Entry]> folder-entries;
+    in property <string> file;
+    in property <[Line]> file-lines;
+    in property <[Body]> bodies;
+    in property <length> field-width;
+    in property <length> field-height;
+    in property <string> physics-note;
+
+    callback select(mount: string, folder: string, file: string);
+
+    public function open-folder(entry: Entry) {
+        if entry.folder {
+            self.select(self.mount, entry.name, "");
+        }
+    }
+
+    public function open-file(entry: Entry) {
+        if !entry.folder {
+            self.select(self.mount, self.folder, entry.name);
+        }
+    }
+}
+
+component AppWindow inherits Rectangle {
+    in property <string> title;
+
+    background: Palette.page;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #c5ccd8;
+    clip: true;
+
+    VerticalLayout {
+        Rectangle {
+            height: 34px;
+            background: Palette.bar;
+            Text {
+                text: root.title;
+                color: Palette.text;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Palette.line;
+        }
+        @children
+    }
+}
+
+component StatusBar inherits Rectangle {
+    height: 32px;
+    background: Palette.bar;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 24px;
+        Text {
+            text: "RustOS";
+            color: Palette.text;
+            font-size: 14px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: Desktop.frame-rate;
+            color: Palette.muted;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: Desktop.clock;
+            color: Palette.text;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Breadcrumb inherits HorizontalLayout {
+    height: 40px;
+    padding-left: 16px;
+    spacing: 6px;
+    alignment: start;
+    Text {
+        text: Desktop.mount;
+        color: Palette.muted;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: Desktop.folder;
+        color: Palette.muted;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: "/";
+        color: Palette.faint;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: Desktop.file;
+        color: Palette.text;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+}
+
+component Preview inherits VerticalLayout {
+    padding: 14px;
+    alignment: start;
+    for line in Desktop.file-lines: LineRow {
+        line: line;
+    }
+}
+
+component HorizontalRule inherits Rectangle {
+    height: 1px;
+    background: Palette.line;
+}
+
+component FilesWide inherits AppWindow {
+    title: "Files";
+
+    HorizontalLayout {
+        vertical-stretch: 1;
+
+        Rectangle {
+            width: 150px;
+            background: Palette.sidebar;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 4px;
+                alignment: start;
+                Text {
+                    text: "Mounts";
+                    color: Palette.faint;
+                    font-size: 12px;
+                }
+                for place in Desktop.places: PlaceRow {
+                    place: place;
+                    selected: place.path == Desktop.mount;
+                    clicked => {
+                        Desktop.select(place.path, "", "");
+                    }
+                }
+            }
+        }
+        Divider { }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            Breadcrumb { }
+            HorizontalRule { }
+
+            HorizontalLayout {
+                vertical-stretch: 1;
+                Column {
+                    width: 215px;
+                    entries: Desktop.root-entries;
+                    selected: Desktop.folder;
+                    clicked(entry) => {
+                        Desktop.open-folder(entry);
+                    }
+                }
+                Divider { }
+                Column {
+                    width: 190px;
+                    entries: Desktop.folder-entries;
+                    selected: Desktop.file;
+                    active: true;
+                    clicked(entry) => {
+                        Desktop.open-file(entry);
+                    }
+                }
+                Divider { }
+                Preview {
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}
+
+component MountTabs inherits HorizontalLayout {
+    padding: 10px;
+    spacing: 8px;
+    alignment: start;
+    for place in Desktop.places: Rectangle {
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: place.path == Desktop.mount ? Palette.selection : Palette.line;
+        background: place.path == Desktop.mount ? Palette.selection : transparent;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            spacing: 8px;
+            Text {
+                text: place.path;
+                color: Palette.text;
+                font-size: 15px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: place.note;
+                color: Palette.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        TouchArea {
+            clicked => {
+                Desktop.select(place.path, "", "");
+            }
+        }
+    }
+}
+
+component Tree inherits VerticalLayout {
+    alignment: start;
+    for entry in Desktop.root-entries: VerticalLayout {
+        EntryRow {
+            height: 30px;
+            entry: entry;
+            open: entry.name == Desktop.folder;
+            selected: entry.name == Desktop.folder;
+            clicked => {
+                Desktop.open-folder(entry);
+            }
+        }
+        if entry.name == Desktop.folder: VerticalLayout {
+            for child in Desktop.folder-entries: EntryRow {
+                height: 30px;
+                indent: 20px;
+                entry: child;
+                selected: child.name == Desktop.file;
+                active: true;
+                clicked => {
+                    Desktop.open-file(child);
+                }
+            }
+        }
+    }
+}
+
+component FilesNarrow inherits AppWindow {
+    title: "Files";
+
+    MountTabs { }
+    HorizontalRule { }
+    Tree { }
+    Rectangle {
+        min-height: 0;
+        vertical-stretch: 1;
+        clip: true;
+        Preview {
+            y: 0;
+        }
+    }
+}
+
+component Bodies inherits AppWindow {
+    title: "Bodies";
+
+    Rectangle {
+        height: Desktop.field-height;
+        for body in Desktop.bodies: Rectangle {
+            x: body.x - body.size / 2;
+            y: body.y - body.size / 2;
+            width: body.size;
+            height: body.size;
+            border-radius: body.size / 2;
+            background: body.tint;
+        }
+    }
+    HorizontalRule { }
+    HorizontalLayout {
+        height: 32px;
+        padding-left: 12px;
+        Text {
+            text: Desktop.physics-note;
+            color: Palette.muted;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component Demo inherits Window {
+    in property <bool> portrait;
+
+    background: Palette.desk;
+
+    VerticalLayout {
+        StatusBar { }
+
+        if !root.portrait: HorizontalLayout {
+            vertical-stretch: 1;
+            padding: 16px;
+            spacing: 16px;
+            FilesWide {
+                horizontal-stretch: 1;
+            }
+            Bodies {
+                width: Desktop.field-width + 2px;
+            }
+        }
+
+        if root.portrait: VerticalLayout {
+            vertical-stretch: 1;
+            padding: 16px;
+            spacing: 16px;
+            Bodies { }
+            FilesNarrow {
+                vertical-stretch: 1;
+            }
+        }
+    }
+}

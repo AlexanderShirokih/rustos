@@ -1,0 +1,33 @@
+[package]
+license = "GPL-3.0-only"
+name = "slint-demo"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 1048576
+
+[[bin]]
+name = "slint-demo"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+components = { workspace = true }
+display-abi = { workspace = true }
+filesystem-abi = { workspace = true }
+input-abi = { workspace = true }
+kernel-objects = { workspace = true }
+rtc-abi = { workspace = true }
+syscall = { workspace = true }
+slint = { version = "=1.18.1", default-features = false, features = ["compat-1-2", "renderer-software", "std"] }
+
+[build-dependencies]
+userland-build = { workspace = true }
+slint-build = "=1.18.1"
+
+[lints]
+workspace = true

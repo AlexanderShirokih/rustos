@@ -1,0 +1,57 @@
+version = 1
+
+[plan]
+source = "user/examples/slint-demo/system.toml"
+
+[[programs]]
+package = "rootkeeper"
+path = "/rootkeeper"
+boot = true
+
+[[programs]]
+package = "platform"
+path = "/platform"
+
+[[programs]]
+package = "driver-simplefb"
+path = "/driver-simplefb"
+
+[[programs]]
+package = "virtio-mmio"
+path = "/virtio-mmio"
+
+[[programs]]
+package = "driver-virtio-gpu"
+path = "/driver-virtio-gpu"
+
+[[programs]]
+package = "driver-pl031"
+path = "/driver-pl031"
+
+[[programs]]
+package = "mounts"
+path = "/mounts"
+
+[[programs]]
+package = "filesystem-imagefs"
+path = "/filesystem-imagefs"
+
+[[programs]]
+package = "filesystem-ramfs"
+path = "/filesystem-ramfs"
+
+[[programs]]
+package = "input-hub"
+path = "/input-hub"
+
+[[programs]]
+package = "slint-demo"
+path = "/slint-demo"
+
+[[files]]
+path = "/mounts/table"
+source = "user/examples/slint-demo/mounts"
+
+[[files]]
+path = "/slint-demo/system.toml"
+source = "user/examples/slint-demo/system.toml"

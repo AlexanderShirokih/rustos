@@ -380,6 +380,11 @@ impl WireTyped for DeviceLayout {
 }
 
 impl DeviceLayout {
+    /// Привязка абсолютных осей `X` и `Y`.
+    pub fn binding(&self) -> Binding {
+        self.binding
+    }
+
     /// Usage клавиши с индексом `index`.
     pub fn key(&self, index: u16) -> Option<Usage> {
         self.keys

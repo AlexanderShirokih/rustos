@@ -1,0 +1,23 @@
+version = 1
+
+[[components]]
+executable = "platform"
+memory_limit = "1M"
+restarts = 2
+
+[[components]]
+executable = "mounts"
+memory_limit = "2M"
+restarts = 2
+
+[[components]]
+executable = "filesystem-imagefs"
+memory_limit = "4M"
+
+[[components]]
+executable = "filesystem-ramfs"
+memory_limit = "4M"
+
+[[components]]
+executable = "slint-demo"
+memory_limit = "16M"

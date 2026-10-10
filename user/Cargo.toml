@@ -8,6 +8,7 @@ members = [
     "examples/files-demo",
     "examples/hello-c",
     "examples/hello-std",
+    "examples/slint-demo",
     "system/driver-pl031",
     "system/driver-pm8941-rtc",
     "system/driver-simplefb",

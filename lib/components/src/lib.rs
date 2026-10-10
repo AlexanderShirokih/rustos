@@ -11,8 +11,8 @@
 
 use std::os::molecular;
 
+pub use component_startup::{Attributes, Providers, StartupError, component_manifest};
 use component_startup::{Handle, Requirements, StartupFailure};
-pub use component_startup::{StartupError, component_manifest};
 
 mod handle;
 
