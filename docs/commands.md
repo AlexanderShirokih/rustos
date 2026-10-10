@@ -165,13 +165,15 @@ TRYBUILD=overwrite cargo test -p syscall --test compile_fail
 ```text
 cargo xtask stress [--seed <n>] [--seeds <n>] [--steps <n>]
                    [--epoch <n>] [--shard <n>] [--shards <n>]
-                   [--timeout <seconds>]
+                   [--cpus <n>] [--memory <MiB>] [--timeout <seconds>]
 ```
 
 Стресс-прогон повторяет операции для диапазона seed.
 `--steps` задаёт число операций, `--epoch` — длину эпохи.
 `--shards` делит диапазон на равные части, `--shard` выбирает часть
 с нулевой нумерацией. Неделимый диапазон и неверный номер отклоняются.
+`--cpus` и `--memory` задают размер машины QEMU; `--cpus` задаёт и число
+потоков параллельных стресс-тестов.
 
 Seed повторяет последовательность операций; чередование потоков
 зависит от планирования.

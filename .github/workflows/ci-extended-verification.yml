@@ -26,12 +26,22 @@ on:
         description: Operations per userspace stress seed
         required: false
         type: number
-        default: 16384
+        default: 32768
       stress_epoch:
         description: Operations in one epoch of a seed
         required: false
         type: number
         default: 256
+      stress_cpus:
+        description: CPUs of the stress QEMU machine
+        required: false
+        type: number
+        default: 4
+      stress_memory:
+        description: Memory of the stress QEMU machine in MiB
+        required: false
+        type: number
+        default: 2048
 
 permissions:
   contents: read
@@ -49,16 +59,19 @@ jobs:
       # Образ и ядро у шардов одни. Второй шард берёт сборку первого, и scope
       # кэша у них общий.
       cache-scope: userspace-stress
-      timeout-minutes: 90
+      timeout-minutes: 240
+      # Число CPU по умолчанию не больше ядер раннера.
       run: >-
         cargo xtask stress
         --seed "${{ inputs.stress_seed || 1 }}"
         --seeds "${{ inputs.stress_seeds || 64 }}"
-        --steps "${{ inputs.stress_steps || 16384 }}"
+        --steps "${{ inputs.stress_steps || 32768 }}"
         --epoch "${{ inputs.stress_epoch || 256 }}"
         --shard "${{ matrix.shard }}"
         --shards "${{ strategy.job-total }}"
-        --timeout 3600
+        --cpus "${{ inputs.stress_cpus || 4 }}"
+        --memory "${{ inputs.stress_memory || 2048 }}"
+        --timeout 13800
 
   qemu-test-gicv2:
     name: qemu-test (GICv2)

@@ -11,7 +11,7 @@ use core::{
     },
 };
 
-use kernel_objects::{Port, Resource, Signal, kind};
+use kernel_objects::{Port, Resource, kind};
 use runtime::{
     JoinHandle, Priority, Timeout, UserMemFlags, handle_close, handle_duplicate, port_call,
     port_recv, port_reply, port_send, signal_wait_one, spawn_owned, thread::Builder,
@@ -19,14 +19,15 @@ use runtime::{
 };
 use syscall::{Handle, Rights, SIGNALED, SYSCALL_RETURN_TIMEOUT, SyscallError};
 
-use crate::stress::{SplitMix64, StressPlan, log_pass, log_seed, read_payload, write_payload};
+use crate::{
+    composition::pause,
+    stress::{SplitMix64, StressPlan, log_pass, log_seed, read_payload, write_payload},
+};
 
-const CALLERS: usize = 3;
-const RESPONDERS: usize = 3;
 const MAPPERS: usize = 1;
 const CHURNERS: usize = 1;
 
-const BRIGADE: usize = CALLERS + RESPONDERS + MAPPERS + CHURNERS;
+const CALLERS_MAX: usize = 12;
 
 const RECV_TIMEOUT_MS: u64 = 500;
 const POLL_MS: u64 = 100;
@@ -41,7 +42,8 @@ const STALL_POLLS: usize = (8 * RECV_TIMEOUT_MS / POLL_MS) as usize;
 
 const MAPPING_BYTES: u64 = 0x4000;
 
-const VICTIMS: usize = 6;
+const VICTIMS_OVER_THREADS: usize = 2;
+const VICTIMS_MAX: usize = 24;
 
 const TERMINATE_ROUNDS: usize = 8;
 
@@ -56,6 +58,7 @@ static VICTIMS_READY: AtomicU64 = AtomicU64::new(0);
 struct Arena {
     server: Handle<kind::Port>,
     client: Handle<kind::Port>,
+    callers: usize,
     callers_live: AtomicU64,
     calls_ok: AtomicU64,
     replies_ok: AtomicU64,
@@ -70,11 +73,12 @@ struct Arena {
 }
 
 impl Arena {
-    fn new(server: Handle<kind::Port>, client: Handle<kind::Port>) -> Self {
+    fn new(server: Handle<kind::Port>, client: Handle<kind::Port>, callers: usize) -> Self {
         Self {
             server,
             client,
-            callers_live: AtomicU64::new(CALLERS as u64),
+            callers,
+            callers_live: AtomicU64::new(callers as u64),
             calls_ok: AtomicU64::new(0),
             replies_ok: AtomicU64::new(0),
             replies_lost: AtomicU64::new(0),
@@ -129,12 +133,6 @@ fn failure_code(error: &kernel_objects::Error, fallback: i64) -> i64 {
     }
 }
 
-fn sleep(budget: Timeout) {
-    // Ждём бит, который никто не поднимает, и выходим по сроку.
-    let idle = Signal::create().expect("signal create for sleep");
-    let _ = idle.wait(SIGNALED, budget);
-}
-
 fn caller(arena: &Arena, index: usize, steps: u64, seed: u64) -> u32 {
     let mut random = SplitMix64::new(seed);
     for step in 0..steps {
@@ -182,7 +180,7 @@ fn responder(arena: &Arena) -> u32 {
         let request = read_payload();
         match (request, reply) {
             (Some(request), Some(reply)) => {
-                if caller_of(request) >= CALLERS {
+                if caller_of(request) >= arena.callers {
                     arena.mismatched.fetch_add(1, Relaxed);
                 }
                 if !write_payload(answer_to(request)) {
@@ -275,7 +273,7 @@ fn await_brigade(arena: &Arena, workers: u64, seed: u64) {
     let mut last = arena.progress.load(Acquire);
     let mut idle_polls = 0;
     while arena.finished.load(Acquire) < workers {
-        sleep(POLL_TIMEOUT);
+        pause(POLL_TIMEOUT);
         let progress = arena.progress.load(Acquire);
         if progress == last {
             idle_polls += 1;
@@ -295,18 +293,26 @@ fn await_brigade(arena: &Arena, workers: u64, seed: u64) {
     }
 }
 
-fn run_brigade(seed: u64, steps: u64) {
+fn run_brigade(seed: u64, steps: u64, threads: usize) {
+    // Вызывающих и отвечающих по числу потоков плана без одного: вместе с
+    // картографом и оборотом хэндлов бригада вдвое шире машины. Поток занимает в
+    // карте процесса стек и IPC-буфер, а карта вмещает 64 отображения, и бригада из
+    // двенадцати пар оставляет место главному потоку, куче и региону картографа.
+    let callers = threads.saturating_sub(1).clamp(1, CALLERS_MAX);
+    let responders = callers;
+    let brigade = callers + responders + MAPPERS + CHURNERS;
+
     let port = Port::create().expect("stress port");
     // Клиентской стороне нужно и право множиться. Хэндлы создают от неё
     // производные, пока по ней идут вызовы.
     let client = port
         .duplicate(Rights::WRITE | Rights::DUPLICATE, None)
         .expect("client side of the stress port");
-    let arena = Arc::new(Arena::new(port.as_raw(), client.as_raw()));
+    let arena = Arc::new(Arena::new(port.as_raw(), client.as_raw(), callers));
 
     let mut random = SplitMix64::new(seed);
-    let mut workers: Vec<JoinHandle> = Vec::with_capacity(BRIGADE);
-    for index in 0..CALLERS {
+    let mut workers: Vec<JoinHandle> = Vec::with_capacity(brigade);
+    for index in 0..callers {
         let share = steps / 2 + random.next() % (steps / 2 + 1);
         let priority = Priority::new(1 + u8::try_from(random.next() % 2).unwrap_or(0));
         let caller_seed = random.next();
@@ -318,7 +324,7 @@ fn run_brigade(seed: u64, steps: u64) {
                 .expect("caller thread spawns"),
         );
     }
-    for _ in 0..RESPONDERS {
+    for _ in 0..responders {
         let arena = Arc::clone(&arena);
         workers.push(spawn_owned(move || responder(&arena)).expect("responder thread spawns"));
     }
@@ -332,7 +338,7 @@ fn run_brigade(seed: u64, steps: u64) {
             .push(spawn_owned(move || handle_churn(&arena)).expect("handle churn thread spawns"));
     }
 
-    await_brigade(&arena, BRIGADE as u64, seed);
+    await_brigade(&arena, brigade as u64, seed);
     for worker in workers {
         worker
             .join(JOIN_TIMEOUT)
@@ -387,7 +393,7 @@ fn shuffled(count: usize, random: &mut SplitMix64) -> Vec<usize> {
     order
 }
 
-fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
+fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize, victims_count: usize) {
     // Жертвы блокируются в приёме на порту, которому никто не шлёт, и
     // снимаются прямо из syscall потоком, идущим на другом CPU.
     let port = Port::create().expect("victim port");
@@ -395,8 +401,8 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
 
     VICTIMS_READY.store(0, Release);
 
-    let mut victims: Vec<JoinHandle> = Vec::with_capacity(VICTIMS);
-    for _ in 0..VICTIMS {
+    let mut victims: Vec<JoinHandle> = Vec::with_capacity(victims_count);
+    for _ in 0..victims_count {
         victims.push(
             spawn_owned(move || {
                 // За отметкой готовности у жертвы нет обращений к общему
@@ -414,17 +420,17 @@ fn terminate_round(random: &mut SplitMix64, seed: u64, round: usize) {
     // Снятие потока не отпускает замки его процесса, а пролог потока держит
     // мьютекс кучи. Готовая жертва прошла пролог и кучу отпустила.
     let mut waits = 0;
-    while VICTIMS_READY.load(Acquire) != VICTIMS as u64 {
+    while VICTIMS_READY.load(Acquire) != victims_count as u64 {
         test_harness::check!(
             waits < READY_YIELD_LIMIT,
-            "smp stress seed={seed} round={round}: only {} of {VICTIMS} victims ready",
+            "smp stress seed={seed} round={round}: only {} of {victims_count} victims ready",
             VICTIMS_READY.load(Acquire)
         );
         waits += 1;
         thread_yield();
     }
 
-    for index in shuffled(VICTIMS, random) {
+    for index in shuffled(victims_count, random) {
         let exit_code = VICTIM_EXIT_BASE + u32::try_from(index).unwrap_or(0);
         let result = thread_terminate(victims[index].handle(), u64::from(exit_code));
         test_harness::check!(
@@ -459,7 +465,7 @@ fn smp_port_brigade_stress() {
     let plan = StressPlan::load();
     for seed in plan.seeds() {
         log_seed(seed, plan.steps);
-        run_brigade(seed, plan.steps);
+        run_brigade(seed, plan.steps, plan.threads);
         log_pass(seed);
     }
 }
@@ -467,11 +473,14 @@ fn smp_port_brigade_stress() {
 #[test_harness::test(stress)]
 fn smp_terminate_blocked_threads_stress() {
     let plan = StressPlan::load();
+    // Жертва занимает в карте процесса стек и IPC-буфер. Карта вмещает 64 отображения, и
+    // при двадцати четырёх жертвах в ней остаётся место главному потоку и куче.
+    let victims = (plan.threads + VICTIMS_OVER_THREADS).min(VICTIMS_MAX);
     for seed in plan.seeds() {
         log_seed(seed, TERMINATE_ROUNDS as u64);
         let mut random = SplitMix64::new(seed);
         for round in 0..TERMINATE_ROUNDS {
-            terminate_round(&mut random, seed, round);
+            terminate_round(&mut random, seed, round, victims);
         }
         log_pass(seed);
     }

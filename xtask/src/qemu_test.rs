@@ -19,9 +19,28 @@ const TEST_FILTER_IMAGE_PATH: &str = "/testrunner/test-filter";
 
 const TEST_FILTER_SOURCE: &str = "test-filter.txt";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Machine {
+    pub(crate) cpus: u64,
+    pub(crate) memory_mib: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StressRun {
+    pub(crate) seed: u64,
+    pub(crate) seeds: u64,
+    pub(crate) steps: u64,
+    pub(crate) epoch: u64,
+    pub(crate) shard: u64,
+    pub(crate) shards: u64,
+    pub(crate) machine: Machine,
+    pub(crate) timeout: u64,
+}
+
 struct QemuPass<'a> {
     label: &'a str,
     spec: &'a Path,
+    machine: Option<Machine>,
     features: Option<String>,
     image: &'a Path,
     timeout: u64,
@@ -38,6 +57,7 @@ pub(crate) fn qemu_test(timeout: u64, spec: &Path, filter: Option<&str>) -> Resu
     let kernel = qemu_test_pass(QemuPass {
         label: "kernel",
         spec,
+        machine: None,
         features: Some(String::from("kernel-tests")),
         image,
         timeout,
@@ -50,6 +70,7 @@ pub(crate) fn qemu_test(timeout: u64, spec: &Path, filter: Option<&str>) -> Resu
     let userland = qemu_test_pass(QemuPass {
         label: "userland",
         spec,
+        machine: None,
         features: None,
         image,
         timeout,
@@ -67,6 +88,7 @@ pub(crate) fn qemu_bench(timeout: u64, filter: Option<&str>) -> Result<()> {
     let ran = qemu_test_pass(QemuPass {
         label: "bench",
         spec: Path::new(DEFAULT_SPEC),
+        machine: None,
         features: None,
         image: Path::new(TESTRUNNER_IMAGE),
         timeout,
@@ -82,17 +104,25 @@ pub(crate) fn qemu_bench(timeout: u64, filter: Option<&str>) -> Result<()> {
     require_match(filter, ran)
 }
 
-pub(crate) fn qemu_stress(
-    seed: u64,
-    seeds: u64,
-    steps: u64,
-    epoch: u64,
-    shard: u64,
-    shards: u64,
-    timeout: u64,
-) -> Result<()> {
+pub(crate) fn qemu_stress(run: StressRun) -> Result<()> {
+    let StressRun {
+        seed,
+        seeds,
+        steps,
+        epoch,
+        shard,
+        shards,
+        machine,
+        timeout,
+    } = run;
     if epoch == 0 {
         bail!("--epoch must be greater than zero");
+    }
+    if machine.cpus == 0 {
+        bail!("--cpus must be greater than zero");
+    }
+    if machine.memory_mib == 0 {
+        bail!("--memory must be greater than zero");
     }
     let subrange = shard_subrange(seed, seeds, shard, shards)?;
     let (seed, seeds) = (subrange.first_seed, subrange.seed_count);
@@ -100,16 +130,19 @@ pub(crate) fn qemu_stress(
     let files = [write_image_file(
         STRESS_PLAN_SOURCE,
         STRESS_PLAN_IMAGE_PATH,
-        &encode_plan(seed, seeds, steps, epoch),
+        &encode_plan(seed, seeds, steps, epoch, machine.cpus),
     )?];
     println!(
         "=== stress plan: cargo xtask stress --seed {seed} --seeds {seeds} \
---steps {steps} --epoch {epoch} --timeout {timeout} (shard {shard} of {shards}) ==="
+--steps {steps} --epoch {epoch} --cpus {} --memory {} --timeout {timeout} \
+(shard {shard} of {shards}) ===",
+        machine.cpus, machine.memory_mib
     );
 
     qemu_test_pass(QemuPass {
         label: "stress",
         spec: Path::new(DEFAULT_SPEC),
+        machine: Some(machine),
         // Короткий квант режет окно между операциями и расширяет чередования.
         features: Some(String::from("short-quantum")),
         image: Path::new(TESTRUNNER_IMAGE),
@@ -151,8 +184,26 @@ fn require_match(filter: Option<&str>, ran: usize) -> Result<()> {
     }
 }
 
-fn encode_plan(seed: u64, seeds: u64, steps: u64, epoch: u64) -> String {
-    format!("seed={seed}\nseeds={seeds}\nsteps={steps}\nepoch={epoch}\n")
+fn encode_plan(seed: u64, seeds: u64, steps: u64, epoch: u64, threads: u64) -> String {
+    // Число CPU ABI не сообщает, и ширину параллельной нагрузки прогон получает планом.
+    format!("seed={seed}\nseeds={seeds}\nsteps={steps}\nepoch={epoch}\nthreads={threads}\n")
+}
+
+fn machine_command(command: &str, machine: Machine) -> Result<String> {
+    let mut tokens: Vec<String> = command.split(' ').map(String::from).collect();
+    for (option, value) in [
+        ("-smp", machine.cpus.to_string()),
+        ("-m", format!("{}M", machine.memory_mib)),
+    ] {
+        let Some(position) = tokens.iter().position(|token| token == option) else {
+            bail!("the run command of the spec has no '{option}' to size the machine");
+        };
+        let Some(slot) = tokens.get_mut(position + 1) else {
+            bail!("the run command of the spec has no value after '{option}'");
+        };
+        *slot = value;
+    }
+    Ok(tokens.join(" "))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +241,7 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<usize> {
     let QemuPass {
         label,
         spec,
+        machine,
         features,
         image,
         timeout,
@@ -218,6 +270,10 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<usize> {
         .run
         .first()
         .with_context(|| format!("No run commands in {}", spec.display()))?;
+    let qemu_cmd = match machine {
+        Some(machine) => machine_command(qemu_cmd, machine)?,
+        None => qemu_cmd.clone(),
+    };
 
     let mut command = Command::new("sh");
     command
@@ -532,9 +588,31 @@ mod tests {
     #[test]
     fn encoded_plan_declares_every_field_on_its_own_line() {
         assert_eq!(
-            encode_plan(7, 3, 64, 16),
-            "seed=7\nseeds=3\nsteps=64\nepoch=16\n"
+            encode_plan(7, 3, 64, 16, 8),
+            "seed=7\nseeds=3\nsteps=64\nepoch=16\nthreads=8\n"
         );
+    }
+
+    #[test]
+    fn the_machine_replaces_the_size_the_spec_declares() {
+        let machine = Machine {
+            cpus: 8,
+            memory_mib: 4096,
+        };
+        assert_eq!(
+            machine_command("qemu -smp 4 -m 512M -kernel k.bin", machine).expect("sized"),
+            "qemu -smp 8 -m 4096M -kernel k.bin"
+        );
+    }
+
+    #[test]
+    fn a_command_without_a_machine_size_is_refused() {
+        let machine = Machine {
+            cpus: 8,
+            memory_mib: 4096,
+        };
+        assert!(machine_command("qemu -m 512M -kernel k.bin", machine).is_err());
+        assert!(machine_command("qemu -smp 4 -m", machine).is_err());
     }
 
     #[test]

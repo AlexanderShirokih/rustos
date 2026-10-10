@@ -62,6 +62,7 @@ mod log_fixture_protocol;
 mod log_relay;
 mod memory_capability_target;
 mod memory_share;
+mod memory_stress;
 mod mismatched_kind;
 mod owned_handle;
 mod parent;

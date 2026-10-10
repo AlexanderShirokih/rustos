@@ -41,6 +41,7 @@ pub(crate) struct StressPlan {
     seed_count: u64,
     pub(crate) steps: u64,
     epoch_steps: u64,
+    pub(crate) threads: usize,
 }
 
 impl SplitMix64 {
@@ -97,6 +98,7 @@ impl StressPlan {
         let mut seed_count = None;
         let mut steps = None;
         let mut epoch_steps = None;
+        let mut threads = None;
 
         for line in text.lines() {
             let line = line.trim();
@@ -111,6 +113,7 @@ impl StressPlan {
                 "seeds" => &mut seed_count,
                 "steps" => &mut steps,
                 "epoch" => &mut epoch_steps,
+                "threads" => &mut threads,
                 _ => return Err(PlanError::Unknown(key)),
             };
             if slot.is_some() {
@@ -126,6 +129,7 @@ impl StressPlan {
         let seed_count = seed_count.ok_or(PlanError::Missing("seeds"))?;
         let steps = steps.ok_or(PlanError::Missing("steps"))?;
         let epoch_steps = epoch_steps.ok_or(PlanError::Missing("epoch"))?;
+        let threads = threads.ok_or(PlanError::Missing("threads"))?;
         if seed_count == 0 {
             return Err(PlanError::Zero("seeds"));
         }
@@ -135,12 +139,17 @@ impl StressPlan {
         if epoch_steps == 0 {
             return Err(PlanError::Zero("epoch"));
         }
+        if threads == 0 {
+            return Err(PlanError::Zero("threads"));
+        }
+        let threads = usize::try_from(threads).map_err(|_| PlanError::NotANumber("threads"))?;
 
         Ok(Self {
             first_seed,
             seed_count,
             steps,
             epoch_steps,
+            threads,
         })
     }
 
@@ -885,7 +894,7 @@ pub(crate) fn answered<T, E: fmt::Debug>(
     }
 }
 
-fn measure(context: fmt::Arguments<'_>) -> u64 {
+pub(crate) fn measure(context: fmt::Arguments<'_>) -> u64 {
     // Нехватка остатка на само снятие величины - то же расхождение.
     match remaining_budget() {
         Ok(budget) => budget,
@@ -956,16 +965,19 @@ fn port_signal_lifecycle_stress() {
 
 #[test_harness::test]
 fn plan_parses_declared_fields() {
-    let plan = StressPlan::parse("seed=7\nseeds=3\nsteps=64\nepoch=16\n").expect("plan parses");
+    let plan =
+        StressPlan::parse("seed=7\nseeds=3\nsteps=64\nepoch=16\nthreads=4\n").expect("plan parses");
     test_harness::check_eq!(plan.steps, 64);
     test_harness::check_eq!(plan.epochs(), 4);
+    test_harness::check_eq!(plan.threads, 4);
     let seeds: alloc::vec::Vec<u64> = plan.seeds().collect();
     test_harness::check_eq!(seeds, alloc::vec![7, 8, 9]);
 }
 
 #[test_harness::test]
 fn epochs_cover_the_steps_of_a_seed() {
-    let plan = StressPlan::parse("seed=1\nseeds=1\nsteps=70\nepoch=32\n").expect("plan parses");
+    let plan =
+        StressPlan::parse("seed=1\nseeds=1\nsteps=70\nepoch=32\nthreads=1\n").expect("plan parses");
     test_harness::check_eq!(plan.epochs(), 3);
     let lengths: alloc::vec::Vec<u64> = (0..plan.epochs()).map(|e| plan.epoch_length(e)).collect();
     test_harness::check_eq!(lengths, alloc::vec![32, 32, 6]);
@@ -1007,16 +1019,20 @@ fn plan_rejects_a_line_without_a_separator() {
 #[test_harness::test]
 fn plan_rejects_a_zero_count() {
     test_harness::check_eq!(
-        StressPlan::parse("seed=1\nseeds=0\nsteps=4\nepoch=1\n").err(),
+        StressPlan::parse("seed=1\nseeds=0\nsteps=4\nepoch=1\nthreads=1\n").err(),
         Some(PlanError::Zero("seeds"))
     );
     test_harness::check_eq!(
-        StressPlan::parse("seed=1\nseeds=2\nsteps=0\nepoch=1\n").err(),
+        StressPlan::parse("seed=1\nseeds=2\nsteps=0\nepoch=1\nthreads=1\n").err(),
         Some(PlanError::Zero("steps"))
     );
     test_harness::check_eq!(
-        StressPlan::parse("seed=1\nseeds=2\nsteps=4\nepoch=0\n").err(),
+        StressPlan::parse("seed=1\nseeds=2\nsteps=4\nepoch=0\nthreads=1\n").err(),
         Some(PlanError::Zero("epoch"))
+    );
+    test_harness::check_eq!(
+        StressPlan::parse("seed=1\nseeds=2\nsteps=4\nepoch=1\nthreads=0\n").err(),
+        Some(PlanError::Zero("threads"))
     );
 }
 
@@ -1029,6 +1045,10 @@ fn plan_rejects_an_incomplete_declaration() {
     test_harness::check_eq!(
         StressPlan::parse("seed=1\nseeds=2\nsteps=4\n").err(),
         Some(PlanError::Missing("epoch"))
+    );
+    test_harness::check_eq!(
+        StressPlan::parse("seed=1\nseeds=2\nsteps=4\nepoch=1\n").err(),
+        Some(PlanError::Missing("threads"))
     );
     test_harness::check_eq!(
         StressPlan::parse("").err(),

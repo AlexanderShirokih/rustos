@@ -90,6 +90,12 @@ enum Commands {
         /// Number of shards the seed range is split into
         #[arg(long, default_value_t = 1)]
         shards: u64,
+        /// CPUs of the QEMU machine and threads of each parallel stress test
+        #[arg(long, default_value_t = 4)]
+        cpus: u64,
+        /// Memory of the QEMU machine in MiB
+        #[arg(long, default_value_t = 512)]
+        memory: u64,
         /// Timeout in seconds
         #[arg(long, default_value_t = 120)]
         timeout: u64,
@@ -190,8 +196,22 @@ fn main() -> Result<ExitCode> {
             epoch,
             shard,
             shards,
+            cpus,
+            memory,
             timeout,
-        } => qemu_test::qemu_stress(seed, seeds, steps, epoch, shard, shards, timeout)?,
+        } => qemu_test::qemu_stress(qemu_test::StressRun {
+            seed,
+            seeds,
+            steps,
+            epoch,
+            shard,
+            shards,
+            machine: qemu_test::Machine {
+                cpus,
+                memory_mib: memory,
+            },
+            timeout,
+        })?,
         Commands::Race => race::run()?,
         Commands::Fuzz { target, seconds } => fuzz::run(&target, seconds)?,
         Commands::BuildUserland { image, arch, files } => {
