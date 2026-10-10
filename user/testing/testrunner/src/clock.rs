@@ -26,5 +26,5 @@ fn clock_monotonic_advances_over_a_pause() {
     let elapsed = Instant::now().since(before);
 
     test_harness::check_eq!(observed, Err(Error::Syscall(SyscallError::Timeout)));
-    test_harness::check!(elapsed.raw() >= PAUSE.raw());
+    test_harness::check!(elapsed >= PAUSE);
 }

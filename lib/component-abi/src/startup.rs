@@ -19,7 +19,7 @@ use crate::attributes::{ATTRIBUTES_MAX_BYTES, AttributeSet};
 pub const REQUIREMENT_NAME_MAX: usize = 64;
 
 /// Срок одного запроса компонента к родителю по стартовой сессии.
-pub const STARTUP_REQUEST_TIMEOUT: ipc::Timeout = ipc::Timeout::from_secs(5);
+pub const STARTUP_REQUEST_TIMEOUT: ipc::Timeout = ipc::Timeout::from_secs(2);
 
 /// Граница длины идентификатора протокола [`ipc::Protocol::ID`] в байтах.
 pub const PROTOCOL_ID_MAX: usize = 64;

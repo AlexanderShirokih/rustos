@@ -140,7 +140,7 @@ fn wait_ready(expected: usize, counter: &Counter) -> Result<(), StartError> {
     Err(StartError::NotReady)
 }
 
-struct Counter {
+pub(crate) struct Counter {
     frequency: u64,
 }
 
@@ -148,7 +148,7 @@ const MIN_COUNTER_HZ: u64 = 1_000;
 const MAX_COUNTER_HZ: u64 = 100_000_000_000;
 
 impl Counter {
-    fn probe() -> Option<Self> {
+    pub(crate) fn probe() -> Option<Self> {
         // SAFETY: CNTFRQ_EL0 доступен на EL1 и только читается.
         let frequency = unsafe { read_sysreg!(cntfrq_el0) };
 
@@ -157,13 +157,13 @@ impl Counter {
             .then_some(Self { frequency })
     }
 
-    fn deadline_after_ms(&self, timeout_ms: u64) -> u64 {
+    pub(crate) fn deadline_after_ms(&self, timeout_ms: u64) -> u64 {
         let ticks = timeout_ms.saturating_mul(self.frequency) / 1_000;
 
         Self::now().saturating_add(ticks)
     }
 
-    fn passed(deadline: u64) -> bool {
+    pub(crate) fn passed(deadline: u64) -> bool {
         Self::now() >= deadline
     }
 

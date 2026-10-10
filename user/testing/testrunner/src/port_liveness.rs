@@ -399,7 +399,7 @@ fn a_failed_transfer_does_not_extend_the_receive_deadline() {
         received,
         Err(Error::Syscall(SyscallError::Timeout))
     ));
-    test_harness::check!(elapsed.raw() < DEADLINE_RECV.raw() + SENDER_DELAY.raw());
+    test_harness::check!(elapsed < DEADLINE_RECV.saturating_add(SENDER_DELAY));
     worker.join(JOIN_TIMEOUT).expect("sender joins");
     test_harness::check_eq!(
         SyscallError::from_return(LATE_SENDER_RESULT.load(SeqCst)),

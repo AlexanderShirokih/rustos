@@ -255,7 +255,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .iter()
             .filter(|entry| launchable(entry.child))
             .filter_map(Entry::launch_wait)
-            .min_by_key(|wait| wait.raw())
+            .min()
             .unwrap_or(Timeout::INFINITE)
     }
 
@@ -677,7 +677,7 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
 
         Some(exhausted_since.map_or(Timeout::POLL, |since| {
             let elapsed = Instant::now().since(since);
-            Timeout::from_ns(self.budget_deadline.raw().saturating_sub(elapsed.raw()))
+            self.budget_deadline.saturating_sub(elapsed)
         }))
     }
 
@@ -697,8 +697,7 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
             Err(Error::Syscall(SyscallError::ResourceExhausted)) => {
                 let since = *exhausted_since.get_or_insert_with(Instant::now);
                 let elapsed = Instant::now().since(since);
-                return (elapsed.raw() >= self.budget_deadline.raw())
-                    .then_some(Outcome::BudgetNotReturned);
+                return (elapsed >= self.budget_deadline).then_some(Outcome::BudgetNotReturned);
             }
             Err(_) => return Some(Outcome::LaunchFailed),
         }

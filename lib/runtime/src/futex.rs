@@ -139,7 +139,7 @@ impl Deadline {
             Self::Infinite => Some(Timeout::INFINITE),
             Self::Until(end) => {
                 let left = end.since(Instant::now());
-                (left.raw() > 0).then_some(left)
+                (left > Timeout::POLL).then_some(left)
             }
         }
     }
@@ -254,8 +254,7 @@ fn slotless_round(
     match bucket.signal() {
         Some(signal) => {
             // Никто не поднимает IDLE_BIT, поэтому ожидание на нём истекает только по тайм-ауту.
-            let pause = remaining.raw().min(SLOTLESS_PAUSE.raw());
-            let _ = signal_wait_one(signal, IDLE_BIT, Timeout::from_ns(pause));
+            let _ = signal_wait_one(signal, IDLE_BIT, remaining.min(SLOTLESS_PAUSE));
         }
         None => thread_yield(),
     }

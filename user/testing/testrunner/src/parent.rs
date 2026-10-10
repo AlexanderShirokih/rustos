@@ -303,7 +303,7 @@ impl Parent {
             if let Some(found) = check(&mut self.state.lock()) {
                 return Some(found);
             }
-            if Instant::now().since(since).raw() >= wait.raw() {
+            if Instant::now().since(since) >= wait {
                 return None;
             }
             pause(POLL_INTERVAL);
@@ -470,11 +470,7 @@ fn turn(state: &Mutex<State>, port: Handle<kind::Port>) -> ControlFlow<()> {
             state.depart(departure);
         }
         let next = state.children.next_launch(|_| true);
-        if next.raw() < LAUNCH_CHECK_INTERVAL.raw() {
-            next
-        } else {
-            LAUNCH_CHECK_INTERVAL
-        }
+        next.min(LAUNCH_CHECK_INTERVAL)
     };
 
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];

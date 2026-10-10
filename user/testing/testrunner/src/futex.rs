@@ -99,7 +99,7 @@ fn pause(millis: u64) {
 fn wait_for(counter: &AtomicU32, target: u32, limit: Timeout) -> bool {
     let started = Instant::now();
     while counter.load(Ordering::Acquire) < target {
-        if Instant::now().since(started).raw() > limit.raw() {
+        if Instant::now().since(started) > limit {
             return false;
         }
         thread_yield();
@@ -121,7 +121,7 @@ fn wait_returns_at_once_when_the_value_differs() {
     let started = Instant::now();
 
     test_harness::check!(futex_wait(&futex, PARKED, PARK_LIMIT));
-    test_harness::check!(Instant::now().since(started).raw() < Timeout::from_secs(1).raw());
+    test_harness::check!(Instant::now().since(started) < Timeout::from_secs(1));
 }
 
 #[test_harness::test]
@@ -130,7 +130,7 @@ fn wait_reports_the_timeout_it_was_given() {
     let started = Instant::now();
 
     test_harness::check!(!futex_wait(&futex, PARKED, Some(Duration::from_millis(50))));
-    test_harness::check!(Instant::now().since(started).raw() >= Timeout::from_millis(40).raw());
+    test_harness::check!(Instant::now().since(started) >= Timeout::from_millis(40));
 }
 
 #[test_harness::test]
@@ -281,7 +281,7 @@ fn a_waiter_without_a_slot_reports_its_timeout() {
         PARKED,
         Some(Duration::from_millis(50))
     ));
-    test_harness::check!(Instant::now().since(started).raw() >= Timeout::from_millis(40).raw());
+    test_harness::check!(Instant::now().since(started) >= Timeout::from_millis(40));
 }
 
 fn colliding_pair(cells: &[Futex]) -> Option<(usize, usize)> {

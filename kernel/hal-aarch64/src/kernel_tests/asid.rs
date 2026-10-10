@@ -164,10 +164,7 @@ fn reissued_asid_does_not_translate_through_the_previous_owner() {
         new_owner_page.write_volatile(NEW_OWNER_VALUE);
     }
 
-    // Прежний владелец получает ASID в начале поколения, и после следующего rollover этот ASID
-    // достаётся одному из первых новых адресных пространств.
-    let first_generation = unpack_generation(fresh_tag(factory));
-    while unpack_generation(fresh_tag(factory)) == first_generation {}
+    // После rollover ASID прежнего владельца достаётся новому адресному пространству.
     let owner_tag = previous_owner
         .handle()
         .expect("user variant has handle")
@@ -206,11 +203,6 @@ fn reissued_asid_does_not_translate_through_the_previous_owner() {
     test_harness::check_eq!(observed, Some(NEW_OWNER_VALUE));
     drop(spacer);
     drop(previous_owner);
-}
-
-fn fresh_tag(factory: &dyn AddressSpaceFactory) -> u64 {
-    let space = AddressSpace::new_user(factory).expect("create AS");
-    space.handle().expect("user variant has handle").tag.raw()
 }
 
 fn read_probe_under_reissued_asid(

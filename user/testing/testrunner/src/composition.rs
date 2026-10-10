@@ -358,7 +358,7 @@ pub(crate) fn drained(enumeration: &Session<startup_contract::Protocol>) -> Vec<
 
 fn await_budget(plan: &BootPlan<'_>) {
     let resource = Resource::self_resource().expect("self metering resource");
-    let mut waited = 0;
+    let mut waited = Timeout::POLL;
     loop {
         let probes: Result<Vec<Resource>, Error> = plan
             .components()
@@ -368,10 +368,10 @@ fn await_budget(plan: &BootPlan<'_>) {
         match probes {
             Ok(_) => return,
             Err(Error::Syscall(SyscallError::ResourceExhausted))
-                if waited < BUDGET_RETURN_TIMEOUT.raw() =>
+                if waited < BUDGET_RETURN_TIMEOUT =>
             {
                 pause(BUDGET_POLL);
-                waited += BUDGET_POLL.raw();
+                waited = waited.saturating_add(BUDGET_POLL);
             }
             Err(Error::Syscall(SyscallError::ResourceExhausted)) => expire(
                 format_args!("components={}", plan.components().count()),

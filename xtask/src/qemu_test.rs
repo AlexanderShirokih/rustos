@@ -1,6 +1,12 @@
 //! Двухпроходные QEMU-тесты: pass "kernel" и pass "userland".
 
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    os::unix::process::ExitStatusExt as _,
+    path::Path,
+    process::{Command, ExitStatus},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use userland_image_tool::{BuildEnvironment, ExtraFile};
@@ -49,9 +55,15 @@ struct QemuPass<'a> {
     filtered: bool,
     expected_seeds: Option<u64>,
     expected_epochs: Option<u64>,
+    durations: usize,
 }
 
-pub(crate) fn qemu_test(timeout: u64, spec: &Path, filter: Option<&str>) -> Result<()> {
+pub(crate) fn qemu_test(
+    timeout: u64,
+    spec: &Path,
+    filter: Option<&str>,
+    durations: usize,
+) -> Result<()> {
     let image = Path::new(TESTRUNNER_IMAGE);
     let filter_file = filter_file(filter)?;
     let kernel = qemu_test_pass(QemuPass {
@@ -66,6 +78,7 @@ pub(crate) fn qemu_test(timeout: u64, spec: &Path, filter: Option<&str>) -> Resu
         filtered: filter.is_some(),
         expected_seeds: None,
         expected_epochs: None,
+        durations,
     })?;
     let userland = qemu_test_pass(QemuPass {
         label: "userland",
@@ -79,6 +92,7 @@ pub(crate) fn qemu_test(timeout: u64, spec: &Path, filter: Option<&str>) -> Resu
         filtered: filter.is_some(),
         expected_seeds: None,
         expected_epochs: None,
+        durations,
     })?;
     require_match(filter, kernel + userland)
 }
@@ -100,6 +114,7 @@ pub(crate) fn qemu_bench(timeout: u64, filter: Option<&str>) -> Result<()> {
         filtered: filter.is_some(),
         expected_seeds: None,
         expected_epochs: None,
+        durations: 0,
     })?;
     require_match(filter, ran)
 }
@@ -155,6 +170,7 @@ pub(crate) fn qemu_stress(run: StressRun) -> Result<()> {
         filtered: false,
         expected_seeds: Some(seeds),
         expected_epochs: Some(seeds * expected_epochs(steps, epoch)),
+        durations: 0,
     })
     .map(drop)
 }
@@ -250,6 +266,7 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<usize> {
         filtered,
         expected_seeds,
         expected_epochs,
+        durations,
     } = pass;
     println!("=== qemu-test pass: {label} ===");
 
@@ -281,19 +298,48 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<usize> {
         .current_dir(&ctx.project_root);
 
     let mut markers = TestMarkers::default();
-    let status = shell::run_streaming(&mut command, "QEMU", |line| markers.observe(line))?;
+    let mut timings = TestTimings::default();
+    let status = shell::run_streaming(&mut command, "QEMU", |line| {
+        markers.observe(line);
+        timings.observe(line, Instant::now());
+    })?;
+    let place = match (timings.running(), &markers.stress_started) {
+        (Some(test), Some(seed)) => format!(" during {test} ({seed})"),
+        (Some(test), None) => format!(" during {test}"),
+        (None, _) => String::new(),
+    };
+    if durations > 0 {
+        println!("=== slowest tests of pass {label} ===");
+        for (duration, name) in timings.slowest(durations) {
+            println!("{:>8.2}s {name}", duration.as_secs_f64());
+        }
+    }
+
     if !status.success() {
-        let code = status.code().unwrap_or(1);
         if let Some(refusal) = markers.expiry_refusal(label) {
             bail!(refusal);
         }
-        if code == 124 {
-            bail!("QEMU pass '{label}' timed out after {timeout}s");
+        if status.code() == Some(124) {
+            bail!("QEMU pass '{label}' timed out after {timeout}s{place}");
         }
-        bail!("QEMU pass '{label}' exited with code {code}");
+        bail!("QEMU pass '{label}' {}{place}", exit_description(status));
     }
 
     markers.verify(label, filtered, expected_seeds, expected_epochs)
+}
+
+fn exit_description(status: ExitStatus) -> String {
+    match (status.code(), status.signal()) {
+        (Some(code), _) => format!("exited with code {code}"),
+        (None, Some(signal)) => format!("was killed by signal {signal}"),
+        (None, None) => format!("ended with status {status}"),
+    }
+}
+
+#[derive(Default)]
+struct TestTimings {
+    running: Option<(String, Instant)>,
+    finished: Vec<(Duration, String)>,
 }
 
 #[derive(Default)]
@@ -307,6 +353,33 @@ struct TestMarkers {
     stress_seeds: usize,
     stress_epochs: usize,
     stress_expiry: Option<String>,
+    stress_started: Option<String>,
+}
+
+impl TestTimings {
+    fn observe(&mut self, line: &str, now: Instant) {
+        if let Some(tail) = line.split("[TEST-START: ").nth(1) {
+            let name = tail.split(']').next().unwrap_or(tail);
+            self.running = Some((name.to_string(), now));
+        } else if ["[TEST-PASS: ", "[TEST-SKIP: ", "[TEST-FAIL"]
+            .iter()
+            .any(|marker| line.contains(marker))
+            && let Some((name, started)) = self.running.take()
+        {
+            self.finished.push((now - started, name));
+        }
+    }
+
+    fn running(&self) -> Option<&str> {
+        self.running.as_ref().map(|(name, _)| name.as_str())
+    }
+
+    fn slowest(mut self, count: usize) -> Vec<(Duration, String)> {
+        self.finished
+            .sort_by(|(left, _), (right, _)| right.cmp(left));
+        self.finished.truncate(count);
+        self.finished
+    }
 }
 
 impl TestMarkers {
@@ -320,6 +393,9 @@ impl TestMarkers {
             self.announced = suffix_count(line, "[TEST-RUN: ");
         } else if line.contains("[TEST-START: ") {
             self.started += 1;
+            self.stress_started = None;
+        } else if let Some(tail) = line.split("[STRESS-START: ").nth(1) {
+            self.stress_started = tail.split(']').next().map(String::from);
         } else if line.contains("[TEST-PASS: ") {
             self.passed += 1;
         } else if line.contains("[TEST-SKIP: ") {
@@ -330,6 +406,7 @@ impl TestMarkers {
             self.done = suffix_count(line, "[TEST-DONE: ");
         } else if line.contains("[STRESS-PASS: ") {
             self.stress_seeds += 1;
+            self.stress_started = None;
         } else if line.contains("[STRESS-EPOCH: ") {
             self.stress_epochs += 1;
         } else if line.contains("[STRESS-TIMEOUT: ") && self.stress_expiry.is_none() {
@@ -440,6 +517,50 @@ mod tests {
 
     fn borrow(lines: &[String]) -> Vec<&str> {
         lines.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn a_test_lasts_from_its_start_to_its_verdict() {
+        let start = Instant::now();
+        let mut timings = TestTimings::default();
+        let lines = [
+            (0, "[I] [testrunner] [TEST-START: quick]"),
+            (1, "[I] [testrunner] [TEST-PASS: quick]"),
+            (2, "[I] [testrunner] [TEST-START: slow]"),
+            (3, "[I] [slow-fixture] output"),
+            (
+                7,
+                "[I] [testrunner] [TEST-SKIP: no device] at src/slow.rs:1",
+            ),
+            (8, "[I] [testrunner] [TEST-START: medium]"),
+            (
+                10,
+                "[I] [testrunner] [TEST-FAIL: assertion] at src/medium.rs:1",
+            ),
+        ];
+        for (seconds, line) in lines {
+            timings.observe(line, start + Duration::from_secs(seconds));
+        }
+
+        assert_eq!(
+            timings.slowest(2),
+            [
+                (Duration::from_secs(5), String::from("slow")),
+                (Duration::from_secs(2), String::from("medium")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_signal_is_not_reported_as_an_exit_code() {
+        assert_eq!(
+            exit_description(ExitStatus::from_raw(3 << 8)),
+            "exited with code 3"
+        );
+        assert_eq!(
+            exit_description(ExitStatus::from_raw(9)),
+            "was killed by signal 9"
+        );
     }
 
     #[test]

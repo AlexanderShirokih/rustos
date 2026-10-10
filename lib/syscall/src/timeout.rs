@@ -3,8 +3,10 @@ const NS_PER_MILLI: u64 = 1_000_000;
 const NS_PER_MICRO: u64 = 1_000;
 
 /// Типизированный фасад над `timeout_ns` блокирующих syscall. Значение отсчитывается от
-/// момента вызова, два sentinel-значения выделены под poll и бессрочное ожидание.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// момента вызова, два sentinel-значения выделены под poll и бессрочное ожидание. Порядок
+/// сроков совпадает с порядком их длительности: [`Self::POLL`] короче любого срока,
+/// [`Self::INFINITE`] длиннее любого.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Timeout(u64);
 
@@ -38,6 +40,23 @@ impl Timeout {
     /// [`Self::INFINITE`].
     pub const fn from_secs(secs: u64) -> Self {
         Self(secs.saturating_mul(NS_PER_SEC))
+    }
+
+    /// Возвращает сумму сроков. Сумма с [`Self::INFINITE`] либо сверх диапазона наносекунд -
+    /// [`Self::INFINITE`].
+    #[must_use]
+    pub const fn saturating_add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0))
+    }
+
+    /// Возвращает остаток срока после `other`. Остаток [`Self::INFINITE`] - [`Self::INFINITE`],
+    /// остаток срока не длиннее `other` - [`Self::POLL`].
+    #[must_use]
+    pub const fn saturating_sub(self, other: Self) -> Self {
+        if self.0 == Self::INFINITE.0 {
+            return self;
+        }
+        Self(self.0.saturating_sub(other.0))
     }
 
     /// ABI-значение `timeout_ns` для укладки в аргумент syscall.
@@ -74,5 +93,13 @@ mod tests {
         assert_eq!(Timeout::from_micros(u64::MAX), Timeout::INFINITE);
         assert_eq!(Timeout::from_millis(u64::MAX), Timeout::INFINITE);
         assert_eq!(Timeout::from_secs(u64::MAX), Timeout::INFINITE);
+    }
+
+    #[test]
+    fn remainder_of_infinite_stays_infinite() {
+        assert_eq!(
+            Timeout::INFINITE.saturating_sub(Timeout::from_secs(1)),
+            Timeout::INFINITE
+        );
     }
 }

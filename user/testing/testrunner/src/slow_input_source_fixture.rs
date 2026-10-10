@@ -6,7 +6,7 @@
 
 extern crate alloc;
 
-use component_startup::{Requirements as _, component_manifest};
+use component_startup::{Requirements as _, STARTUP_REQUEST_TIMEOUT, component_manifest};
 use input_abi::input_source;
 use runtime::Timeout;
 use syscall::{Handle, kind};
@@ -17,7 +17,7 @@ mod source_fixture;
 use failed::Failed;
 use source_fixture::{Attach, SLOW_DEVICE, serve_source};
 
-const ACCEPT_DELAY: Timeout = Timeout::from_secs(7);
+const ACCEPT_DELAY: Timeout = STARTUP_REQUEST_TIMEOUT.saturating_add(Timeout::from_secs(1));
 
 component_manifest! {
     struct SlowInputSourceStartup {

@@ -25,6 +25,8 @@ mod consts;
 mod cpu;
 mod exception;
 mod memory;
+#[cfg(not(test))]
+mod panic;
 mod power;
 mod psci;
 mod sched;
@@ -35,28 +37,3 @@ mod smp;
 mod qemu_tests;
 
 extern crate drivers_common_aarch64;
-
-static PANICKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    use core::sync::atomic::Ordering;
-
-    use kbase::{CriticalSection as _, DaifCriticalSection};
-
-    // IRQ маскируются на весь путь паники, поэтому печать причины не прерывается,
-    // а обработчик не вытесняется до выключения машины.
-    let _irq_mask = DaifCriticalSection::enter();
-
-    // Паника на пути печати причины гасит машину молча, потому что стек ядра защитной
-    // страницы не имеет, и рекурсивная печать затирает соседнюю память.
-    if PANICKING.swap(true, Ordering::Relaxed) {
-        kernelspace::power::system_off(1);
-    }
-
-    // Причина печатается в обход локов пути записи, потому что их держатель - контекст,
-    // прерванный паникой, и своих локов он уже не освобождает.
-    klog::panic_logf(format_args!("Kernel panic: {info}"));
-    kernelspace::power::system_off(1)
-}

@@ -20,9 +20,10 @@ use kernel_objects::{
 };
 use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
+use managed_component::Status;
 use platform_abi::{Description, DescriptionRegion, MappedDescription, PlatformError, platform};
 use rootkeeper::{
-    BootFailure, SEARCH_LIMITS, SearchLimits, Stopped,
+    BootFailure, RecordState, SEARCH_LIMITS, SearchLimits, Stopped,
     relay::{ComponentNames, LogSessions as _, LogSources, Relay, log_badge},
 };
 use rtc_abi::rtc;
@@ -77,7 +78,6 @@ const STOPPED_LINE: &str = "stopped: failed";
 const DUPLICATE_REFUSED_LINES: [&str; 2] = ["Err(Syscall(AccessDenied))", STOPPED_LINE];
 const BOOT_REFUSAL: &str = "mount table line 2 /boot: filesystem refused: Remote(Unbound)";
 const TMP_MOUNT: &str = "mount /tmp";
-const TMP_ENDED: &str = "mount /tmp ended";
 
 pub(crate) const COMPONENT_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 const PARENT_REFUSAL_TIMEOUT: Timeout = Timeout::from_secs(1);
@@ -85,7 +85,7 @@ pub(crate) const IDLE_PROVIDER_REQUEST_TIMEOUT: Timeout = Timeout::from_millis(5
 const STALE_VIEW_TIMEOUT: Timeout = Timeout::from_millis(500);
 const REQUEST_DELIVERY_PAUSE: Timeout = Timeout::from_millis(200);
 const SERVED_CHILD_REPLY_TIMEOUT: Timeout = Timeout::from_millis(200);
-const REQUEST_ACROSS_EXIT_TIMEOUT: Timeout = Timeout::from_secs(3);
+const REQUEST_ACROSS_EXIT_TIMEOUT: Timeout = Timeout::from_secs(1);
 const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(8);
 const HELD_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(15);
 const WATCH_WAIT_TIMEOUT: Timeout = Timeout::from_millis(300);
@@ -549,6 +549,24 @@ fn region_base(region: &MemoryRegion) -> u64 {
     region.inspect().expect("region inspects").base
 }
 
+fn await_removed(composition: &Composition, name: &str) -> Option<RecordState> {
+    (0..POLL_ATTEMPTS).find_map(|_| {
+        let state = composition.hold().record(name);
+        let removed = state.filter(|state| state.status == Status::Removed);
+        if removed.is_none() {
+            pause(POLL_INTERVAL);
+        }
+        removed
+    })
+}
+
+fn spent(restarts_spent: u32) -> RecordState {
+    RecordState {
+        status: Status::Removed,
+        restarts_spent,
+    }
+}
+
 pub(crate) fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
     (0..POLL_ATTEMPTS).any(|_| {
         let revoked = inspect().err() == Some(Error::Syscall(SyscallError::Revoked));
@@ -668,7 +686,7 @@ fn logged(lines: &[String], expected: &str) -> usize {
 
 fn refusals() -> Vec<String> {
     let composition = scenario(&[EXPORT, REFUSAL_PROBE]);
-    let lines = await_component_lines(REFUSAL_PROBE.name, 5);
+    let lines = await_component_lines(REFUSAL_PROBE.name, 4);
     finish(composition);
     lines
 }
@@ -922,12 +940,12 @@ fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
     let answer =
         component_startup::open::<probe::Protocol>(&found, COMPONENT_REPLY_TIMEOUT).map(drop);
     let again = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
-    let lines = await_component_lines(EXPORT.name, 2);
+    let removed = await_removed(&composition, EXPORT.name);
 
     test_harness::check_eq!(started, ["started"]);
     test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Unavailable)));
     test_harness::check_eq!(again, Err(CallError::Remote(SessionError::Unbound)));
-    test_harness::check_eq!(lines, ["started"]);
+    test_harness::check_eq!(removed, Some(spent(0)));
     finish(composition);
 }
 
@@ -938,11 +956,12 @@ fn a_failing_child_spends_each_restart_once() {
         ..LOG_DUPLICATE
     }]);
 
+    let removed = await_removed(&composition, LOG_DUPLICATE.name);
+    // Двойное списание тоже исчерпывает лимит, поэтому число запусков считается по строкам.
     let failures = await_component_lines(LOG_DUPLICATE.name, 6);
-    let after = await_component_lines(LOG_DUPLICATE.name, 7);
 
+    test_harness::check_eq!(removed, Some(spent(2)));
     test_harness::check_eq!(failures, DUPLICATE_REFUSED_LINES.repeat(3));
-    test_harness::check_eq!(after.len(), 6);
     finish(composition);
 }
 
@@ -953,11 +972,11 @@ fn a_child_taken_down_for_a_closed_startup_session_spends_a_restart() {
         ..CLOSED
     }]);
 
+    let removed = await_removed(&composition, CLOSED.name);
     let restarted = await_component_lines(CLOSED.name, 2);
-    let after = await_component_lines(CLOSED.name, 3);
 
+    test_harness::check_eq!(removed, Some(spent(1)));
     test_harness::check_eq!(restarted.len(), 2);
-    test_harness::check_eq!(after.len(), 2);
     finish(composition);
 }
 
@@ -1555,14 +1574,22 @@ fn a_restarted_file_system_serves_its_prefix_again_without_restarting_the_router
     ]);
     let importer = composition.importer(&[view(TMP_VIEW, "/tmp")]);
     let tmp = importer.port::<namespace::Protocol>(TMP_VIEW);
-    write(&resolved(&tmp, "/"));
+    let previous = resolved(&tmp, "/");
+    write(&previous);
 
     composition.terminate(RAM_FS.name, TERMINATE_EXIT_CODE);
-    // После конца монтирования разрешение ждёт монтирования новым воплощением.
-    await_component_lines_with_prefix(ROUTER_NAME, TMP_ENDED, 1);
+    // Разрешение после ухода прежнего воплощения ждёт монтирования новым.
+    let gone = (0..POLL_ATTEMPTS).any(|_| {
+        let gone = matches!(written(&previous), Err(CallError::Ipc(_)));
+        if !gone {
+            pause(POLL_INTERVAL);
+        }
+        gone
+    });
     let rewritten = written(&resolved(&tmp, "/"));
     let router = await_component_lines_with_prefix(ROUTER_NAME, TMP_MOUNT, 3);
 
+    test_harness::check!(gone);
     test_harness::check_eq!(logged(&router, TMP_MOUNT), 2);
     test_harness::check_eq!(rewritten, Err(CallError::Remote(FileSystemError::NotFound)));
     finish(composition);

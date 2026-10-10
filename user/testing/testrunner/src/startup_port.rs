@@ -666,7 +666,7 @@ fn an_unanswered_requirement_ends_the_start_after_the_request_timeout() {
         parent.departure(UNANSWERED_IMPORTER_DEPARTURE_TIMEOUT),
         Some(departed(two, Outcome::Exit(FIRST_IPC_FAILED_EXIT_CODE)))
     );
-    test_harness::check!(Instant::now().since(since).raw() >= STARTUP_REQUEST_TIMEOUT.raw());
+    test_harness::check!(Instant::now().since(since) >= STARTUP_REQUEST_TIMEOUT);
     test_harness::check_eq!(parent.requests(), 1);
 }
 
@@ -741,7 +741,7 @@ fn a_living_child_that_closes_its_start_session_is_terminated() {
         parent.departure(DEPARTURE_TIMEOUT),
         Some(departed(closed, Outcome::TakenDown))
     );
-    test_harness::check!(parent.last_depart().raw() < TAKE_DOWN_DURATION_MAX.raw());
+    test_harness::check!(parent.last_depart() < TAKE_DOWN_DURATION_MAX);
     test_harness::check_eq!(parent.requests(), 0);
 }
 

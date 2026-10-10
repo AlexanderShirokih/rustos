@@ -61,6 +61,9 @@ enum Commands {
         /// Device spec to run against
         #[arg(long, default_value = qemu_test::DEFAULT_SPEC)]
         spec: PathBuf,
+        /// Print the given number of slowest tests of each pass
+        #[arg(long, default_value_t = 0)]
+        durations: usize,
     },
     /// Run the userspace filesystem benchmarks in QEMU
     Bench {
@@ -187,7 +190,8 @@ fn main() -> Result<ExitCode> {
             filter,
             timeout,
             spec,
-        } => qemu_test::qemu_test(timeout, &spec, filter.as_deref())?,
+            durations,
+        } => qemu_test::qemu_test(timeout, &spec, filter.as_deref(), durations)?,
         Commands::Bench { filter, timeout } => qemu_test::qemu_bench(timeout, filter.as_deref())?,
         Commands::Stress {
             seed,

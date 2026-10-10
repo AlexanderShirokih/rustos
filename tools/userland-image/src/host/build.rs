@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     fs::File,
     io::Read,
@@ -58,39 +59,60 @@ impl UserlandTarget {
     }
 }
 
-pub(super) fn build_program(
+pub(super) fn build_programs(
     userland_root: &Path,
     target_directory: &Path,
     target: &UserlandTarget,
     std_src: &Path,
-    program: &ResolvedProgram,
+    programs: &[ResolvedProgram],
     environment: &[BuildEnvironment<'_>],
-) -> Result<BuiltEntry> {
-    run_userland_build(userland_root, target, std_src, program, environment)?;
-    let binary_path =
-        userland_binary_path(target_directory, target.directory_name()?, &program.bin);
-    read_and_extract_entry(&binary_path, program, target.architecture)
+) -> Result<Vec<BuiltEntry>> {
+    let directory_name = target.directory_name()?;
+
+    // Cargo объединяет features всех пакетов одного вызова, поэтому вызов собирает один пакет.
+    let mut packages: BTreeMap<&str, Vec<(usize, &ResolvedProgram)>> = BTreeMap::new();
+    for (position, program) in programs.iter().enumerate() {
+        packages
+            .entry(program.package.as_str())
+            .or_default()
+            .push((position, program));
+    }
+
+    let mut built = Vec::with_capacity(programs.len());
+    for (package, members) in packages {
+        let bins: Vec<&str> = members
+            .iter()
+            .map(|(_, member)| member.bin.as_str())
+            .collect();
+        run_userland_build(userland_root, target, std_src, package, &bins, environment)?;
+        // Одноимённый bin другого пакета ляжет по тому же пути, поэтому ELF пакета
+        // читается до сборки следующего.
+        for (position, member) in members {
+            let binary_path = userland_binary_path(target_directory, directory_name, &member.bin);
+            let entry = read_and_extract_entry(&binary_path, member, target.architecture)?;
+            built.push((position, entry));
+        }
+    }
+
+    built.sort_by_key(|(position, _)| *position);
+    Ok(built.into_iter().map(|(_, entry)| entry).collect())
 }
 
 fn run_userland_build(
     userland_root: &Path,
     target: &UserlandTarget,
     std_src: &Path,
-    program: &ResolvedProgram,
+    package: &str,
+    bins: &[&str],
     environment: &[BuildEnvironment<'_>],
 ) -> Result<()> {
     let mut command = Command::new("cargo");
+    command.args(["build", "--package", package, "--release", "--target"]);
+    command.arg(&target.spec);
+    for bin in bins {
+        command.args(["--bin", bin]);
+    }
     command
-        .args([
-            "build",
-            "--package",
-            &program.package,
-            "--bin",
-            &program.bin,
-            "--release",
-            "--target",
-        ])
-        .arg(&target.spec)
         // Cargo читает конфигурацию таргета по рабочему каталогу процесса.
         .current_dir(userland_root)
         .env("__CARGO_TESTS_ONLY_SRC_ROOT", std_src)
@@ -102,14 +124,10 @@ fn run_userland_build(
     }
     let status = command
         .status()
-        .context("Failed to execute cargo build for userland entry")?;
+        .context("Failed to execute cargo build for userland package")?;
 
     if !status.success() {
-        bail!(
-            "Failed to build userland entry '{}' with status {}",
-            program.path,
-            status
-        );
+        bail!("Failed to build userland package '{package}' with status {status}");
     }
 
     Ok(())

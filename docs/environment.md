@@ -15,7 +15,7 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 | Инструмент | Назначение |
 |------------|------------|
 | `cargo-binutils` | Извлечение бинарного образа через `cargo objcopy` |
-| `qemu-system-aarch64` | Запуск и тесты QEMU |
+| `qemu-system-aarch64` не ниже 8.1 | Запуск и тесты QEMU |
 | C/C++ toolchain | Линковка host-программ, сборка зависимостей и fuzz-целей |
 | `clang`, `lld` | Сборка библиотек C и C++ и C/C++-исходников программ userland |
 | `meson`, `ninja-build`, `xz-utils` | Сборка библиотеки C из архива релиза |
@@ -25,11 +25,14 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 | `similarity-rs` | Проверка дублирования |
 | `cargo-fuzz` | Сборка и запуск fuzz-целей |
 
-Для QEMU-разработки на Debian:
+Для QEMU-разработки на Debian bookworm `qemu-system-arm` ставится из bookworm-backports:
 
 ```bash
 cargo install cargo-binutils
-sudo apt-get install -y gcc g++ libc6-dev qemu-system-arm meson ninja-build cmake unzip xz-utils
+echo "deb http://deb.debian.org/debian bookworm-backports main" | sudo tee /etc/apt/sources.list.d/bookworm-backports.list
+sudo apt-get update
+sudo apt-get install -y gcc g++ libc6-dev meson ninja-build cmake unzip xz-utils
+sudo apt-get install -y -t bookworm-backports qemu-system-arm
 ```
 
 В `PATH` должны быть `clang` и компоновщик `ld.lld` той же версии.

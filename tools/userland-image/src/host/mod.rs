@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 
 pub use self::{build::UserlandTarget, files::ExtraFile};
 use self::{
-    build::build_program,
+    build::build_programs,
     files::collect_files,
     image::assemble_userland_image,
     program::resolve_programs,
@@ -55,19 +55,14 @@ pub fn build_userland(
     let mut files = collect_files(project_root, &manifest.files, extra_files)?;
     // План сверяется с манифестами компонентов, поэтому программы собираются до
     // его компиляции.
-    let built_entries = programs
-        .iter()
-        .map(|program| {
-            build_program(
-                &userland_root,
-                &workspace.target_directory,
-                target,
-                std_src,
-                program,
-                environment,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let built_entries = build_programs(
+        &userland_root,
+        &workspace.target_directory,
+        target,
+        std_src,
+        &programs,
+        environment,
+    )?;
     let built_programs: Vec<PlanProgram<'_>> = built_entries
         .iter()
         .map(|entry| PlanProgram {

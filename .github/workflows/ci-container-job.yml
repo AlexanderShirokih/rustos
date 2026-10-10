@@ -83,23 +83,36 @@ jobs:
       # uid на хосте самостоятельных раннеров.
       # CARGO_HOME образа принадлежит root и на запись недоступен; каталог реестра
       # переносится на монтирование и переживает джобу.
+      # Хост освобождает место только за счёт target'ов, поэтому sccache пулов
+      # на общем диске ограничен.
+      # Монтируется корень target'ов пула, а не каталог scope: отсутствующий
+      # источник монтирования Docker создаёт от root, и uid 1000 в него не пишет.
+      # Каталог scope создаёт cargo. Корень target'ов должен принадлежать uid 1000.
       options: >-
         ${{ inputs.seccomp-unconfined && '--security-opt seccomp=unconfined' || '' }}
         ${{ vars.CI_RUNNER && format('--user 1000:1000
         --volume /var/cache/ci/{0}/cargo-home:/cargo
         --volume /var/cache/ci/{0}/sccache:/sccache
-        --volume /var/cache/ci/{0}/target/{1}:/target
+        --volume /var/cache/ci/{0}/target:/target
         --env CARGO_HOME=/cargo
         --env RUSTC_WRAPPER=sccache
         --env SCCACHE_DIR=/sccache
-        --env SCCACHE_CACHE_SIZE=20G
-        --env CARGO_TARGET_DIR=/target', inputs.runner, inputs.cache-scope) || '' }}
+        --env SCCACHE_CACHE_SIZE=5G
+        --env CARGO_TARGET_DIR=/target/{1}', inputs.runner, inputs.cache-scope) || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: ${{ inputs.fetch-depth }}
 
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Каталог scope, созданный прежним монтированием, принадлежит root.
+      - if: vars.CI_RUNNER
+        run: |
+          mkdir -p "$CARGO_TARGET_DIR" && [ -w "$CARGO_TARGET_DIR" ] && exit 0
+          ls -ln /target
+          echo "::error::$CARGO_TARGET_DIR is not writable by uid $(id -u); chown the host cache directory to 1000:1000"
+          exit 1
 
       - if: inputs.cache-path != ''
         uses: actions/cache@v6

@@ -18,7 +18,7 @@ const RETRY_INTERVAL: Timeout = Timeout::from_secs(1);
 
 const NO_SPACE_PAUSE: Duration = Duration::from_secs(1);
 
-const ATTACH_TIMEOUT: Timeout = Timeout::from_secs(5);
+const ATTACH_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 type Attached = input_source::Client<SessionTransport>;
 

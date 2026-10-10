@@ -53,7 +53,7 @@ const IMPLICIT_RESTARTS: u32 = 0;
 const FEATURES_MAX: usize = 256;
 
 /// Срок возврата бюджета перед перезапуском записи.
-pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(5);
+pub const BUDGET_RETURN_TIMEOUT: Timeout = Timeout::from_secs(1);
 
 /// Пределы поиска композиции загрузочного плана.
 pub const SEARCH_LIMITS: SearchLimits = SearchLimits {
@@ -119,6 +119,15 @@ pub struct SearchLimits {
     pub total_states: usize,
     /// Память состояний всех владельцев в байтах.
     pub total_bytes: usize,
+}
+
+/// Состояние записи компонента.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordState {
+    /// Состояние текущей incarnation. Запись в [`Status::Removed`] больше не запускается.
+    pub status: Status,
+    /// Перезапуски, списанные с лимита записи.
+    pub restarts_spent: u32,
 }
 
 /// Отказ [`RootSystem::add`].
@@ -408,6 +417,16 @@ impl<'a> RootSystem<'a> {
         if let Some((record, _)) = self.record_named(name) {
             self.children.terminate(Holder::Record(record), code);
         }
+    }
+
+    /// Возвращает состояние записи `name` либо `None`, если такая запись не зарегистрирована.
+    #[must_use]
+    pub fn record(&self, name: &str) -> Option<RecordState> {
+        let (record, _) = self.record_named(name)?;
+        Some(RecordState {
+            status: self.children.status(Holder::Record(record))?,
+            restarts_spent: *self.restarts_used.get(usize::from(record))?,
+        })
     }
 
     fn record_named(&self, name: &str) -> Option<(u16, &Record<'a>)> {
@@ -1438,12 +1457,7 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
         let mut guard = system.lock();
         guard.launch_due();
         let next = guard.next_launch();
-        let wait = if next.raw() < timeout.raw() {
-            next
-        } else {
-            timeout
-        };
-        (guard.children.port().as_raw(), wait)
+        (guard.children.port().as_raw(), next.min(timeout))
     };
 
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];

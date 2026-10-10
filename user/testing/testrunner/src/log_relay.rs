@@ -223,14 +223,14 @@ pub(crate) fn await_component_lines_with_prefix(
 
 fn await_records(complete: impl Fn(&[JournalLine]) -> bool) -> Vec<JournalLine> {
     let idle = Port::create().expect("port create");
-    let mut waited = 0;
+    let mut waited = Timeout::POLL;
     loop {
         let records = scenario_lines();
-        if complete(&records) || waited >= RECORD_TIMEOUT.raw() {
+        if complete(&records) || waited >= RECORD_TIMEOUT {
             return records;
         }
         let _ = idle.recv(RECORD_POLL);
-        waited += RECORD_POLL.raw();
+        waited = waited.saturating_add(RECORD_POLL);
     }
 }
 

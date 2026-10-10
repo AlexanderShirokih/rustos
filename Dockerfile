@@ -8,13 +8,16 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_TERM_COLOR=always
 
 # Системные зависимости:
-#   qemu-system-arm   — запуск QEMU integration tests (xtask qemu-test)
+#   qemu-system-arm   — запуск QEMU integration tests (xtask qemu-test); версия из
+#                       bookworm-backports нужна для запуска virtio-multitouch-device
 #   gcc/g++/libc6-dev — линкер для host-сборок, build-скриптов и libFuzzer
 #   git/ca-certs/curl — checkout, rustup, загрузка crates
 #   meson/ninja/xz    — сборка picolibc из релизного архива (xtask libc-src)
 #   cmake             — сборка рантаймов C++ LLVM из релизного архива (xtask libc-src)
 #   unzip             — распаковка архивов стороннего кода (xtask third-party)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "deb http://deb.debian.org/debian bookworm-backports main" \
+        > /etc/apt/sources.list.d/bookworm-backports.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         cmake \
         curl \
@@ -24,9 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libc6-dev \
         meson \
         ninja-build \
-        qemu-system-arm \
         unzip \
         xz-utils \
+    && apt-get install -y --no-install-recommends -t bookworm-backports qemu-system-arm \
     && rm -rf /var/lib/apt/lists/*
 
 # clang компилирует picolibc и C-исходники программ userland. Версия не ниже

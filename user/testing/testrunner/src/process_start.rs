@@ -9,8 +9,8 @@ use syscall::{Handle, ProcessName, Rights, SIGNALED, SyscallError, WakeCount};
 use crate::fixture::spawn_entry;
 
 const FORWARD_FIXTURE: &str = "/start-handle-forward-fixture/exec";
-const RECV_TIMEOUT: Timeout = Timeout::from_secs(5);
-const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
+const RECV_TIMEOUT: Timeout = Timeout::from_millis(100);
+const RECV_ATTEMPTS: usize = 50;
 
 fn is_closed(handle: Handle<kind::Signal>) -> bool {
     signal_set(handle, SIGNALED, 0, WakeCount::None) == SyscallError::BadHandle.as_return_value()
@@ -45,12 +45,20 @@ fn a_started_process_cannot_pass_its_start_handle_on() {
         .expect("client copy of the port");
     let process = spawn_entry(FORWARD_FIXTURE, start);
 
-    test_harness::check!(matches!(
-        port.recv(RECV_TIMEOUT),
-        Err(Error::Syscall(SyscallError::Timeout))
-    ));
+    // Передачу хэндла порт отклоняет при встрече с получателем, поэтому тест принимает,
+    // пока фикстура не завершится.
+    for _ in 0..RECV_ATTEMPTS {
+        test_harness::check!(matches!(
+            port.recv(RECV_TIMEOUT),
+            Err(Error::Syscall(SyscallError::Timeout))
+        ));
 
-    process.join(JOIN_TIMEOUT).expect("fixture exits");
+        if process.join(Timeout::POLL).is_ok() {
+            break;
+        }
+    }
+
+    process.join(Timeout::POLL).expect("fixture exits");
     test_harness::check_eq!(
         process.exit_code().expect("exit code"),
         SyscallError::AccessDenied as u32

@@ -122,11 +122,13 @@ cargo xtask userland doc --no-deps --workspace
 `cargo xtask test` запускает host-тесты профилей `common` и `host`.
 
 ```text
-cargo xtask qemu-test [--timeout <seconds>] [--spec <path>] [<filter>]
+cargo xtask qemu-test [--timeout <seconds>] [--spec <path>] [--durations <n>] [<filter>]
 ```
 
 Тайм-аут по умолчанию — 120 секунд, конфигурация —
 [devices/spec/qemu-aarch64-test.yaml](../devices/spec/qemu-aarch64-test.yaml).
+`--durations <n>` выводит после каждого прохода `n` самых долгих тестов.
+Длительность измеряется на хосте между маркерами начала и результата теста.
 
 `<filter>` запускает только тесты, имя которых содержит указанную подстроку.
 Фильтр без совпадений завершает команду отказом:
