@@ -184,6 +184,22 @@ impl<R: Registers> Arbiter<R> {
         self.write_channel(apid, channel, offset, count, value)
     }
 
+    /// Заменяет биты `mask` регистра `offset` блока `ppid` битами `value`. Регистр
+    /// записывается, только если его значение меняется.
+    ///
+    /// Отказы - как у [`read`](Self::read) и [`write`](Self::write).
+    pub fn update(&self, ppid: u16, offset: u8, mask: u8, value: u8) -> Result<(), DeviceError> {
+        let (apid, channel) = self.channel(ppid).ok_or(DeviceError::Failed)?;
+        let current = self.read_channel(apid, offset, 1)?;
+        let updated = (current & !u64::from(mask)) | u64::from(value & mask);
+
+        if updated == current {
+            return Ok(());
+        }
+
+        self.write_channel(apid, channel, offset, 1, updated)
+    }
+
     /// Настраивает срабатывание прерывания `interrupt`, разрешает его в блоке и разрешает
     /// канал блока в арбитре. При отказе канал остаётся в прежнем состоянии.
     ///

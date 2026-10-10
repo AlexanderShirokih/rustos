@@ -487,6 +487,10 @@ pub(crate) fn platform_describes(device: &str) -> bool {
     with_description(|description| description.find(device).is_some())
 }
 
+pub(crate) fn platform_has_compatible(compatible: &str) -> bool {
+    with_description(|description| description.compatible_devices(compatible).next().is_some())
+}
+
 fn described_clock() -> Option<(&'static str, &'static str)> {
     with_description(|description| {
         description
@@ -495,7 +499,7 @@ fn described_clock() -> Option<(&'static str, &'static str)> {
             .find_map(|device| {
                 CLOCK_DRIVERS
                     .into_iter()
-                    .find(|(compatible, _)| device.compatible().any(|each| each == *compatible))
+                    .find(|(compatible, _)| device.is_compatible(compatible))
             })
     })
 }

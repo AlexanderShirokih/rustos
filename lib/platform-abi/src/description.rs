@@ -70,6 +70,17 @@ impl<'a> Description<'a> {
         }
     }
 
+    /// Доступные устройства, в списке совместимостей которых есть `compatible`, в порядке
+    /// описания. Устройство, которое [`devices`](Self::devices) выдаёт ошибкой, пропускается.
+    pub fn compatible_devices(
+        &'a self,
+        compatible: &'a str,
+    ) -> impl Iterator<Item = Device<'a>> + 'a {
+        self.devices()
+            .filter_map(Result::ok)
+            .filter(move |device| device.is_compatible(compatible))
+    }
+
     /// Узел устройства `id`. Недоступный узел либо узел с недоступным предком даёт `None`.
     pub fn node(&'a self, id: &DeviceId) -> Option<Node<'a>> {
         available_path(&self.tree, id.as_str()).map(|found| Node { node: found.node() })
@@ -141,6 +152,11 @@ impl<'a> Device<'a> {
     /// Совместимости устройства в порядке описания.
     pub fn compatible(&self) -> impl Iterator<Item = &'a str> + 'a {
         self.compatible.clone()
+    }
+
+    /// Есть ли `compatible` в списке совместимостей устройства.
+    pub fn is_compatible(&self, compatible: &str) -> bool {
+        self.compatible().any(|each| each == compatible)
     }
 }
 

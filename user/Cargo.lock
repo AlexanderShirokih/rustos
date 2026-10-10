@@ -880,6 +880,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-pm8941-pwrkey"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "input-abi",
+ "ipc",
+ "kernel-objects",
+ "platform-abi",
+ "program-entry",
+ "runtime",
+ "spmi-abi",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
 name = "driver-pm8941-rtc"
 version = "0.1.0"
 dependencies = [
@@ -4301,6 +4317,7 @@ dependencies = [
  "component-abi",
  "component-startup",
  "display-abi",
+ "driver-pm8941-pwrkey",
  "driver-simplefb",
  "driver-virtio-input",
  "fdt",

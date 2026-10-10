@@ -10,6 +10,7 @@ members = [
     "examples/hello-std",
     "examples/slint-demo",
     "system/driver-pl031",
+    "system/driver-pm8941-pwrkey",
     "system/driver-pm8941-rtc",
     "system/driver-simplefb",
     "system/driver-virtio-gpu",

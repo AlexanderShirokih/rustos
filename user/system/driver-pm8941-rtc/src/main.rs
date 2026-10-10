@@ -31,9 +31,9 @@ const ALARM_VALUE: u16 = 0x6140;
 const ALARM_CONTROL: u16 = 0x6146;
 const ALARM_CONTROL_2: u16 = 0x6148;
 
-const RTC_ENABLE: u64 = 1 << 7;
-const ALARM_ENABLE: u64 = 1 << 7;
-const ALARM_CLEAR: u64 = 1 << 0;
+const RTC_ENABLE: u8 = 1 << 7;
+const ALARM_ENABLE: u8 = 1 << 7;
+const ALARM_CLEAR: u8 = 1 << 0;
 
 const COUNT_BYTES: u8 = 4;
 const LOW_BYTE: u64 = 0xFF;
@@ -115,7 +115,6 @@ impl Shared {
         let transport = PortTransport::new(self.service.borrow());
         let mut bytes = [0u8; MESSAGE_INLINE_MAX];
 
-        // Отброшенный кадр порт не закрывает, а закрытие порта терминально.
         loop {
             match transport.recv(&mut bytes, Timeout::INFINITE) {
                 Ok(frame) => {
@@ -143,7 +142,7 @@ impl Clock {
             alarm: Mutex::new(None),
         };
 
-        clock.update(RTC_CONTROL, RTC_ENABLE, 0)?;
+        clock.device.update(RTC_CONTROL, RTC_ENABLE, RTC_ENABLE)?;
         Ok(clock)
     }
 
@@ -168,30 +167,20 @@ impl Clock {
         let signal = alarm.insert(signal);
 
         let target = (self.count()? + ALARM_SECONDS) & u64::from(u32::MAX);
-        self.update(ALARM_CONTROL, 0, ALARM_ENABLE)?;
+        self.device.update(ALARM_CONTROL, ALARM_ENABLE, 0)?;
         self.device.write(ALARM_VALUE, COUNT_BYTES, target)?;
-        self.update(ALARM_CONTROL, ALARM_ENABLE, 0)?;
+        self.device
+            .update(ALARM_CONTROL, ALARM_ENABLE, ALARM_ENABLE)?;
 
         signal
             .wait(SIGNALED, ALARM_BUDGET)
             .map_err(|_| Failure::Silent)?;
 
-        self.update(ALARM_CONTROL, 0, ALARM_ENABLE)?;
-        self.update(ALARM_CONTROL_2, 0, ALARM_CLEAR)?;
+        self.device.update(ALARM_CONTROL, ALARM_ENABLE, 0)?;
+        self.device.update(ALARM_CONTROL_2, ALARM_CLEAR, 0)?;
         self.device.ack(ALARM_INTERRUPT)?;
 
         self.count()
-    }
-
-    fn update(&self, address: u16, set: u64, clear: u64) -> Result<(), Failure> {
-        let value = self.device.read(address, 1)?;
-        let updated = (value | set) & !clear;
-
-        if updated != value {
-            self.device.write(address, 1, updated)?;
-        }
-
-        Ok(())
     }
 }
 

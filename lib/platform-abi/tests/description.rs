@@ -247,3 +247,23 @@ fn a_description_past_the_region_or_with_a_broken_structure_is_malformed() {
         assert!(matches!(description, Err(DescriptionError::Malformed)));
     }
 }
+
+#[test]
+fn compatible_devices_match_any_string_of_an_available_node() {
+    let blob = fdt_test::build(TREE);
+    let description = Description::new(&blob, 0).unwrap();
+    let ids = |compatible| -> Vec<String> {
+        description
+            .compatible_devices(compatible)
+            .map(|device| device.id().as_str().to_owned())
+            .collect()
+    };
+
+    assert_eq!(
+        ids("virtio,mmio"),
+        ["/virtio_mmio@a000000", "/virtio_mmio@a000200"]
+    );
+    assert_eq!(ids("arm,primecell"), ["/pl031@9010000"]);
+    assert_eq!(ids("arm,pl011"), ["/bus/uart@2000"]);
+    assert!(ids("arm,pl050").is_empty());
+}

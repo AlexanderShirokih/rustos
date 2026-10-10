@@ -189,6 +189,19 @@ impl spmi_device::Service<Delivery> for Held<'_> {
         self.arbiter.write(span.ppid, span.offset, count, value)
     }
 
+    fn update(
+        &mut self,
+        _frame: &Delivery,
+        address: u16,
+        mask: u8,
+        value: u8,
+    ) -> Result<(), DeviceError> {
+        // Кадр обслуживается под замком шины, и чтение с записью не перемежаются командами
+        // других сессий.
+        let span = self.peripheral.span(address, 1)?;
+        self.arbiter.update(span.ppid, span.offset, mask, value)
+    }
+
     fn irq(
         &mut self,
         _frame: &Delivery,
@@ -236,7 +249,6 @@ pub(crate) fn serve(bus: &Mutex<Bus>, sessions: &Sessions) {
     let transport = PortTransport::new(sessions.service.borrow());
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
 
-    // Отброшенный кадр порт не закрывает, а закрытие порта терминально.
     loop {
         match transport.recv(&mut bytes, Timeout::INFINITE) {
             Ok(frame) => {

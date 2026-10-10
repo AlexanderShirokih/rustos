@@ -28,9 +28,9 @@ impl Usage {
     pub const DOWN: Self = Self::new(0x07, 0x51);
     pub const UP: Self = Self::new(0x07, 0x52);
 
-    pub const POWER: Self = Self::new(0x0C, 0x30);
-    pub const VOLUME_UP: Self = Self::new(0x0C, 0xE9);
-    pub const VOLUME_DOWN: Self = Self::new(0x0C, 0xEA);
+    pub const POWER: Self = Self::new(0x07, 0x66);
+    pub const VOLUME_UP: Self = Self::new(0x07, 0x80);
+    pub const VOLUME_DOWN: Self = Self::new(0x07, 0x81);
 
     /// Основная кнопка указателя.
     pub const PRIMARY: Self = Self::new(0x09, 0x01);

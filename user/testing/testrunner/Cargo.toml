@@ -225,6 +225,7 @@ bootstrap-abi = { workspace = true }
 component-abi = { workspace = true }
 component-startup = { workspace = true }
 display-abi = { workspace = true }
+driver-pm8941-pwrkey = { path = "../../system/driver-pm8941-pwrkey" }
 driver-simplefb = { path = "../../system/driver-simplefb" }
 driver-virtio-input = { path = "../../system/driver-virtio-input" }
 fdt = { workspace = true }

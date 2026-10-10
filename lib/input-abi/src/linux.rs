@@ -82,6 +82,13 @@ mod tests {
     }
 
     #[test]
+    fn platform_buttons_are_the_named_usages() {
+        assert_eq!(Usage::from_linux_key(116), Some(Usage::POWER));
+        assert_eq!(Usage::from_linux_key(114), Some(Usage::VOLUME_DOWN));
+        assert_eq!(Usage::from_linux_key(115), Some(Usage::VOLUME_UP));
+    }
+
+    #[test]
     fn code_without_translation_is_none() {
         assert_eq!(Usage::from_linux_key(0), None);
         assert_eq!(Usage::from_linux_key(240), None);

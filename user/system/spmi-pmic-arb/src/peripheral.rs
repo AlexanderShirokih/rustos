@@ -2,8 +2,9 @@
 //!
 //! Под узлом арбитра лежат узлы PMIC, первая ячейка `reg` которых - номер ведомого (SID).
 //! Устройство - доступный узел с непустым `compatible` ниже узла PMIC. Каждая запись `reg`
-//! устройства - 16-битный адрес начала блока из 256 регистров. Запись `interrupts` - четыре
-//! ячейки: SID, номер блока, бит 0..7 и тип `IRQ_TYPE_*`.
+//! устройства - 16-битный адрес начала блока из 256 регистров. Узел без `reg` получает блоки
+//! ближайшего предка ниже узла PMIC, у которого `reg` есть, и остаётся отдельным устройством.
+//! Запись `interrupts` - четыре ячейки: SID, номер блока, бит 0..7 и тип `IRQ_TYPE_*`.
 
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
@@ -224,8 +225,8 @@ impl ArbiterNode {
             .and_then(|sid| u8::try_from(sid).ok())
             .ok_or(SkipReason::Sid)?;
 
-        let parent = id
-            .as_str()
+        let holder = blocks_holder(description, &pmic_path, id.as_str());
+        let parent = holder
             .rsplit_once(SEPARATOR)
             .and_then(|(parent, _)| description.find(parent))
             .ok_or(SkipReason::Block)?;
@@ -233,8 +234,12 @@ impl ArbiterNode {
         let address_cells = cell_count(&parent, "#address-cells", ADDRESS_CELLS_DEFAULT)?;
         let size_cells = cell_count(&parent, "#size-cells", SIZE_CELLS_DEFAULT)?;
 
+        let reg = description
+            .find(holder)
+            .and_then(|holder| holder.bytes("reg"))
+            .unwrap_or_default();
+        let reg = cells(reg).ok_or(SkipReason::Block)?;
         let node = description.find(id.as_str()).ok_or(SkipReason::Block)?;
-        let reg = cells(node.bytes("reg").unwrap_or_default()).ok_or(SkipReason::Block)?;
 
         let entry = address_cells + size_cells;
         if address_cells != 1 || !reg.len().is_multiple_of(entry) {
@@ -373,6 +378,23 @@ fn interrupt(
         bit,
         trigger,
     })
+}
+
+fn blocks_holder<'a>(description: &Description<'_>, pmic: &str, id: &'a str) -> &'a str {
+    let mut path = id;
+
+    while path.len() > pmic.len() {
+        if description
+            .find(path)
+            .is_some_and(|node| node.bytes("reg").is_some())
+        {
+            return path;
+        }
+
+        path = path.rsplit_once(SEPARATOR).map_or("", |(parent, _)| parent);
+    }
+
+    id
 }
 
 const fn trigger(kind: u32) -> Option<Trigger> {

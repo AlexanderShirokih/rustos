@@ -65,8 +65,16 @@ pub(crate) fn with_descriptor<T>(
     name: &str,
     inspect: impl FnOnce(DeviceDescriptor<'_>) -> T,
 ) -> Option<T> {
+    with_key_descriptor(name, KEY, inspect)
+}
+
+pub(crate) fn with_key_descriptor<T>(
+    name: &str,
+    key: Usage,
+    inspect: impl FnOnce(DeviceDescriptor<'_>) -> T,
+) -> Option<T> {
     let mut keys = KeyList::new();
-    keys.push(KEY).ok()?;
+    keys.push(key).ok()?;
     let axes = AxisList::new();
     let descriptor = DeviceDescriptor::new(name, Binding::None, &keys, &axes, 0, &axes)?;
     Some(inspect(descriptor))

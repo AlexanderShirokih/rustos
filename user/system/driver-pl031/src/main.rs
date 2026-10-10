@@ -78,7 +78,6 @@ impl Shared {
     fn serve(&self) {
         let transport = PortTransport::new(self.service.borrow());
         let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        // Отброшенный кадр порт не закрывает, а закрытие порта терминально.
         loop {
             match transport.recv(&mut bytes, Timeout::INFINITE) {
                 Ok(frame) => {
@@ -97,17 +96,11 @@ impl Shared {
 impl Pl031 {
     fn bind(platform: &platform::Client<SessionTransport>) -> Result<Self> {
         let description = platform.description()?;
-        // Регион описания нужен только на время поиска узла.
         let region = MemoryRegion::from(description.region);
         let mapping = region.map_full_read_only()?;
         let id = Description::new(mapping.as_bytes(), description.offset)?
-            .devices()
-            .filter_map(core::result::Result::ok)
-            .find(|device| {
-                device
-                    .compatible()
-                    .any(|compatible| compatible == COMPATIBLE)
-            })
+            .compatible_devices(COMPATIBLE)
+            .next()
             .map(|device| device.id().clone())
             .ok_or(Error::NoDevice)?;
         let line = IrqLine::from(platform.irq(id.as_str(), 0)?);

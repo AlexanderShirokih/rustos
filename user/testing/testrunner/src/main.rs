@@ -61,6 +61,7 @@ mod memory_share;
 mod mismatched_kind;
 mod owned_handle;
 mod parent;
+mod pmic_keys;
 mod port;
 mod port_liveness;
 mod port_transport;

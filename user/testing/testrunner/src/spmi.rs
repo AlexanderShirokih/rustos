@@ -71,6 +71,37 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
     };
 };
 
+const PON_TREE: &[Token<'static>] = &fdt_test::tree! {
+    spmi@0 {
+        compatible = "qcom,spmi-pmic-arb";
+        "reg-names" = "core", "chnls", "obsrvr", "intr", "cnfg";
+        "qcom,ee" = <0>;
+        #address-cells = <2>;
+        #size-cells = <0>;
+        interrupt-controller;
+        #interrupt-cells = <4>;
+        phandle = <1>;
+        pmic@0 {
+            compatible = "qcom,pm660", "qcom,spmi-pmic";
+            reg = <0 0>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            pon@800 {
+                compatible = "qcom,pm8998-pon";
+                reg = <0x800>;
+                pwrkey {
+                    compatible = "qcom,pm8941-pwrkey";
+                    interrupts = <0 0x08 0 3>;
+                };
+                resin {
+                    compatible = "qcom,pm8941-resin";
+                    interrupts = <0 0x08 1 3>;
+                };
+            };
+        };
+    };
+};
+
 const PARTIAL_CELLS: &[Token<'static>] = &[
     Token::Node("spmi@0"),
     Token::Strings("compatible", &["qcom,spmi-pmic-arb"]),
@@ -145,14 +176,14 @@ const ALARM_WRITE: u16 = 0x6140;
 const ALARM_CONTROL: u16 = 0x6146;
 const ALARM_CONTROL_2: u16 = 0x6148;
 
-const ALARM_ENABLE: u64 = 1 << 7;
-const ALARM_CLEAR: u64 = 1;
+const ALARM_ENABLE: u8 = 1 << 7;
+const ALARM_CLEAR: u8 = 1;
 
 const COUNT_PAUSE: Timeout = Timeout::from_secs(2);
 const ALARM_AHEAD: u64 = 2;
 const ALARM_WAIT: Timeout = Timeout::from_secs(3);
 
-const SPMI_IMPORTS: &[crate::composition::Import] = &[crate::composition::Import {
+pub(crate) const SPMI_IMPORTS: &[crate::composition::Import] = &[crate::composition::Import {
     declaration: RequirementDeclaration::all(SPMI_REQUIREMENT, spmi::Protocol::ID),
     namespace_root: None,
 }];
@@ -287,7 +318,11 @@ fn peripherals(tree: &[Token<'_>]) -> Vec<Result<Peripheral, Skipped>> {
 }
 
 fn peripheral(path: &str) -> Peripheral {
-    peripherals(TREE)
+    described(TREE, path)
+}
+
+fn described(tree: &[Token<'_>], path: &str) -> Peripheral {
+    peripherals(tree)
         .into_iter()
         .filter_map(Result::ok)
         .find(|peripheral| peripheral.id().as_str() == path)
@@ -347,6 +382,29 @@ fn a_property_with_a_partial_cell_describes_nothing() {
 
     test_harness::check_eq!(reasons, [Some(SkipReason::Block), None]);
     test_harness::check_eq!(interrupt, Some(Err(DeviceError::NotDescribed)));
+}
+
+#[test_harness::test]
+fn a_node_without_reg_takes_the_blocks_of_its_nearest_ancestor_below_the_pmic() {
+    let found = peripherals(PON_TREE);
+    let devices = found.iter().filter(|found| found.is_ok()).count();
+    let pwrkey = described(PON_TREE, "/spmi@0/pmic@0/pon@800/pwrkey");
+    let resin = described(PON_TREE, "/spmi@0/pmic@0/pon@800/resin");
+    let blocks = [&pwrkey, &resin].map(|key| key.ppids().collect::<Vec<_>>());
+
+    test_harness::check_eq!(devices, 3);
+    test_harness::check_eq!(blocks, [[0x008], [0x008]]);
+    test_harness::check!(pwrkey.is_compatible("qcom,pm8941-pwrkey"));
+    test_harness::check!(resin.is_compatible("qcom,pm8941-resin"));
+    test_harness::check_eq!(
+        pwrkey.interrupt(0),
+        Ok(Interrupt {
+            ppid: 0x008,
+            bit: 0,
+            trigger: Trigger::Both
+        })
+    );
+    test_harness::check_eq!(resin.interrupt(0).map(|irq| irq.bit), Ok(1));
 }
 
 #[test_harness::test]
@@ -422,6 +480,38 @@ fn a_write_to_a_channel_of_another_environment_is_denied_without_a_command() {
     test_harness::check_eq!(commands, 0);
     test_harness::check_eq!(read, Ok(0));
     test_harness::check_eq!(absent, Err(DeviceError::Failed));
+}
+
+#[test_harness::test]
+fn an_update_keeps_the_other_bits_and_skips_an_unchanged_value() {
+    let model = Model::new(VERSION_3);
+    let arbiter = arbiter(&model, 0);
+
+    let first = arbiter.update(0x061, 0x70, 0b10, 0b10);
+    let second = arbiter.update(0x061, 0x70, 0b01, 0b01);
+    let written = model.steps.take();
+    let unchanged = arbiter.update(0x061, 0x70, 0b11, 0b11);
+    let skipped = model.steps.take();
+    let value = arbiter.read(0x061, 0x70, 1);
+
+    test_harness::check_eq!([first, second, unchanged], [Ok(()), Ok(()), Ok(())]);
+    test_harness::check_eq!(
+        written,
+        [
+            Step::Pmic {
+                apid: 1,
+                address: 0x70,
+                value: 0b10
+            },
+            Step::Pmic {
+                apid: 1,
+                address: 0x70,
+                value: 0b11
+            },
+        ]
+    );
+    test_harness::check_eq!(skipped, []);
+    test_harness::check_eq!(value, Ok(0b11));
 }
 
 #[test_harness::test]
@@ -572,7 +662,7 @@ fn an_arbiter_of_another_environment_uses_its_command_page_and_accumulator() {
     test_harness::check_eq!(delivered, [(0x2D0, 0b1000)]);
 }
 
-fn spmi_session(importer: &Importer) -> spmi::Client<SessionTransport> {
+pub(crate) fn spmi_session(importer: &Importer) -> spmi::Client<SessionTransport> {
     request::<spmi::Protocol>(importer.handle(), SPMI_REQUIREMENT, SPMI_REPLY_TIMEOUT)
         .expect("spmi session")
         .client()
@@ -588,16 +678,6 @@ fn open(
             .client()
             .with_wait(SPMI_REPLY_TIMEOUT)
     })
-}
-
-fn update(
-    clock: &spmi_device::Client<SessionTransport>,
-    address: u16,
-    set: u64,
-    clear: u64,
-) -> Result<(), CallError<DeviceError>> {
-    let value = clock.read(address, 1)?;
-    clock.write(address, 1, (value | set) & !clear)
 }
 
 #[test_harness::test]
@@ -619,15 +699,17 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
     let past_blocks = clock.write(RTC_PAST_BLOCKS, 1, 0);
 
     let alarm = clock.irq(0).map(Signal::from);
-    let set = update(&clock, ALARM_CONTROL, 0, ALARM_ENABLE)
+    let set = clock
+        .update(ALARM_CONTROL, ALARM_ENABLE, 0)
         .and_then(|()| clock.write(ALARM_WRITE, 4, second + ALARM_AHEAD))
-        .and_then(|()| update(&clock, ALARM_CONTROL, ALARM_ENABLE, 0));
+        .and_then(|()| clock.update(ALARM_CONTROL, ALARM_ENABLE, ALARM_ENABLE));
     let raised = alarm
         .as_ref()
         .is_ok_and(|alarm| set.is_ok() && alarm.wait(SIGNALED, ALARM_WAIT).is_ok());
 
-    let cleared = update(&clock, ALARM_CONTROL, 0, ALARM_ENABLE)
-        .and_then(|()| update(&clock, ALARM_CONTROL_2, 0, ALARM_CLEAR));
+    let cleared = clock
+        .update(ALARM_CONTROL, ALARM_ENABLE, 0)
+        .and_then(|()| clock.update(ALARM_CONTROL_2, ALARM_CLEAR, 0));
     let acknowledged = clock.ack(0);
     let lowered = alarm
         .as_ref()

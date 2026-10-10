@@ -102,19 +102,13 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
         return None;
     };
 
-    // Регион описания нужен только на время разбора.
     let region = MemoryRegion::from(description.region);
     let mapping = region.map_full_read_only().ok()?;
     let description = Description::new(mapping.as_bytes(), description.offset).ok()?;
 
     let Some(id) = description
-        .devices()
-        .filter_map(Result::ok)
-        .find(|device| {
-            device
-                .compatible()
-                .any(|compatible| compatible == COMPATIBLE)
-        })
+        .compatible_devices(COMPATIBLE)
+        .next()
         .map(|device| device.id().clone())
     else {
         log_line("no arbiter described");

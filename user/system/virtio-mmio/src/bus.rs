@@ -69,20 +69,12 @@ enum Refusal {
 impl Bus {
     pub(crate) fn take(platform: &platform::Client<SessionTransport>) -> Option<Self> {
         let description = platform.description().ok()?;
-        // Регион описания нужен только на время обхода узлов.
         let region = MemoryRegion::from(description.region);
         let mapping = region.map_full_read_only().ok()?;
         let description = Description::new(mapping.as_bytes(), description.offset).ok()?;
 
         let mut transports = Vec::new();
-        for device in description.devices().filter_map(Result::ok) {
-            if !device
-                .compatible()
-                .any(|compatible| compatible == COMPATIBLE)
-            {
-                continue;
-            }
-
+        for device in description.compatible_devices(COMPATIBLE) {
             match Transport::take(platform, device.id()) {
                 Ok(transport) => transports.push(transport),
                 Err(refusal) => log_fmt(format_args!(
@@ -98,7 +90,6 @@ impl Bus {
     pub(crate) fn serve(&mut self, sessions: &Sessions) {
         let transport = PortTransport::new(sessions.service.borrow());
         let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        // Отброшенный кадр порт не закрывает, а закрытие порта терминально.
         loop {
             match transport.recv(&mut bytes, Timeout::INFINITE) {
                 Ok(frame) => {

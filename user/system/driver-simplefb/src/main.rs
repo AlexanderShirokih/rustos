@@ -143,13 +143,8 @@ impl Attacher {
         let description = Description::new(self.description.as_bytes(), self.description_offset)
             .map_err(|error| OpenRefusal::Framebuffer(error.into()))?;
         let id = description
-            .devices()
-            .filter_map(Result::ok)
-            .find(|device| {
-                device
-                    .compatible()
-                    .any(|compatible| compatible == SIMPLE_FRAMEBUFFER_COMPATIBLE)
-            })
+            .compatible_devices(SIMPLE_FRAMEBUFFER_COMPATIBLE)
+            .next()
             .map(|device| device.id().clone())
             .ok_or(OpenRefusal::NoDevice)?;
         let framebuffer = Framebuffer::open(&description, &id).map_err(OpenRefusal::Framebuffer)?;
