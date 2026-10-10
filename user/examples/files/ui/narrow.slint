@@ -1,0 +1,86 @@
+import { Desktop, Level } from "desktop.slint";
+import { Palette } from "palette.slint";
+import { EntryRow, HorizontalRule, Preview } from "widgets.slint";
+
+component MountTabs inherits HorizontalLayout {
+    padding: 10px;
+    spacing: 8px;
+    alignment: start;
+    for place in Desktop.places: Rectangle {
+        property <bool> selected: place.path == Desktop.mount;
+        property <bool> active: Desktop.level == Level.mounts;
+
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: !self.selected ? Palette.line : self.active ? Palette.accent : Palette.inactive;
+        background: !self.selected ? transparent : self.active ? Palette.selection : Palette.inactive;
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 6px;
+            padding-bottom: 6px;
+            spacing: 8px;
+            Text {
+                text: place.path;
+                color: Palette.text;
+                font-size: 15px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: place.note;
+                color: Palette.muted;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        TouchArea {
+            clicked => {
+                Desktop.select(Level.mounts, place.path, "", "");
+            }
+        }
+    }
+}
+
+component Tree inherits VerticalLayout {
+    alignment: start;
+    for entry in Desktop.root-entries: VerticalLayout {
+        EntryRow {
+            height: 30px;
+            entry: entry;
+            open: entry.name == Desktop.folder;
+            selected: entry.name == Desktop.folder;
+            active: Desktop.level == Level.folder;
+            clicked => {
+                Desktop.open-folder(entry);
+            }
+        }
+        if entry.name == Desktop.folder: VerticalLayout {
+            for child in Desktop.folder-entries: EntryRow {
+                height: 30px;
+                indent: 20px;
+                entry: child;
+                selected: child.name == Desktop.file;
+                active: Desktop.level == Level.file;
+                clicked => {
+                    Desktop.open-file(child);
+                }
+            }
+        }
+    }
+}
+
+export component FilesNarrow inherits VerticalLayout {
+    MountTabs { }
+    HorizontalRule { }
+    Tree { }
+    Rectangle {
+        min-height: 0;
+        vertical-stretch: 1;
+        clip: true;
+        Preview {
+            y: 0;
+        }
+    }
+}

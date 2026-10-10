@@ -1,0 +1,10 @@
+version = 1
+
+[[components]]
+executable = "platform"
+memory_limit = "1M"
+restarts = 2
+
+[[components]]
+executable = "physics"
+memory_limit = "16M"

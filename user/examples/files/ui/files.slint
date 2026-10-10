@@ -1,0 +1,39 @@
+import "@inter/Inter-Regular.ttf";
+import { Desktop, Entry, Level, Line, Place, Step } from "desktop.slint";
+import { Palette } from "palette.slint";
+import { FilesNarrow } from "narrow.slint";
+import { FilesWide } from "wide.slint";
+
+export { Desktop, Entry, Level, Line, Place, Step }
+
+export component Files inherits Window {
+    in property <bool> narrow;
+
+    default-font-family: "Inter";
+    background: Palette.page;
+
+    keys := FocusScope {
+        init => {
+            self.focus();
+        }
+
+        key-pressed(event) => {
+            if event.text == Key.DownArrow {
+                Desktop.navigate(Step.next);
+            } else if event.text == Key.UpArrow {
+                Desktop.navigate(Step.previous);
+            } else if event.text == Key.RightArrow || event.text == Key.Return {
+                Desktop.navigate(Step.forward);
+            } else if event.text == Key.LeftArrow || event.text == Key.Backspace
+                || event.text == Key.Escape {
+                Desktop.navigate(Step.back);
+            } else {
+                return reject;
+            }
+            accept
+        }
+
+        if !root.narrow: FilesWide { }
+        if root.narrow: FilesNarrow { }
+    }
+}

@@ -1,4 +1,4 @@
-//! Перевод записей сессии `Input` в события окна Slint.
+//! Перевод записей сессии `Input` в события окна Slint и их доставка окну.
 //!
 //! Указатель окна ведут устройства с привязкой осей к экрану: абсолютные оси `X` и `Y`
 //! устройства с кнопками указателя либо первый контакт касания. Клавиши с аналогом среди
@@ -7,11 +7,14 @@
 
 use std::collections::BTreeMap;
 
-use input_abi::{AxisMode, Binding, CANCEL, DeviceLayout, Kind, NO_CONTACT, Record, Usage};
+use input_abi::{AxisMode, Binding, CANCEL, DeviceLayout, Kind, NO_CONTACT, Record, Usage, input};
+use kernel_objects::SessionTransport;
 use slint::{
-    LogicalPosition, SharedString,
+    ComponentHandle, LogicalPosition, SharedString,
     platform::{Key, PointerEventButton, WindowEvent},
 };
+
+use crate::ui;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Screen {
@@ -20,7 +23,7 @@ pub(crate) struct Screen {
     pub(crate) scale: f32,
 }
 
-pub(crate) struct Translator {
+struct Translator {
     screen: Screen,
     devices: BTreeMap<u16, Device>,
     touch: Option<(u16, u16)>,
@@ -56,7 +59,7 @@ enum Phase {
 }
 
 impl Translator {
-    pub(crate) const fn new(screen: Screen) -> Self {
+    const fn new(screen: Screen) -> Self {
         Self {
             screen,
             devices: BTreeMap::new(),
@@ -65,11 +68,7 @@ impl Translator {
         }
     }
 
-    pub(crate) fn feed(
-        &mut self,
-        record: Record,
-        describe: impl FnOnce(u16) -> Option<DeviceLayout>,
-    ) {
+    fn feed(&mut self, record: Record, describe: impl FnOnce(u16) -> Option<DeviceLayout>) {
         match record.kind {
             Kind::Resync => {
                 let held =
@@ -133,7 +132,7 @@ impl Translator {
         }
     }
 
-    pub(crate) fn take_events(&mut self) -> Vec<WindowEvent> {
+    fn take_events(&mut self) -> Vec<WindowEvent> {
         core::mem::take(&mut self.events)
     }
 
@@ -279,6 +278,38 @@ impl Device {
 impl Point {
     fn position(self, scale: f32) -> Option<LogicalPosition> {
         Some(LogicalPosition::new(self.x? / scale, self.y? / scale))
+    }
+}
+
+pub(crate) fn deliver(
+    session: &input::Client<SessionTransport>,
+    screen: Screen,
+    files: &slint::Weak<ui::Files>,
+) {
+    let mut translator = Translator::new(screen);
+    loop {
+        let records = match session.next() {
+            Ok(records) => records,
+            Err(error) => {
+                println!("input stopped: {error:?}");
+                return;
+            }
+        };
+        for record in records.records() {
+            translator.feed(record, |device| session.describe(device).ok());
+        }
+
+        let events = translator.take_events();
+        if !events.is_empty() {
+            let posted = files.upgrade_in_event_loop(move |files| {
+                for event in events {
+                    files.window().dispatch_event(event);
+                }
+            });
+            if posted.is_err() {
+                return;
+            }
+        }
     }
 }
 

@@ -1,13 +1,15 @@
 //! Привязка GPU через слот шины.
 
-use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES};
+use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES};
 use ipc::wire::IpcError;
 use kernel_objects::{IrqLine, Mapping, SessionTransport};
 use runtime::{Timeout, log_fmt};
 use virtio::{
     Buffer, Completion, DeviceMemory, DeviceType, QUEUE_REGION_BYTES, QueueError, SplitQueue,
     Transport, TransportError,
-    gpu::{Command, DisplayInfo, Format, GpuError, Rect},
+    gpu::{
+        Command, DisplayInfo, EDID_RESPONSE_BYTES, FEATURE_EDID, Format, GpuError, ImageSize, Rect,
+    },
 };
 use virtio_driver::{DmaRegion, SlotFailure, SlotRegisters, open_slot};
 use virtio_mmio_abi::{SlotError, VirtioMmioError, virtio_mmio};
@@ -18,7 +20,7 @@ const CONTROL_QUEUE: u16 = 0;
 const CONTROL_QUEUE_SIZE: u16 = 2;
 const RESOURCE_ID: u32 = 1;
 const RESPONSE_OFFSET: usize = 512;
-const RESPONSE_BYTES: usize = 512;
+const RESPONSE_BYTES: usize = EDID_RESPONSE_BYTES;
 const COMMANDS_REGION_BYTES: u64 = (RESPONSE_OFFSET + RESPONSE_BYTES) as u64;
 const PIXEL_BYTES: u64 = SURFACE_PIXEL_BYTES as u64;
 
@@ -51,6 +53,7 @@ pub(crate) enum CommandFailure {
 pub(crate) struct Gpu {
     device: Device,
     dimension: DisplayDimension,
+    physical_size: Option<PhysicalSize>,
     scanout: u32,
 }
 
@@ -61,6 +64,7 @@ struct Device {
     queue_memory: DmaRegion,
     commands: DmaRegion,
     transfer: Option<TransferBuffer>,
+    edid: bool,
 }
 
 struct TransferBuffer {
@@ -109,11 +113,15 @@ impl Gpu {
     pub(crate) fn bind(bus: &virtio_mmio::Client<SessionTransport>) -> Result<Self, BindRefusal> {
         let mut device = Device::open(bus)?;
         match device.attach() {
-            Ok((scanout, dimension)) => Ok(Self {
-                device,
-                dimension,
-                scanout,
-            }),
+            Ok((scanout, dimension)) => {
+                let physical_size = device.physical_size(scanout);
+                Ok(Self {
+                    device,
+                    dimension,
+                    physical_size,
+                    scanout,
+                })
+            }
             Err(refusal) => {
                 device.release();
                 Err(refusal)
@@ -123,6 +131,10 @@ impl Gpu {
 
     pub(crate) fn dimension(&self) -> DisplayDimension {
         self.dimension
+    }
+
+    pub(crate) fn physical_size(&self) -> Option<PhysicalSize> {
+        self.physical_size
     }
 
     pub(crate) fn present(&mut self, surface: &Mapping, area: Area) -> Result<(), DisplayError> {
@@ -198,6 +210,7 @@ impl Device {
             queue_memory,
             commands,
             transfer: None,
+            edid: false,
         };
         if let Err(refusal) = device.initialize() {
             device.release();
@@ -208,9 +221,11 @@ impl Device {
 
     fn initialize(&mut self) -> Result<(), BindRefusal> {
         self.queue = None;
-        self.transport
-            .negotiate(0)
+        let accepted = self
+            .transport
+            .negotiate(FEATURE_EDID)
             .map_err(BindRefusal::Transport)?;
+        self.edid = accepted & FEATURE_EDID != 0;
         let queue = SplitQueue::new(
             &mut self.transport,
             &mut self.queue_memory,
@@ -283,6 +298,31 @@ impl Device {
             .find(|(_, scanout)| scanout.enabled)
             .map(|(number, scanout)| (number, scanout.rect))
             .ok_or(BindRefusal::NoScanout)
+    }
+
+    fn physical_size(&mut self, scanout: u32) -> Option<PhysicalSize> {
+        if !self.edid {
+            return None;
+        }
+
+        let size = self
+            .execute(Command::GetEdid {
+                scanout_id: scanout,
+            })
+            .and_then(|response| {
+                ImageSize::from_edid_response(&response).map_err(CommandFailure::Gpu)
+            });
+
+        match size {
+            Ok(size) => size.map(|size| PhysicalSize {
+                width_mm: size.width_mm,
+                height_mm: size.height_mm,
+            }),
+            Err(failure) => {
+                log_fmt(format_args!("edid refused: {failure:?}"));
+                None
+            }
+        }
     }
 
     fn transfer_to_host(&mut self, area: Area, offset: u64) -> Result<(), CommandFailure> {

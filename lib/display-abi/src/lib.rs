@@ -15,6 +15,6 @@ mod dimension;
 mod error;
 mod protocol;
 
-pub use dimension::{Area, DisplayDimension, SURFACE_PIXEL_BYTES};
+pub use dimension::{Area, DisplayDimension, PhysicalSize, SURFACE_PIXEL_BYTES};
 pub use error::DisplayError;
 pub use protocol::display;

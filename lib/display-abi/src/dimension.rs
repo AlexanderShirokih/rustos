@@ -15,6 +15,16 @@ ipc::wire_value! {
 }
 
 ipc::wire_value! {
+    /// Размер видимой области экрана в миллиметрах в ориентации [`DisplayDimension`]. Обе
+    /// стороны больше нуля.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PhysicalSize {
+        pub width_mm: u32,
+        pub height_mm: u32,
+    }
+}
+
+ipc::wire_value! {
     /// Прямоугольник экрана в пикселях, заданный левым верхним углом и размером.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Area {

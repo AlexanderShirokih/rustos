@@ -24,3 +24,7 @@ memory_limit = "8M"
 [[components]]
 executable = "hello-std"
 memory_limit = "8M"
+
+[[components]]
+executable = "journal"
+memory_limit = "16M"

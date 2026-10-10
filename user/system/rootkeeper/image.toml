@@ -67,6 +67,10 @@ package = "driver-virtio-input"
 path = "/driver-virtio-input"
 
 [[programs]]
+package = "journal"
+path = "/journal"
+
+[[programs]]
 package = "hello-std"
 path = "/hello-std"
 

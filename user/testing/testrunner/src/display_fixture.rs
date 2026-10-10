@@ -14,8 +14,10 @@ use alloc::{boxed::Box, vec::Vec};
 use component_startup::{
     Requirements as _, SessionEvent, SessionEvents, component_manifest, serve_export, whole_export,
 };
-use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
-use display_fixture_protocol::DIMENSION;
+use display_abi::{
+    Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES, display,
+};
+use display_fixture_protocol::{DIMENSION, PHYSICAL_SIZE};
 use failed::Failed;
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource};
@@ -125,6 +127,10 @@ impl Screen {
 impl display::Service<Delivery> for Screen {
     fn dimension(&mut self, _frame: &Delivery) -> DisplayDimension {
         DIMENSION
+    }
+
+    fn physical_size(&mut self, _frame: &Delivery) -> Option<PhysicalSize> {
+        Some(PHYSICAL_SIZE)
     }
 
     fn acquire_surface(

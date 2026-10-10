@@ -85,6 +85,8 @@ regex = "1"
 sha2 = "0.10"
 tempfile = "3"
 trybuild = "1.0"
+slint = { version = "=1.18.1", default-features = false, features = ["compat-1-2", "renderer-software", "libm", "unsafe-single-threaded"] }
+slint-build = { version = "=1.18.1", features = ["sdf-fonts"] }
 
 # Внутренние крейты workspace
 ipc = { path = "lib/ipc" }

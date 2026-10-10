@@ -1,0 +1,55 @@
+export struct Place {
+    path: string,
+    note: string,
+}
+
+export struct Line {
+    number: string,
+    text: string,
+}
+
+export struct Entry {
+    name: string,
+    size: string,
+    folder: bool,
+}
+
+export enum Level {
+    mounts,
+    folder,
+    file,
+}
+
+export enum Step {
+    next,
+    previous,
+    forward,
+    back,
+}
+
+export global Desktop {
+    in property <[Place]> places;
+    in property <Level> level;
+    in property <string> mount;
+    in property <[Entry]> root-entries;
+    in property <string> folder;
+    in property <[Entry]> folder-entries;
+    in property <string> file;
+    in property <[Line]> file-lines;
+
+    callback select(level: Level, mount: string, folder: string, file: string);
+    callback receive();
+    callback navigate(Step);
+
+    public function open-folder(entry: Entry) {
+        if entry.folder {
+            self.select(Level.folder, self.mount, entry.name, "");
+        }
+    }
+
+    public function open-file(entry: Entry) {
+        if !entry.folder {
+            self.select(Level.file, self.mount, self.folder, entry.name);
+        }
+    }
+}

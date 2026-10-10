@@ -9,7 +9,7 @@ use component_startup::{
     MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
     mint_session, serve_export,
 };
-use display_abi::{Area, DisplayDimension, DisplayError, display};
+use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, display};
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport};
 use runtime::{
@@ -85,7 +85,17 @@ impl Shared {
                 SessionError::Refused
             })?;
             let DisplayDimension { width, height } = gpu.dimension();
-            log_fmt(format_args!("gpu attached: {width}x{height}"));
+            match gpu.physical_size() {
+                Some(PhysicalSize {
+                    width_mm,
+                    height_mm,
+                }) => log_fmt(format_args!(
+                    "gpu attached: {width}x{height}, {width_mm}x{height_mm} mm"
+                )),
+                None => log_fmt(format_args!(
+                    "gpu attached: {width}x{height}, physical size unknown"
+                )),
+            }
             state.gpu = Some(gpu);
         }
 
@@ -168,6 +178,10 @@ impl Served<'_> {
 impl display::Service<Delivery> for Served<'_> {
     fn dimension(&mut self, _frame: &Delivery) -> DisplayDimension {
         self.gpu.dimension()
+    }
+
+    fn physical_size(&mut self, _frame: &Delivery) -> Option<PhysicalSize> {
+        self.gpu.physical_size()
     }
 
     fn acquire_surface(

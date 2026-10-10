@@ -12,7 +12,7 @@ use userland_image::ComponentSpec;
 
 use crate::{
     composition::Importer,
-    display_fixture_protocol::DIMENSION,
+    display_fixture_protocol::{DIMENSION, PHYSICAL_SIZE},
     log_relay::await_component_lines,
     rootkeeper_system::{await_revoked, finish, fixture, indexed, query, registered, scenario},
 };
@@ -82,15 +82,17 @@ fn present(
 }
 
 #[test_harness::test]
-fn a_display_session_gets_the_dimension_and_a_surface_that_holds_it() {
+fn a_display_session_gets_the_dimension_the_physical_size_and_a_surface_that_holds_it() {
     let composition = scenario(&[DISPLAY]);
     let importer = composition.importer(SCREEN_REQUIREMENTS);
     let screen = session(&importer);
 
     let dimension = screen.dimension().expect("dimension call");
+    let physical_size = screen.physical_size().expect("physical size call");
     let region = surface(&screen).expect("surface granted");
 
     test_harness::check_eq!(dimension, DIMENSION);
+    test_harness::check_eq!(physical_size, Some(PHYSICAL_SIZE));
     let size = region.inspect().expect("surface inspects").size_bytes;
     test_harness::check!(
         dimension

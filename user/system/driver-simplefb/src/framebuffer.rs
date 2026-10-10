@@ -1,4 +1,4 @@
-use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES};
+use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES};
 use platform_abi::{Description, DescriptionError, DeviceId, Node};
 
 /// Значение `compatible` узла буфера кадра, который обслуживает драйвер.
@@ -42,6 +42,7 @@ pub enum Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Framebuffer {
     dimension: DisplayDimension,
+    physical_size: Option<PhysicalSize>,
     stride: u32,
     format: PixelFormat,
 }
@@ -76,12 +77,13 @@ impl Framebuffer {
         Self::new(&node)
     }
 
-    /// Читает `width`, `height`, `stride` и `format` узла `node`.
+    /// Читает `width`, `height`, `stride`, `format` и необязательные `width-mm` и `height-mm`
+    /// узла `node`.
     ///
     /// Если узел не совместим с [`SIMPLE_FRAMEBUFFER_COMPATIBLE`], задаёт свойство
     /// `memory-region` или формат вне биндинга `simple-framebuffer`, возвращает `Unsupported`.
-    /// Если свойство отсутствует или не разобрано, ширина либо высота равна нулю или шаг строки
-    /// меньше строки пикселей формата, возвращает `Malformed`.
+    /// Если обязательное свойство отсутствует, любое свойство не разобрано, ширина либо высота
+    /// равна нулю или шаг строки меньше строки пикселей формата, возвращает `Malformed`.
     pub fn new(node: &Node<'_>) -> Result<Self, Refusal> {
         let mut compatible = node.strings("compatible")?.ok_or(Refusal::Unsupported)?;
         if !compatible.any(|name| name == SIMPLE_FRAMEBUFFER_COMPATIBLE) {
@@ -95,6 +97,10 @@ impl Framebuffer {
         let height = node.u32("height")?.ok_or(Refusal::Malformed)?;
         let stride = node.u32("stride")?.ok_or(Refusal::Malformed)?;
         let name = node.string("format")?.ok_or(Refusal::Malformed)?;
+
+        let width_mm = node.u32("width-mm")?;
+        let height_mm = node.u32("height-mm")?;
+
         let format = PIXEL_FORMATS
             .into_iter()
             .find(|format| format.name == name)
@@ -104,8 +110,20 @@ impl Framebuffer {
         if width == 0 || height == 0 || u64::from(stride) < row {
             return Err(Refusal::Malformed);
         }
+
+        let physical_size = match (width_mm, height_mm) {
+            (Some(width_mm), Some(height_mm)) if width_mm != 0 && height_mm != 0 => {
+                Some(PhysicalSize {
+                    width_mm,
+                    height_mm,
+                })
+            }
+            _ => None,
+        };
+
         Ok(Self {
             dimension: DisplayDimension { width, height },
+            physical_size,
             stride,
             format,
         })
@@ -114,6 +132,12 @@ impl Framebuffer {
     /// Размер экрана в пикселях.
     pub fn dimension(&self) -> DisplayDimension {
         self.dimension
+    }
+
+    /// Размер видимой области из свойств `width-mm` и `height-mm`. `None`, если узел не задаёт
+    /// одно из них либо задаёт ноль.
+    pub fn physical_size(&self) -> Option<PhysicalSize> {
+        self.physical_size
     }
 
     /// Шаг строки буфера кадра в байтах.

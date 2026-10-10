@@ -15,7 +15,7 @@ use component_startup::{
     MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
     mint_session, serve_export,
 };
-use display_abi::{Area, DisplayDimension, DisplayError, display};
+use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, display};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{
@@ -232,6 +232,10 @@ impl Session {
 impl display::Service<Delivery> for Session {
     fn dimension(&mut self, _frame: &Delivery) -> DisplayDimension {
         self.screen.framebuffer.dimension()
+    }
+
+    fn physical_size(&mut self, _frame: &Delivery) -> Option<PhysicalSize> {
+        self.screen.framebuffer.physical_size()
     }
 
     fn acquire_surface(

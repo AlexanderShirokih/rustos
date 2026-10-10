@@ -1,7 +1,7 @@
 version = 1
 
 [plan]
-source = "user/examples/slint-demo/system.toml"
+source = "user/examples/files/system.toml"
 
 [[programs]]
 package = "rootkeeper"
@@ -25,10 +25,6 @@ package = "driver-virtio-gpu"
 path = "/driver-virtio-gpu"
 
 [[programs]]
-package = "driver-pl031"
-path = "/driver-pl031"
-
-[[programs]]
 package = "mounts"
 path = "/mounts"
 
@@ -45,13 +41,17 @@ package = "input-hub"
 path = "/input-hub"
 
 [[programs]]
-package = "slint-demo"
-path = "/slint-demo"
+package = "driver-virtio-input"
+path = "/driver-virtio-input"
+
+[[programs]]
+package = "files"
+path = "/files"
 
 [[files]]
 path = "/mounts/table"
-source = "user/examples/slint-demo/mounts"
+source = "user/examples/files/mounts"
 
 [[files]]
-path = "/slint-demo/system.toml"
-source = "user/examples/slint-demo/system.toml"
+path = "/files/system.toml"
+source = "user/examples/files/system.toml"

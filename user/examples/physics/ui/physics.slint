@@ -1,0 +1,44 @@
+import "@inter/Inter-Regular.ttf";
+
+export struct Body {
+    x: length,
+    y: length,
+    size: length,
+    tint: color,
+}
+
+export component Physics inherits Window {
+    in property <[Body]> bodies;
+    in property <length> field-height;
+    in property <string> note;
+
+    default-font-family: "Inter";
+    background: #ffffff;
+
+    VerticalLayout {
+        Rectangle {
+            height: root.field-height;
+            for body in root.bodies: Rectangle {
+                x: body.x - body.size / 2;
+                y: body.y - body.size / 2;
+                width: body.size;
+                height: body.size;
+                border-radius: body.size / 2;
+                background: body.tint;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: #e3e6eb;
+        }
+        HorizontalLayout {
+            padding-left: 12px;
+            Text {
+                text: root.note;
+                color: #6b7280;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

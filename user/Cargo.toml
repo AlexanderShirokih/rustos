@@ -6,10 +6,11 @@ members = [
     "examples/calculator-demo",
     "examples/clock-std",
     "examples/doomgeneric",
+    "examples/files",
     "examples/files-demo",
     "examples/hello-c",
     "examples/hello-std",
-    "examples/slint-demo",
+    "examples/physics",
     "system/driver-pl031",
     "system/driver-pm8941-pwrkey",
     "system/driver-pm8941-rtc",
@@ -19,6 +20,7 @@ members = [
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
     "system/input-hub",
+    "system/journal",
     "system/mounts",
     "system/platform",
     "system/rootkeeper",
@@ -36,6 +38,7 @@ members = [
     "../lib/filesystem-server",
     "../lib/log-relay",
     "../lib/managed-component",
+    "../lib/slint-display",
     "../lib/sqlite",
     "../lib/userland-loader",
     "../lib/virtio-driver",
@@ -53,6 +56,8 @@ publish = false
 [workspace.dependencies]
 # Внешние зависимости
 spin = "0.12.0"
+slint = { version = "=1.18.1", default-features = false, features = ["compat-1-2", "renderer-software", "libm", "unsafe-single-threaded"] }
+slint-build = { version = "=1.18.1", features = ["sdf-fonts"] }
 
 # Крейты userspace
 c-library = { path = "../lib/c-library" }
@@ -62,6 +67,7 @@ filesystem-server = { path = "../lib/filesystem-server" }
 log-relay = { path = "../lib/log-relay" }
 managed-component = { path = "../lib/managed-component" }
 runtime = { path = "../lib/runtime" }
+slint-display = { path = "../lib/slint-display" }
 sqlite = { path = "../lib/sqlite" }
 userland-loader = { path = "../lib/userland-loader" }
 virtio-driver = { path = "../lib/virtio-driver" }

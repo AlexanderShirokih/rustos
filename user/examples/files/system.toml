@@ -19,5 +19,5 @@ executable = "filesystem-ramfs"
 memory_limit = "4M"
 
 [[components]]
-executable = "slint-demo"
+executable = "files"
 memory_limit = "16M"

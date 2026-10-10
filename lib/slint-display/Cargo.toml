@@ -1,0 +1,21 @@
+[package]
+license = "GPL-3.0-only"
+name = "slint-display"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+workspace = "../../user"
+
+[lib]
+bench = false
+doctest = false
+
+[dependencies]
+display-abi = { workspace = true }
+ipc = { workspace = true }
+kernel-objects = { workspace = true }
+slint = { workspace = true }
+syscall = { workspace = true }
+
+[lints]
+workspace = true

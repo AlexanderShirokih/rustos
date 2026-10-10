@@ -1,0 +1,185 @@
+import { Desktop, Entry, Line, Place } from "desktop.slint";
+import { Palette } from "palette.slint";
+
+export component PlaceRow inherits Rectangle {
+    in property <Place> place;
+    in property <bool> selected;
+    in property <bool> active;
+
+    callback clicked;
+
+    height: 52px;
+    border-radius: 6px;
+    border-width: root.selected && root.active ? 1px : 0;
+    border-color: Palette.accent;
+    background: !root.selected ? transparent : root.active ? Palette.selection : Palette.inactive;
+
+    VerticalLayout {
+        padding-left: 12px;
+        alignment: center;
+        spacing: 2px;
+        Text {
+            text: root.place.path;
+            color: Palette.text;
+            font-size: 15px;
+        }
+        Text {
+            text: root.place.note;
+            color: Palette.muted;
+            font-size: 12px;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component EntryRow inherits Rectangle {
+    in property <Entry> entry;
+    in property <bool> selected;
+    in property <bool> active;
+    in property <bool> open;
+    in property <length> indent;
+
+    callback clicked;
+
+    height: 34px;
+    border-width: root.selected && root.active ? 1px : 0;
+    border-color: Palette.accent;
+    background: !root.selected ? transparent : root.active ? Palette.selection : Palette.inactive;
+
+    HorizontalLayout {
+        padding-left: 16px + root.indent;
+        padding-right: 16px;
+        spacing: 12px;
+        Text {
+            text: root.entry.name;
+            color: Palette.text;
+            font-size: 15px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: root.entry.size;
+            color: Palette.muted;
+            font-size: 13px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        Text {
+            text: !root.entry.folder ? "" : root.open ? "⌄" : "›";
+            color: Palette.muted;
+            font-size: 15px;
+            width: 8px;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Palette.line;
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component Column inherits Rectangle {
+    in property <[Entry]> entries;
+    in property <string> selected;
+    in property <bool> active;
+
+    callback clicked(Entry);
+
+    background: root.active ? Palette.focus : transparent;
+
+    VerticalLayout {
+        alignment: start;
+        for entry in root.entries: EntryRow {
+            entry: entry;
+            selected: entry.name == root.selected;
+            active: root.active;
+            clicked => {
+                root.clicked(entry);
+            }
+        }
+    }
+}
+
+component LineRow inherits HorizontalLayout {
+    in property <Line> line;
+
+    height: 20px;
+    spacing: 14px;
+    Text {
+        width: 20px;
+        text: root.line.number;
+        color: Palette.faint;
+        font-size: 14px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.line.text;
+        color: Palette.text;
+        font-size: 14px;
+        vertical-alignment: center;
+    }
+}
+
+export component Divider inherits Rectangle {
+    width: 1px;
+    background: Palette.line;
+}
+
+export component Breadcrumb inherits HorizontalLayout {
+    height: 40px;
+    padding-left: 16px;
+    spacing: 6px;
+    alignment: start;
+    Text {
+        text: Desktop.mount;
+        color: Palette.muted;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: Desktop.folder;
+        color: Palette.muted;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: Desktop.folder == "" ? "" : "/";
+        color: Palette.faint;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: Desktop.file;
+        color: Palette.text;
+        font-size: 15px;
+        vertical-alignment: center;
+    }
+}
+
+export component Preview inherits VerticalLayout {
+    padding: 14px;
+    alignment: start;
+    for line in Desktop.file-lines: LineRow {
+        line: line;
+    }
+}
+
+export component HorizontalRule inherits Rectangle {
+    height: 1px;
+    background: Palette.line;
+}

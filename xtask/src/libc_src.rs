@@ -432,10 +432,13 @@ fn build_runtimes(
         .arg(&build)
         .arg(format!("-DCMAKE_INSTALL_PREFIX={}", prefix.display()))
         .arg(format!("-DCMAKE_SYSTEM_PROCESSOR={}", arch.cpu_family))
-        .arg(format!("-DCMAKE_AR={archiver}"))
         .args(["C", "CXX", "ASM"].map(|lang| format!("-DCMAKE_{lang}_COMPILER=clang")))
         .args(["C", "CXX", "ASM"].map(|lang| format!("-DCMAKE_{lang}_FLAGS={flags}")))
         .args(CMAKE_OPTIONS);
+    // Голое имя CMake читает как путь от каталога запуска, а архиватор из `PATH` он сам находит.
+    if Path::new(archiver).is_absolute() {
+        configure.arg(format!("-DCMAKE_AR={archiver}"));
+    }
     shell::run(
         &mut configure,
         &format!("cmake configure for {}", arch.name),

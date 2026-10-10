@@ -1,7 +1,7 @@
 use syscall::kind;
 
 use crate::{
-    dimension::{Area, DisplayDimension},
+    dimension::{Area, DisplayDimension, PhysicalSize},
     error::DisplayError,
 };
 
@@ -12,6 +12,9 @@ ipc::protocol! {
 
         /// Размер экрана в пикселях.
         call fn dimension() -> DisplayDimension;
+
+        /// Физический размер экрана. `None`, если устройство его не сообщает.
+        call fn physical_size() -> Option<PhysicalSize>;
 
         /// Выдаёт сессии RW-capability на регион поверхности размером не меньше
         /// [`DisplayDimension::surface_size`] байт. Повторный вызов в той же сессии возвращает

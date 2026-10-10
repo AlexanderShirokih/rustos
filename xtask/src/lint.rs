@@ -206,12 +206,13 @@ fn test_commands(workspace: &Workspace, root: &Path, host: &str) -> Vec<Invocati
             "test",
             &["--workspace", "--all-features"],
         )],
-        // Примеры объявления компонента проверяют раскрытие макроса, а юнит-тесты журнала relay -
-        // его историю и подписчиков над кольцом в памяти теста. Их запускает host-target.
-        // Команды идут из корня, потому что таргет userland задан конфигурацией его каталога.
+        // Host-тесты userland находятся в библиотеках, которые собираются под хост, и их
+        // запускает host-target. Команды идут из корня, потому что таргет userland задан
+        // конфигурацией его каталога.
         Profile::Userland => [
             ["-p", "component-startup", "--doc"],
             ["-p", "log-relay", "--lib"],
+            ["-p", "slint-display", "--tests"],
         ]
         .into_iter()
         .map(|args| {
@@ -430,7 +431,8 @@ mod tests {
             tests,
             [
                 "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p component-startup --doc --target host-triple",
-                "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p log-relay --lib --target host-triple"
+                "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p log-relay --lib --target host-triple",
+                "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p slint-display --tests --target host-triple"
             ]
         );
     }

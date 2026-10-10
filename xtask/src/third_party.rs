@@ -27,6 +27,16 @@ enum Role {
 
 const ENTRIES: &[Entry] = &[
     Entry {
+        name: "dejavu-fonts",
+        role: Role::Sources,
+        pin: Pin::Archive {
+            url: "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip",
+            sha256: "7576310b219e04159d35ff61dd4a4ec4cdba4f35c00e002a136f00e96a908b0a",
+            format: Format::Zip,
+            members: &["dejavu-fonts-ttf-2.37/ttf"],
+        },
+    },
+    Entry {
         name: "doomgeneric",
         role: Role::Sources,
         pin: Pin::GitCommit {

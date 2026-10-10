@@ -1,0 +1,67 @@
+import { Desktop, Level } from "desktop.slint";
+import { Palette } from "palette.slint";
+import { Breadcrumb, Column, Divider, HorizontalRule, PlaceRow, Preview } from "widgets.slint";
+
+export component FilesWide inherits Rectangle {
+    HorizontalLayout {
+        vertical-stretch: 1;
+
+        Rectangle {
+            width: 150px;
+            background: Desktop.level == Level.mounts ? Palette.focus : Palette.sidebar;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 4px;
+                alignment: start;
+                Text {
+                    text: "Mounts";
+                    color: Palette.faint;
+                    font-size: 12px;
+                }
+                for place in Desktop.places: PlaceRow {
+                    place: place;
+                    selected: place.path == Desktop.mount;
+                    active: Desktop.level == Level.mounts;
+                    clicked => {
+                        Desktop.select(Level.mounts, place.path, "", "");
+                    }
+                }
+            }
+        }
+        Divider { }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            Breadcrumb { }
+            HorizontalRule { }
+
+            HorizontalLayout {
+                vertical-stretch: 1;
+                Column {
+                    width: 215px;
+                    entries: Desktop.root-entries;
+                    selected: Desktop.folder;
+                    active: Desktop.level == Level.folder;
+                    clicked(entry) => {
+                        Desktop.open-folder(entry);
+                    }
+                }
+                Divider { }
+                Column {
+                    width: 190px;
+                    entries: Desktop.folder-entries;
+                    selected: Desktop.file;
+                    active: Desktop.level == Level.file;
+                    clicked(entry) => {
+                        Desktop.open-file(entry);
+                    }
+                }
+                Divider { }
+                Preview {
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+    }
+}

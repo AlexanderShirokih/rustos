@@ -1,0 +1,68 @@
+import "@dejavu/DejaVuSansMono.ttf";
+
+export enum RowKind {
+    line,
+    gap,
+    failure,
+}
+
+export struct Row {
+    kind: RowKind,
+    source: string,
+    text: string,
+}
+
+export component Journal inherits Window {
+    in property <[Row]> rows;
+    in property <int> text-column;
+    out property <int> columns: max(1, floor((root.width - 2 * root.margin) / root.advance));
+
+    private property <length> margin: 8px;
+    private property <length> advance: probe.preferred-width / 100;
+    private property <length> row-height: probe.preferred-height;
+
+    default-font-family: "DejaVu Sans Mono";
+    default-font-size: 12px;
+    background: #101418;
+
+    // Шаг сетки - ширина ста символов. Литерал из обратных апострофов встраивает их глиф,
+    // которого нет среди встроенных глифов ASCII, для сообщений паники Rust.
+    probe := Text {
+        visible: false;
+        text: "``````````" + "``````````" + "``````````" + "``````````" + "``````````"
+            + "``````````" + "``````````" + "``````````" + "``````````" + "``````````";
+    }
+
+    Rectangle {
+        x: root.margin;
+        y: root.margin;
+        width: root.width - 2 * root.margin;
+        height: root.height - 2 * root.margin;
+        clip: true;
+
+        for row[index] in root.rows: Rectangle {
+            x: 0;
+            y: parent.height - (root.rows.length - index) * root.row-height;
+            width: parent.width;
+            height: root.row-height;
+
+            Text {
+                x: 0;
+                y: 0;
+                width: root.text-column * root.advance;
+                height: parent.height;
+                text: row.source;
+                color: #7d8a99;
+            }
+
+            Text {
+                x: root.text-column * root.advance;
+                y: 0;
+                width: parent.width - self.x;
+                height: parent.height;
+                text: row.text;
+                color: row.kind == RowKind.gap ? #e0b45a : row.kind == RowKind.failure ? #ef6f6c : #d7dde5;
+            }
+        }
+    }
+}

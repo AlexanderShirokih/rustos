@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES};
+use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 use fdt_test::Token;
 use platform_abi::{Description, DeviceId};
@@ -14,6 +14,44 @@ const A8R8G8B8_PIXEL_BYTES: usize = 4;
 const R8G8B8_PIXEL_BYTES: usize = 3;
 
 const SURFACE_FULL_RED_HALF_BLUE_TOP_5A: u32 = 0x5AFF_0080;
+
+const SIZED_TREE: &[Token<'static>] = &fdt_test::tree! {
+    sized@f000 {
+        compatible = "simple-framebuffer";
+        width = <4>;
+        height = <2>;
+        stride = <16>;
+        format = "a8r8g8b8";
+        width-mm = <68>;
+        height-mm = <147>;
+    };
+    zero-width-mm@c000 {
+        compatible = "simple-framebuffer";
+        width = <4>;
+        height = <2>;
+        stride = <16>;
+        format = "a8r8g8b8";
+        width-mm = <0>;
+        height-mm = <147>;
+    };
+    height-mm-only@d000 {
+        compatible = "simple-framebuffer";
+        width = <4>;
+        height = <2>;
+        stride = <16>;
+        format = "a8r8g8b8";
+        height-mm = <147>;
+    };
+    wide-width-mm@e000 {
+        compatible = "simple-framebuffer";
+        width = <4>;
+        height = <2>;
+        stride = <16>;
+        format = "a8r8g8b8";
+        width-mm = <0 68>;
+        height-mm = <147>;
+    };
+};
 
 const TREE: &[Token<'static>] = &fdt_test::tree! {
     phone@1000 {
@@ -92,7 +130,11 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
 };
 
 fn framebuffer(path: &str) -> Result<Framebuffer, Refusal> {
-    let blob = fdt_test::build(TREE);
+    framebuffer_of(TREE, path)
+}
+
+fn framebuffer_of(tree: &[Token<'_>], path: &str) -> Result<Framebuffer, Refusal> {
+    let blob = fdt_test::build(tree);
     let description = Description::new(&blob, 0).expect("tree parses");
     let device = DeviceId::new(path).expect("absolute path");
     Framebuffer::open(&description, &device)
@@ -169,6 +211,29 @@ fn a_described_framebuffer_reports_its_dimension_and_needs_a_window_of_its_frame
     test_harness::check_eq!(phone.format(), "a8r8g8b8");
     test_harness::check_eq!(phone.fits(frame), Ok(()));
     test_harness::check_eq!(phone.fits(frame - 1), Err(Refusal::Malformed));
+}
+
+#[test_harness::test]
+fn a_physical_size_needs_both_nonzero_millimetre_properties() {
+    let sized = framebuffer_of(SIZED_TREE, "/sized@f000").expect("framebuffer accepted");
+    let unsized_framebuffer = framebuffer("/unpadded@9000").expect("framebuffer accepted");
+
+    test_harness::check_eq!(
+        sized.physical_size(),
+        Some(PhysicalSize {
+            width_mm: 68,
+            height_mm: 147,
+        })
+    );
+    test_harness::check_eq!(unsized_framebuffer.physical_size(), None);
+    for path in ["/zero-width-mm@c000", "/height-mm-only@d000"] {
+        let framebuffer = framebuffer_of(SIZED_TREE, path).expect("framebuffer accepted");
+        test_harness::check_eq!(framebuffer.physical_size(), None);
+    }
+    test_harness::check_eq!(
+        framebuffer_of(SIZED_TREE, "/wide-width-mm@e000"),
+        Err(Refusal::Malformed)
+    );
 }
 
 #[test_harness::test]

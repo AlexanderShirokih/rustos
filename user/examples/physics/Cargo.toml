@@ -1,0 +1,29 @@
+[package]
+license = "GPL-3.0-only"
+name = "physics"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 1048576
+
+[[bin]]
+name = "physics"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+components = { workspace = true }
+display-abi = { workspace = true }
+slint = { workspace = true }
+slint-display = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+slint-build = { workspace = true }
+
+[lints]
+workspace = true

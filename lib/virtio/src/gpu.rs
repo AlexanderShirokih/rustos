@@ -9,6 +9,18 @@ const HEADER_BYTES: usize = 24;
 pub const SCANOUTS_MAX: usize = 16;
 const SCANOUT_BYTES: usize = 24;
 const DISPLAY_INFO_BYTES: usize = HEADER_BYTES + SCANOUTS_MAX * SCANOUT_BYTES;
+const EDID_MAX_BYTES: usize = 1024;
+/// Длина ответа на [`Command::GetEdid`].
+pub const EDID_RESPONSE_BYTES: usize = HEADER_BYTES + 8 + EDID_MAX_BYTES;
+
+/// Признак устройства, с которым устройство отвечает на [`Command::GetEdid`].
+pub const FEATURE_EDID: u64 = 1 << 1;
+
+const EDID_BASE_BLOCK_BYTES: usize = 128;
+const EDID_HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+const EDID_IMAGE_SIZE_CM: usize = 21;
+const EDID_FIRST_TIMING: usize = 54;
+const EDID_TIMING_IMAGE_SIZE: usize = EDID_FIRST_TIMING + 12;
 
 const COMMAND_GET_DISPLAY_INFO: u32 = 0x0100;
 const COMMAND_RESOURCE_CREATE_2D: u32 = 0x0101;
@@ -16,8 +28,10 @@ const COMMAND_SET_SCANOUT: u32 = 0x0103;
 const COMMAND_RESOURCE_FLUSH: u32 = 0x0104;
 const COMMAND_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const COMMAND_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+const COMMAND_GET_EDID: u32 = 0x010A;
 const RESPONSE_OK_NODATA: u32 = 0x1100;
 const RESPONSE_OK_DISPLAY_INFO: u32 = 0x1101;
+const RESPONSE_OK_EDID: u32 = 0x1104;
 
 /// Формат пикселя ресурса.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +82,8 @@ pub enum Command<'a> {
     },
     /// Обновление прямоугольника ресурса на выводах.
     ResourceFlush { resource_id: u32, rect: Rect },
+    /// Запрос EDID вывода `scanout_id`. Требует признака [`FEATURE_EDID`].
+    GetEdid { scanout_id: u32 },
 }
 
 /// Отказ кодирования команды или разбора ответа.
@@ -95,6 +111,13 @@ pub struct Scanout {
 pub struct DisplayInfo {
     /// Выводы по номеру.
     pub scanouts: [Scanout; SCANOUTS_MAX],
+}
+
+/// Размер видимой области вывода из EDID в миллиметрах. Обе стороны больше нуля.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageSize {
+    pub width_mm: u32,
+    pub height_mm: u32,
 }
 
 struct Encoder<'a> {
@@ -149,6 +172,9 @@ impl Command<'_> {
                 encoder.rect(rect)?;
                 encoder.words(&[resource_id, 0])?;
             }
+            Self::GetEdid { scanout_id } => {
+                encoder.words(&[scanout_id, 0])?;
+            }
         }
         Ok(encoder.length)
     }
@@ -157,6 +183,7 @@ impl Command<'_> {
     pub fn response_bytes(&self) -> usize {
         match self {
             Self::GetDisplayInfo => DISPLAY_INFO_BYTES,
+            Self::GetEdid { .. } => EDID_RESPONSE_BYTES,
             _ => HEADER_BYTES,
         }
     }
@@ -181,12 +208,14 @@ impl Command<'_> {
             Self::SetScanout { .. } => COMMAND_SET_SCANOUT,
             Self::TransferToHost2d { .. } => COMMAND_TRANSFER_TO_HOST_2D,
             Self::ResourceFlush { .. } => COMMAND_RESOURCE_FLUSH,
+            Self::GetEdid { .. } => COMMAND_GET_EDID,
         }
     }
 
     fn response_type(&self) -> u32 {
         match self {
             Self::GetDisplayInfo => RESPONSE_OK_DISPLAY_INFO,
+            Self::GetEdid { .. } => RESPONSE_OK_EDID,
             _ => RESPONSE_OK_NODATA,
         }
     }
@@ -213,6 +242,56 @@ impl DisplayInfo {
             };
         }
         Ok(Self { scanouts })
+    }
+}
+
+impl ImageSize {
+    /// Разбирает ответ на [`Command::GetEdid`] и возвращает размер видимой области из первого
+    /// описателя развёртки EDID, а при его нулевом размере - из размера изображения базового
+    /// блока в сантиметрах. `None`, если EDID короче базового блока, начинается не заголовком
+    /// EDID либо не задаёт обе стороны.
+    ///
+    /// Отказы:
+    /// - `UnexpectedResponse` - тип ответа не `OK_EDID`;
+    /// - `Truncated` - ответ короче своего формата.
+    pub fn from_edid_response(response: &[u8]) -> Result<Option<Self>, GpuError> {
+        Command::GetEdid { scanout_id: 0 }.check_response(response)?;
+        let size =
+            usize::try_from(read_word(response, HEADER_BYTES)?).map_err(|_| GpuError::Truncated)?;
+        let edid = response
+            .get(HEADER_BYTES + 8..)
+            .and_then(|edid| edid.get(..size))
+            .ok_or(GpuError::Truncated)?;
+        Ok(Self::from_edid(edid))
+    }
+
+    fn from_edid(edid: &[u8]) -> Option<Self> {
+        let base = edid.get(..EDID_BASE_BLOCK_BYTES)?;
+        if base.get(..EDID_HEADER.len())? != EDID_HEADER {
+            return None;
+        }
+
+        let &[low_width, low_height, high] =
+            base.get(EDID_TIMING_IMAGE_SIZE..EDID_TIMING_IMAGE_SIZE + 3)?
+        else {
+            return None;
+        };
+        let &[width_cm, height_cm] = base.get(EDID_IMAGE_SIZE_CM..EDID_IMAGE_SIZE_CM + 2)? else {
+            return None;
+        };
+
+        let timing_size = Self::new(
+            u32::from(low_width) | u32::from(high >> 4) << 8,
+            u32::from(low_height) | u32::from(high & 0x0F) << 8,
+        );
+        timing_size.or_else(|| Self::new(u32::from(width_cm) * 10, u32::from(height_cm) * 10))
+    }
+
+    fn new(width_mm: u32, height_mm: u32) -> Option<Self> {
+        (width_mm != 0 && height_mm != 0).then_some(Self {
+            width_mm,
+            height_mm,
+        })
     }
 }
 
@@ -384,6 +463,97 @@ mod tests {
                 9,
                 0
             ]
+        );
+    }
+
+    fn edid_response(edid: &[u8]) -> Vec<u8> {
+        let mut response = vec![0; EDID_RESPONSE_BYTES];
+        response[..4].copy_from_slice(&RESPONSE_OK_EDID.to_le_bytes());
+        let size = u32::try_from(edid.len()).unwrap();
+        response[HEADER_BYTES..HEADER_BYTES + 4].copy_from_slice(&size.to_le_bytes());
+        response[HEADER_BYTES + 8..HEADER_BYTES + 8 + edid.len()].copy_from_slice(edid);
+        response
+    }
+
+    fn edid(base_cm: [u8; 2], timing_mm: [u8; 3]) -> Vec<u8> {
+        let mut edid = vec![0; EDID_BASE_BLOCK_BYTES];
+        edid[..8].copy_from_slice(&EDID_HEADER);
+        edid[EDID_IMAGE_SIZE_CM..EDID_IMAGE_SIZE_CM + 2].copy_from_slice(&base_cm);
+        edid[EDID_TIMING_IMAGE_SIZE..EDID_TIMING_IMAGE_SIZE + 3].copy_from_slice(&timing_mm);
+        edid
+    }
+
+    #[test]
+    fn get_edid_names_the_scanout_after_header() {
+        let mut buffer = [0; 32];
+
+        let length = Command::GetEdid { scanout_id: 2 }
+            .encode(&mut buffer)
+            .unwrap();
+
+        assert_eq!(length, 32);
+        assert_eq!(words(&buffer), [COMMAND_GET_EDID, 0, 0, 0, 0, 0, 2, 0]);
+    }
+
+    #[test]
+    fn edid_image_size_comes_from_the_first_timing_in_millimetres() {
+        // 600×340 мм: младшие байты 0x58 и 0x54, старшие полубайты 2 и 1.
+        let response = edid_response(&edid([61, 35], [0x58, 0x54, 0x21]));
+
+        assert_eq!(
+            ImageSize::from_edid_response(&response),
+            Ok(Some(ImageSize {
+                width_mm: 600,
+                height_mm: 340
+            }))
+        );
+    }
+
+    #[test]
+    fn edid_without_timing_size_falls_back_to_the_base_block_centimetres() {
+        let response = edid_response(&edid([60, 34], [0, 0, 0]));
+
+        assert_eq!(
+            ImageSize::from_edid_response(&response),
+            Ok(Some(ImageSize {
+                width_mm: 600,
+                height_mm: 340
+            }))
+        );
+    }
+
+    #[test]
+    fn edid_without_size_or_header_has_no_image_size() {
+        let unsized_edid = edid([60, 0], [0x58, 0, 0]);
+        let mut headless = edid([60, 34], [0x58, 0x54, 0x21]);
+        headless[0] = 0xFF;
+
+        for edid in [unsized_edid, headless, Vec::new()] {
+            assert_eq!(
+                ImageSize::from_edid_response(&edid_response(&edid)),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn edid_response_of_another_type_or_past_its_buffer_is_refused() {
+        let mut foreign = edid_response(&edid([60, 34], [0, 0, 0]));
+        foreign[..4].copy_from_slice(&RESPONSE_OK_NODATA.to_le_bytes());
+        let mut oversized = edid_response(&[]);
+        oversized[HEADER_BYTES..HEADER_BYTES + 4].copy_from_slice(&2048u32.to_le_bytes());
+
+        assert_eq!(
+            ImageSize::from_edid_response(&foreign),
+            Err(GpuError::UnexpectedResponse(RESPONSE_OK_NODATA))
+        );
+        assert_eq!(
+            ImageSize::from_edid_response(&oversized),
+            Err(GpuError::Truncated)
+        );
+        assert_eq!(
+            ImageSize::from_edid_response(&edid_response(&[])[..HEADER_BYTES]),
+            Err(GpuError::Truncated)
         );
     }
 }
