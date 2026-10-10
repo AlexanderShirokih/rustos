@@ -9,6 +9,10 @@ publish.workspace = true
 io = { workspace = true }
 spin = { workspace = true }
 test-harness-macros = { workspace = true }
+userland-image = { workspace = true }
+
+[dev-dependencies]
+userland-image = { workspace = true, features = ["alloc"] }
 
 [lints]
 workspace = true

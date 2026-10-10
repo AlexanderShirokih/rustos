@@ -4281,6 +4281,7 @@ dependencies = [
  "io",
  "spin",
  "test-harness-macros",
+ "userland-image",
 ]
 
 [[package]]

@@ -53,6 +53,8 @@ enum Commands {
     Build(BuildArgs),
     /// Run the QEMU integration tests
     QemuTest {
+        /// Run only the tests whose name contains this substring
+        filter: Option<String>,
         /// Timeout in seconds
         #[arg(long, default_value_t = 120)]
         timeout: u64,
@@ -62,6 +64,8 @@ enum Commands {
     },
     /// Run the userspace filesystem benchmarks in QEMU
     Bench {
+        /// Run only the benchmarks whose name contains this substring
+        filter: Option<String>,
         /// Timeout in seconds
         #[arg(long, default_value_t = 120)]
         timeout: u64,
@@ -173,8 +177,12 @@ fn main() -> Result<ExitCode> {
             }
         }
         Commands::Build(args) => build::run(args)?,
-        Commands::QemuTest { timeout, spec } => qemu_test::qemu_test(timeout, &spec)?,
-        Commands::Bench { timeout } => qemu_test::qemu_bench(timeout)?,
+        Commands::QemuTest {
+            filter,
+            timeout,
+            spec,
+        } => qemu_test::qemu_test(timeout, &spec, filter.as_deref())?,
+        Commands::Bench { filter, timeout } => qemu_test::qemu_bench(timeout, filter.as_deref())?,
         Commands::Stress {
             seed,
             seeds,

@@ -1,7 +1,7 @@
 //! Test-mode ядра под `cfg(feature = "kernel-tests")`.
 //!
-//! `kmain` после bootstrap создаёт начальный процесс и под этой фичей запускает все
-//! зарегистрированные тест-кейсы через `test_harness::run_all_tests()`.
+//! `kmain` после bootstrap создаёт начальный процесс и под этой фичей запускает
+//! зарегистрированные тест-кейсы через `test_harness::run_tests()`.
 //!
 //! Тестам вендится только консоль для маркеров.
 
@@ -71,7 +71,7 @@ fn harness_exit(code: u32) -> ! {
     crate::power::system_off(i32::try_from(code).unwrap_or(i32::MAX))
 }
 
-/// Подключает harness к ядру и запускает все зарегистрированные кейсы.
+/// Подключает harness к ядру и запускает зарегистрированные кейсы.
 #[allow(clippy::expect_used)]
 pub fn run(kernel: &mut KernelContext) -> ! {
     // Без консоли и её адаптера сообщить о результате прогона нечем.
@@ -86,5 +86,9 @@ pub fn run(kernel: &mut KernelContext) -> ! {
         ADAPTER.get().expect("ADAPTER initialised above");
     test_harness::runner::install_writer(writer);
     test_harness::runner::install_exit(harness_exit);
-    test_harness::run_all_tests()
+
+    let image = kernel
+        .userland_image()
+        .and_then(|image| userland_image::decode(image.bytes).ok());
+    test_harness::run_tests(test_harness::TestKind::Regular, image.as_ref())
 }

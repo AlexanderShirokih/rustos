@@ -11,13 +11,20 @@
 
 use core::{
     fmt::Write as _,
+    str::Utf8Error,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use io::writer::Writer;
 use spin::Once;
+use userland_image::DecodedImage;
 
-use crate::case::{TestCase, TestKind};
+use crate::{
+    case::{TestCase, TestKind},
+    macros::fail,
+};
+
+const FILTER_IMAGE_PATH: &str = "/testrunner/test-filter";
 
 #[allow(improper_ctypes)]
 unsafe extern "C" {
@@ -110,19 +117,33 @@ fn run_case(case: &TestCase) {
 
 /// Прогоняет зарегистрированные кейсы профиля `kind` и выключает машину.
 ///
+/// Фильтр по подстроке имени кейса читается из `image`.
+///
 /// Порядок обхода задаётся раскладкой секции `.tests` линкером и не
 /// является частью контракта. Кейс обязан быть самодостаточным - сам создавать
 /// нужное ему состояние и не полагаться на то, что оставил предыдущий.
-pub fn run_tests(kind: TestKind) -> ! {
+pub fn run_tests(kind: TestKind, image: Option<&DecodedImage<'_>>) -> ! {
+    let filter = match image.map(image_filter).transpose() {
+        Ok(filter) => filter.flatten(),
+        Err(_) => fail(
+            format_args!("test filter at {FILTER_IMAGE_PATH} is not UTF-8"),
+            file!(),
+            line!(),
+        ),
+    };
+
     let cases = iter_cases();
-    let selected = cases.iter().filter(|case| case.kind == kind).count();
+    let selected = cases
+        .iter()
+        .filter(|case| is_selected(case, kind, filter))
+        .count();
 
     with_writer(|w| {
         let mut fmt = FmtAdapter::new(w);
         let _ = writeln!(fmt, "[TEST-RUN: {selected}]");
     });
 
-    for case in cases.iter().filter(|case| case.kind == kind) {
+    for case in cases.iter().filter(|case| is_selected(case, kind, filter)) {
         run_case(case);
     }
 
@@ -133,7 +154,56 @@ pub fn run_tests(kind: TestKind) -> ! {
     exit(0)
 }
 
-/// Прогоняет обычный профиль тестов.
-pub fn run_all_tests() -> ! {
-    run_tests(TestKind::Regular)
+fn is_selected(case: &TestCase, kind: TestKind, filter: Option<&str>) -> bool {
+    case.kind == kind && filter.is_none_or(|filter| case.name.contains(filter))
+}
+
+fn image_filter<'a>(image: &DecodedImage<'a>) -> Result<Option<&'a str>, Utf8Error> {
+    image
+        .entry(FILTER_IMAGE_PATH)
+        .map(|entry| core::str::from_utf8(entry.data()))
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use userland_image::{ImageRecord, decode, encode};
+
+    use super::{FILTER_IMAGE_PATH, image_filter, is_selected};
+    use crate::case::{TestCase, TestKind};
+
+    #[test]
+    fn a_filter_selects_cases_whose_name_contains_it() {
+        let case = |name| TestCase {
+            name,
+            run: || {},
+            kind: TestKind::Regular,
+        };
+
+        let filter = Some("liveness");
+        assert!(is_selected(
+            &case("port_liveness_on_close"),
+            TestKind::Regular,
+            filter
+        ));
+        assert!(!is_selected(&case("port_send"), TestKind::Regular, filter));
+    }
+
+    #[test]
+    fn the_filter_is_read_from_its_image_record() {
+        let records = [
+            ImageRecord {
+                path: "/testrunner",
+                data: b"boot",
+            },
+            ImageRecord {
+                path: FILTER_IMAGE_PATH,
+                data: b"liveness",
+            },
+        ];
+        let bytes = encode(&records, "/testrunner").expect("the image encodes");
+        let image = decode(&bytes).expect("the image decodes");
+
+        assert_eq!(image_filter(&image), Ok(Some("liveness")));
+    }
 }

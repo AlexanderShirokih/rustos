@@ -15,6 +15,10 @@ const STRESS_PLAN_IMAGE_PATH: &str = "/testrunner/stress-plan";
 
 const STRESS_PLAN_SOURCE: &str = "stress-plan.txt";
 
+const TEST_FILTER_IMAGE_PATH: &str = "/testrunner/test-filter";
+
+const TEST_FILTER_SOURCE: &str = "test-filter.txt";
+
 struct QemuPass<'a> {
     label: &'a str,
     spec: &'a Path,
@@ -23,39 +27,44 @@ struct QemuPass<'a> {
     timeout: u64,
     environment: &'a [BuildEnvironment<'a>],
     files: &'a [ExtraFile],
+    filtered: bool,
     expected_seeds: Option<u64>,
     expected_epochs: Option<u64>,
 }
 
-pub(crate) fn qemu_test(timeout: u64, spec: &Path) -> Result<()> {
+pub(crate) fn qemu_test(timeout: u64, spec: &Path, filter: Option<&str>) -> Result<()> {
     let image = Path::new(TESTRUNNER_IMAGE);
-    qemu_test_pass(QemuPass {
+    let filter_file = filter_file(filter)?;
+    let kernel = qemu_test_pass(QemuPass {
         label: "kernel",
         spec,
         features: Some(String::from("kernel-tests")),
         image,
         timeout,
         environment: &[],
-        files: &[],
+        files: filter_file.as_slice(),
+        filtered: filter.is_some(),
         expected_seeds: None,
         expected_epochs: None,
     })?;
-    qemu_test_pass(QemuPass {
+    let userland = qemu_test_pass(QemuPass {
         label: "userland",
         spec,
         features: None,
         image,
         timeout,
         environment: &[],
-        files: &[],
+        files: filter_file.as_slice(),
+        filtered: filter.is_some(),
         expected_seeds: None,
         expected_epochs: None,
     })?;
-    Ok(())
+    require_match(filter, kernel + userland)
 }
 
-pub(crate) fn qemu_bench(timeout: u64) -> Result<()> {
-    qemu_test_pass(QemuPass {
+pub(crate) fn qemu_bench(timeout: u64, filter: Option<&str>) -> Result<()> {
+    let filter_file = filter_file(filter)?;
+    let ran = qemu_test_pass(QemuPass {
         label: "bench",
         spec: Path::new(DEFAULT_SPEC),
         features: None,
@@ -65,10 +74,12 @@ pub(crate) fn qemu_bench(timeout: u64) -> Result<()> {
             name: "TEST_PROFILE",
             value: "bench",
         }],
-        files: &[],
+        files: filter_file.as_slice(),
+        filtered: filter.is_some(),
         expected_seeds: None,
         expected_epochs: None,
-    })
+    })?;
+    require_match(filter, ran)
 }
 
 pub(crate) fn qemu_stress(
@@ -86,18 +97,16 @@ pub(crate) fn qemu_stress(
     let subrange = shard_subrange(seed, seeds, shard, shards)?;
     let (seed, seeds) = (subrange.first_seed, subrange.seed_count);
 
-    let project_root = crate::context::project_root();
-    let plan_source = crate::context::build_dir(&project_root)?.join(STRESS_PLAN_SOURCE);
-    fs::write(&plan_source, encode_plan(seed, seeds, steps, epoch))?;
+    let files = [write_image_file(
+        STRESS_PLAN_SOURCE,
+        STRESS_PLAN_IMAGE_PATH,
+        &encode_plan(seed, seeds, steps, epoch),
+    )?];
     println!(
         "=== stress plan: cargo xtask stress --seed {seed} --seeds {seeds} \
 --steps {steps} --epoch {epoch} --timeout {timeout} (shard {shard} of {shards}) ==="
     );
 
-    let files = [ExtraFile {
-        path: String::from(STRESS_PLAN_IMAGE_PATH),
-        source: plan_source,
-    }];
     qemu_test_pass(QemuPass {
         label: "stress",
         spec: Path::new(DEFAULT_SPEC),
@@ -110,9 +119,36 @@ pub(crate) fn qemu_stress(
             value: "stress",
         }],
         files: &files,
+        filtered: false,
         expected_seeds: Some(seeds),
         expected_epochs: Some(seeds * expected_epochs(steps, epoch)),
     })
+    .map(drop)
+}
+
+fn write_image_file(source_name: &str, image_path: &str, contents: &str) -> Result<ExtraFile> {
+    let project_root = crate::context::project_root();
+    let source = crate::context::build_dir(&project_root)?.join(source_name);
+
+    fs::write(&source, contents)?;
+
+    Ok(ExtraFile {
+        path: String::from(image_path),
+        source,
+    })
+}
+
+fn filter_file(filter: Option<&str>) -> Result<Option<ExtraFile>> {
+    filter
+        .map(|filter| write_image_file(TEST_FILTER_SOURCE, TEST_FILTER_IMAGE_PATH, filter))
+        .transpose()
+}
+
+fn require_match(filter: Option<&str>, ran: usize) -> Result<()> {
+    match filter {
+        Some(filter) if ran == 0 => bail!("no test name contains '{filter}'"),
+        _ => Ok(()),
+    }
 }
 
 fn encode_plan(seed: u64, seeds: u64, steps: u64, epoch: u64) -> String {
@@ -150,7 +186,7 @@ fn expected_epochs(steps: u64, epoch: u64) -> u64 {
     steps.div_ceil(epoch)
 }
 
-fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
+fn qemu_test_pass(pass: QemuPass<'_>) -> Result<usize> {
     let QemuPass {
         label,
         spec,
@@ -159,6 +195,7 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
         timeout,
         environment,
         files,
+        filtered,
         expected_seeds,
         expected_epochs,
     } = pass;
@@ -200,7 +237,7 @@ fn qemu_test_pass(pass: QemuPass<'_>) -> Result<()> {
         bail!("QEMU pass '{label}' exited with code {code}");
     }
 
-    markers.verify(label, expected_seeds, expected_epochs)
+    markers.verify(label, filtered, expected_seeds, expected_epochs)
 }
 
 #[derive(Default)]
@@ -258,9 +295,10 @@ impl TestMarkers {
     fn verify(
         &self,
         label: &str,
+        filtered: bool,
         expected_seeds: Option<u64>,
         expected_epochs: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         if let Some(refusal) = self.expiry_refusal(label) {
             bail!(refusal);
         }
@@ -273,7 +311,7 @@ impl TestMarkers {
         let Some(announced) = self.announced else {
             bail!("QEMU pass '{label}': TEST-RUN marker not found");
         };
-        if announced == 0 {
+        if announced == 0 && !filtered {
             bail!("QEMU pass '{label}': TEST-RUN announced no tests for this profile");
         }
         if self.done != Some(announced) {
@@ -318,7 +356,7 @@ impl TestMarkers {
             "qemu-test pass '{label}': {} tests passed, {} skipped",
             self.passed, self.skipped
         );
-        Ok(())
+        Ok(announced)
     }
 }
 
@@ -355,7 +393,7 @@ mod tests {
         assert_eq!(markers.announced, Some(3));
         assert_eq!(markers.started, 3);
         assert_eq!(markers.passed, 3);
-        assert!(markers.verify("kernel", None, None).is_ok());
+        assert_eq!(markers.verify("kernel", false, None, None).ok(), Some(3));
     }
 
     #[test]
@@ -364,7 +402,7 @@ mod tests {
         lines.pop();
         assert!(
             observe_all(&borrow(&lines))
-                .verify("kernel", None, None)
+                .verify("kernel", false, None, None)
                 .is_err()
         );
     }
@@ -377,7 +415,11 @@ mod tests {
             "[TEST-PASS: case_0]",
             "[TEST-DONE: 2]",
         ];
-        assert!(observe_all(&lines).verify("kernel", None, None).is_err());
+        assert!(
+            observe_all(&lines)
+                .verify("kernel", false, None, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -388,7 +430,7 @@ mod tests {
         let markers = observe_all(&borrow(&lines));
 
         assert_eq!(markers.skipped, 1);
-        assert!(markers.verify("userland", None, None).is_ok());
+        assert!(markers.verify("userland", false, None, None).is_ok());
     }
 
     #[test]
@@ -397,7 +439,7 @@ mod tests {
         lines.insert(1, "[TEST-FAIL: case_0]".to_string());
         assert!(
             observe_all(&borrow(&lines))
-                .verify("kernel", None, None)
+                .verify("kernel", false, None, None)
                 .is_err()
         );
     }
@@ -406,7 +448,7 @@ mod tests {
     fn a_missing_run_marker_is_refused() {
         assert!(
             observe_all(&["[TEST-PASS: case_0]"])
-                .verify("kernel", None, None)
+                .verify("kernel", false, None, None)
                 .is_err()
         );
     }
@@ -414,7 +456,28 @@ mod tests {
     #[test]
     fn a_profile_announcing_no_tests_is_refused() {
         let lines = ["[TEST-RUN: 0]", "[TEST-DONE: 0]"];
-        assert!(observe_all(&lines).verify("kernel", None, None).is_err());
+        assert!(
+            observe_all(&lines)
+                .verify("kernel", false, None, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_filtered_pass_without_matching_tests_verifies() {
+        let lines = ["[TEST-RUN: 0]", "[TEST-DONE: 0]"];
+        assert_eq!(
+            observe_all(&lines)
+                .verify("kernel", true, None, None)
+                .expect("a filter may leave a pass empty"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_filter_that_matches_no_test_of_the_command_is_refused() {
+        assert!(require_match(Some("missing"), 0).is_err());
+        assert!(require_match(Some("liveness"), 2).is_ok());
     }
 
     fn subrange(seeds: u64, shard: u64, shards: u64) -> SeedShard {
@@ -502,13 +565,13 @@ mod tests {
         let markers = observe_all(&borrow(&stress_run(2, 2, 3)));
         assert_eq!(markers.stress_seeds, 4);
         assert_eq!(markers.stress_epochs, 6);
-        assert!(markers.verify("stress", Some(2), Some(6)).is_ok());
+        assert!(markers.verify("stress", false, Some(2), Some(6)).is_ok());
     }
 
     #[test]
     fn every_seed_reports_for_every_stress_test() {
         let markers = observe_all(&borrow(&stress_run(2, 2, 3)));
-        assert!(markers.verify("stress", Some(3), Some(6)).is_err());
+        assert!(markers.verify("stress", false, Some(3), Some(6)).is_err());
     }
 
     #[test]
@@ -517,7 +580,7 @@ mod tests {
         lines.retain(|line| !line.contains("epoch=2"));
         assert!(
             observe_all(&borrow(&lines))
-                .verify("stress", Some(2), Some(6))
+                .verify("stress", false, Some(2), Some(6))
                 .is_err()
         );
     }
@@ -528,7 +591,7 @@ mod tests {
         lines.retain(|line| !line.contains("[STRESS-EPOCH: "));
         assert!(
             observe_all(&borrow(&lines))
-                .verify("stress", Some(2), Some(6))
+                .verify("stress", false, Some(2), Some(6))
                 .is_err()
         );
     }
@@ -544,7 +607,7 @@ mod tests {
         let markers = observe_all(&borrow(&lines));
 
         let refusal = markers
-            .verify("stress", Some(2), Some(6))
+            .verify("stress", false, Some(2), Some(6))
             .expect_err("an expiry refuses the run");
         let refusal = refusal.to_string();
         assert!(refusal.contains("ran out of its allotted time"));

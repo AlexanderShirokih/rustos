@@ -26,6 +26,7 @@ use bootstrap_abi::{bootstrap, features, hardware, image, log_message_max, syste
 use component_startup::component_manifest;
 use io::writer::Writer;
 use kernel_objects::{Port, Session};
+use rootkeeper::SystemImage;
 use runtime::{ExitCode, PortTransport, process_exit};
 use spin::{Mutex, Once};
 use syscall::{Handle, kind};
@@ -194,7 +195,10 @@ fn run(root: &Port) -> ExitCode {
     runtime::set_panic_hook(report_panic);
     test_harness::runner::install_writer(&LOG_WRITER);
     test_harness::runner::install_exit(runner_exit);
-    test_harness::run_tests(profile())
+
+    let image = SystemImage::acquire(root.as_raw()).expect("userland image is mapped");
+    let entries = image.entries().expect("userland image decodes");
+    test_harness::run_tests(profile(), Some(&entries))
 }
 
 pub(crate) fn profile() -> test_harness::TestKind {

@@ -23,5 +23,5 @@ pub mod macros;
 pub mod runner;
 
 pub use case::{TestCase, TestKind};
-pub use runner::{run_all_tests, run_tests};
+pub use runner::run_tests;
 pub use test_harness_macros::test;

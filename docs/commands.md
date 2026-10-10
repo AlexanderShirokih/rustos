@@ -121,11 +121,19 @@ cargo xtask userland doc --no-deps --workspace
 `cargo xtask test` запускает host-тесты профилей `common` и `host`.
 
 ```text
-cargo xtask qemu-test [--timeout <seconds>] [--spec <path>]
+cargo xtask qemu-test [--timeout <seconds>] [--spec <path>] [<filter>]
 ```
 
 Тайм-аут по умолчанию — 120 секунд, конфигурация —
 [devices/spec/qemu-aarch64-test.yaml](../devices/spec/qemu-aarch64-test.yaml).
+
+`<filter>` запускает только тесты, имя которых содержит указанную подстроку.
+Фильтр без совпадений завершает команду отказом:
+
+```bash
+cargo xtask qemu-test badge_departs
+```
+
 Альтернативный контроллер прерываний проверяется так:
 
 ```bash
@@ -143,7 +151,8 @@ TRYBUILD=overwrite cargo test -p syscall --test compile_fail
 
 ### Замеры
 
-`cargo xtask bench` запускает файловые замеры testrunner.
+`cargo xtask bench [<filter>]` запускает файловые замеры testrunner.
+`<filter>` отбирает замеры по подстроке имени, как у `qemu-test`.
 `--timeout` задаёт срок прогона в секундах; по умолчанию 120.
 Результаты публикуются строками `[TEST-REPORT]`.
 
