@@ -128,3 +128,5 @@ panic = "abort"
 panic = "abort"
 debug = true
 opt-level = 2
+lto = "fat"
+codegen-units = 1
