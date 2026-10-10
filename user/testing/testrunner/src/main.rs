@@ -26,6 +26,7 @@ use bootstrap_abi::{bootstrap, features, hardware, image, log_message_max, syste
 use component_startup::component_manifest;
 use io::writer::Writer;
 use kernel_objects::{Port, Session};
+use log_abi::journal;
 use rootkeeper::SystemImage;
 use runtime::{ExitCode, PortTransport, process_exit};
 use spin::{Mutex, Once};
@@ -55,6 +56,7 @@ mod input_hub;
 mod ipc_buffer;
 mod ipc_raw;
 mod irq_provision;
+mod journal_fixture_protocol;
 mod load_program;
 mod log_fixture_protocol;
 mod log_relay;
@@ -106,7 +108,13 @@ mod vm;
 mod watched_capability;
 
 component_manifest! {
-    exports: [hardware::Protocol, system_info::Protocol, image::Protocol, features::Protocol],
+    exports: [
+        hardware::Protocol,
+        system_info::Protocol,
+        image::Protocol,
+        features::Protocol,
+        journal::Protocol,
+    ],
 }
 
 static BOOTSTRAP_HANDLE: Once<Handle<kind::Port>> = Once::new();

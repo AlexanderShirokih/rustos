@@ -23,7 +23,7 @@ use log_relay::SourceNames as _;
 use platform_abi::{Description, MmioWindow, PlatformError, platform};
 use rootkeeper::{
     BootFailure, SEARCH_LIMITS, SearchLimits, Stopped,
-    relay::{ComponentNames, LogSessions as _, LogSources, log_badge},
+    relay::{ComponentNames, LogSessions as _, LogSources, Relay, log_badge},
 };
 use rtc_abi::rtc;
 use runtime::{JoinHandle, PortTransport, Timeout, spawn_owned};
@@ -37,6 +37,7 @@ use crate::{
         image, pause, request, view,
     },
     filesystem::{IMAGE_FILE, LEAK_ROUNDS, connect, open},
+    journal_fixture_protocol::{REPORT_SEPARATOR, WATCHED_SOURCE},
     log_relay::{
         ScenarioLogSessions, await_component_lines, await_component_lines_with_prefix,
         await_component_sources, start_component_relay, stop_component_relay,
@@ -137,6 +138,9 @@ const REFUSAL_PROBE: ComponentSpec<'static> =
 
 const LOG_DUPLICATE: ComponentSpec<'static> =
     fixture("/log-duplicate-fixture", "log-duplicate-fixture");
+
+const JOURNAL_SUBSCRIBER: ComponentSpec<'static> =
+    fixture("/journal-subscriber-fixture", "journal-subscriber-fixture");
 
 pub(crate) const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
     name: "neighbour",
@@ -276,11 +280,14 @@ fn started(
 ) -> (Composition, ComponentNames) {
     let plan = encoded(records);
     let names = ComponentNames::of(&plan);
-    start_component_relay(names.clone());
+    let journal = start_component_relay(names.clone());
     let composition = Composition::start(
         plan,
         index,
-        LogSources::new(names.clone(), ScenarioLogSessions),
+        Relay {
+            sources: LogSources::new(names.clone(), ScenarioLogSessions),
+            journal,
+        },
         limits,
     );
     (composition, names)
@@ -864,6 +871,20 @@ fn a_child_log_session_refuses_duplicate() {
 }
 
 #[test_harness::test]
+fn a_journal_subscriber_reads_the_lines_of_another_record() {
+    let watched = ComponentSpec {
+        name: WATCHED_SOURCE,
+        ..LOG_DUPLICATE
+    };
+    let composition = scenario(&[watched, JOURNAL_SUBSCRIBER]);
+
+    let report = await_component_lines(JOURNAL_SUBSCRIBER.name, 1);
+
+    test_harness::check_eq!(report, [DUPLICATE_REFUSED_LINES.join(REPORT_SEPARATOR)]);
+    finish(composition);
+}
+
+#[test_harness::test]
 fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
     let composition = scenario(&[IDLE_EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(HELD), probe_of(PROBE)]);
@@ -1179,7 +1200,7 @@ fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
     await_component_lines(PUBLISHER.name, 1);
 
     let opened = featured_session(importer.handle(), COMPONENT_REPLY_TIMEOUT);
-    let lines = await_component_lines(FEATURED.name, 6);
+    let lines = await_component_lines(FEATURED.name, 7);
 
     test_harness::check_eq!(opened, Ok(PING));
     test_harness::check_eq!(
@@ -1189,6 +1210,7 @@ fn a_record_of_the_export_index_gets_the_root_exports_except_features() {
             "system_info Ok(true)",
             "image Ok(())",
             "features Err(Refused)",
+            "journal Ok(())",
             "started",
             "request kind=featured"
         ]
@@ -1791,11 +1813,14 @@ fn a_started_consumer_discovers_a_provider_added_at_runtime() {
 fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
     let plan = encoded(&[PARENT, EXPORT]);
     let names = ComponentNames::of(&plan);
-    start_component_relay(names.clone());
+    let journal = start_component_relay(names.clone());
     let composition = Composition::start(
         plan,
         ExportIndex::EMPTY,
-        LogSources::new(names.clone(), ScenarioLogSessions),
+        Relay {
+            sources: LogSources::new(names.clone(), ScenarioLogSessions),
+            journal,
+        },
         SEARCH_LIMITS,
     );
     let importer = composition.importer(&[probe_of(PROBE)]);

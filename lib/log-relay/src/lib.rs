@@ -7,16 +7,23 @@
 //! [`KernelLogSink`] пишет строки в журнал ядра bootstrap-контрактом. Отказы стока подряд
 //! считаются до [`SINK_FAILURE_LIMIT`], после чего поток пересылки завершается.
 //!
+//! [`Journal`] хранит историю строк и копирует каждую строку в кольца подписчиков,
+//! [`JournalSink`] пишет в него строки relay перед следующим стоком.
+//!
 //! Capability из принятых кадров дальше стока не идут.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
+mod journal;
 mod kernel_sink;
 mod relay;
 mod thread;
 
+pub use journal::{JOURNAL_REGION_BYTES, Journal, JournalLine, JournalRing, JournalSink};
 pub use kernel_sink::KernelLogSink;
 pub use relay::{LogSink, SINK_FAILURE_LIMIT, SourceNames};
 pub use thread::LogRelayThread;

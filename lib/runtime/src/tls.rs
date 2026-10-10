@@ -8,9 +8,13 @@
 //! значение ключа без деструктора доступно деструкторам других ключей до освобождения блока.
 //! Ключевой TLS стандартной библиотеки рассчитывает на этот прогон и без него не отработают
 //! ни `Drop` у `thread_local!`, ни её собственная уборка потока.
+//!
+//! Указатель локальных данных есть только под RustOS на aarch64. На другом таргете блок потока
+//! не запоминается, и крейт собирается для хостовых тестов зависимых крейтов.
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
+use core::arch::asm;
 use core::{
-    arch::asm,
     ptr,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -168,6 +172,7 @@ fn installed_block() -> Option<*mut Block> {
     Some(block)
 }
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 fn thread_pointer() -> u64 {
     let value: u64;
     // SAFETY: указатель локальных данных читается на EL0 и принадлежит текущему потоку.
@@ -181,6 +186,7 @@ fn thread_pointer() -> u64 {
     value
 }
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 fn set_thread_pointer(value: u64) {
     // SAFETY: указатель локальных данных пишется на EL0 и принадлежит текущему потоку;
     // его владелец - этот модуль.
@@ -192,3 +198,11 @@ fn set_thread_pointer(value: u64) {
         );
     }
 }
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+fn thread_pointer() -> u64 {
+    0
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+fn set_thread_pointer(_value: u64) {}

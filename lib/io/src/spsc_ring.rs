@@ -214,7 +214,19 @@ impl SpscRing {
     pub fn is_full(&self) -> bool {
         let head = self.head_ref().load(Ordering::Acquire);
         let tail = self.tail_ref().load(Ordering::Acquire);
-        head.wrapping_sub(tail) as usize == self.capacity
+        self.occupied(head, tail) == self.capacity
+    }
+
+    /// Число свободных слотов для производителя. Вызывается **только производителем**.
+    ///
+    /// Кольцо, чей `tail` потребитель отвёл дальше [`capacity`](Self::capacity) от `head`,
+    /// считается полным. Число не превышает `capacity` при любых значениях индексов в регионе.
+    #[must_use]
+    #[inline]
+    pub fn free_slots(&self) -> usize {
+        let head = self.head_ref().load(Ordering::Relaxed);
+        let tail = self.tail_ref().load(Ordering::Acquire);
+        self.capacity - self.occupied(head, tail)
     }
 
     /// Вставляет кадр в кольцо. Вызывается **только производителем**.
@@ -241,7 +253,7 @@ impl SpscRing {
         // наблюдаем через Acquire, чтобы увидеть освобождённые слоты.
         let head = self.head_ref().load(Ordering::Relaxed);
         let tail = self.tail_ref().load(Ordering::Acquire);
-        if head.wrapping_sub(tail) as usize == self.capacity {
+        if self.occupied(head, tail) == self.capacity {
             return Err(RingError::Full);
         }
 
@@ -335,6 +347,11 @@ impl SpscRing {
     fn tail_ref(&self) -> &AtomicU32 {
         // SAFETY: см. `head_ref`; `self.tail` - соседний AtomicU32 в заголовке.
         unsafe { &*self.tail }
+    }
+
+    #[inline]
+    fn occupied(&self, head: u32, tail: u32) -> usize {
+        (head.wrapping_sub(tail) as usize).min(self.capacity)
     }
 
     #[inline]
@@ -547,10 +564,58 @@ mod tests {
         assert_eq!(ring.capacity(), 4);
 
         for i in 0..4u8 {
+            assert_eq!(ring.free_slots(), usize::from(4 - i));
             assert!(ring.try_push(&[i]).is_ok());
         }
         assert!(ring.is_full());
+        assert_eq!(ring.free_slots(), 0);
         assert_eq!(ring.try_push(&[42]), Err(RingError::Full));
+    }
+
+    // Потребитель в другом процессе пишет в заголовок и поля длины что угодно.
+    #[test]
+    fn corrupted_indices_and_lengths_keep_the_ring_inside_its_region() {
+        const SENTINEL: u8 = 0xA5;
+
+        let slot_payload = 8usize;
+        let region_len = SpscRing::region_bytes(4, slot_payload);
+        let mut region = Region::new();
+        region.bytes[region_len..].fill(SENTINEL);
+        {
+            let base = region.bytes.as_mut_ptr();
+            // SAFETY: регион существует до конца теста, а кольцо выходит из области видимости до
+            // проверки байтов региона. Страничное выравнивание удовлетворяет `AtomicU32`.
+            let ring = unsafe { SpscRing::from_raw(base, region_len, slot_payload) }
+                .expect("ring must construct");
+
+            let samples = [0, 1, 3, 4, 5, u32::MAX / 2, u32::MAX - 1, u32::MAX];
+            for head in samples {
+                for tail in samples {
+                    ring.head_ref().store(head, Ordering::Relaxed);
+                    ring.tail_ref().store(tail, Ordering::Relaxed);
+                    for slot in 0..ring.capacity() {
+                        ring.slot_len_ref(slot).store(u32::MAX, Ordering::Relaxed);
+                    }
+
+                    let free = ring.free_slots();
+                    assert!(
+                        free <= ring.capacity(),
+                        "head {head}, tail {tail}: {free} free"
+                    );
+                    assert_eq!(ring.try_push(&[0x5A; 8]).is_ok(), free > 0);
+
+                    let mut buf = [0u8; 8];
+                    if let Ok(popped) = ring.try_pop(&mut buf) {
+                        assert!(popped.len <= slot_payload);
+                    }
+                }
+            }
+        }
+        assert!(
+            region.bytes[region_len..]
+                .iter()
+                .all(|&byte| byte == SENTINEL)
+        );
     }
 
     #[test]

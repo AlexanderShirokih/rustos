@@ -270,6 +270,7 @@ dependencies = [
  "ipc",
  "ipc-test",
  "rustc-std-workspace-core",
+ "syscall",
 ]
 
 [[package]]

@@ -7,7 +7,8 @@ edition.workspace = true
 publish.workspace = true
 workspace = "../std-runtime"
 
-# API крейта одинаков на любой архитектуре, asm-вставки приходят модулями `cfg(target_arch)`.
+# API крейта одинаков на любом таргете. Вставки asm стоят под `cfg` RustOS на aarch64, и вне
+# него крейт собирается для хостовых тестов зависимых крейтов.
 # Ключом `process-state` крейт объявляет, что держит состояние процесса.
 [package.metadata.molecular]
 process-state = true

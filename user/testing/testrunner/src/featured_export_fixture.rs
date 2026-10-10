@@ -9,6 +9,7 @@ use core::fmt::Debug;
 use bootstrap_abi::{features, hardware, image, system_info};
 use component_startup::{Attributes, Providers, Requirements as _, component_manifest};
 use kernel_objects::{Port, Session};
+use log_abi::journal;
 use runtime::{log_fmt, log_line};
 use syscall::{Handle, kind};
 
@@ -25,6 +26,7 @@ component_manifest! {
             system_info: all(system_info::Protocol),
             images: all(image::Protocol),
             features: all(features::Protocol),
+            journal: all(journal::Protocol),
         },
         features: ["testrunner,featured"],
         exports: [probe::Protocol => [{ kind = "featured" }]],
@@ -43,6 +45,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     })?;
     log_opened("image", &requirements.images, drop)?;
     log_opened("features", &requirements.features, drop)?;
+    log_opened("journal", &requirements.journal, drop)?;
 
     let export = Port::create().map_err(|_| Failed)?;
     log_line("started");

@@ -2,9 +2,13 @@
 //!
 //! Показания идут по тому же источнику и от той же точки отсчёта, что и дедлайны `timeout_ns`
 //! блокирующих операций, и разность двух замеров сравнима с переданным тайм-аутом.
+//!
+//! Счётчик читается только под RustOS на aarch64. На другом таргете часы стоят на нуле, и
+//! крейт собирается для хостовых тестов зависимых крейтов.
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
+use core::arch::asm;
 use core::{
-    arch::asm,
     sync::atomic::{
         AtomicU32, AtomicU64,
         Ordering::{Acquire, Relaxed, Release},
@@ -109,6 +113,7 @@ fn frequency() -> u64 {
     value
 }
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 fn counter() -> u64 {
     let ticks: u64;
     // SAFETY: чтение счётчика ядро разрешает процессу на всё время его работы; инструкция
@@ -123,6 +128,7 @@ fn counter() -> u64 {
     ticks
 }
 
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
 fn read_frequency() -> u64 {
     let frequency: u64;
     // SAFETY: частота читается по тому же разрешению, что и счётчик; инструкция не трогает
@@ -135,4 +141,14 @@ fn read_frequency() -> u64 {
         );
     }
     frequency
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+fn counter() -> u64 {
+    0
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+fn read_frequency() -> u64 {
+    1
 }

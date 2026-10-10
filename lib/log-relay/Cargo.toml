@@ -8,13 +8,14 @@ publish.workspace = true
 workspace = "../../user"
 
 [lib]
-test = false
+test = true
 bench = false
 doctest = false
 
 [dependencies]
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
+io = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }
 runtime = { workspace = true }

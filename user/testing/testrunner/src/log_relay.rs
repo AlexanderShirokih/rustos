@@ -1,14 +1,12 @@
 //! E2E relay логирования: лог-порт с сессиями по значкам вместо bootstrap-капы
 //! и граница полномочий выданной лог-сессии.
 //!
-//! Сток тестового relay записывает пересланные строки и делает встречный
-//! двусторонний вызов ядра. Он перезаписывает значок в IPC-буфере потока, и
-//! записанный источник проверяет, что relay снял значок до пересылки.
+//! Строки relay сценария копятся в его `Journal`. Сток под журналом делает
+//! встречный двусторонний вызов ядра. Вызов перезаписывает значок в IPC-буфере
+//! потока, и источник строки журнала проверяет, что relay снял значок до
+//! пересылки.
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 use core::{
     num::NonZeroU64,
     sync::atomic::{AtomicBool, Ordering::SeqCst},
@@ -18,7 +16,9 @@ use bootstrap_abi::bootstrap;
 use ipc::wire::{Header, IpcError, MessageBuf};
 use kernel_objects::{Port, Session};
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
-use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
+use log_relay::{
+    Journal, JournalLine, JournalSink, KernelLogSink, LogRelayThread, LogSink, SourceNames,
+};
 use rootkeeper::relay::LogSessions;
 use runtime::{PortTransport, Timeout, port_send};
 use spin::Mutex;
@@ -90,23 +90,14 @@ const CHURN_BATCH: u64 = 64;
 
 const SYNC_BADGE_BASE: NonZeroU64 = NonZeroU64::new(0x0300_0000).expect("badge is non-zero");
 
-#[derive(Clone)]
-struct Record {
-    source: String,
-    message: String,
+struct Relay {
+    thread: LogRelayThread,
+    journal: Journal,
 }
 
-impl Record {
-    fn of(&self, component: &str) -> bool {
-        self.source == component
-    }
-}
+static SHARED: Mutex<Option<Relay>> = Mutex::new(None);
 
-static RECORDED: Mutex<Vec<Record>> = Mutex::new(Vec::new());
-
-static SHARED: Mutex<Option<LogRelayThread>> = Mutex::new(None);
-
-static ACTIVE: Mutex<Option<LogRelayThread>> = Mutex::new(None);
+static ACTIVE: Mutex<Option<Relay>> = Mutex::new(None);
 
 static SINK_REFUSES: AtomicBool = AtomicBool::new(false);
 
@@ -114,24 +105,43 @@ pub(crate) struct SharedLogSessions;
 
 pub(crate) struct ScenarioLogSessions;
 
+impl Relay {
+    fn start(
+        names: impl SourceNames + 'static,
+        sink: impl LogSink + Send + 'static,
+    ) -> kernel_objects::Result<Self> {
+        let journal = Journal::new();
+        let thread = LogRelayThread::start(names, JournalSink::new(journal.clone(), sink))?;
+        Ok(Self { thread, journal })
+    }
+}
+
 impl LogSessions for SharedLogSessions {
     fn session(&self, badge: NonZeroU64) -> Option<Session<log::Protocol>> {
-        let mut shared = SHARED.lock();
-        let relay = shared.get_or_insert_with(|| {
-            LogRelayThread::start(
-                SharedSourceNames,
-                KernelLogSink::new(crate::bootstrap_handle()),
-            )
-            .expect("shared log relay starts")
-        });
-        relay.session(badge).ok()
+        with_shared(|relay| relay.thread.session(badge).ok())
     }
 }
 
 impl LogSessions for ScenarioLogSessions {
     fn session(&self, badge: NonZeroU64) -> Option<Session<log::Protocol>> {
-        ACTIVE.lock().as_ref()?.session(badge).ok()
+        ACTIVE.lock().as_ref()?.thread.session(badge).ok()
     }
+}
+
+pub(crate) fn shared_journal() -> Journal {
+    with_shared(|relay| relay.journal.clone())
+}
+
+fn with_shared<T>(body: impl FnOnce(&Relay) -> T) -> T {
+    let mut shared = SHARED.lock();
+    let relay = shared.get_or_insert_with(|| {
+        Relay::start(
+            SharedSourceNames,
+            KernelLogSink::new(crate::bootstrap_handle()),
+        )
+        .expect("shared log relay starts")
+    });
+    body(relay)
 }
 
 pub(crate) fn shutdown_relays() {
@@ -139,28 +149,24 @@ pub(crate) fn shutdown_relays() {
     stop(&SHARED);
 }
 
-fn stop(slot: &Mutex<Option<LogRelayThread>>) {
+fn stop(slot: &Mutex<Option<Relay>>) {
     // Путь завершения прогона не ждёт лока. Ожидание превращает провал теста в зависание.
     if let Some(mut held) = slot.try_lock()
         && let Some(relay) = held.take()
     {
-        let _ = relay.shutdown(JOIN_TIMEOUT);
+        let _ = relay.thread.shutdown(JOIN_TIMEOUT);
     }
 }
 
-struct RecordingSink;
+struct ScenarioSink;
 
-impl LogSink for RecordingSink {
+impl LogSink for ScenarioSink {
     fn write(&mut self, source: &str, message: &str) -> Result<(), IpcError> {
         let kernel = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
         let forwarded = kernel.log_str(source, message);
         // Двусторонний вызов ядра перезаписывает значок в IPC-буфере потока.
         // Выданный образ закрывает ответ: значок буфера здесь важнее самой capability.
         let _ = kernel.acquire_userland_image();
-        RECORDED.lock().push(Record {
-            source: source.to_string(),
-            message: message.to_string(),
-        });
         if SINK_REFUSES.load(SeqCst) {
             return Err(IpcError::PeerClosed);
         }
@@ -168,18 +174,19 @@ impl LogSink for RecordingSink {
     }
 }
 
-pub(crate) fn start_component_relay(names: impl SourceNames + 'static) {
-    RECORDED.lock().clear();
+pub(crate) fn start_component_relay(names: impl SourceNames + 'static) -> Journal {
     SINK_REFUSES.store(false, SeqCst);
-    *ACTIVE.lock() =
-        Some(LogRelayThread::start(names, RecordingSink).expect("component log relay starts"));
+    let relay = Relay::start(names, ScenarioSink).expect("component log relay starts");
+    let journal = relay.journal.clone();
+    *ACTIVE.lock() = Some(relay);
+    journal
 }
 
 pub(crate) fn await_component_sources(names: &[&str]) -> Vec<String> {
     await_records(|records| {
         names
             .iter()
-            .all(|name| records.iter().any(|record| record.of(name)))
+            .all(|name| records.iter().any(|record| record.source == *name))
     })
     .into_iter()
     .map(|record| record.source)
@@ -198,27 +205,35 @@ pub(crate) fn await_component_lines_with_prefix(
     await_records(|records| {
         records
             .iter()
-            .filter(|record| record.of(name) && record.message.starts_with(prefix))
+            .filter(|record| record.source == name && record.text.starts_with(prefix))
             .count()
             >= count
     })
     .into_iter()
-    .filter(|record| record.of(name))
-    .map(|record| record.message)
+    .filter(|record| record.source == name)
+    .map(|record| record.text)
     .collect()
 }
 
-fn await_records(complete: impl Fn(&[Record]) -> bool) -> Vec<Record> {
+fn await_records(complete: impl Fn(&[JournalLine]) -> bool) -> Vec<JournalLine> {
     let idle = Port::create().expect("port create");
     let mut waited = 0;
     loop {
-        let records = RECORDED.lock().clone();
+        let records = scenario_lines();
         if complete(&records) || waited >= RECORD_TIMEOUT.raw() {
             return records;
         }
         let _ = idle.recv(RECORD_POLL);
         waited += RECORD_POLL.raw();
     }
+}
+
+fn scenario_lines() -> Vec<JournalLine> {
+    ACTIVE
+        .lock()
+        .as_ref()
+        .map(|relay| relay.journal.lines())
+        .unwrap_or_default()
 }
 
 pub(crate) fn stop_component_relay() {
@@ -231,16 +246,14 @@ fn scenario_session(badge: NonZeroU64) -> Port {
         .lock()
         .as_ref()
         .expect("scenario relay is running")
+        .thread
         .session(badge)
         .expect("log session")
         .into_handle()
 }
 
 fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> Port)) {
-    RECORDED.lock().clear();
-    SINK_REFUSES.store(false, SeqCst);
-    *ACTIVE.lock() =
-        Some(LogRelayThread::start(TestSourceNames, RecordingSink).expect("test log relay starts"));
+    start_component_relay(TestSourceNames);
 
     body(&scenario_session);
 
@@ -249,28 +262,22 @@ fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> Port)) {
         .lock()
         .take()
         .expect("scenario relay is running")
+        .thread
         .shutdown(JOIN_TIMEOUT)
         .expect("test log relay stops");
 }
 
-fn wait_for_records(count: usize) -> Vec<Record> {
-    // Порт-таймер создаётся один на всё ожидание. Приёмник ему не нужен.
-    let idle = Port::create().expect("port create");
-    let mut waited = 0;
-    loop {
-        let records: Vec<Record> = RECORDED
-            .lock()
+fn wait_for_records(count: usize) -> Vec<JournalLine> {
+    let mut records = await_records(|records| {
+        records
             .iter()
             .filter(|record| record.source != RELAY_SOURCE)
-            .cloned()
-            .collect();
-        if records.len() >= count {
-            return records;
-        }
-        test_harness::check!(waited < RECORD_TIMEOUT.raw());
-        let _ = idle.recv(RECORD_POLL);
-        waited += RECORD_POLL.raw();
-    }
+            .count()
+            >= count
+    });
+    records.retain(|record| record.source != RELAY_SOURCE);
+    test_harness::check!(records.len() >= count);
+    records
 }
 
 fn write_log(session: &Port, message: &str) {
@@ -335,7 +342,7 @@ fn relay_forwards_a_frame_under_the_badge_name() {
         let records = wait_for_records(1);
         test_harness::check_eq!(records.len(), 1);
         test_harness::check!(records[0].source == "named-subsystem");
-        test_harness::check!(records[0].message == "hello");
+        test_harness::check!(records[0].text == "hello");
     });
 }
 
@@ -358,7 +365,7 @@ fn relay_escapes_control_characters_in_the_message() {
 
         let records = wait_for_records(1);
         let expected = "first\\r\\n\\tsecond\\u{1b}[2J\\u{0}\\u{85}";
-        test_harness::check!(records[0].message == expected);
+        test_harness::check!(records[0].text == expected);
     });
 }
 
@@ -370,7 +377,7 @@ fn relay_escapes_unicode_line_and_paragraph_separators() {
 
         let records = wait_for_records(1);
         let expected = "a\\u{2028}b\\u{2029}c";
-        test_harness::check!(records[0].message == expected);
+        test_harness::check!(records[0].text == expected);
     });
 }
 
@@ -382,7 +389,7 @@ fn relay_escapes_unicode_format_controls() {
 
         let records = wait_for_records(1);
         let expected = "c\\u{2066}d";
-        test_harness::check!(records[0].message == expected);
+        test_harness::check!(records[0].text == expected);
     });
 }
 
@@ -397,16 +404,13 @@ fn relay_splits_a_grown_message_without_losing_its_tail() {
         let characters_per_record = LOG_MESSAGE_MAX / escaped_character_len;
         let record_count = LOG_MESSAGE_MAX.div_ceil(characters_per_record);
         let records = wait_for_records(record_count);
-        let joined: String = records
-            .iter()
-            .map(|record| record.message.as_str())
-            .collect();
+        let joined: String = records.iter().map(|record| record.text.as_str()).collect();
         let expected = "\\u{1b}".repeat(LOG_MESSAGE_MAX);
         test_harness::check!(joined == expected);
         test_harness::check!(
             records
                 .iter()
-                .all(|record| record.message.len() <= LOG_MESSAGE_MAX)
+                .all(|record| record.text.len() <= LOG_MESSAGE_MAX)
         );
     });
 }
@@ -418,7 +422,7 @@ fn relay_keeps_ordinary_utf8_unchanged() {
         write_log(&logger, "こんにちは, 世界!");
 
         let records = wait_for_records(1);
-        test_harness::check!(records[0].message == "こんにちは, 世界!");
+        test_harness::check!(records[0].text == "こんにちは, 世界!");
     });
 }
 
@@ -430,7 +434,7 @@ fn relay_never_writes_an_unprefixed_physical_line() {
 
         let records = wait_for_records(1);
         test_harness::check!(records[0].source == "named-subsystem");
-        test_harness::check!(!records[0].message.chars().any(char::is_control));
+        test_harness::check!(!records[0].text.chars().any(char::is_control));
     });
 }
 
@@ -442,7 +446,7 @@ fn relay_forwards_an_empty_message_once() {
 
         let records = wait_for_records(1);
         test_harness::check_eq!(records.len(), 1);
-        test_harness::check!(records[0].message.is_empty());
+        test_harness::check!(records[0].text.is_empty());
     });
 }
 
@@ -457,7 +461,7 @@ fn relay_serves_past_a_departed_session() {
         let logger = session(NAMED_BADGE);
         write_log(&logger, "after departure");
         let records = wait_for_records(2);
-        test_harness::check!(records[1].message == "after departure");
+        test_harness::check!(records[1].text == "after departure");
     });
 }
 
@@ -469,7 +473,7 @@ fn relay_rejects_one_bad_frame_and_serves_the_next() {
         write_log(&logger, "after a bad frame");
 
         let records = wait_for_records(1);
-        test_harness::check!(records[0].message == "after a bad frame");
+        test_harness::check!(records[0].text == "after a bad frame");
     });
 }
 
@@ -508,7 +512,7 @@ fn relay_serves_after_receiver_resource_exhaustion() {
         write_log(&logger, "after resource exhaustion");
 
         let records = wait_for_records(1);
-        test_harness::check!(records[0].message == "after resource exhaustion");
+        test_harness::check!(records[0].text == "after resource exhaustion");
     });
 }
 
@@ -520,12 +524,12 @@ fn log_session_denies_bootstrap_operations() {
         test_harness::check_eq!(fixture.exit_code().expect("exit code"), 0);
 
         let records = wait_for_records(1);
-        test_harness::check!(records[0].message == FIXTURE_LINE);
+        test_harness::check!(records[0].text == FIXTURE_LINE);
 
         let next = session(NAMED_BADGE);
         write_log(&next, "relay is alive");
         let records = wait_for_records(2);
-        test_harness::check!(records[1].message == "relay is alive");
+        test_harness::check!(records[1].text == "relay is alive");
     });
 }
 
@@ -550,7 +554,7 @@ fn relay_drains_departed_badges_so_new_sessions_mint() {
 #[test_harness::test]
 fn relay_stops_when_its_log_port_closes() {
     let relay =
-        LogRelayThread::start(TestSourceNames, RecordingSink).expect("test log relay starts");
+        LogRelayThread::start(TestSourceNames, ScenarioSink).expect("test log relay starts");
     relay.shutdown(JOIN_TIMEOUT).expect("test log relay stops");
 }
 
@@ -568,7 +572,7 @@ fn relay_stops_a_frame_at_the_first_refused_chunk() {
         SINK_REFUSES.store(false, SeqCst);
         write_log(&logger, "accepted after refused frame");
         let records = wait_for_records(2);
-        test_harness::check!(records[1].message == "accepted after refused frame");
+        test_harness::check!(records[1].text == "accepted after refused frame");
     });
 }
 
@@ -584,7 +588,7 @@ fn relay_stops_after_the_sink_refuses_in_a_row() {
         SINK_REFUSES.store(false, SeqCst);
         write_log(&logger, "accepted");
         let records = wait_for_records(SINK_FAILURE_LIMIT);
-        test_harness::check!(records[SINK_FAILURE_LIMIT - 1].message == "accepted");
+        test_harness::check!(records[SINK_FAILURE_LIMIT - 1].text == "accepted");
 
         SINK_REFUSES.store(true, SeqCst);
         for _ in 0..SINK_FAILURE_LIMIT {

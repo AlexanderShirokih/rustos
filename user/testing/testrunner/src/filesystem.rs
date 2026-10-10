@@ -17,7 +17,7 @@ use ipc::{
 use kernel_objects::{
     Delivery, Mapping, MemoryRegion, OwnedHandle, Port, Resource, Session, SessionTransport, Signal,
 };
-use rootkeeper::relay::{ComponentNames, LogSources};
+use rootkeeper::relay::{ComponentNames, LogSources, Relay};
 use runtime::{PortTransport, Timeout, UserMemFlags, port_send, spawn_owned};
 use spin::Once;
 use syscall::Rights;
@@ -27,7 +27,7 @@ use userland_image::ExportIndex;
 use crate::{
     composition::{BOOT_PLAN_ENTRY, Composition, Importer, Mounted, admin, image, pause, view},
     fixture::{JOIN_TIMEOUT, spawn_entry},
-    log_relay::SharedLogSessions,
+    log_relay::{SharedLogSessions, shared_journal},
     stress::{answered, expire},
 };
 
@@ -126,7 +126,10 @@ fn start_namespace() -> Namespace {
     let composition = Composition::start(
         plan,
         ExportIndex::EMPTY,
-        LogSources::new(ComponentNames::of(&plan), SharedLogSessions),
+        Relay {
+            sources: LogSources::new(ComponentNames::of(&plan), SharedLogSessions),
+            journal: shared_journal(),
+        },
         rootkeeper::SEARCH_LIMITS,
     );
     let importer = composition.importer(NAMESPACE_REQUIREMENTS);

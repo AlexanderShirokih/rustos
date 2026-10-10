@@ -5,7 +5,7 @@ use core::num::NonZeroU64;
 
 use kernel_objects::Session;
 use log_abi::{LOG_SOURCE_MAX, LogBuffer, log};
-use log_relay::{LogRelayThread, SourceNames};
+use log_relay::{Journal, LogRelayThread, SourceNames};
 use runtime::Mutex;
 use userland_image::BootPlan;
 
@@ -20,6 +20,14 @@ pub struct ComponentNames(Arc<Mutex<Vec<String>>>);
 pub struct LogSources {
     names: ComponentNames,
     sessions: Box<dyn LogSessions>,
+}
+
+/// Стороны relay журнала: сессии записей компонентов и подписка на принятые строки.
+pub struct Relay {
+    /// Сессии журнала записей.
+    pub sources: LogSources,
+    /// История принятых строк и их подписчики.
+    pub journal: Journal,
 }
 
 /// Выдача сессий журнала по значку источника.

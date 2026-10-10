@@ -2534,6 +2534,7 @@ name = "log-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "syscall",
 ]
 
 [[package]]
@@ -2541,6 +2542,7 @@ name = "log-relay"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
+ "io",
  "ipc",
  "kernel-objects",
  "log-abi",

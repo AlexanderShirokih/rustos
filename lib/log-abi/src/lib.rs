@@ -5,6 +5,10 @@
 //! строки. Источник строки сервер контракта выводит из значка сессии.
 //! [`log::Client::write_str`] режет сообщение длиннее кадра на несколько вызовов.
 //!
+//! Модуль [`journal`] подписывает читателя на строки журнала через кольцо в разделяемой
+//! памяти. [`LineFrames`] режет строку на кадры кольца, [`JournalAssembler`] собирает её
+//! обратно.
+//!
 //! [`LogBuffer`] копит строку на стеке до отправки, [`LineAssembler`] собирает строки из
 //! потока фрагментов, [`chunks`] режет текст по границе символа. [`Utf8Assembler`] собирает
 //! текст из байтового потока вывода.
@@ -15,11 +19,16 @@
 extern crate std;
 
 mod buffer;
+mod journal_session;
 mod line;
 mod utf8;
 mod write;
 
 pub use buffer::{LogBuffer, chunks};
+pub use journal_session::{
+    JOURNAL_RING_SLOTS, JOURNAL_SLOT_PAYLOAD, JournalAssembler, JournalEntry, JournalError,
+    LineFrames, Subscription, gap_frame, journal,
+};
 pub use line::LineAssembler;
 pub use utf8::Utf8Assembler;
 

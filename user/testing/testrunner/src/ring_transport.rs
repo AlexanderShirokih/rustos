@@ -2,18 +2,17 @@
 //! регионом-кольцом (`SpscRing`) в shared memory и одним "data"-сигналом.
 //!
 //! Главный поток выступает стороной producer, рабочий поток - стороной
-//! consumer. Регион создаётся через `Resource`/`MemoryRegion` и маппится,
-//! оборачивается двумя значениями `SpscRing` (по одному на конец). Consumer
+//! consumer. Регион создаётся через `Resource`/`MemoryRegion`, consumer получает
+//! копии региона и сигнала, и каждый конец отображает регион у себя. Consumer
 //! вызовами `pop` выгребает `FRAMES` кадров, producer шлёт те же `FRAMES`
 //! (повтор на `Full`). Проверяем, что все кадры получены по порядку.
 
-use io::{RingError, SpscRing};
-use kernel_objects::{Mapping, Resource, RingConsumer, RingProducer, Signal, kind};
-use runtime::{MemoryAccess, Timeout, UserMemFlags, spawn};
-use syscall::Handle;
+use io::RingError;
+use kernel_objects::{Resource, RingConsumer, RingProducer, Signal};
+use runtime::{MemoryAccess, Timeout, spawn_owned};
+use syscall::Rights;
 
 const SLOT_PAYLOAD: usize = 4;
-const RING_CAPACITY: usize = 4;
 const FRAMES: u32 = 4096;
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -21,27 +20,7 @@ const WAIT_TIMEOUT: Timeout = Timeout::from_secs(1);
 
 const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 
-struct Shared {
-    region_va: u64,
-    region_len: usize,
-    data: Handle<kind::Signal>,
-    ok: core::sync::atomic::AtomicBool,
-}
-
-extern "C" fn consumer_worker(arg: usize) -> u32 {
-    // SAFETY: arg - адрес Shared в кадре главного потока; жив до завершения
-    // join, который выполняется до выхода из его кадра.
-    let shared = unsafe { &*(arg as *const Shared) };
-
-    let base = shared.region_va as *mut u8;
-    // SAFETY: страница-носитель замаплена RW главным потоком и остаётся действительной
-    // до конца теста; `region_len <= PAGE_SIZE`, поэтому кольцо лежит в её границах.
-    // Этот consumer - единственный consumer-конец над ней (SPSC-инвариант:
-    // один producer + один consumer).
-    let ring = unsafe { SpscRing::from_raw(base, shared.region_len, SLOT_PAYLOAD) }
-        .expect("consumer ring");
-    let consumer = RingConsumer::new(ring, shared.data);
-
+fn drain(consumer: &RingConsumer) -> u32 {
     for next in 0..FRAMES {
         let mut buf = [0u8; SLOT_PAYLOAD];
         match consumer.pop(&mut buf, WAIT_TIMEOUT) {
@@ -49,41 +28,29 @@ extern "C" fn consumer_worker(arg: usize) -> u32 {
             _ => return 1,
         }
     }
-
-    shared.ok.store(true, core::sync::atomic::Ordering::Release);
     0
 }
 
 #[test_harness::test]
 fn ring_transport_round_trip() {
-    let region_len = SpscRing::region_bytes(RING_CAPACITY, SLOT_PAYLOAD);
-    test_harness::check!(region_len as u64 <= PAGE_SIZE);
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
         .create_virtual(PAGE_SIZE, MemoryAccess::RW)
         .expect("region");
-    let mapping = Mapping::new(region, PAGE_SIZE, UserMemFlags::ReadWrite).expect("map region");
-    test_harness::check!(mapping.va() > 0);
+    let consumer_region = region
+        .duplicate(Rights::READ | Rights::WRITE, None)
+        .expect("duplicate region");
 
     let data_signal = Signal::create().expect("signal create");
+    let consumer_signal = data_signal
+        .duplicate(Rights::READ | Rights::WRITE, None)
+        .expect("duplicate data signal");
 
-    let shared = Shared {
-        region_va: mapping.va(),
-        region_len,
-        data: data_signal.as_raw(),
-        ok: core::sync::atomic::AtomicBool::new(false),
-    };
+    let consumer =
+        RingConsumer::new(consumer_region, SLOT_PAYLOAD, consumer_signal).expect("consumer ring");
+    let producer = RingProducer::new(region, SLOT_PAYLOAD, data_signal).expect("producer ring");
 
-    let base = shared.region_va as *mut u8;
-    // SAFETY: страница только что замаплена RW и остаётся действительной до конца теста;
-    // `region_len <= PAGE_SIZE`, кольцо в её границах; главный поток -
-    // единственный producer-конец над ней.
-    let producer_ring =
-        unsafe { SpscRing::from_raw(base, region_len, SLOT_PAYLOAD) }.expect("producer ring");
-    let producer = RingProducer::new(producer_ring, data_signal.borrow());
-
-    let arg = (&raw const shared) as usize;
-    let thread = spawn(consumer_worker, arg).expect("spawn consumer worker");
+    let thread = spawn_owned(move || drain(&consumer)).expect("spawn consumer worker");
 
     let mut sent = 0u32;
     while sent < FRAMES {
@@ -95,8 +62,8 @@ fn ring_transport_round_trip() {
     }
 
     thread
-        .join(JOIN_TIMEOUT)
-        .expect("consumer joins before timeout");
-
-    test_harness::check!(shared.ok.load(core::sync::atomic::Ordering::Acquire));
+        .wait(JOIN_TIMEOUT)
+        .expect("consumer finishes before timeout");
+    test_harness::check_eq!(thread.exit_code().expect("consumer exit code"), 0);
+    thread.join(JOIN_TIMEOUT).expect("consumer joins");
 }

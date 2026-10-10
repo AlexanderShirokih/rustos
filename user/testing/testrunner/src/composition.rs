@@ -17,7 +17,7 @@ use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
 use rootkeeper::{
-    BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::LogSources, turn,
+    BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::Relay, turn,
 };
 use runtime::{JoinHandle, Mutex, MutexGuard, PortTransport, Timeout, spawn_owned};
 use spin::Once;
@@ -101,7 +101,7 @@ impl Composition {
     pub(crate) fn start(
         plan: BootPlan<'static>,
         index: ExportIndex<'static>,
-        logs: LogSources,
+        relay: Relay,
         limits: SearchLimits,
     ) -> Self {
         await_budget(&plan);
@@ -111,7 +111,7 @@ impl Composition {
             plan,
             index,
             crate::bootstrap_handle(),
-            logs,
+            relay,
             limits,
         )
         .expect("composition started");

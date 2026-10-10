@@ -22,18 +22,20 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
-    Delivery, Error, IssuedHandle, Port, ReadOnlyMapping, Resource, Session, kind,
+    Delivery, Error, IssuedHandle, MemoryRegion, OwnedHandle, Port, ReadOnlyMapping, Resource,
+    RingProducer, Session, Signal, kind,
 };
-use log_abi::{LogBuffer, log};
+use log_abi::{JOURNAL_SLOT_PAYLOAD, JournalError, LogBuffer, Subscription, journal, log};
+use log_relay::{JOURNAL_REGION_BYTES, Journal};
 use managed_component::{Children, Departure, GrantError, Held, Outcome, Purpose, Status};
-use runtime::{Mutex, PortTransport, Termination, Timeout};
+use runtime::{MemoryAccess, Mutex, PortTransport, Termination, Timeout};
 use syscall::{Handle, ProcessName, Rights, SyscallError};
 use userland::{DecodedProgram, ProgramView};
 use userland_image::{ExportIndex, IndexedExport, PlanComponent};
 
 use crate::{
     component::{Component, ImporterRequirement, Origin, Record},
-    relay::LogSources,
+    relay::{LogSources, Relay},
 };
 
 const LOG_TAG: &str = "rootkeeper";
@@ -41,6 +43,8 @@ const LOG_TAG: &str = "rootkeeper";
 const BOOT_RECORD: u16 = 0;
 
 const IMAGE_REGION_GRANT: &str = "image region";
+const JOURNAL_REGION_GRANT: &str = "journal region";
+const JOURNAL_SIGNAL_GRANT: &str = "journal signal";
 
 const IMPLICIT_MEMORY_LIMIT: u64 = 16 * 1024 * 1024;
 
@@ -142,6 +146,15 @@ enum Holder {
     Image(u64),
     Features(u64),
     Search(u64),
+    Journal(u64),
+}
+
+struct JournalReader {
+    incarnation: u64,
+    session: u64,
+    journal: Journal,
+    _region: MemoryRegion,
+    _signal: Signal,
 }
 
 struct ImporterBinding {
@@ -216,12 +229,22 @@ pub struct RootSystem<'a> {
     next_search: u64,
     limits: SearchLimits,
     features: Vec<Feature>,
+    journal: Journal,
+    journal_readers: Vec<JournalReader>,
     resource: Resource,
 }
 
 impl Termination for Stopped {
     fn report(self) -> i32 {
         self as i32
+    }
+}
+
+impl Drop for JournalReader {
+    fn drop(&mut self) {
+        // Кольцо отображает регион через копию корня, и закрытие корня сняло бы отображение
+        // под кольцом, которое ещё пишет relay.
+        self.journal.unsubscribe(self.session);
     }
 }
 
@@ -232,7 +255,7 @@ impl<'a> RootSystem<'a> {
         boot: PlanComponent<'a>,
         manifest: ComponentManifest<'a>,
         index: ExportIndex<'a>,
-        log_sources: LogSources,
+        relay: Relay,
         limits: SearchLimits,
     ) -> Result<Self, BudgetFailure> {
         let resource = Resource::self_resource().map_err(|_| BudgetFailure::Root)?;
@@ -259,7 +282,7 @@ impl<'a> RootSystem<'a> {
                 restarts: 0,
             }],
             logs: Vec::new(),
-            log_sources,
+            log_sources: relay.sources,
             index,
             hardware,
             system_info,
@@ -272,6 +295,8 @@ impl<'a> RootSystem<'a> {
             next_search: 0,
             limits,
             features: Vec::new(),
+            journal: relay.journal,
+            journal_readers: Vec::new(),
             resource,
         })
     }
@@ -998,6 +1023,11 @@ impl<'a> RootSystem<'a> {
         {
             *closed = true;
         }
+
+        // Уход сессии снимает её подписку, конец incarnation - подписку и её учёт.
+        self.journal.unsubscribe(badge);
+        self.journal_readers
+            .retain(|reader| reader.incarnation != badge);
     }
 
     fn log_session(
@@ -1055,6 +1085,15 @@ impl<'a> RootSystem<'a> {
                     Holder::Image(badge),
                 )
             }
+            journal::Protocol::ID => {
+                self.admit(badge, Records::ISSUE_BYTES)?;
+                self.children.issue(
+                    badge,
+                    requirement,
+                    Purpose::Requirement,
+                    Holder::Journal(badge),
+                )
+            }
             features::Protocol::ID if self.planned(record) => {
                 self.admit(badge, Records::ISSUE_BYTES)?;
                 self.children.issue(
@@ -1073,6 +1112,31 @@ impl<'a> RootSystem<'a> {
         self.records
             .get(usize::from(record))
             .is_some_and(|record| record.origin == Origin::Plan)
+    }
+
+    fn grant_ring(
+        &mut self,
+        incarnation: u64,
+        region: &MemoryRegion,
+        signal: &Signal,
+    ) -> Result<Subscription<OwnedHandle<kind::MemoryRegion>, OwnedHandle<kind::Signal>>, GrantError>
+    {
+        // Потребителю `WRITE` нужен для `tail` кольца и сброса сигнала.
+        let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER;
+        Ok(Subscription {
+            region: self.children.grant(
+                incarnation,
+                JOURNAL_REGION_GRANT,
+                region.borrow(),
+                rights,
+            )?,
+            signal: self.children.grant(
+                incarnation,
+                JOURNAL_SIGNAL_GRANT,
+                signal.borrow(),
+                rights,
+            )?,
+        })
     }
 
     fn log(&self, line: Arguments<'_>) {
@@ -1310,6 +1374,63 @@ impl image::Service<Delivery> for RootSystem<'_> {
     }
 }
 
+impl journal::Service<Delivery> for RootSystem<'_> {
+    fn subscribe(
+        &mut self,
+        frame: &Delivery,
+    ) -> impl IntoWireValue<Delivery, Read = Result<Subscription, JournalError>> {
+        let session = frame.badge;
+        let Some(Holder::Journal(incarnation)) = self.children.caller(session) else {
+            return Err(JournalError::Refused);
+        };
+        if self
+            .journal_readers
+            .iter()
+            .any(|reader| reader.incarnation == incarnation)
+        {
+            return Err(JournalError::Refused);
+        }
+        self.journal_readers
+            .try_reserve(1)
+            .map_err(|_| JournalError::Refused)?;
+
+        let region = self
+            .resource
+            .create_virtual(JOURNAL_REGION_BYTES, MemoryAccess::RW)
+            .map_err(|_| JournalError::Refused)?;
+        let signal = Signal::create().map_err(|_| JournalError::Refused)?;
+        // Закрытие корня отзывает производные копии. Кольцо получает свои копии, и уход сессии,
+        // снимающий кольцо, не отзывает выданное подписчику.
+        let ring_rights = Rights::READ | Rights::WRITE;
+        let ring_region = region
+            .duplicate(ring_rights, None)
+            .map_err(|_| JournalError::Refused)?;
+        let ring_signal = signal
+            .duplicate(ring_rights, None)
+            .map_err(|_| JournalError::Refused)?;
+        let ring = RingProducer::new(ring_region, JOURNAL_SLOT_PAYLOAD, ring_signal)
+            .ok_or(JournalError::Refused)?;
+        self.journal.subscribe(session, ring)?;
+
+        let granted = self.grant_ring(incarnation, &region, &signal);
+        // Учёт хранит корни, и выданное подписчику действует до конца incarnation. Повторная
+        // выдача по тем же ключам отдала бы прежний регион, поэтому incarnation, дошедшая до
+        // выдачи, подписку израсходовала.
+        self.journal_readers.push(JournalReader {
+            incarnation,
+            session,
+            journal: self.journal.clone(),
+            _region: region,
+            _signal: signal,
+        });
+        granted
+            .inspect_err(|_| {
+                self.journal.unsubscribe(session);
+            })
+            .map_err(|_| JournalError::Refused)
+    }
+}
+
 /// Обслуживает один кадр композиции `system`, ожидая его не дольше `timeout`. На время ожидания
 /// замок `system` свободен. `Break` - порт закрыт.
 pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()> {
@@ -1334,6 +1455,7 @@ pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()>
             let _ = match guard.children.caller(incoming.resources.badge) {
                 Some(Holder::Image(_)) => image::dispatch(&mut *guard, incoming),
                 Some(Holder::Features(_)) => features::dispatch(&mut *guard, incoming),
+                Some(Holder::Journal(_)) => journal::dispatch(&mut *guard, incoming),
                 _ => component_startup::dispatch(&mut *guard, incoming),
             };
         }

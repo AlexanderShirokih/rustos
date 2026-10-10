@@ -206,14 +206,19 @@ fn test_commands(workspace: &Workspace, root: &Path, host: &str) -> Vec<Invocati
             "test",
             &["--workspace", "--all-features"],
         )],
-        // Примеры объявления компонента проверяют раскрытие макроса, и запускает их host-target.
-        // Команда идёт из корня, потому что таргет userland задан конфигурацией его каталога.
-        Profile::Userland => vec![cargo_in(
-            root,
-            &workspace.dir.join("Cargo.toml"),
-            "test",
-            &["-p", "component-startup", "--doc", "--target", host],
-        )],
+        // Примеры объявления компонента проверяют раскрытие макроса, а юнит-тесты журнала relay -
+        // его историю и подписчиков над кольцом в памяти теста. Их запускает host-target.
+        // Команды идут из корня, потому что таргет userland задан конфигурацией его каталога.
+        Profile::Userland => [
+            ["-p", "component-startup", "--doc"],
+            ["-p", "log-relay", "--lib"],
+        ]
+        .into_iter()
+        .map(|args| {
+            let args = [&args[..], &["--target", host]].concat();
+            cargo_in(root, &workspace.dir.join("Cargo.toml"), "test", &args)
+        })
+        .collect(),
         // Платформенные крейты проверяет `cargo xtask qemu-test`, рантайм `std` и программы
         // образа - проход userland под QEMU, fuzz-цели - их прогон.
         Profile::Platform | Profile::StdRuntime | Profile::Fuzz => Vec::new(),
@@ -412,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn the_userland_profile_lints_from_its_directory_and_runs_its_doctests_on_the_host() {
+    fn the_userland_profile_lints_from_its_directory_and_runs_its_host_tests_on_the_host() {
         let (host, arch, tests) = table(Profile::Userland, "/repo/user");
         assert!(host.is_empty());
         assert_eq!(
@@ -424,7 +429,8 @@ mod tests {
         assert_eq!(
             tests,
             [
-                "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p component-startup --doc --target host-triple"
+                "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p component-startup --doc --target host-triple",
+                "/repo: cargo test --manifest-path /repo/user/Cargo.toml -p log-relay --lib --target host-triple"
             ]
         );
     }

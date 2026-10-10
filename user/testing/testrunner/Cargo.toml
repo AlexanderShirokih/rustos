@@ -106,6 +106,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "journal-subscriber-fixture"
+path = "src/journal_subscriber_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "idle-export-fixture"
 path = "src/idle_export_fixture.rs"
 test = false
