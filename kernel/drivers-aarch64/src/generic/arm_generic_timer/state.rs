@@ -1,9 +1,8 @@
 //! Аппаратное состояние ARM Generic Timer (virtual timer, `CNTV_*`).
 
 use alloc::{string::String, sync::Arc};
-use core::cmp;
 
-use drivers_common::services::timer::TickHandler;
+use drivers_common::services::timer::{TickHandler, deadline_ticks, ticks_to_ns};
 use spin::Once;
 
 use crate::{read_sysreg, write_sysreg};
@@ -38,36 +37,20 @@ impl ArmGenericTimerState {
     }
 
     pub(super) fn schedule_next(&self, deadline_ns: u64) {
-        let now_ns = self.get_elapsed_ns();
-        let delta_ns = deadline_ns.saturating_sub(now_ns);
-        let reload_value = Self::compute_counter_value(self.frequency, delta_ns).unwrap_or(1);
-
-        Self::write_cntv_tval_el0(reload_value);
+        // Компаратор абсолютный и 64-битный. Относительная запись `CNTV_TVAL_EL0`
+        // расширяется знаком, и срок дальше 2^31 тиков попадал бы в прошлое.
+        Self::write_cntv_cval_el0(deadline_ticks(deadline_ns, self.frequency));
         Self::write_cntv_ctl_el0(CNTV_CTL_ENABLE);
     }
 
     pub(super) fn get_elapsed_ns(&self) -> u64 {
-        Self::ticks_to_ns(Self::read_cntvct_el0(), self.frequency)
-    }
-
-    fn ticks_to_ns(ticks: u64, frequency: u64) -> u64 {
-        (u128::from(ticks) * 1_000_000_000 / u128::from(frequency)) as u64
+        ticks_to_ns(Self::read_cntvct_el0(), self.frequency)
     }
 
     pub(super) fn on_interrupt(&self) {
         if let Some(handler) = self.handler.get() {
             handler.on_tick(self.get_elapsed_ns());
         }
-    }
-
-    fn compute_counter_value(frequency: u64, interval_ns: u64) -> Option<u32> {
-        let ticks = frequency.checked_mul(interval_ns)? / 1_000_000_000;
-
-        if ticks == 0 {
-            return None;
-        }
-
-        Some(cmp::min(ticks, u64::from(u32::MAX)) as u32)
     }
 
     fn read_cntfrq_el0() -> u64 {
@@ -82,12 +65,12 @@ impl ArmGenericTimerState {
         unsafe { read_sysreg!(cntvct_el0) }
     }
 
-    fn write_cntv_tval_el0(value: u32) {
-        // SAFETY: Запись в CNTV_TVAL_EL0 программирует относительный дедлайн virtual timer.
-        // Аппаратно устанавливает CNTV_CVAL_EL0 = CNTVCT_EL0 + TVAL. ISB гарантирует,
+    fn write_cntv_cval_el0(value: u64) {
+        // SAFETY: Запись в CNTV_CVAL_EL0 программирует абсолютное значение CNTVCT_EL0,
+        // на котором срабатывает virtual timer, и не затрагивает память. ISB гарантирует,
         // что следующая инструкция выполняется уже с обновлённым значением регистра.
         unsafe {
-            write_sysreg!(cntv_tval_el0, u64::from(value));
+            write_sysreg!(cntv_cval_el0, value);
             core::arch::asm!("isb", options(nomem, nostack, preserves_flags));
         }
     }

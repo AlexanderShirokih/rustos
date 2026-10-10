@@ -29,6 +29,7 @@ pub(crate) fn no_space(error: kernel_objects::Error) -> FileSystemError {
         error,
         kernel_objects::Error::Syscall(
             SyscallError::OutOfMemory
+                | SyscallError::OutOfMappings
                 | SyscallError::OutOfHandles
                 | SyscallError::ResourceExhausted
         )

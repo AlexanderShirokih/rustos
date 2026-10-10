@@ -122,6 +122,11 @@ path = "/handle-table-full-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "mapping-table-full-fixture"
+path = "/mapping-table-full-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "vend-exhaustion-fixture"
 path = "/vend-exhaustion-fixture"
 

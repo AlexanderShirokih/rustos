@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 use capability::{Capability, HandleId, HandleTable, Resource};
 use kbase::{LockCell, MutexCell};
 use memory::{
-    AccessMask, MemoryRegion,
+    AccessMask, MappingTag, MemFlags, MemoryRegion,
     frame::Frame,
     frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
     range_allocator::RangeError,
@@ -185,6 +185,46 @@ fn metered_alloc_does_not_leak_budget_on_frame_oom() {
         budget_before,
         "frame-OOM before region creation must not consume budget"
     );
+}
+
+// Заполненная таблица отображений отвергает выделение до кадров и бюджета: при обратном
+// порядке нехватка кадров отдавала `OutOfMemory` вместо `OutOfMappings`.
+#[test]
+fn memory_allocate_refuses_full_mapping_table_before_frames_and_budget() {
+    let _g = test_lock();
+    let (table, allocator, fa) = setup();
+    let (resource_h, resource) = insert_metering_resource(&table);
+    let budget_before = resource.remaining_budget();
+    let size = NonZeroUsize::new(PAGE).unwrap();
+    let filler =
+        Arc::new(MemoryRegion::create_virtual(fa, NonZeroUsize::MIN, AccessMask::RW).unwrap());
+    let occupied: Vec<_> = allocator.with_lock(|alloc| {
+        core::iter::from_fn(|| {
+            let tag = MappingTag {
+                flags: MemFlags::user_rw(),
+                region: filler.clone(),
+                grant: AccessMask::RW,
+                revocation: None,
+            };
+            alloc.allocate(size, tag).ok().map(|range| range.base())
+        })
+        .collect()
+    });
+
+    fa.set_blocked(true);
+    let res = dispatch(
+        SyscallOp::MemoryAllocate,
+        [resource_h, PAGE as u64, 0, 0, 0, 0],
+    );
+    fa.set_blocked(false);
+    allocator.with_lock(|alloc| {
+        for base in occupied {
+            alloc.free(base, size).unwrap();
+        }
+    });
+
+    assert_eq!(res, Err(SyscallError::OutOfMappings.as_return_value()));
+    assert_eq!(resource.remaining_budget(), budget_before);
 }
 
 #[test]

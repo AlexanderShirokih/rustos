@@ -96,6 +96,15 @@ impl ReadyQueue {
         None
     }
 
+    /// Число потоков очереди, принятых `accept`.
+    pub fn count_matching(&self, accept: impl Fn(ThreadId) -> bool) -> usize {
+        self.queues
+            .iter()
+            .flatten()
+            .filter(|id| accept(**id))
+            .count()
+    }
+
     pub fn peek_highest_priority(&self) -> Option<Priority> {
         Self::level_priority(self.highest_level()?)
     }

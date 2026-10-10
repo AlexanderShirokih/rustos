@@ -15,6 +15,7 @@ use memory::{
     AccessMask, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE,
     frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, AddressSpaceHandle},
+    range_allocator::AllocateError,
     user_vm_allocator::UserVmAllocator,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
@@ -736,7 +737,7 @@ where
     }
 
     fn cpu_load(cpu: &Cpu) -> usize {
-        let running = usize::from(cpu.current() != cpu.idle());
+        let running = usize::from(!cpu.is_idle());
 
         cpu.ready_queue().len() + running
     }
@@ -815,14 +816,45 @@ where
 
         cpu.ready_queue_mut().push(id, priority);
         self.mark_wakeup(target);
+        self.wake_idle_cpus_for(target);
     }
 
     fn mark_wakeup(&mut self, target: CpuId) {
-        if self.current_cpu().map(Cpu::id) == Some(target) {
+        // Занятый текущий CPU выберет поток из своей очереди на ближайшем перевыборе.
+        // Простаивающий ждёт в `wfi` без кванта, и к этой работе его будит IPI самому себе.
+        if self
+            .current_cpu()
+            .is_some_and(|cpu| cpu.id() == target && !cpu.is_idle())
+        {
             return;
         }
 
         self.pending_wakeups |= 1u16 << target.as_index();
+    }
+
+    fn wake_idle_cpus_for(&mut self, donor: CpuId) {
+        let Some(cpu) = self.cpu_by_id(donor) else {
+            return;
+        };
+
+        if Self::cpu_load(cpu) < MIN_DONOR_LOAD {
+            return;
+        }
+
+        let mut stealable = cpu.ready_queue().count_matching(|id| self.is_stealable(id));
+        let mut woken = 0u16;
+        for idle in self.cpus.iter().flatten() {
+            if stealable == 0 {
+                break;
+            }
+
+            if idle.id() == donor || !idle.is_idle() || !idle.ready_queue().is_empty() {
+                continue;
+            }
+            stealable -= 1;
+            woken |= 1u16 << idle.id().as_index();
+        }
+        self.pending_wakeups |= woken;
     }
 
     pub(super) fn take_pending_wakeups(&mut self) -> u16 {
@@ -1107,15 +1139,20 @@ where
             return self.preempt_current(now_ns);
         }
 
+        // Простаивающий CPU перевыбирает поток и с пустой очередью, потому что IPI
+        // будит его и к работе, которую он заберёт у загруженного соседа.
+        if current_id == idle_id {
+            return self.preempt_current(now_ns);
+        }
+
         let Some(highest_ready) = highest_ready else {
             return ScheduleAction::None;
         };
 
-        let should_preempt = current_id == idle_id
-            || self
-                .threads
-                .get(current_id)
-                .is_some_and(|current| highest_ready < current.priority());
+        let should_preempt = self
+            .threads
+            .get(current_id)
+            .is_some_and(|current| highest_ready < current.priority());
 
         if should_preempt {
             self.preempt_current(now_ns)
@@ -1461,8 +1498,13 @@ where
             .mapper_arc()
             .ok_or(SpawnError::AddressSpaceCreationFailed)?;
 
+        // Заполненная таблица отвергает поток до выделения кадра, иначе нехватка кадров скрыла
+        // бы `MappingTableFull`.
+        user_vm
+            .with_lock(|alloc| alloc.ensure_free_slot())
+            .map_err(ipc_buffer_allocate_err)?;
         let region = MemoryRegion::create_virtual(fa, IPC_BUFFER_PAGES, AccessMask::RW)
-            .map_err(|_| SpawnError::StackAllocationFailed)?;
+            .map_err(|_| SpawnError::IpcBufferAllocationFailed)?;
         let region = Arc::new(region);
         let flags = MemFlags::user_rw();
         let grant = region.access_mask();
@@ -1476,19 +1518,19 @@ where
                         flags,
                         region: region.clone(),
                         grant,
-                        // Стек потока не имеет публичной капы - отзывать нечего.
+                        // IPC-буфер не имеет публичной капы - отзывать нечего.
                         revocation: None,
                     },
                 )
             })
-            .map_err(|_| SpawnError::StackAllocationFailed)?;
+            .map_err(ipc_buffer_allocate_err)?;
         let base = allocated.base();
 
         if region.install(&*mapper_arc, base, flags).is_err() {
             user_vm.with_lock(|alloc| {
                 let _ = alloc.free(base, size);
             });
-            return Err(SpawnError::StackAllocationFailed);
+            return Err(SpawnError::IpcBufferAllocationFailed);
         }
 
         let slot = IpcBufferSlot::new(base, region);
@@ -1498,7 +1540,7 @@ where
             user_vm.with_lock(|alloc| {
                 let _ = alloc.free(base, size);
             });
-            return Err(SpawnError::StackAllocationFailed);
+            return Err(SpawnError::IpcBufferAllocationFailed);
         };
         thread.set_ipc_buffer(slot);
         Ok(())
@@ -1582,8 +1624,18 @@ where
     }
 
     fn release_previous(&mut self) {
-        if let Some(cpu) = self.current_cpu_mut() {
+        let released = self.current_cpu_mut().and_then(|cpu| {
+            let previous = cpu.previous()?;
             cpu.set_previous(None);
+            let queued = cpu
+                .ready_queue()
+                .highest_matching(|id| id == previous)
+                .is_some();
+            queued.then_some(cpu.id())
+        });
+        // Отпущенный поток, оставшийся в очереди этого CPU, теперь можно забрать.
+        if let Some(own) = released {
+            self.wake_idle_cpus_for(own);
         }
         self.release_pending_ipc_buffers();
         self.reap_pending_threads();
@@ -1610,9 +1662,12 @@ where
         }
     }
 
-    pub(super) fn finish_switch(&mut self) -> Vec<Process> {
+    pub(super) fn finish_switch(&mut self) -> (Vec<Process>, u16) {
         self.release_previous();
-        core::mem::take(&mut self.pending_process_drops)
+        (
+            core::mem::take(&mut self.pending_process_drops),
+            self.take_pending_wakeups(),
+        )
     }
 
     fn is_process_running(&self, pid: ProcessId) -> bool {
@@ -1795,7 +1850,7 @@ where
             Ok(t) => t,
             Err(source) => {
                 child_table.with_lock(|tbl| tbl.release_reservation(reservation));
-                return Err(StartProcessError::SpawnFailed(source.into()));
+                return Err(StartProcessError::SpawnFailed(source));
             }
         };
 
@@ -2063,6 +2118,16 @@ where
     }
 
     fn take_next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {
+        let next = self.pick_next_runnable(idle_id);
+        // Выбор под локом учитывает всю очередь CPU и кражу, поэтому IPI самому себе,
+        // поставленный до выбора или кражей, больше не нужен.
+        if let Some(own) = self.current_cpu().map(Cpu::id) {
+            self.pending_wakeups &= !(1u16 << own.as_index());
+        }
+        next
+    }
+
+    fn pick_next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {
         loop {
             let popped = self
                 .current_cpu_mut()
@@ -2196,12 +2261,19 @@ where
     }
 
     fn schedule_next_deadline(&self, now_ns: u64) {
-        let wakeup_deadline = self.sleepers.peek().map(|entry| entry.wakeup_at_ns);
-        let quantum_deadline = now_ns.saturating_add(self.quantum_ns);
-        let deadline = wakeup_deadline.map_or(quantum_deadline, |wakeup_deadline| {
-            wakeup_deadline.min(quantum_deadline)
-        });
-        self.timer.schedule_next(deadline);
+        let wakeup_deadline = self
+            .sleepers
+            .peek()
+            .map_or(u64::MAX, |entry| entry.wakeup_at_ns);
+        // Простаивающий CPU кванта не взводит, потому что к работе его будит IPI, а
+        // таймер нужен ему только к сроку спящих.
+        let quantum_deadline = if self.current_cpu().is_some_and(Cpu::is_idle) {
+            u64::MAX
+        } else {
+            now_ns.saturating_add(self.quantum_ns)
+        };
+        self.timer
+            .schedule_next(wakeup_deadline.min(quantum_deadline));
     }
 
     fn current_cpu(&self) -> Option<&Cpu> {
@@ -2274,6 +2346,15 @@ struct TrampolinePayload {
     entry: Box<dyn FnOnce() + Send + 'static>,
 }
 
+fn ipc_buffer_allocate_err(error: AllocateError) -> SpawnError {
+    match error {
+        AllocateError::OutOfSlots => SpawnError::MappingTableFull,
+        AllocateError::NotEnoughSpace | AllocateError::UnalignedSize => {
+            SpawnError::IpcBufferAllocationFailed
+        }
+    }
+}
+
 pub(super) fn release_deferred_handles<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
 ) {
@@ -2288,8 +2369,10 @@ pub(super) fn release_deferred_handles<A: ArchContext, T: TimerSource>(
 pub(super) fn notify_pending_cpus<A: ArchContext, T: TimerSource>(
     inner: &MutexCell<SchedulerInner<A, T>>,
 ) {
-    let mut pending = inner.with_lock(SchedulerInner::take_pending_wakeups);
+    send_reschedules::<A>(inner.with_lock(SchedulerInner::take_pending_wakeups));
+}
 
+fn send_reschedules<A: ArchContext>(mut pending: u16) {
     // Отправка не выполняется под scheduler-локом. Она идёт через контроллер
     // прерываний, который берёт свои локи, а обработчик прерывания берёт ту же
     // пару в обратном порядке.
@@ -2339,7 +2422,8 @@ pub(super) fn perform_schedule_action<A: ArchContext, T: TimerSource>(
 
     // Ушедший в exit поток сюда не возвращается. Отметку снимает и процесс
     // освобождает тот поток, который следующим пройдёт через переключение.
-    let dropped = inner.with_lock(SchedulerInner::finish_switch);
+    let (dropped, pending) = inner.with_lock(SchedulerInner::finish_switch);
+    send_reschedules::<A>(pending);
     // Снятые процессы роняются не под scheduler-локом: `Drop` их capability
     // будит припаркованные потоки через тот же лок.
     drop(dropped);

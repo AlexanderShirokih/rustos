@@ -36,8 +36,7 @@ pub enum SyscallError {
     MessageTooBig = 11,
     /// Capability-таблица процесса исчерпана ([`crate::HANDLE_TABLE_CAPACITY`] записей).
     OutOfHandles = 12,
-    /// Не хватает физической или виртуальной памяти, либо реестр регионов
-    /// процесса исчерпан.
+    /// Не хватает физической или виртуальной памяти.
     OutOfMemory = 13,
     /// Регион не найден в реестре user-VM текущего процесса.
     NotFound = 14,
@@ -57,11 +56,14 @@ pub enum SyscallError {
     /// Линия прерывания уже привязана. Минт занятой линии отвергается, и
     /// разделяемых линий не существует.
     AlreadyBound = 19,
+    /// Таблица отображений адресного пространства процесса заполнена. Место
+    /// освобождает снятие отображения. Ёмкость таблицы в ABI не входит.
+    OutOfMappings = 20,
 }
 
 impl SyscallError {
     #[cfg(test)]
-    const ALL: [SyscallError; 19] = [
+    const ALL: [SyscallError; 20] = [
         SyscallError::BadSyscall,
         SyscallError::KernelOriginated,
         SyscallError::InvalidArgument,
@@ -81,6 +83,7 @@ impl SyscallError {
         SyscallError::Revoked,
         SyscallError::SenderGone,
         SyscallError::AlreadyBound,
+        SyscallError::OutOfMappings,
     ];
 
     /// ABI-возврат отказа - код варианта со знаком минус.
@@ -115,6 +118,7 @@ impl SyscallError {
             17 => Some(Self::Revoked),
             18 => Some(Self::SenderGone),
             19 => Some(Self::AlreadyBound),
+            20 => Some(Self::OutOfMappings),
             _ => None,
         }
     }
@@ -188,7 +192,7 @@ mod tests {
             assert_eq!(SyscallError::from_return(e.as_return_value()), Some(e));
         }
         assert_eq!(SyscallError::from_code(0), None);
-        assert_eq!(SyscallError::from_code(20), None);
+        assert_eq!(SyscallError::from_code(21), None);
     }
 
     #[test]

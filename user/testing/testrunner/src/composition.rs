@@ -13,7 +13,7 @@ use component_abi::{
 };
 use component_startup::Found;
 use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
-use ipc::{CallError, Protocol};
+use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
 use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SystemImage, relay::LogSources, turn};
@@ -21,6 +21,8 @@ use runtime::{JoinHandle, Mutex, PortTransport, Timeout, spawn_owned};
 use spin::Once;
 use syscall::{Handle, SIGNALED, SyscallError, kind};
 use userland_image::{BootPlan, ComponentSpec, ExportIndex, decode_plan, encode_plan};
+
+use crate::stress::{answered, expire};
 
 pub(crate) const BOOT_PLAN_ENTRY: &str = "/testrunner/plan";
 
@@ -182,8 +184,13 @@ impl Drop for TurnThread {
 
 impl Importer {
     pub(crate) fn session<P: Protocol>(&self, requirement: &str) -> Session<P> {
-        let session =
-            request::<P>(self.handle(), requirement, IMPORTER_WAIT).expect("session granted");
+        let session = answered(
+            request::<P>(self.handle(), requirement, IMPORTER_WAIT),
+            format_args!("requirement={requirement}"),
+            "session",
+            IMPORTER_WAIT,
+            "session granted",
+        );
         if P::ID == namespace::Protocol::ID
             && let Some(root) = self.namespace_roots.get(requirement)
         {
@@ -203,11 +210,13 @@ impl Importer {
         requirement: &str,
         attributes: Attributes<'_>,
     ) -> Vec<Found> {
-        drained(
-            &self
-                .enumeration::<P>(requirement, attributes)
-                .expect("enumeration granted"),
-        )
+        drained(&answered(
+            self.enumeration::<P>(requirement, attributes),
+            format_args!("requirement={requirement}"),
+            "enumeration",
+            IMPORTER_WAIT,
+            "enumeration granted",
+        ))
     }
 
     pub(crate) fn enumeration<P: Protocol>(
@@ -268,8 +277,15 @@ impl Mounted {
         let resolved = namespace::Client::new(PortTransport::new(&view))
             .with_wait(IMPORTER_WAIT)
             .resolve("/");
-        if let Err(CallError::Ipc(error)) = resolved {
-            panic!("the view of the prefix answers: {error:?}");
+        match resolved {
+            Err(CallError::Ipc(IpcError::Timeout)) => expire(
+                format_args!("requirement={requirement}"),
+                "resolve",
+                "call",
+                IMPORTER_WAIT,
+            ),
+            Err(CallError::Ipc(error)) => panic!("the view of the prefix answers: {error:?}"),
+            Ok(_) | Err(CallError::Remote(_)) => {}
         }
         Self {
             admin: Some(admin),
@@ -343,6 +359,12 @@ fn await_budget(plan: &BootPlan<'_>) {
                 pause(BUDGET_POLL);
                 waited += BUDGET_POLL.raw();
             }
+            Err(Error::Syscall(SyscallError::ResourceExhausted)) => expire(
+                format_args!("components={}", plan.components().count()),
+                "composition_budget",
+                "split",
+                BUDGET_RETURN_TIMEOUT,
+            ),
             Err(error) => panic!("composition budget is not available: {error:?}"),
         }
     }

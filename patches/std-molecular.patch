@@ -807,7 +807,7 @@ diff -ruN a/std/src/sys/io/error/mod.rs b/std/src/sys/io/error/mod.rs
 diff -ruN a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.rs
 --- a/std/src/sys/io/error/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/io/error/molecular.rs	2026-08-10 18:37:47.249441451 +0000
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,77 @@
 +//! Отображение ошибок syscall-ABI в `io::ErrorKind`.
 +//!
 +//! Перечисление берётся из крейта ABI через `syscall-user`, а не переписывается числами:
@@ -849,6 +849,7 @@ diff -ruN a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.r
 +        }
 +        SyscallError::Timeout => ErrorKind::TimedOut,
 +        SyscallError::OutOfHandles
++        | SyscallError::OutOfMappings
 +        | SyscallError::OutOfMemory
 +        | SyscallError::ResourceExhausted => ErrorKind::OutOfMemory,
 +        SyscallError::NotFound => ErrorKind::NotFound,
@@ -874,6 +875,7 @@ diff -ruN a/std/src/sys/io/error/molecular.rs b/std/src/sys/io/error/molecular.r
 +            SyscallError::MessageTooBig => "message exceeds the size limit",
 +            SyscallError::OutOfHandles => "capability table is exhausted",
 +            SyscallError::OutOfMemory => "out of memory",
++            SyscallError::OutOfMappings => "address space mapping table is full",
 +            SyscallError::NotFound => "region is not in the process registry",
 +            SyscallError::Canceled => "wait was canceled",
 +            SyscallError::ResourceExhausted => "resource accounting is exhausted",

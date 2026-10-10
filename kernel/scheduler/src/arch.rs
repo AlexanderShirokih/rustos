@@ -241,8 +241,9 @@ pub trait ArchCpu: Send + Sync + 'static {
     /// сразу.
     fn start_secondaries() {}
 
-    /// Просит `target` перевыбрать поток: на нём появилась работа, а он мог
-    /// уйти в idle. Вызывается вне scheduler-лока.
+    /// Просит `target` перевыбрать поток: у него или у загруженного соседа появилась
+    /// работа, а он мог уйти в idle. Вызывается вне scheduler-лока. `target` может
+    /// быть текущим CPU.
     fn send_reschedule(_target: CpuId) {}
 
     fn idle() -> !;
@@ -265,5 +266,7 @@ pub trait ThreadStackAllocator: Send + Sync + 'static {
 pub trait TimerSource: Send + Sync + 'static {
     fn now_ns(&self) -> u64;
 
+    /// Взводит таймер текущего CPU на абсолютный срок. Срок `u64::MAX` за время
+    /// работы системы не наступает и оставляет CPU без прерываний таймера.
     fn schedule_next(&self, deadline_ns: u64);
 }

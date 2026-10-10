@@ -28,7 +28,9 @@ pub(super) fn map_spawn_error(e: SpawnError) -> SyscallError {
         SpawnError::NoFreeProcessSlots
         | SpawnError::NoFreeThreadSlots
         | SpawnError::StackAllocationFailed
+        | SpawnError::IpcBufferAllocationFailed
         | SpawnError::AddressSpaceCreationFailed => SyscallError::OutOfMemory,
+        SpawnError::MappingTableFull => SyscallError::OutOfMappings,
         SpawnError::InvalidName | SpawnError::InvalidPriority | SpawnError::InvalidStackPages => {
             SyscallError::InvalidArgument
         }
@@ -95,6 +97,7 @@ mod tests {
             SpawnError::NoFreeProcessSlots,
             SpawnError::NoFreeThreadSlots,
             SpawnError::StackAllocationFailed,
+            SpawnError::IpcBufferAllocationFailed,
             SpawnError::AddressSpaceCreationFailed,
         ] {
             assert_eq!(map_spawn_error(e), SyscallError::OutOfMemory, "{e:?}");
@@ -111,6 +114,10 @@ mod tests {
         for e in [SpawnError::ImageNotLoaded, SpawnError::ProcessTerminated] {
             assert_eq!(map_spawn_error(e), SyscallError::WrongType, "{e:?}");
         }
+        assert_eq!(
+            map_spawn_error(SpawnError::MappingTableFull),
+            SyscallError::OutOfMappings
+        );
     }
 
     #[test]

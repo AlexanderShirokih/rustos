@@ -4,7 +4,7 @@
 use core::num::NonZeroU64;
 
 use bootstrap_abi::bootstrap;
-use kernel_objects::{MemoryRegion, Port, Process, Resource, Result};
+use kernel_objects::{MemoryRegion, ObjectKind, OwnedHandle, Port, Process, Resource, Result};
 use runtime::{PortTransport, Timeout};
 use syscall::ProcessName;
 use userland::{DecodedProgram, ProgramView, SegmentView, USERLAND_PAGE_SIZE};
@@ -146,7 +146,7 @@ pub(crate) fn program(path: &str) -> DecodedProgram<'static> {
     userland::decode_program(entry.data()).expect("image entry is a program")
 }
 
-pub(crate) fn spawn_entry(path: &str, start: Port) -> Process {
+pub(crate) fn spawn_entry<K: ObjectKind>(path: &str, start: OwnedHandle<K>) -> Process {
     let resource = Resource::self_resource().expect("self metering resource");
     load_program(
         &program(path),

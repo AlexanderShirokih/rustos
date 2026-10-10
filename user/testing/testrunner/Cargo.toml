@@ -64,6 +64,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "mapping-table-full-fixture"
+path = "src/mapping_table_full_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "vend-exhaustion-fixture"
 path = "src/vend_exhaustion_fixture.rs"
 test = false

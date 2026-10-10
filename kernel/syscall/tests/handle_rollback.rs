@@ -173,44 +173,10 @@ fn install_process_handle(table: &Arc<MutexCell<HandleTable>>) -> capability::Ha
 }
 
 fn dispatch(op: SyscallOp, args: [u64; 6]) -> Result<u64, SyscallError> {
-    common::dispatch(op, args)
-        .map_err(|ret| decode_error(u32::try_from(-ret).expect("error code fits in u32")))
-}
-
-const ALL_ERRORS: &[SyscallError] = &[
-    SyscallError::BadSyscall,
-    SyscallError::KernelOriginated,
-    SyscallError::InvalidArgument,
-    SyscallError::BadHandle,
-    SyscallError::WrongType,
-    SyscallError::AccessDenied,
-    SyscallError::ShouldWait,
-    SyscallError::PeerClosed,
-    SyscallError::Timeout,
-    SyscallError::BufferTooSmall,
-    SyscallError::MessageTooBig,
-    SyscallError::OutOfHandles,
-    SyscallError::OutOfMemory,
-    SyscallError::NotFound,
-    SyscallError::Canceled,
-    SyscallError::ResourceExhausted,
-];
-
-fn decode_error(code: u32) -> SyscallError {
-    let want = -i64::from(code);
-    *ALL_ERRORS
-        .iter()
-        .find(|e| e.as_return_value() == want)
-        .unwrap_or_else(|| panic!("unknown SyscallError code: {code}"))
-}
-
-#[test]
-fn decode_error_handles_all_abi_codes_including_resource_exhausted() {
-    for &e in ALL_ERRORS {
-        let code = u32::try_from(-e.as_return_value()).expect("error code fits u32");
-        assert_eq!(decode_error(code), e);
-    }
-    assert_eq!(decode_error(16), SyscallError::ResourceExhausted);
+    common::dispatch(op, args).map_err(|ret| {
+        SyscallError::from_return(ret)
+            .unwrap_or_else(|| panic!("unknown SyscallError return: {ret}"))
+    })
 }
 
 #[test]

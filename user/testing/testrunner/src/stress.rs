@@ -8,6 +8,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::SeqCst},
 };
 
+use ipc::{CallError, wire::IpcError};
 use kernel_objects::{Error, ObjectKind, Port, Resource, Signal, kind};
 use rootkeeper::SystemImage;
 use runtime::{
@@ -15,6 +16,7 @@ use runtime::{
     signal_wait_one, spawn,
 };
 use syscall::{Handle, Rights, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
+use test_harness::TestKind;
 
 const PLAN_PATH: &str = "/testrunner/stress-plan";
 
@@ -846,6 +848,41 @@ fn report(context: fmt::Arguments<'_>, failure: StepFailure) -> ! {
         });
     }
     test_harness::macros::fail(format_args!("stress {context} {failure}"), file!(), line!())
+}
+
+pub(crate) fn expire(
+    context: fmt::Arguments<'_>,
+    operation: &'static str,
+    phase: &'static str,
+    wait: Timeout,
+) -> ! {
+    let failure = StepFailure::of(
+        operation,
+        FailureKind::Expired {
+            phase,
+            timeout: wait,
+        },
+    );
+    // Маркер истечения разбирает xtask и в проходе обычных тестов. Вне stress-прогона
+    // истечение отчитывается провалом теста с той же диагностикой.
+    if crate::profile() == TestKind::Stress {
+        report(context, failure);
+    }
+    test_harness::macros::fail(format_args!("{context} {failure}"), file!(), line!())
+}
+
+pub(crate) fn answered<T, E: fmt::Debug>(
+    result: Result<T, CallError<E>>,
+    context: fmt::Arguments<'_>,
+    operation: &'static str,
+    wait: Timeout,
+    claim: &str,
+) -> T {
+    match result {
+        Ok(value) => value,
+        Err(CallError::Ipc(IpcError::Timeout)) => expire(context, operation, "call", wait),
+        Err(error) => panic!("{claim}: {error:?}"),
+    }
 }
 
 fn measure(context: fmt::Arguments<'_>) -> u64 {

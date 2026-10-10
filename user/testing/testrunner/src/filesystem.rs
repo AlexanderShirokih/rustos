@@ -3,8 +3,9 @@
 use alloc::{format, string::String, vec, vec::Vec};
 
 use filesystem_abi::{
-    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NAME_MAX, NodeDescriptor,
-    NodeKind, OpenFlags, Opened, Path, file_system, file_system_mount, namespace,
+    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FILE_SYSTEM_OPEN_ROOT_TIMEOUT, FileSystemError,
+    NAME_MAX, NodeDescriptor, NodeKind, OpenFlags, Opened, Path, file_system, file_system_mount,
+    namespace,
 };
 use filesystem_client::{Failure, FileSystem};
 use ipc::{
@@ -27,9 +28,10 @@ use crate::{
     composition::{BOOT_PLAN_ENTRY, Composition, Importer, Mounted, admin, image, pause, view},
     fixture::{JOIN_TIMEOUT, spawn_entry},
     log_relay::SharedLogSessions,
+    stress::{answered, expire},
 };
 
-const FILE_SYSTEM_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
+pub(crate) const FILE_SYSTEM_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const NAMESPACE_REPLY_TIMEOUT: Timeout = Timeout::from_secs(5);
 const MOUNT_END_TIMEOUT: Timeout = Timeout::from_secs(5);
@@ -142,9 +144,22 @@ fn view_of(requirement: &str) -> Port {
 
 fn resolved(importer: &Importer, requirement: &str, text: &str) -> Session<file_system::Protocol> {
     let view = importer.port::<namespace::Protocol>(requirement);
-    let session = namespace_client(&view)
-        .resolve(text)
-        .expect("path is covered by a mount");
+    let resolved = namespace_client(&view).resolve(text);
+    if let Err(CallError::Remote(FileSystemError::Unresponsive)) = resolved {
+        expire(
+            format_args!("requirement={requirement} path={text}"),
+            "resolve",
+            "open_root",
+            FILE_SYSTEM_OPEN_ROOT_TIMEOUT,
+        );
+    }
+    let session = answered(
+        resolved,
+        format_args!("requirement={requirement} path={text}"),
+        "resolve",
+        NAMESPACE_REPLY_TIMEOUT,
+        "path is covered by a mount",
+    );
     Session::from_session(session)
 }
 
@@ -167,7 +182,13 @@ pub(crate) fn mount_ram_window(requirement: &str, scope: &str) -> Mounted {
             OpenFlags::CREATE | OpenFlags::DIRECTORY,
         ),
     );
-    let window = client.open_root(scope).expect("window granted");
+    let window = answered(
+        client.open_root(scope),
+        format_args!("path={scope}"),
+        "open_root",
+        FILE_SYSTEM_REPLY_TIMEOUT,
+        "window granted",
+    );
     Mounted::new(importer(), requirement, Session::from_session(window))
 }
 

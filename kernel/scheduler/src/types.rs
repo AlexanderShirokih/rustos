@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use core::num::{NonZeroU32, NonZeroU64};
 
-use capability::WaitToken;
+use capability::{SpawnError, WaitToken};
 
 /// Идентификатор потока.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -117,34 +117,6 @@ impl SpawnConfig {
     pub const fn address_space(mut self, address_space: SpawnAddressSpace) -> Self {
         self.address_space = address_space;
         self
-    }
-}
-
-/// Ошибки запуска и управления потоком.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnError {
-    NoFreeThreadSlots,
-    InvalidName,
-    InvalidPriority,
-    InvalidStackPages,
-    StackAllocationFailed,
-    AddressSpaceCreationFailed,
-    ImageNotLoaded,
-    ProcessTerminated,
-}
-
-impl From<SpawnError> for capability::SpawnError {
-    fn from(value: SpawnError) -> Self {
-        match value {
-            SpawnError::NoFreeThreadSlots => Self::NoFreeThreadSlots,
-            SpawnError::InvalidName => Self::InvalidName,
-            SpawnError::InvalidPriority => Self::InvalidPriority,
-            SpawnError::InvalidStackPages => Self::InvalidStackPages,
-            SpawnError::StackAllocationFailed => Self::StackAllocationFailed,
-            SpawnError::AddressSpaceCreationFailed => Self::AddressSpaceCreationFailed,
-            SpawnError::ImageNotLoaded => Self::ImageNotLoaded,
-            SpawnError::ProcessTerminated => Self::ProcessTerminated,
-        }
     }
 }
 

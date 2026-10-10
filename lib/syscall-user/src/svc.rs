@@ -547,7 +547,8 @@ pub fn resource_split(
 ///  - `priority` - приоритет в битах `[0..8)`, свыше `0xFF` - `InvalidArgument`.
 ///
 /// Требует `Rights::WRITE` на `process`. Процесс без загруженного образа отвечает
-/// `WrongType`.
+/// `WrongType`. Ядро отображает IPC-буфер потока в адресное пространство `process`, и
+/// заполненная таблица его отображений даёт `OutOfMappings`.
 /// Возврат: handle на `ThreadObject` либо `-(SyscallError)`.
 pub fn thread_create(
     process: Handle<kind::Process>,
@@ -677,7 +678,7 @@ pub fn memory_slice(
 ///  - `READ | EXECUTE` для RX.
 ///
 /// Маппинг снимается отзывом `handle`. Капа, отозванная в гонке, оставляет отказ `Revoked`
-/// вместо живого VA.
+/// вместо живого VA. Заполненная таблица отображений процесса даёт `OutOfMappings`.
 /// Возврат: базовый VA либо `-(SyscallError)`.
 pub fn memory_map(handle: Handle<kind::MemoryRegion>, size_bytes: u64, flags_raw: u64) -> i64 {
     // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x2. Память не передаётся ядру.
@@ -704,6 +705,7 @@ pub fn memory_remap(va: u64, size_bytes: u64, flags_raw: u64) -> i64 {
 ///
 /// Handle на регион наружу не выкладывается, и доступ целиком задаётся `flags_raw`. Бюджет
 /// возвращается ресурсу на [`memory_free`] либо с разрушением адресного пространства.
+/// Заполненная таблица отображений процесса даёт `OutOfMappings`, как у [`memory_map`].
 /// Возврат: базовый VA либо `-(SyscallError)`.
 pub fn memory_allocate(resource: Handle<kind::Resource>, size_bytes: u64, flags_raw: u64) -> i64 {
     // SAFETY: svc-immediate содержит номер операции, аргументы в x0..x2. Память не передаётся ядру.

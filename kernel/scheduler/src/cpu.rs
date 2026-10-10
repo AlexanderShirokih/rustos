@@ -56,4 +56,9 @@ impl Cpu {
     pub fn idle(&self) -> ThreadId {
         self.idle
     }
+
+    /// CPU исполняет свой idle-поток.
+    pub fn is_idle(&self) -> bool {
+        self.current == self.idle
+    }
 }

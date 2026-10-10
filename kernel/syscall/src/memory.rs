@@ -243,6 +243,12 @@ pub(crate) fn sys_memory_allocate(
         return Err(SyscallError::InvalidArgument);
     }
 
+    // Заполненная таблица отвергает вызов до выделения кадров и списания бюджета, иначе
+    // их нехватка скрыла бы `OutOfMappings`.
+    user_vm
+        .allocator()
+        .with_lock(|alloc| alloc.ensure_free_slot())
+        .map_err(allocate_err_to_syscall)?;
     let region = MemoryRegion::create_virtual(fa, pages_count, access)
         .map_err(|e| region_create_err_to_syscall(&e))?;
     // Метерим после выделения. На нехватке бюджета регион дропается (фреймы
@@ -505,7 +511,8 @@ pub(crate) fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
 fn allocate_err_to_syscall(err: AllocateError) -> SyscallError {
     match err {
         AllocateError::UnalignedSize => SyscallError::InvalidArgument,
-        AllocateError::NotEnoughSpace | AllocateError::OutOfSlots => SyscallError::OutOfMemory,
+        AllocateError::NotEnoughSpace => SyscallError::OutOfMemory,
+        AllocateError::OutOfSlots => SyscallError::OutOfMappings,
     }
 }
 
@@ -613,7 +620,7 @@ mod tests {
         );
         assert_eq!(
             allocate_err_to_syscall(AllocateError::OutOfSlots),
-            SyscallError::OutOfMemory
+            SyscallError::OutOfMappings
         );
     }
 

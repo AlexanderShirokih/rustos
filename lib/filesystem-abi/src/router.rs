@@ -3,6 +3,11 @@
 
 use crate::error::FileSystemError;
 
+/// Срок, который маршрутизатор отводит файловой системе на выдачу сессии в
+/// [`namespace`]`::resolve` и `resolve_pair`. Его истечение клиент получает отказом
+/// [`FileSystemError::Unresponsive`].
+pub const FILE_SYSTEM_OPEN_ROOT_TIMEOUT: ipc::Timeout = ipc::Timeout::from_secs(1);
+
 ipc::wire_value! {
     /// Сессия, накрывающая оба пути пары. Клиент снимает с обоих путей `root_len` байт и остаток
     /// передаёт этой сессии.
@@ -30,8 +35,9 @@ ipc::protocol! {
         /// запрос ждёт монтирования; путь выше монтирования - `NotFound`.
         ///
         /// Capability выдаёт сама файловая система, применяя свою политику допуска. Оттуда же
-        /// приходит и отказ установления. Файловая система без ответа в отведённый срок -
-        /// `Unresponsive`. Маршрутизатор, которому нечем удержать запрос, отвечает `NoSpace`.
+        /// приходит и отказ установления. Файловая система без ответа в срок
+        /// [`FILE_SYSTEM_OPEN_ROOT_TIMEOUT`] - `Unresponsive`. Маршрутизатор, которому нечем
+        /// удержать запрос, отвечает `NoSpace`.
         call(defer) fn resolve(
             path: &str,
         ) -> own Result<ipc::wire::Session<crate::file_system::Protocol>, FileSystemError>;

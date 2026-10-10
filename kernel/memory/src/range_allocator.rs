@@ -205,6 +205,16 @@ impl<Tag: Clone> RangeAllocator<Tag> {
         &self.free_ranges
     }
 
+    /// Отказывает [`AllocateError::OutOfSlots`], если таблица живых регионов заполнена.
+    /// Вызывающий проверяет слот до затрат, которые нужны для тега будущего диапазона.
+    /// Проверка не резервирует слот, и [`allocate`](Self::allocate) проверяет его снова.
+    pub fn ensure_free_slot(&self) -> Result<(), AllocateError> {
+        if self.allocated.len() >= self.capacity {
+            return Err(AllocateError::OutOfSlots);
+        }
+        Ok(())
+    }
+
     pub fn allocate(
         &mut self,
         size_bytes: NonZeroUsize,
@@ -226,9 +236,7 @@ impl<Tag: Clone> RangeAllocator<Tag> {
         let reserved_pages = requested_pages
             .checked_add(guard_pages)
             .ok_or(AllocateError::NotEnoughSpace)?;
-        if self.allocated.len() >= self.capacity {
-            return Err(AllocateError::OutOfSlots);
-        }
+        self.ensure_free_slot()?;
 
         // `None` в остатке означает точное совпадение с запрошенным размером.
         let (idx, reserved_base, remainder) = self
@@ -497,7 +505,9 @@ mod tests {
             2,
         );
         a.allocate(nz(PAGE_SIZE), 0).unwrap();
+        assert_eq!(a.ensure_free_slot(), Ok(()));
         a.allocate(nz(PAGE_SIZE), 0).unwrap();
+        assert_eq!(a.ensure_free_slot(), Err(AllocateError::OutOfSlots));
         assert_eq!(a.allocate(nz(PAGE_SIZE), 0), Err(AllocateError::OutOfSlots));
     }
 

@@ -37,6 +37,7 @@ pub use arch::{
     ArchContext, ArchCpu, CpuId, CpuLocalError, MAX_CPUS, StackError, ThreadStack,
     ThreadStackAllocator, TimerSource, with_preemption_disabled,
 };
+pub use capability::SpawnError;
 pub use process::Process;
 pub use scheduler::{
     Bootstrapped, CpuBootstrapError, DEFAULT_QUANTUM_NS, Running, Scheduler, SchedulerConfig,
@@ -49,7 +50,7 @@ pub use syscall::ProcessName;
 pub use thread::{Thread, ThreadState};
 pub use types::{
     Priority, ProcessId, SchedulerService, SchedulerServiceExt, SpawnAddressSpace, SpawnConfig,
-    SpawnError, ThreadId,
+    ThreadId,
 };
 pub use user::{
     PreparedUserProcess, PreparedUserProcessError, UserBootstrapArg, UserEntry, UserProcessLaunch,

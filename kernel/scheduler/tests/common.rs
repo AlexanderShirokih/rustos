@@ -229,6 +229,8 @@ pub(crate) fn make_thread(name: &'static str, priority: Priority) -> Thread<Mock
     Thread::new(id, process, CpuId::ZERO, priority, arch, stack, name)
 }
 
+const FIRST_COUNTED_FRAME: usize = 1000;
+
 pub(crate) struct CountingFrameAllocator {
     next: AtomicUsize,
     deallocated: Mutex<Vec<Frame>>,
@@ -237,13 +239,17 @@ pub(crate) struct CountingFrameAllocator {
 impl CountingFrameAllocator {
     pub(crate) fn new() -> Self {
         Self {
-            next: AtomicUsize::new(1000),
+            next: AtomicUsize::new(FIRST_COUNTED_FRAME),
             deallocated: Mutex::new(Vec::new()),
         }
     }
 
     pub(crate) fn deallocated_count(&self) -> usize {
         self.deallocated.lock().unwrap().len()
+    }
+
+    pub(crate) fn allocated_count(&self) -> usize {
+        self.next.load(Ordering::SeqCst) - FIRST_COUNTED_FRAME
     }
 }
 

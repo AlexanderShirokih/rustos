@@ -39,7 +39,7 @@ pub enum IpcError {
     AlreadyBound,
 }
 
-/// Ошибки создания процесса/потока через [`KernelRuntime`](super::KernelRuntime).
+/// Ошибки создания процесса и потока в планировщике и [`KernelRuntime`](super::KernelRuntime).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnError {
     /// Слоты процессов исчерпаны.
@@ -54,6 +54,11 @@ pub enum SpawnError {
     InvalidStackPages,
     /// Не удалось аллоцировать стек потока.
     StackAllocationFailed,
+    /// Не удалось выделить или отобразить IPC-буфер потока.
+    IpcBufferAllocationFailed,
+    /// Таблица отображений адресного пространства процесса заполнена, и IPC-буферу потока
+    /// не досталось места.
+    MappingTableFull,
     /// Не удалось создать адресное пространство процесса.
     AddressSpaceCreationFailed,
     /// Поток создаётся в процессе, образ которого ещё не загружен.

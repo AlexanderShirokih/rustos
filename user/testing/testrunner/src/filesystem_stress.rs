@@ -12,13 +12,16 @@ use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind,
     OpenFlags, file_system,
 };
-use ipc::CallError;
+use ipc::{CallError, wire::IpcError};
 use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
 use runtime::UserMemFlags;
 
 use crate::{
-    filesystem::{STRESS_VIEW, connect, mount_ram_window, remove_ram_directory, session_for},
-    stress::{SplitMix64, StressPlan, log_pass, log_seed},
+    filesystem::{
+        FILE_SYSTEM_REPLY_TIMEOUT, STRESS_VIEW, connect, mount_ram_window, remove_ram_directory,
+        session_for,
+    },
+    stress::{SplitMix64, StressPlan, expire, log_pass, log_seed},
 };
 
 const STRESS_MOUNT: &str = "/stress";
@@ -44,6 +47,7 @@ type Step = Result<(), Mismatch>;
 #[derive(Debug)]
 enum Mismatch {
     Call(&'static str),
+    Expired(&'static str),
     Refused(&'static str, FileSystemError),
     Model(&'static str),
 }
@@ -70,11 +74,10 @@ struct Run {
 
 impl Mismatch {
     fn refused(operation: &'static str) -> impl FnOnce(CallError<FileSystemError>) -> Self {
-        move |error| {
-            error.fold(
-                |_| Self::Call(operation),
-                |error| Self::Refused(operation, error),
-            )
+        move |error| match error {
+            CallError::Ipc(IpcError::Timeout) => Self::Expired(operation),
+            CallError::Ipc(_) => Self::Call(operation),
+            CallError::Remote(error) => Self::Refused(operation, error),
         }
     }
 }
@@ -83,6 +86,7 @@ impl core::fmt::Display for Mismatch {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Call(operation) => write!(formatter, "{operation} call failed"),
+            Self::Expired(operation) => write!(formatter, "{operation} call ran out of its wait"),
             Self::Refused(operation, error) => {
                 write!(formatter, "{operation} refused with {error:?}")
             }
@@ -674,7 +678,7 @@ fn filesystem_ramfs_stress() {
 fn run_seed(seed: u64, steps: u64) {
     let scope = scope_of(seed);
     let mounted = mount_ram_window(STRESS_VIEW, &scope);
-    let mut run = Run::new(seed).expect("session of the run");
+    let mut run = Run::new(seed).unwrap_or_else(|mismatch| report(seed, 0, "start", &mismatch));
     for step in 0..steps {
         let (operation, result) = run.step();
         if let Err(mismatch) = result {
@@ -697,6 +701,14 @@ fn scope_of(seed: u64) -> String {
 }
 
 fn report(seed: u64, step: u64, operation: &'static str, mismatch: &Mismatch) -> ! {
+    if let Mismatch::Expired(call) = mismatch {
+        expire(
+            format_args!("seed={seed} step={step} call={call}"),
+            operation,
+            "call",
+            FILE_SYSTEM_REPLY_TIMEOUT,
+        );
+    }
     test_harness::macros::fail(
         format_args!("stress seed={seed} step={step} operation={operation}: {mismatch}"),
         file!(),

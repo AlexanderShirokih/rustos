@@ -3,7 +3,8 @@
 //!  - без зарегистрированного `FrameAllocator` user-поток создаётся без буфера
 //!    (user_vm-регионы не выделяются);
 //!  - с allocator-ом создаётся ровно один backing-регион IPC-буфера;
-//!  - на ошибке `install` маппинга allocation откатывается, поток не создаётся.
+//!  - на ошибке `install` маппинга allocation откатывается, поток не создаётся;
+//!  - заполненная таблица отображений отвергает поток `MappingTableFull` до выделения кадра.
 
 #![allow(clippy::expect_used)]
 
@@ -11,7 +12,7 @@ mod common;
 
 use std::sync::Arc;
 
-use capability::UserThreadEntry;
+use capability::{SpawnError, UserThreadEntry};
 use memory::{
     testing::PageMapperFactory,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
@@ -24,6 +25,8 @@ use crate::common::{
 
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
+
+const MAPPING_TABLE_FILL_THREADS_MAX: usize = 256;
 
 fn factory_static(factory: PageMapperFactory) -> &'static PageMapperFactory {
     Box::leak(Box::new(factory))
@@ -173,4 +176,33 @@ fn ipc_buffer_install_failure_rolls_back_allocation_and_thread() {
 
     assert_eq!(scheduler.process_user_vm_region_count(pid), Some(0));
     assert_eq!(scheduler.process_thread_count(pid), threads_before);
+}
+
+#[test]
+fn full_mapping_table_refuses_thread_before_allocating_a_frame() {
+    reset_switches();
+    let factory = factory_static(PageMapperFactory::new());
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::with_address_space_factory(
+        MockTimerSource(timer),
+        SchedulerConfig::new(32, MAPPING_TABLE_FILL_THREADS_MAX),
+        Some(factory),
+    )
+    .bootstrap()
+    .ok()
+    .expect("bootstrap must succeed in tests");
+    let frames = frame_allocator_static();
+    scheduler.set_frame_allocator(frames);
+    let handle = scheduler.handle();
+
+    let process = handle.create_empty_process("p").expect("create process");
+    mark_loaded(&handle, &process);
+    let refusal = (0..MAPPING_TABLE_FILL_THREADS_MAX)
+        .find_map(|_| handle.create_user_thread(&process, user_entry()).err());
+    assert_eq!(refusal, Some(SpawnError::MappingTableFull));
+
+    let frames_before = frames.allocated_count();
+    let err = handle.create_user_thread(&process, user_entry());
+    assert_eq!(err.err(), Some(SpawnError::MappingTableFull));
+    assert_eq!(frames.allocated_count(), frames_before);
 }

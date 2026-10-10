@@ -99,8 +99,8 @@ where
         perform_schedule_action(&self.inner, action);
     }
 
-    /// Перевыбор потока по требованию другого CPU: на этом CPU появилась
-    /// работа, пока он мог стоять в idle.
+    /// Перевыбирает поток текущего CPU по межпроцессорному прерыванию о новой работе
+    /// в его очереди или у загруженного соседа.
     pub fn on_reschedule(&self) {
         with_preemption_disabled::<A::Cpu, _>(|| {
             let action = self.inner.with_lock(|inner| {
@@ -161,24 +161,19 @@ where
             .with_lock(|inner| inner.thread_in_current_process(thread))
     }
 
-    pub fn create_empty_process(
-        &self,
-        name: &str,
-    ) -> Result<Arc<ProcessObject>, capability::SpawnError> {
+    pub fn create_empty_process(&self, name: &str) -> Result<Arc<ProcessObject>, SpawnError> {
         self.inner
             .with_lock(|inner| inner.create_empty_process(name))
-            .map_err(Into::into)
     }
 
     pub fn create_user_thread(
         &self,
         process: &Arc<ProcessObject>,
         entry: UserThreadEntry,
-    ) -> Result<Arc<ThreadObject>, capability::SpawnError> {
+    ) -> Result<Arc<ThreadObject>, SpawnError> {
         let result = self
             .inner
-            .with_lock(|inner| inner.create_user_thread(process, entry))
-            .map_err(Into::into);
+            .with_lock(|inner| inner.create_user_thread(process, entry));
         notify_pending_cpus(&self.inner);
         result
     }

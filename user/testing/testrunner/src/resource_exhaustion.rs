@@ -1,13 +1,18 @@
-//! E2E проверка границ процесса из EL0: выдача сверх бюджета метеринг-ресурса
-//! и создание объекта при заполненной таблице handle отвергаются ошибкой,
-//! освобождение возвращает выданное, а процесс после отказа продолжает работу.
+//! E2E проверка границ процесса из EL0: выдача сверх бюджета метеринг-ресурса,
+//! создание объекта при заполненной таблице handle и отображение при заполненной
+//! таблице отображений отвергаются ошибкой, освобождение возвращает выданное, а
+//! процесс после отказа продолжает работу.
 
 use alloc::vec::Vec;
 
 use kernel_objects::{Error, MemoryRegion, Resource, Signal};
-use runtime::MemoryAccess;
-use syscall::{HANDLE_TABLE_CAPACITY, SyscallError};
+use runtime::{MemoryAccess, SUCCESS_EXIT_CODE};
+use syscall::{HANDLE_TABLE_CAPACITY, Rights, SyscallError};
 use userland::USERLAND_PAGE_SIZE;
+
+use crate::fixture::{JOIN_TIMEOUT, spawn_entry};
+
+const MAPPING_TABLE_FIXTURE: &str = "/mapping-table-full-fixture/exec";
 
 const PROBE_BUDGET_PAGES: u64 = 64;
 
@@ -165,4 +170,19 @@ fn closing_a_handle_makes_room_after_the_refusal() {
 
     test_harness::check!(slot_taken);
     test_harness::check_eq!(over, Some(Error::Syscall(SyscallError::OutOfHandles)));
+}
+
+#[test_harness::test]
+fn a_full_mapping_table_refuses_by_its_own_code() {
+    let resource = Resource::self_resource().expect("self metering resource");
+    let probe = resource
+        .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
+        .expect("probe region");
+    let lease = probe
+        .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
+        .expect("probe region for the fixture");
+    let process = spawn_entry(MAPPING_TABLE_FIXTURE, lease);
+
+    process.join(JOIN_TIMEOUT).expect("fixture terminates");
+    test_harness::check_eq!(process.exit_code(), Ok(SUCCESS_EXIT_CODE.cast_unsigned()));
 }

@@ -193,12 +193,15 @@ fn run(root: &Port) -> ExitCode {
     runtime::set_panic_hook(report_panic);
     test_harness::runner::install_writer(&LOG_WRITER);
     test_harness::runner::install_exit(runner_exit);
-    let profile = match env!("TEST_PROFILE") {
+    test_harness::run_tests(profile())
+}
+
+pub(crate) fn profile() -> test_harness::TestKind {
+    match env!("TEST_PROFILE") {
         "stress" => test_harness::TestKind::Stress,
         "bench" => test_harness::TestKind::Bench,
         _ => test_harness::TestKind::Regular,
-    };
-    test_harness::run_tests(profile)
+    }
 }
 
 #[test_harness::test]

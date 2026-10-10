@@ -262,6 +262,115 @@ fn sleep_ns_blocks_and_wakes_thread_on_deadline() {
 }
 
 #[test]
+fn an_idle_cpu_without_sleepers_arms_no_deadline() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let only = scheduler
+        .spawn(SpawnConfig::new("only"), || {})
+        .expect("spawn only");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(only));
+
+    running.exit_current();
+    assert_ne!(running.current(), Some(only));
+    assert_eq!(
+        timer.scheduled_deadline(),
+        u64::MAX,
+        "an idle cpu without sleepers must not arm a quantum",
+    );
+}
+
+#[test]
+fn an_idle_cpu_arms_the_deadline_of_a_sleeper() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let sleeper = scheduler
+        .spawn(SpawnConfig::new("sleeper"), || {})
+        .expect("spawn sleeper");
+
+    let running = scheduler.run();
+    assert_eq!(running.current(), Some(sleeper));
+
+    running.sleep_ns(DEFAULT_QUANTUM_NS * 3);
+    assert_ne!(running.current(), Some(sleeper));
+    assert_eq!(
+        timer.scheduled_deadline(),
+        DEFAULT_QUANTUM_NS * 3,
+        "an idle cpu must wake for the sleeper, not for the end of a quantum",
+    );
+}
+
+#[test]
+fn a_thread_woken_on_its_idle_cpu_runs_without_a_tick() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let worker = scheduler
+        .spawn(SpawnConfig::new("worker"), || {})
+        .expect("spawn worker");
+
+    let running = scheduler.run();
+    let handle = running.handle();
+    running.sleep_ns(100);
+    assert_ne!(running.current(), Some(worker));
+    let _ = take_reschedules();
+
+    // Прерывание устройства будит поток в очередь простаивающего текущего CPU,
+    // а выход из прерывания поток не перевыбирает.
+    with_simulated_irq(|| {
+        capability::KernelRuntime::unblock(&handle, capability::WaitToken::from(worker));
+    });
+    assert_eq!(
+        take_reschedules(),
+        vec![CpuId::ZERO],
+        "an idle cpu must interrupt itself for a thread woken in its queue",
+    );
+
+    handle.on_reschedule();
+    assert_eq!(running.current(), Some(worker));
+}
+
+#[test]
+fn an_idle_cpu_waking_its_sleeper_switches_without_an_ipi_to_itself() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let sleeper = scheduler
+        .spawn(SpawnConfig::new("sleeper"), || {})
+        .expect("spawn sleeper");
+
+    let running = scheduler.run();
+    let handle = running.handle();
+    running.sleep_ns(100);
+    assert_ne!(running.current(), Some(sleeper));
+    let _ = take_reschedules();
+
+    timer.advance_to(100);
+    with_simulated_irq(|| handle.on_timer_tick(100));
+    assert_eq!(running.current(), Some(sleeper));
+    assert_eq!(
+        take_reschedules(),
+        Vec::new(),
+        "a tick that switches to the woken thread needs no IPI to its own cpu",
+    );
+}
+
+#[test]
 fn yield_now_with_no_other_threads_keeps_current() {
     reset_switches();
     let timer = MockTimer::new();
@@ -2733,11 +2842,17 @@ fn a_backlog_appearing_after_a_cpu_went_idle_is_migrated() {
     let second_cpu = bootstrap_cpu(&handle, 1);
 
     timer.advance_to(100);
+    let _ = take_reschedules();
     with_simulated_irq(|| handle.on_timer_tick(100));
     assert_eq!(running.current(), Some(first));
+    assert_eq!(
+        take_reschedules(),
+        vec![second_cpu],
+        "an idle cpu must be interrupted once a backlog appears",
+    );
 
     set_current_cpu(second_cpu);
-    with_simulated_irq(|| handle.on_timer_tick(100));
+    handle.on_reschedule();
     assert_eq!(
         running.current(),
         Some(second_thread),
@@ -2787,6 +2902,18 @@ fn a_thread_whose_context_is_still_being_saved_is_not_stolen() {
         Some(CpuId::ZERO),
         "a thread held by a cpu keeps its home",
     );
+
+    // Завершение переключения отпускает поток, и простаивающий CPU забирает его
+    // по IPI, не дожидаясь своего тика.
+    assert_eq!(take_reschedules(), vec![second]);
+    set_current_cpu(second);
+    handle.on_reschedule();
+    assert_eq!(
+        running.current(),
+        Some(leaving),
+        "a released thread must be taken by the idle cpu",
+    );
+    set_current_cpu(CpuId::ZERO);
 }
 
 #[test]

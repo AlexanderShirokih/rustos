@@ -11,17 +11,16 @@ use core::sync::atomic::AtomicU64;
 
 use component_startup::{MintedSession, SessionError, mint_session};
 use filesystem_abi::{
-    FileSystemError, MountEnded, PATH_MAX, Path, ResolvedPair, common_directory, file_system,
-    file_system_mount, namespace, rebase,
+    FILE_SYSTEM_OPEN_ROOT_TIMEOUT, FileSystemError, MountEnded, PATH_MAX, Path, ResolvedPair,
+    common_directory, file_system, file_system_mount, namespace, rebase,
 };
 use ipc::{
     CallError,
     wire::{IpcError, Session},
 };
 use kernel_objects::{Delivery, IssuedHandle, Port, SessionTransport, kind};
-use runtime::{Mutex, Timeout, log_fmt};
+use runtime::{Mutex, log_fmt};
 
-const OPEN_ROOT_TIMEOUT: Timeout = Timeout::from_secs(1);
 const WAITING_REQUESTS_MAX: usize = 64;
 const VIEW_WAITING_REQUESTS_MAX: usize = 8;
 
@@ -187,7 +186,7 @@ impl file_system_mount::Service<Delivery> for Router {
         let id = tree.next_mount;
         tree.next_mount = id.wrapping_add(1);
         let client = kernel_objects::Session::from_session(filesystem).client();
-        let filesystem = Arc::new(Mutex::new(client.with_wait(OPEN_ROOT_TIMEOUT)));
+        let filesystem = Arc::new(Mutex::new(client.with_wait(FILE_SYSTEM_OPEN_ROOT_TIMEOUT)));
         let displaced = tree.mounts.insert(
             prefix.clone(),
             Mount {

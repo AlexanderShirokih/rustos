@@ -6,13 +6,12 @@
 use core::sync::atomic::Ordering::Relaxed;
 
 use kernel_objects::Resource;
-use runtime::{MemoryAccess, Timeout, UserMemFlags};
-use syscall::{ProcessName, Rights};
-use userland_image::component_name;
-use userland_loader::load_program;
+use runtime::{MemoryAccess, UserMemFlags};
+use syscall::Rights;
+use userland::USERLAND_PAGE_SIZE;
 
 use crate::{
-    fixture::program,
+    fixture::{JOIN_TIMEOUT, spawn_entry},
     thread_stack_protocol::{
         JOIN_FAILED_EXIT_CODE, LARGE_FRAME_BYTES, MAP_FAILED_EXIT_CODE,
         RECURSION_RETURNED_EXIT_CODE, SMALL_FRAME_BYTES, SPAWN_FAILED_EXIT_CODE, StackReport,
@@ -21,8 +20,6 @@ use crate::{
 };
 
 const OVERFLOW_FIXTURE: &str = "/stack-overflow-fixture/exec";
-const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
-const PAGE_SIZE: u64 = syscall::PAGE_SIZE as u64;
 const DEEPEST_FRAME_SPAN: u64 = 512;
 
 #[test_harness::test]
@@ -41,10 +38,10 @@ fn overflow_lands_on_the_guard_page(frame_bytes: usize) {
 
     let resource = Resource::self_resource().expect("self metering resource");
     let region = resource
-        .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+        .create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW)
         .expect("create report region");
     let mapping = region
-        .map(PAGE_SIZE, UserMemFlags::ReadWrite)
+        .map(USERLAND_PAGE_SIZE, UserMemFlags::ReadWrite)
         .expect("map report region");
 
     let va = usize::try_from(mapping.va()).expect("positive va fits usize");
@@ -56,13 +53,7 @@ fn overflow_lands_on_the_guard_page(frame_bytes: usize) {
     let lease = region
         .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
         .expect("report region for the fixture");
-    let process = load_program(
-        &program(OVERFLOW_FIXTURE),
-        ProcessName::new(component_name(OVERFLOW_FIXTURE)).expect("fixture process name"),
-        &resource,
-        lease,
-    )
-    .expect("spawn overflow fixture");
+    let process = spawn_entry(OVERFLOW_FIXTURE, lease);
 
     process.join(JOIN_TIMEOUT).expect("fixture terminates");
     let exit_code = process.exit_code().expect("exit code");
@@ -85,7 +76,7 @@ fn overflow_lands_on_the_guard_page(frame_bytes: usize) {
 
     // Фикстура не трогает буфер кадра, и буфер последнего кадра может лечь на защитную
     // страницу, но не ниже неё. Следующий кадр не поместился над нижней границей стека.
-    let stack_base = (entry / PAGE_SIZE + 1) * PAGE_SIZE - stack_bytes;
-    test_harness::check!(deepest >= stack_base - PAGE_SIZE);
+    let stack_base = (entry / USERLAND_PAGE_SIZE + 1) * USERLAND_PAGE_SIZE - stack_bytes;
+    test_harness::check!(deepest >= stack_base - USERLAND_PAGE_SIZE);
     test_harness::check!(deepest < stack_base + frame_bytes + DEEPEST_FRAME_SPAN);
 }
