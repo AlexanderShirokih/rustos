@@ -23,3 +23,4 @@ const int c_library_eagain = EAGAIN;
 const int c_library_edeadlk = EDEADLK;
 const int c_library_ebusy = EBUSY;
 const int c_library_eperm = EPERM;
+const int c_library_enosys = ENOSYS;

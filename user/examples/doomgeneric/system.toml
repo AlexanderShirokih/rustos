@@ -1,0 +1,18 @@
+version = 1
+
+[[components]]
+executable = "mounts"
+memory_limit = "2M"
+restarts = 2
+
+[[components]]
+executable = "filesystem-imagefs"
+memory_limit = "4M"
+
+[[components]]
+executable = "platform"
+memory_limit = "1M"
+
+[[components]]
+executable = "doomgeneric"
+memory_limit = "16M"

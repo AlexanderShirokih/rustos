@@ -1,3 +1,5 @@
+import "@inter/Inter-Regular.ttf";
+
 export struct Place {
     path: string,
     note: string,
@@ -474,6 +476,7 @@ component Bodies inherits AppWindow {
 export component Demo inherits Window {
     in property <bool> portrait;
 
+    default-font-family: "Inter";
     background: Palette.desk;
 
     VerticalLayout {

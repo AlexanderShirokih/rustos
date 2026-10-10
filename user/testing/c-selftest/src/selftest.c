@@ -218,6 +218,14 @@ static void check_descriptors(void)
     check(lseek(1, 0, SEEK_CUR) == -1 && errno == ESPIPE, "lseek on fd 1 fails with ESPIPE");
 }
 
+static void check_system(void)
+{
+    check(system(NULL) == 0, "system(NULL) reports no command processor");
+
+    errno = 0;
+    check(system("true") == -1 && errno == ENOSYS, "system with a command fails with ENOSYS");
+}
+
 static void check_allocation(void)
 {
     unsigned char *block = malloc(24);
@@ -1332,6 +1340,7 @@ int selftest_main(int argc, char **argv)
 {
     check_arguments(argc, argv);
     check_descriptors();
+    check_system();
     check_allocation();
     check_unaligned_buffers();
     check_files();

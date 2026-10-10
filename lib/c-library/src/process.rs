@@ -21,7 +21,11 @@ use core::{
 
 use syscall::Handle;
 
-use crate::{ProgramName, memory, stdio, thread};
+use crate::{
+    ProgramName,
+    errno::{Errno, fail},
+    memory, stdio, thread,
+};
 
 unsafe extern "C" {
     fn __libc_init_array();
@@ -65,6 +69,15 @@ extern "C" fn _exit(code: c_int) -> ! {
     runtime::tls::run_destructors();
     stdio::flush();
     runtime::exit(code)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn system(command: *const c_char) -> c_int {
+    if command.is_null() {
+        0
+    } else {
+        fail(Errno::NoSystem, -1)
+    }
 }
 
 pub(crate) fn abort_with(message: &str) -> ! {

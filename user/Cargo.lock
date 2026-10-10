@@ -875,6 +875,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "doomgeneric"
+version = "0.1.0"
+dependencies = [
+ "c-library",
+ "component-startup",
+ "display-abi",
+ "filesystem-abi",
+ "input-abi",
+ "ipc",
+ "kernel-objects",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
 name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

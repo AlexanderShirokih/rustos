@@ -37,6 +37,7 @@ unsafe extern "C" {
     safe static c_library_edeadlk: c_int;
     safe static c_library_ebusy: c_int;
     safe static c_library_eperm: c_int;
+    safe static c_library_enosys: c_int;
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +63,7 @@ pub(crate) enum Errno {
     Deadlock,
     Busy,
     NotPermitted,
+    NoSystem,
 }
 
 impl Errno {
@@ -88,6 +90,7 @@ impl Errno {
             Self::Deadlock => c_library_edeadlk,
             Self::Busy => c_library_ebusy,
             Self::NotPermitted => c_library_eperm,
+            Self::NoSystem => c_library_enosys,
         }
     }
 }

@@ -1,0 +1,53 @@
+version = 1
+
+[plan]
+source = "user/examples/doomgeneric/system.toml"
+
+[[programs]]
+package = "rootkeeper"
+path = "/rootkeeper"
+boot = true
+
+[[programs]]
+package = "platform"
+path = "/platform"
+
+[[programs]]
+package = "virtio-mmio"
+path = "/virtio-mmio"
+
+[[programs]]
+package = "driver-virtio-gpu"
+path = "/driver-virtio-gpu"
+
+[[programs]]
+package = "driver-simplefb"
+path = "/driver-simplefb"
+
+[[programs]]
+package = "mounts"
+path = "/mounts"
+
+[[programs]]
+package = "filesystem-imagefs"
+path = "/filesystem-imagefs"
+
+[[programs]]
+package = "input-hub"
+path = "/input-hub"
+
+[[programs]]
+package = "driver-virtio-input"
+path = "/driver-virtio-input"
+
+[[programs]]
+package = "doomgeneric"
+path = "/doom"
+
+[[files]]
+path = "/mounts/table"
+source = "user/examples/doomgeneric/mounts"
+
+[[files]]
+path = "/doom/freedoom1.wad"
+source = "target/third-party/freedoom/freedoom-0.13.0/freedoom1.wad"
