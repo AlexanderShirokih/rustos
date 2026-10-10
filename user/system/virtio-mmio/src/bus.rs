@@ -12,11 +12,8 @@ use ipc::{
     IntoWireValue, Listener, RecvError,
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
-use kernel_objects::{
-    Delivery, IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, ReadOnlyMapping,
-    SessionTransport,
-};
-use platform_abi::{Description, DeviceId, PlatformError, platform};
+use kernel_objects::{Delivery, IrqLine, MmioMapping, Port, SessionTransport};
+use platform_abi::{DeviceId, MappedDescription, PlatformError, platform};
 use runtime::{PortTransport, Timeout, log_fmt};
 use syscall::{Rights, kind};
 use virtio::register;
@@ -68,9 +65,8 @@ enum Refusal {
 
 impl Bus {
     pub(crate) fn take(platform: &platform::Client<SessionTransport>) -> Option<Self> {
-        let description = platform.description().ok()?;
-        let mapping = ReadOnlyMapping::new(MemoryRegion::from(description.region)).ok()?;
-        let description = Description::new(mapping.as_bytes(), description.offset).ok()?;
+        let mapped = MappedDescription::new(platform.description().ok()?).ok()?;
+        let description = mapped.description().ok()?;
 
         let mut transports = Vec::new();
         for device in description.compatible_devices(COMPATIBLE) {
@@ -129,12 +125,7 @@ impl Transport {
         let window = platform
             .mmio(id.as_str(), 0)
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
-        let window = MmioWindow {
-            region: MemoryRegion::from(window.region),
-            offset: window.offset,
-            size: window.size,
-        };
-        let registers = MmioMapping::new(window).map_err(|_| Refusal::Map)?;
+        let registers = MmioMapping::new(window.into()).map_err(|_| Refusal::Map)?;
         let device_type = registers.mmio().read::<u32>(register::DEVICE_ID);
 
         Ok(Self {

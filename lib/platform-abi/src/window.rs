@@ -1,3 +1,4 @@
+use kernel_objects::MemoryRegion;
 use syscall::kind;
 
 ipc::wire_value! {
@@ -10,5 +11,15 @@ ipc::wire_value! {
         pub offset: u64,
         /// Размер окна из описания устройства.
         pub size: u64,
+    }
+}
+
+impl<M: Into<MemoryRegion>> From<MmioWindow<M>> for kernel_objects::MmioWindow {
+    fn from(window: MmioWindow<M>) -> Self {
+        Self {
+            region: window.region.into(),
+            offset: window.offset,
+            size: window.size,
+        }
     }
 }

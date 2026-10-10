@@ -4,8 +4,8 @@ use core::{fmt, sync::atomic::AtomicU64};
 use component_startup::{
     SessionError, StartupError, component_manifest, mint_session, serve_export,
 };
-use kernel_objects::{IrqLine, MemoryRegion, Port, ReadOnlyMapping, SessionTransport};
-use platform_abi::{Description, platform};
+use kernel_objects::{IrqLine, Port, SessionTransport};
+use platform_abi::{MappedDescription, platform};
 use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, log_line, spawn_owned};
 use spmi_abi::spmi;
 use spmi_pmic_arb::{Arbiter, ArbiterNode, Refusal};
@@ -102,8 +102,8 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
         return None;
     };
 
-    let mapping = ReadOnlyMapping::new(MemoryRegion::from(description.region)).ok()?;
-    let description = Description::new(mapping.as_bytes(), description.offset).ok()?;
+    let mapped = MappedDescription::new(description).ok()?;
+    let description = mapped.description().ok()?;
 
     let Some(id) = description
         .compatible_devices(COMPATIBLE)

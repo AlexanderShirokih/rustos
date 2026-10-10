@@ -1,6 +1,6 @@
 //! Окна регистров арбитра, отображённые в процесс шины.
 
-use kernel_objects::{MemoryRegion, MmioMapping, MmioWindow, SessionTransport};
+use kernel_objects::{MmioMapping, MmioWindow, SessionTransport};
 use platform_abi::{DeviceId, PlatformError, platform};
 use spmi_pmic_arb::{ArbiterNode, Registers, Window};
 
@@ -62,11 +62,7 @@ impl Region {
             .mmio(id.as_str(), resource)
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
 
-        let window = MmioWindow {
-            region: MemoryRegion::from(window.region),
-            offset: window.offset,
-            size: window.size,
-        };
+        let window = MmioWindow::from(window);
 
         let size = usize::try_from(window.size).map_err(|_| Refusal::Map)?;
         let mapping = MmioMapping::new(window).map_err(|_| Refusal::Map)?;

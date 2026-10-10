@@ -21,10 +21,9 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
-    Delivery, Mapping, MemoryRegion, MmioWindow, Port, ReadOnlyMapping, Resource, SessionTransport,
-    WriteCombiningMapping,
+    Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport, WriteCombiningMapping,
 };
-use platform_abi::{Description, DeviceId, PlatformError, platform};
+use platform_abi::{DeviceId, MappedDescription, PlatformError, platform};
 use runtime::{
     FAILED_EXIT_CODE, MemoryAccess, Mutex, PortTransport, Timeout, UserMemFlags, exit, log_fmt,
     spawn_owned,
@@ -46,8 +45,7 @@ struct Shared {
 
 struct Attacher {
     platform: platform::Client<SessionTransport>,
-    description: ReadOnlyMapping,
-    description_offset: u64,
+    description: MappedDescription,
     next_badge: AtomicU64,
     screen: Option<&'static Screen>,
 }
@@ -137,7 +135,9 @@ impl Attacher {
     }
 
     fn attach(&self) -> Result<Screen, OpenRefusal> {
-        let description = Description::new(self.description.as_bytes(), self.description_offset)
+        let description = self
+            .description
+            .description()
             .map_err(|error| OpenRefusal::Framebuffer(error.into()))?;
         let id = description
             .compatible_devices(SIMPLE_FRAMEBUFFER_COMPATIBLE)
@@ -153,12 +153,7 @@ impl Attacher {
         framebuffer
             .fits(window.size)
             .map_err(OpenRefusal::Framebuffer)?;
-        let window = MmioWindow {
-            region: MemoryRegion::from(window.region),
-            offset: window.offset,
-            size: window.size,
-        };
-        let pixels = WriteCombiningMapping::new(window).map_err(|_| OpenRefusal::Map)?;
+        let pixels = WriteCombiningMapping::new(window.into()).map_err(|_| OpenRefusal::Map)?;
         Ok(Screen {
             id,
             framebuffer,
@@ -272,13 +267,10 @@ fn start(requirements: SimplefbStartup) -> Result<&'static Shared, Stopped> {
         .map_err(Stopped::Startup)?
         .client();
     let description = platform.description().map_err(|_| Stopped::Description)?;
-    let description_offset = description.offset;
-    let description = ReadOnlyMapping::new(MemoryRegion::from(description.region))
-        .map_err(|_| Stopped::Description)?;
+    let description = MappedDescription::new(description).map_err(|_| Stopped::Description)?;
     let mut attacher = Attacher {
         platform,
         description,
-        description_offset,
         next_badge: AtomicU64::new(0),
         screen: None,
     };

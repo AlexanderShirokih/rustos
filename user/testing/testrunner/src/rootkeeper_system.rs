@@ -15,12 +15,12 @@ use filesystem_abi::{
 };
 use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{
-    Error, IrqLine, MemoryRegion, MmioMapping, Port, ReadOnlyMapping, Session, SessionTransport,
+    Error, IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, Session, SessionTransport,
     WriteCombiningMapping,
 };
 use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
-use platform_abi::{Description, MmioWindow, PlatformError, platform};
+use platform_abi::{Description, DescriptionRegion, MappedDescription, PlatformError, platform};
 use rootkeeper::{
     BootFailure, SEARCH_LIMITS, SearchLimits, Stopped,
     relay::{ComponentNames, LogSessions as _, LogSources, Relay, log_badge},
@@ -493,12 +493,8 @@ fn line(
 fn window(
     session: &platform::Client<SessionTransport>,
     device: &str,
-) -> Result<MmioWindow<MemoryRegion>, CallError<PlatformError>> {
-    session.mmio(device, 0).map(|window| MmioWindow {
-        region: MemoryRegion::from(window.region),
-        offset: window.offset,
-        size: window.size,
-    })
+) -> Result<MmioWindow, CallError<PlatformError>> {
+    session.mmio(device, 0).map(MmioWindow::from)
 }
 
 fn description(
@@ -537,8 +533,9 @@ fn with_description<T>(inspect: impl FnOnce(&Description<'_>) -> T) -> T {
 
     let inspected = {
         let (region, offset) = description(&session).expect("description granted");
-        let mapping = ReadOnlyMapping::new(region).expect("description maps read-only");
-        inspect(&Description::new(mapping.as_bytes(), offset).expect("description parses"))
+        let mapped = MappedDescription::new(DescriptionRegion { region, offset })
+            .expect("description maps read-only");
+        inspect(&mapped.description().expect("description parses"))
     };
 
     drop(session);
@@ -1347,12 +1344,7 @@ fn a_write_combining_mapping_of_a_window_starts_at_its_device() {
     let composition = scenario(&[PLATFORM]);
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
-    let granted = window(&session, SECOND_VIRTIO).expect("second window");
-    let device = kernel_objects::MmioWindow {
-        region: granted.region,
-        offset: granted.offset,
-        size: granted.size,
-    };
+    let device = window(&session, SECOND_VIRTIO).expect("second window");
 
     let mapping = WriteCombiningMapping::new(device).expect("device window maps write-combining");
     let magic: u32 = mapping.mmio().read(0);
@@ -1377,12 +1369,7 @@ fn mapping_and_releasing_a_window_does_not_exhaust_the_handle_table() {
     let session = platform_session(&importer, PLATFORM_REQUIREMENT);
     for _ in 0..LEAK_ROUNDS {
         let granted = window(&session, SECOND_VIRTIO).expect("second window");
-        let mapping = MmioMapping::new(kernel_objects::MmioWindow {
-            region: granted.region,
-            offset: granted.offset,
-            size: granted.size,
-        })
-        .expect("device window maps");
+        let mapping = MmioMapping::new(granted).expect("device window maps");
 
         test_harness::check_eq!(mapping.mmio().read::<u32>(0), VIRTIO_MAGIC);
     }
@@ -1427,18 +1414,14 @@ fn sessions_read_one_description_through_read_only_copies() {
     let (region, offset) = description(&first).expect("first description");
     let (repeated, repeated_offset) = description(&first).expect("repeated description");
     let (other, other_offset) = description(&second).expect("second description");
+    let base = region_base(&region);
     let writable = region.duplicate(Rights::WRITE, None).map(drop);
-    let mapping = ReadOnlyMapping::new(region).expect("description maps read-only");
-    let tree = Description::new(mapping.as_bytes(), offset).expect("description parses");
+    let mapped = MappedDescription::new(DescriptionRegion { region, offset })
+        .expect("description maps read-only");
+    let tree = mapped.description().expect("description parses");
 
-    test_harness::check_eq!(
-        (region_base(&repeated), repeated_offset),
-        (region_base(mapping.region()), offset)
-    );
-    test_harness::check_eq!(
-        (region_base(&other), other_offset),
-        (region_base(mapping.region()), offset)
-    );
+    test_harness::check_eq!((region_base(&repeated), repeated_offset), (base, offset));
+    test_harness::check_eq!((region_base(&other), other_offset), (base, offset));
     test_harness::check_eq!(writable, Err(Error::Syscall(SyscallError::AccessDenied)));
     test_harness::check!(tree.devices().next().is_some());
     drop((first, second));

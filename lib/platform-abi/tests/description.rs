@@ -81,21 +81,7 @@ fn devices_are_the_available_nodes_with_a_compatible_string_in_description_order
 
 #[test]
 fn a_refused_node_does_not_stop_the_enumeration() {
-    let long = "n".repeat(DEVICE_ID_MAX);
-    let blob = fdt_test::build(&[
-        Token::Node(&long),
-        Token::Strings("compatible", &["test,device"]),
-        Token::Node("child"),
-        Token::Strings("compatible", &["test,device"]),
-        Token::End,
-        Token::End,
-        Token::Node("broken"),
-        Token::Bytes("compatible", b"test,device"),
-        Token::End,
-        Token::Node("next"),
-        Token::Strings("compatible", &["test,device"]),
-        Token::End,
-    ]);
+    let blob = refused_nodes_before_a_device();
     let description = Description::new(&blob, 0).unwrap();
 
     let devices: Vec<_> = description
@@ -266,4 +252,35 @@ fn compatible_devices_match_any_string_of_an_available_node() {
     assert_eq!(ids("arm,primecell"), ["/pl031@9010000"]);
     assert_eq!(ids("arm,pl011"), ["/bus/uart@2000"]);
     assert!(ids("arm,pl050").is_empty());
+}
+
+#[test]
+fn compatible_devices_skip_a_refused_node_before_a_match() {
+    let blob = refused_nodes_before_a_device();
+    let description = Description::new(&blob, 0).unwrap();
+
+    let ids: Vec<_> = description
+        .compatible_devices("test,device")
+        .map(|device| device.id().as_str().to_owned())
+        .collect();
+
+    assert_eq!(ids, ["/next"]);
+}
+
+fn refused_nodes_before_a_device() -> Vec<u8> {
+    let long = "n".repeat(DEVICE_ID_MAX);
+    fdt_test::build(&[
+        Token::Node(&long),
+        Token::Strings("compatible", &["test,device"]),
+        Token::Node("child"),
+        Token::Strings("compatible", &["test,device"]),
+        Token::End,
+        Token::End,
+        Token::Node("broken"),
+        Token::Bytes("compatible", b"test,device"),
+        Token::End,
+        Token::Node("next"),
+        Token::Strings("compatible", &["test,device"]),
+        Token::End,
+    ])
 }

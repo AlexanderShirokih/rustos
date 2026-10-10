@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 fdt = { workspace = true }
 ipc = { workspace = true }
+kernel-objects = { workspace = true }
 syscall = { workspace = true }
 
 [dev-dependencies]

@@ -296,6 +296,7 @@ dependencies = [
  "fdt",
  "fdt-test",
  "ipc",
+ "kernel-objects",
  "syscall",
 ]
 

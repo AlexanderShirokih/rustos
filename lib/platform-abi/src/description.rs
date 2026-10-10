@@ -76,8 +76,7 @@ impl<'a> Description<'a> {
         &'a self,
         compatible: &'a str,
     ) -> impl Iterator<Item = Device<'a>> + 'a {
-        self.devices()
-            .filter_map(Result::ok)
+        self.parsed_devices()
             .filter(move |device| device.is_compatible(compatible))
     }
 
@@ -91,6 +90,10 @@ impl<'a> Description<'a> {
     /// `None`.
     pub fn find(&'a self, path: &str) -> Option<Node<'a>> {
         node_path(&self.tree, path).map(|found| Node { node: found.node() })
+    }
+
+    fn parsed_devices(&'a self) -> impl Iterator<Item = Device<'a>> + 'a {
+        self.devices().filter_map(Result::ok)
     }
 }
 

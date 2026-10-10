@@ -12,10 +12,8 @@ use core::sync::atomic::AtomicU64;
 use component_startup::{SessionError, component_manifest, mint_session, serve_export};
 use io::mmio::Reg;
 use ipc::{Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{
-    IrqLine, MemoryRegion, MmioMapping, MmioWindow, Port, ReadOnlyMapping, SessionTransport,
-};
-use platform_abi::{Description, platform};
+use kernel_objects::{IrqLine, MmioMapping, Port, SessionTransport};
+use platform_abi::{MappedDescription, platform};
 use rtc_abi::rtc;
 use runtime::{
     FAILED_EXIT_CODE, Mutex, PortTransport, Timeout, exit, log_fmt, log_line, spawn_owned,
@@ -96,23 +94,18 @@ impl Shared {
 
 impl Pl031 {
     fn bind(platform: &platform::Client<SessionTransport>) -> Result<Self> {
-        let description = platform.description()?;
-        let mapping = ReadOnlyMapping::new(MemoryRegion::from(description.region))
-            .map_err(kernel_objects::Error::from)?;
-        let id = Description::new(mapping.as_bytes(), description.offset)?
+        let mapped =
+            MappedDescription::new(platform.description()?).map_err(kernel_objects::Error::from)?;
+        let id = mapped
+            .description()?
             .compatible_devices(COMPATIBLE)
             .next()
             .map(|device| device.id().clone())
             .ok_or(Error::NoDevice)?;
         let line = IrqLine::from(platform.irq(id.as_str(), 0)?);
         let window = platform.mmio(id.as_str(), 0)?;
-        let window = MmioWindow {
-            region: MemoryRegion::from(window.region),
-            offset: window.offset,
-            size: window.size,
-        };
         Ok(Self {
-            registers: MmioMapping::new(window).map_err(kernel_objects::Error::from)?,
+            registers: MmioMapping::new(window.into()).map_err(kernel_objects::Error::from)?,
             line,
         })
     }

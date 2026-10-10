@@ -12,11 +12,8 @@ use input_abi::{
     Usage, input_inject, input_source,
 };
 use ipc::{CallError, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
-use kernel_objects::{
-    Delivery, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Session, SessionTransport, Signal,
-    kind,
-};
-use platform_abi::{Description, DescriptionError, PlatformError, platform};
+use kernel_objects::{Delivery, IssuedHandle, Port, Session, SessionTransport, Signal, kind};
+use platform_abi::{DescriptionError, MappedDescription, PlatformError, platform};
 use runtime::{FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_owned};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use syscall::SIGNALED;
@@ -149,10 +146,9 @@ impl input_source::Service<Delivery> for Source {
 impl Node {
     fn find(key: &Key, platform: &platform::Client<SessionTransport>) -> Result<Self, Failure> {
         let description = platform.description().map_err(Failure::Platform)?;
-        let mapping = ReadOnlyMapping::new(MemoryRegion::from(description.region))
+        let mapped = MappedDescription::new(description)
             .map_err(|refused| Failure::Mapping(refused.error))?;
-        let description = Description::new(mapping.as_bytes(), description.offset)
-            .map_err(Failure::Description)?;
+        let description = mapped.description().map_err(Failure::Description)?;
 
         // Шина выдаёт программе первый свободный узел совместимости, и драйвер читает первый
         // доступный узел той же совместимости.
