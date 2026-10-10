@@ -2,25 +2,18 @@
 
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES};
 use ipc::wire::IpcError;
-use kernel_objects::{IrqLine, Mapping, SessionTransport, Signal};
+use kernel_objects::{IrqLine, Mapping, SessionTransport};
 use runtime::{Timeout, log_fmt};
-use syscall::SIGNALED;
 use virtio::{
     Buffer, Completion, DeviceMemory, DeviceType, QUEUE_REGION_BYTES, QueueError, SplitQueue,
     Transport, TransportError,
     gpu::{Command, DisplayInfo, Format, GpuError, Rect},
 };
-use virtio_mmio_abi::{SlotError, VirtioMmioError, virtio_mmio, virtio_slot};
-
-use crate::{
-    memory::DmaRegion,
-    registers::{RemoteRegisters, SlotFailure},
-};
+use virtio_driver::{DmaRegion, SlotFailure, SlotRegisters, open_slot};
+use virtio_mmio_abi::{SlotError, VirtioMmioError, virtio_mmio};
 
 const SLOT_CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 const COMPLETION_TIMEOUT: Timeout = Timeout::from_secs(2);
-const BUSY_ATTEMPTS: usize = 10;
-const BUSY_PAUSE: Timeout = Timeout::from_millis(5);
 const CONTROL_QUEUE: u16 = 0;
 const CONTROL_QUEUE_SIZE: u16 = 2;
 const RESOURCE_ID: u32 = 1;
@@ -59,7 +52,7 @@ pub(crate) struct Gpu {
 }
 
 struct Device {
-    transport: Transport<RemoteRegisters>,
+    transport: Transport<SlotRegisters>,
     line: IrqLine,
     queue: Option<SplitQueue>,
     queue_memory: DmaRegion,
@@ -183,11 +176,14 @@ impl Gpu {
 
 impl Device {
     fn open(bus: &virtio_mmio::Client<SessionTransport>) -> Result<Self, BindRefusal> {
-        let slot = open_slot(bus)?.client().with_wait(SLOT_CALL_TIMEOUT);
+        let slot = open_slot(bus, DeviceType::Gpu)
+            .map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Bus))?
+            .client()
+            .with_wait(SLOT_CALL_TIMEOUT);
         let line = slot
             .irq()
             .map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Line))?;
-        let transport = Transport::probe(RemoteRegisters::new(slot), DeviceType::Gpu)
+        let transport = Transport::probe(SlotRegisters::new(slot), DeviceType::Gpu)
             .map_err(BindRefusal::Transport)?;
         let queue_memory = DmaRegion::new(QUEUE_REGION_BYTES as u64)?;
         let commands = DmaRegion::new(COMMANDS_REGION_BYTES)?;
@@ -365,28 +361,6 @@ impl Device {
             let causes = self.transport.interrupt_status()?;
             self.transport.acknowledge_interrupt(causes)?;
             self.line.ack().map_err(CommandFailure::Line)?;
-        }
-    }
-}
-
-fn open_slot(
-    bus: &virtio_mmio::Client<SessionTransport>,
-) -> Result<kernel_objects::Session<virtio_slot::Protocol>, BindRefusal> {
-    // Шина освобождает слот после того, как обработает уход прошлого клиента, и до этого
-    // отвечает `Busy`. Прошлым клиентом бывает и этот драйвер, отпустивший GPU с последней
-    // сессией.
-    let mut attempts = BUSY_ATTEMPTS;
-    loop {
-        match bus.open(DeviceType::Gpu as u32) {
-            Err(ipc::CallError::Remote(VirtioMmioError::Busy)) if attempts > 1 => {
-                attempts -= 1;
-                let _ = Signal::create().map(|pause| pause.wait(SIGNALED, BUSY_PAUSE));
-            }
-            opened => {
-                let slot =
-                    opened.map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Bus))?;
-                return Ok(kernel_objects::Session::from_session(slot));
-            }
         }
     }
 }

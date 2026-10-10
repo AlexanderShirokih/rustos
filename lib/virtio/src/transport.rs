@@ -1,6 +1,6 @@
 //! Транспорт virtio-mmio версии 2: проверка окна, сброс, признаки, настройка очереди.
 
-use crate::access::Registers;
+use crate::access::{AccessWidth, Registers};
 
 const TRANSPORT_MAGIC: u32 = 0x7472_6976;
 const TRANSPORT_VERSION: u32 = 2;
@@ -44,6 +44,8 @@ pub(crate) mod status {
 pub enum DeviceType {
     /// Устройство GPU.
     Gpu = 16,
+    /// Устройство ввода.
+    Input = 18,
 }
 
 /// Отказ транспорта.
@@ -160,6 +162,23 @@ impl<R: Registers> Transport<R> {
     /// Подтверждает причины прерывания из `causes`.
     pub fn acknowledge_interrupt(&mut self, causes: u32) -> Result<(), R::Error> {
         self.registers.write(register::INTERRUPT_ACK, causes)
+    }
+
+    /// Читает поле конфигурации устройства одним обращением ширины `width` по смещению от
+    /// начала конфигурации.
+    pub fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, R::Error> {
+        self.registers.read_config(offset, width)
+    }
+
+    /// Записывает младшие байты `value` в поле конфигурации устройства одним обращением
+    /// ширины `width` по смещению от начала конфигурации.
+    pub fn write_config(
+        &mut self,
+        offset: usize,
+        width: AccessWidth,
+        value: u32,
+    ) -> Result<(), R::Error> {
+        self.registers.write_config(offset, width, value)
     }
 
     pub(crate) fn select_queue(&mut self, index: u16) -> Result<(), R::Error> {

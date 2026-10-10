@@ -139,7 +139,7 @@ fn source(importer: &Importer) -> Source {
         .with_wait(CALL_WAIT)
 }
 
-fn consumer(session: &Session<input::Protocol>) -> Consumer {
+pub(crate) fn consumer(session: &Session<input::Protocol>) -> Consumer {
     input::Client::new(PortTransport::new(session.handle().as_raw())).with_wait(CALL_WAIT)
 }
 
@@ -178,7 +178,9 @@ fn declare(source: &Source, parts: &DescriptorParts) -> u16 {
     source.declare(parts.descriptor()).expect("device declared")
 }
 
-fn command(build: impl FnOnce(&mut Command) -> Result<&mut Command, RecordsError>) -> Command {
+pub(crate) fn command(
+    build: impl FnOnce(&mut Command) -> Result<&mut Command, RecordsError>,
+) -> Command {
     let mut command = Command::new();
     build(&mut command).expect("command fits");
     command

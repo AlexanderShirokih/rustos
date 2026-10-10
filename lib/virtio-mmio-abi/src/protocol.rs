@@ -1,6 +1,9 @@
 use syscall::kind;
 
-use crate::error::{SlotError, VirtioMmioError};
+use crate::{
+    error::{SlotError, VirtioMmioError},
+    width::AccessWidth,
+};
 
 ipc::protocol! {
     /// Шина транспортов virtio-mmio машины.
@@ -38,6 +41,21 @@ ipc::protocol! {
         /// Отказы:
         /// - `OutOfRange` - регистр выходит за окно либо `offset` не кратно 4.
         call fn write(offset: u16, value: u32) -> Result<(), SlotError>;
+
+        /// Читает поле конфигурации устройства одним обращением ширины `width` по смещению
+        /// `offset` от начала конфигурации. Значение лежит в младших байтах.
+        ///
+        /// Отказы:
+        /// - `OutOfRange` - поле выходит за окно либо `offset` не кратно ширине.
+        call fn config_read(offset: u16, width: AccessWidth) -> Result<u32, SlotError>;
+
+        /// Записывает младшие байты `value` в поле конфигурации устройства одним обращением
+        /// ширины `width` по смещению `offset` от начала конфигурации после барьера памяти,
+        /// как `write`.
+        ///
+        /// Отказы:
+        /// - `OutOfRange` - поле выходит за окно либо `offset` не кратно ширине.
+        call fn config_write(offset: u16, width: AccessWidth, value: u32) -> Result<(), SlotError>;
 
         /// Выдаёт копию линии прерывания транспорта. Уход клиента сессии отзывает каждую
         /// выданную ему копию.

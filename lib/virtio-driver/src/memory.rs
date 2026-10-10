@@ -7,14 +7,16 @@ use virtio::{DeviceMemory, OutOfRange};
 
 const HALF_WORD: usize = 2;
 
-pub(crate) struct DmaRegion {
+/// Непрерывный регион памяти процесса с физическим адресом для устройства.
+pub struct DmaRegion {
     mapping: Mapping,
     address: u64,
     _region: MemoryRegion,
 }
 
 impl DmaRegion {
-    pub(crate) fn new(size: u64) -> Result<Self, kernel_objects::Error> {
+    /// Выделяет регион длиной `size`, округлённой вверх до страницы.
+    pub fn new(size: u64) -> Result<Self, kernel_objects::Error> {
         let size = size
             .checked_next_multiple_of(PAGE_SIZE as u64)
             .ok_or(kernel_objects::Error::OutOfBounds)?;
@@ -28,7 +30,8 @@ impl DmaRegion {
         })
     }
 
-    pub(crate) fn copy_from(
+    /// Копирует `len` байт с `offset` отображения `source` по тому же смещению региона.
+    pub fn copy_from(
         &mut self,
         source: &Mapping,
         offset: usize,

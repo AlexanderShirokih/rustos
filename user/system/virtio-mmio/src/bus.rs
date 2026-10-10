@@ -19,11 +19,12 @@ use platform_abi::{Description, DeviceId, PlatformError, platform};
 use runtime::{PortTransport, Timeout, log_fmt};
 use syscall::{Rights, kind};
 use virtio::register;
-use virtio_mmio_abi::{SlotError, VirtioMmioError, virtio_mmio, virtio_slot};
+use virtio_mmio_abi::{AccessWidth, SlotError, VirtioMmioError, virtio_mmio, virtio_slot};
 
 const COMPATIBLE: &str = "virtio,mmio";
 
 const REGISTER_BYTES: u64 = 4;
+const CONFIG_OFFSET: u64 = 0x100;
 
 const LINE_RIGHTS: Rights = Rights::from_bits_truncate(
     Rights::READ.bits() | Rights::WRITE.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
@@ -159,13 +160,44 @@ impl Transport {
     }
 
     fn register(&self, offset: u16) -> Result<usize, SlotError> {
-        let aligned = u64::from(offset) % REGISTER_BYTES == 0;
-        let inside = u64::from(offset) + REGISTER_BYTES <= self.window.size;
+        self.access(u64::from(offset), REGISTER_BYTES)
+    }
 
-        if aligned && inside {
-            Ok(usize::from(offset))
-        } else {
-            Err(SlotError::OutOfRange)
+    fn config(&self, offset: u16, width: AccessWidth) -> Result<usize, SlotError> {
+        self.access(
+            CONFIG_OFFSET + u64::from(offset),
+            u64::from(u8::from(width)),
+        )
+    }
+
+    fn load(&self, offset: usize, width: AccessWidth) -> u32 {
+        let mmio = self.registers.mmio();
+        match width {
+            AccessWidth::Byte => u32::from(mmio.read::<u8>(offset)),
+            AccessWidth::Half => u32::from(mmio.read::<u16>(offset)),
+            AccessWidth::Word => mmio.read::<u32>(offset),
+        }
+    }
+
+    fn store(&self, offset: usize, width: AccessWidth, value: u32) {
+        let [b0, b1, ..] = value.to_le_bytes();
+        // Запись клиента в общую с устройством память завершена до его запроса.
+        fence(Ordering::SeqCst);
+        let mmio = self.registers.mmio();
+        match width {
+            AccessWidth::Byte => mmio.write::<u8>(offset, b0),
+            AccessWidth::Half => mmio.write::<u16>(offset, u16::from_le_bytes([b0, b1])),
+            AccessWidth::Word => mmio.write::<u32>(offset, value),
+        }
+    }
+
+    fn access(&self, offset: u64, bytes: u64) -> Result<usize, SlotError> {
+        let aligned = offset.is_multiple_of(bytes);
+        let inside = offset + bytes <= self.window.size;
+
+        match usize::try_from(offset) {
+            Ok(offset) if aligned && inside => Ok(offset),
+            _ => Err(SlotError::OutOfRange),
         }
     }
 
@@ -230,14 +262,34 @@ impl virtio_mmio::Service<Delivery> for Opener<'_> {
 impl virtio_slot::Service<Delivery> for Transport {
     fn read(&mut self, _frame: &Delivery, offset: u16) -> Result<u32, SlotError> {
         let offset = self.register(offset)?;
-        Ok(self.registers.mmio().read::<u32>(offset))
+        Ok(self.load(offset, AccessWidth::Word))
     }
 
     fn write(&mut self, _frame: &Delivery, offset: u16, value: u32) -> Result<(), SlotError> {
         let offset = self.register(offset)?;
-        // Запись клиента в общую с устройством память завершена до его запроса.
-        fence(Ordering::SeqCst);
-        self.registers.mmio().write::<u32>(offset, value);
+        self.store(offset, AccessWidth::Word, value);
+        Ok(())
+    }
+
+    fn config_read(
+        &mut self,
+        _frame: &Delivery,
+        offset: u16,
+        width: AccessWidth,
+    ) -> Result<u32, SlotError> {
+        let offset = self.config(offset, width)?;
+        Ok(self.load(offset, width))
+    }
+
+    fn config_write(
+        &mut self,
+        _frame: &Delivery,
+        offset: u16,
+        width: AccessWidth,
+        value: u32,
+    ) -> Result<(), SlotError> {
+        let offset = self.config(offset, width)?;
+        self.store(offset, width, value);
         Ok(())
     }
 

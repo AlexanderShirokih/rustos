@@ -6,7 +6,7 @@
 
 mod descriptors;
 
-use descriptors::Descriptors;
+use descriptors::{Chain, Descriptors};
 
 use crate::{
     access::{DeviceMemory, OutOfRange, Registers},
@@ -30,6 +30,7 @@ const USED_ELEMENT_BYTES: usize = 8;
 const DESCRIPTOR_FLAG_NEXT: u16 = 1;
 const DESCRIPTOR_FLAG_WRITE: u16 = 2;
 const CHAIN_DESCRIPTORS: u16 = 2;
+const OFFER_DESCRIPTORS: u16 = 1;
 
 static ZERO_AREA: [u8; QUEUE_AREA_BYTES] = [0; QUEUE_AREA_BYTES];
 
@@ -42,16 +43,16 @@ pub struct Buffer {
     pub length: u32,
 }
 
-/// Голова цепочки отправленной команды.
+/// Голова опубликованной цепочки.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token(u16);
 
-/// Команда, которую устройство вернуло в использованных элементах.
+/// Цепочка, которую устройство вернуло в использованных элементах.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Completion {
-    /// Голова цепочки, полученная от [`SplitQueue::submit`].
+    /// Голова цепочки, полученная от [`SplitQueue::submit`] или [`SplitQueue::offer`].
     pub token: Token,
-    /// Число байт, записанных устройством в буфер ответа.
+    /// Число байт, записанных устройством в записываемый буфер цепочки.
     pub written: u32,
 }
 
@@ -154,29 +155,29 @@ impl SplitQueue {
         request: Buffer,
         response: Buffer,
     ) -> Result<Token, QueueError<R::Error>> {
-        let chain = self.descriptors.reserve()?;
+        let chain = self.descriptors.reserve(CHAIN_DESCRIPTORS)?;
         let (head, tail) = (chain.head, chain.tail);
         write_descriptor(memory, head, request, DESCRIPTOR_FLAG_NEXT, tail)?;
         write_descriptor(memory, tail, response, DESCRIPTOR_FLAG_WRITE, 0)?;
-
-        let slot = usize::from(self.available_index % self.size);
-        memory.write(
-            AVAILABLE_OFFSET + RING_OFFSET + 2 * slot,
-            &head.to_le_bytes(),
-        )?;
-        // Устройство читает элемент кольца, увидев новый индекс: элемент записан раньше.
-        transport.barrier();
-        let available_index = self.available_index.wrapping_add(1);
-        memory.write(AVAILABLE_OFFSET + 2, &available_index.to_le_bytes())?;
-        // Уведомление идёт после записи индекса, иначе устройство не увидит элемент.
-        transport.barrier();
-        self.descriptors.commit(chain);
-        self.available_index = available_index;
-        transport.notify(self.index).map_err(QueueError::Register)?;
-        Ok(Token(head))
+        self.publish(transport, memory, chain)
     }
 
-    /// Забирает очередную завершённую команду и освобождает её дескрипторы.
+    /// Публикует `buffer`, который устройство только пишет, и уведомляет устройство.
+    ///
+    /// Отказ уведомления не отменяет опубликованный буфер. Он остаётся занятым до
+    /// завершения или сброса устройства.
+    pub fn offer<R: Registers, M: DeviceMemory>(
+        &mut self,
+        transport: &mut Transport<R>,
+        memory: &mut M,
+        buffer: Buffer,
+    ) -> Result<Token, QueueError<R::Error>> {
+        let chain = self.descriptors.reserve(OFFER_DESCRIPTORS)?;
+        write_descriptor(memory, chain.head, buffer, DESCRIPTOR_FLAG_WRITE, 0)?;
+        self.publish(transport, memory, chain)
+    }
+
+    /// Забирает очередную завершённую цепочку и освобождает её дескрипторы.
     pub fn take_used<R: Registers, M: DeviceMemory>(
         &mut self,
         transport: &mut Transport<R>,
@@ -206,6 +207,30 @@ impl SplitQueue {
             token: Token(head),
             written: u32::from_le_bytes([w0, w1, w2, w3]),
         }))
+    }
+
+    fn publish<R: Registers, M: DeviceMemory>(
+        &mut self,
+        transport: &mut Transport<R>,
+        memory: &mut M,
+        chain: Chain,
+    ) -> Result<Token, QueueError<R::Error>> {
+        let head = chain.head;
+        let slot = usize::from(self.available_index % self.size);
+        memory.write(
+            AVAILABLE_OFFSET + RING_OFFSET + 2 * slot,
+            &head.to_le_bytes(),
+        )?;
+        // Устройство читает элемент кольца, увидев новый индекс: элемент записан раньше.
+        transport.barrier();
+        let available_index = self.available_index.wrapping_add(1);
+        memory.write(AVAILABLE_OFFSET + 2, &available_index.to_le_bytes())?;
+        // Уведомление идёт после записи индекса, иначе устройство не увидит элемент.
+        transport.barrier();
+        self.descriptors.commit(chain);
+        self.available_index = available_index;
+        transport.notify(self.index).map_err(QueueError::Register)?;
+        Ok(Token(head))
     }
 }
 
@@ -274,10 +299,20 @@ mod tests {
     }
 
     fn publish_first_used(memory: &mut FakeMemory, id: u32, written: u32) {
-        let mut element = id.to_le_bytes().to_vec();
-        element.extend(written.to_le_bytes());
-        memory.put_from_device(USED_OFFSET + RING_OFFSET, &element);
-        memory.put_from_device(USED_OFFSET + 2, &1u16.to_le_bytes());
+        publish_used(memory, &[(id, written)]);
+    }
+
+    fn publish_used(memory: &mut FakeMemory, elements: &[(u32, u32)]) {
+        for (slot, (id, written)) in elements.iter().enumerate() {
+            let mut element = id.to_le_bytes().to_vec();
+            element.extend(written.to_le_bytes());
+            memory.put_from_device(
+                USED_OFFSET + RING_OFFSET + USED_ELEMENT_BYTES * slot,
+                &element,
+            );
+        }
+        let count = u16::try_from(elements.len()).unwrap();
+        memory.put_from_device(USED_OFFSET + 2, &count.to_le_bytes());
     }
 
     #[test]
@@ -430,6 +465,62 @@ mod tests {
             memory.get(DESCRIPTORS_OFFSET + 24, 6),
             [0x98, 1, 0, 0, 2, 0]
         );
+    }
+
+    #[test]
+    fn offer_publishes_like_submit_with_one_writable_descriptor() {
+        let Fixture {
+            log,
+            mut transport,
+            mut memory,
+        } = fixture(2);
+        let mut queue = SplitQueue::new(&mut transport, &mut memory, 3, 2).unwrap();
+        log.clear();
+
+        queue.offer(&mut transport, &mut memory, RESPONSE).unwrap();
+
+        assert_eq!(
+            log.events(),
+            [
+                Event::MemoryWrite(
+                    DESCRIPTORS_OFFSET,
+                    vec![0, 0x20, 0, 0, 0, 0, 0, 0, 0x98, 1, 0, 0, 2, 0, 0, 0]
+                ),
+                Event::MemoryWrite(AVAILABLE_OFFSET + RING_OFFSET, vec![0, 0]),
+                Event::Barrier,
+                Event::MemoryWrite(AVAILABLE_OFFSET + 2, vec![1, 0]),
+                Event::Barrier,
+                Event::Write(register::QUEUE_NOTIFY, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn returned_buffer_and_command_free_all_their_descriptors() {
+        let Fixture {
+            mut transport,
+            mut memory,
+            ..
+        } = fixture(4);
+        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 4).unwrap();
+        let command = queue
+            .submit(&mut transport, &mut memory, REQUEST, RESPONSE)
+            .unwrap();
+        let buffer = queue.offer(&mut transport, &mut memory, RESPONSE).unwrap();
+        publish_used(
+            &mut memory,
+            &[(u32::from(buffer.0), 8), (u32::from(command.0), 408)],
+        );
+        for _ in 0..2 {
+            queue.take_used(&mut transport, &mut memory).unwrap();
+        }
+
+        for _ in 0..4 {
+            queue.offer(&mut transport, &mut memory, RESPONSE).unwrap();
+        }
+        let overflow = queue.offer(&mut transport, &mut memory, RESPONSE);
+
+        assert_eq!(overflow, Err(QueueError::Full));
     }
 
     #[test]

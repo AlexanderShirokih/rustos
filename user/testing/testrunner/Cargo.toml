@@ -226,6 +226,7 @@ component-abi = { workspace = true }
 component-startup = { workspace = true }
 display-abi = { workspace = true }
 driver-simplefb = { path = "../../system/driver-simplefb" }
+driver-virtio-input = { path = "../../system/driver-virtio-input" }
 fdt = { workspace = true }
 fdt-test = { workspace = true }
 filesystem = { workspace = true }
@@ -252,6 +253,7 @@ userland = { workspace = true }
 userland-image = { workspace = true, features = ["alloc"] }
 userland-loader = { workspace = true }
 virtio = { workspace = true }
+virtio-driver = { workspace = true }
 virtio-mmio-abi = { workspace = true }
 
 [build-dependencies]

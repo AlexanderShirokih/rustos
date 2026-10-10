@@ -53,6 +53,10 @@ package = "input-hub"
 path = "/input-hub"
 
 [[programs]]
+package = "driver-virtio-input"
+path = "/driver-virtio-input"
+
+[[programs]]
 package = "hello-std"
 path = "/hello-std"
 

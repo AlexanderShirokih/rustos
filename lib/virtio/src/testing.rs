@@ -2,16 +2,20 @@ use core::cell::RefCell;
 use std::{collections::HashMap, rc::Rc};
 
 use crate::{
-    access::{DeviceMemory, OutOfRange, Registers},
-    transport::{register, status},
+    access::{AccessWidth, DeviceMemory, OutOfRange, Registers},
+    transport::{DeviceType, register, status},
 };
 
 pub(crate) const REGION_ADDRESS: u64 = 0x1_4000_0000;
+
+const CONFIG_BYTES: usize = 0x100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Event {
     Read(usize),
     Write(usize, u32),
+    ConfigRead(usize, AccessWidth),
+    ConfigWrite(usize, AccessWidth, u32),
     Barrier,
     MemoryRead(usize),
     MemoryWrite(usize, Vec<u8>),
@@ -30,6 +34,7 @@ pub(crate) struct FakeRegisters {
     read_refused: Option<usize>,
     write_refused: Option<usize>,
     values: HashMap<usize, u32>,
+    config: [u8; CONFIG_BYTES],
     features: u64,
     accepts_features: bool,
     completes_reset: bool,
@@ -77,16 +82,21 @@ impl Log {
 
 impl FakeRegisters {
     pub(crate) fn gpu(log: &Log) -> Self {
+        Self::new(DeviceType::Gpu, log)
+    }
+
+    pub(crate) fn new(device: DeviceType, log: &Log) -> Self {
         let values = HashMap::from([
             (register::MAGIC_VALUE, 0x7472_6976),
             (register::VERSION, 2),
-            (register::DEVICE_ID, 16),
+            (register::DEVICE_ID, device as u32),
             (register::QUEUE_SIZE_MAX, 256),
         ]);
         Self {
             read_refused: None,
             write_refused: None,
             values,
+            config: [0; CONFIG_BYTES],
             features: 1 << 32,
             accepts_features: true,
             completes_reset: true,
@@ -122,6 +132,10 @@ impl FakeRegisters {
     pub(crate) fn set(&mut self, offset: usize, value: u32) {
         self.values.insert(offset, value);
     }
+
+    pub(crate) fn set_config(&mut self, offset: usize, bytes: &[u8]) {
+        self.config[offset..offset + bytes.len()].copy_from_slice(bytes);
+    }
 }
 
 impl Registers for FakeRegisters {
@@ -155,6 +169,32 @@ impl Registers for FakeRegisters {
             _ => value,
         };
         self.values.insert(offset, stored);
+        Ok(())
+    }
+
+    fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, RegisterFailure> {
+        self.log.push(Event::ConfigRead(offset, width));
+        let mut value = [0; 4];
+        let field = self
+            .config
+            .get(offset..offset + bytes(width))
+            .ok_or(RegisterFailure::Read(offset))?;
+        value[..field.len()].copy_from_slice(field);
+        Ok(u32::from_le_bytes(value))
+    }
+
+    fn write_config(
+        &mut self,
+        offset: usize,
+        width: AccessWidth,
+        value: u32,
+    ) -> Result<(), RegisterFailure> {
+        self.log.push(Event::ConfigWrite(offset, width, value));
+        let field = self
+            .config
+            .get_mut(offset..offset + bytes(width))
+            .ok_or(RegisterFailure::Write(offset))?;
+        field.copy_from_slice(&value.to_le_bytes()[..bytes(width)]);
         Ok(())
     }
 
@@ -209,5 +249,13 @@ impl DeviceMemory for FakeMemory {
 
     fn physical_address(&self) -> u64 {
         self.address
+    }
+}
+
+fn bytes(width: AccessWidth) -> usize {
+    match width {
+        AccessWidth::Byte => 1,
+        AccessWidth::Half => 2,
+        AccessWidth::Word => 4,
     }
 }

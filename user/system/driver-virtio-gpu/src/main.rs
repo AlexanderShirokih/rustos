@@ -8,5 +8,3 @@ extern crate alloc;
 
 mod device;
 mod entry;
-mod memory;
-mod registers;

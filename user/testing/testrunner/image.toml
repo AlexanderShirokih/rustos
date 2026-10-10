@@ -220,6 +220,10 @@ path = "/slow-input-source-fixture"
 package = "input-hub"
 path = "/input-hub"
 
+[[programs]]
+package = "driver-virtio-input"
+path = "/driver-virtio-input"
+
 [[files]]
 path = "/testrunner/sample"
 source = "user/testing/testrunner/assets/sample.txt"

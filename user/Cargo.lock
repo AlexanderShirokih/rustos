@@ -922,6 +922,24 @@ dependencies = [
  "syscall",
  "userland-build",
  "virtio",
+ "virtio-driver",
+ "virtio-mmio-abi",
+]
+
+[[package]]
+name = "driver-virtio-input"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "input-abi",
+ "ipc",
+ "kernel-objects",
+ "program-entry",
+ "runtime",
+ "syscall",
+ "userland-build",
+ "virtio",
+ "virtio-driver",
  "virtio-mmio-abi",
 ]
 
@@ -4283,6 +4301,7 @@ dependencies = [
  "component-startup",
  "display-abi",
  "driver-simplefb",
+ "driver-virtio-input",
  "fdt",
  "fdt-test",
  "filesystem",
@@ -4311,6 +4330,7 @@ dependencies = [
  "userland-image",
  "userland-loader",
  "virtio",
+ "virtio-driver",
  "virtio-mmio-abi",
 ]
 
@@ -4683,6 +4703,18 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "virtio"
 version = "0.1.0"
+
+[[package]]
+name = "virtio-driver"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "kernel-objects",
+ "runtime",
+ "syscall",
+ "virtio",
+ "virtio-mmio-abi",
+]
 
 [[package]]
 name = "virtio-mmio"

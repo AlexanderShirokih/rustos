@@ -13,6 +13,7 @@ members = [
     "system/driver-pm8941-rtc",
     "system/driver-simplefb",
     "system/driver-virtio-gpu",
+    "system/driver-virtio-input",
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
     "system/input-hub",
@@ -31,6 +32,7 @@ members = [
     "../lib/log-relay",
     "../lib/managed-component",
     "../lib/userland-loader",
+    "../lib/virtio-driver",
 ]
 
 [workspace.metadata.molecular]
@@ -55,6 +57,7 @@ log-relay = { path = "../lib/log-relay" }
 managed-component = { path = "../lib/managed-component" }
 runtime = { path = "../lib/runtime" }
 userland-loader = { path = "../lib/userland-loader" }
+virtio-driver = { path = "../lib/virtio-driver" }
 
 # Крейты корневого workspace
 bootstrap-abi = { path = "../lib/bootstrap-abi" }

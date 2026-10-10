@@ -18,6 +18,7 @@
 
 mod command;
 mod descriptor;
+mod linux;
 mod packed;
 mod protocol;
 mod record;

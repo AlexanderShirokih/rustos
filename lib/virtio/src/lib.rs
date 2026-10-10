@@ -4,18 +4,21 @@
 //! регионом, доступным устройству.
 //!
 //! [`SplitQueue::submit`] отправляет команду цепочкой "запрос, ответ",
-//! [`SplitQueue::take_used`] забирает завершённую. Ожидание прерывания остаётся драйверу.
-//! Формат команд GPU 2D даёт модуль [`gpu`].
+//! [`SplitQueue::offer`] публикует буфер для записи устройством, [`SplitQueue::take_used`]
+//! забирает завершённую цепочку. Ожидание прерывания остаётся драйверу.
+//! Формат команд GPU 2D даёт модуль [`gpu`], формат конфигурации и событий устройства
+//! ввода - модуль [`input`].
 #![cfg_attr(not(test), no_std)]
 
 mod access;
 pub mod gpu;
+pub mod input;
 mod queue;
 #[cfg(test)]
 mod testing;
 mod transport;
 
-pub use access::{DeviceMemory, OutOfRange, Registers};
+pub use access::{AccessWidth, DeviceMemory, OutOfRange, Registers};
 pub use queue::{
     Buffer, Completion, QUEUE_REGION_BYTES, QUEUE_SIZE_MAX, QueueError, SplitQueue, Token,
 };

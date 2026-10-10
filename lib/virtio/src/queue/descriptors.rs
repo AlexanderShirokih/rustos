@@ -1,15 +1,15 @@
-//! Распределитель дескрипторов: список свободных и выданные головы цепочек.
+//! Распределитель дескрипторов: список свободных и длины выданных цепочек по их головам.
 //!
 //! Очередь получает цепочку через [`Descriptors::reserve`], который состояние не меняет,
 //! и закрепляет её через [`Descriptors::commit`] после публикации устройству.
 
-use super::{CHAIN_DESCRIPTORS, QUEUE_SIZE_MAX, QueueError};
+use super::{QUEUE_SIZE_MAX, QueueError};
 
 const DESCRIPTORS_CAPACITY: usize = QUEUE_SIZE_MAX as usize;
 
 pub(super) struct Descriptors {
     next: [u16; DESCRIPTORS_CAPACITY],
-    issued: [bool; DESCRIPTORS_CAPACITY],
+    chain_lengths: [u16; DESCRIPTORS_CAPACITY],
     free_head: u16,
     free_count: u16,
 }
@@ -18,6 +18,7 @@ pub(super) struct Chain {
     pub(super) head: u16,
     pub(super) tail: u16,
     next_free: u16,
+    length: u16,
 }
 
 impl Descriptors {
@@ -28,56 +29,72 @@ impl Descriptors {
         }
         Self {
             next,
-            issued: [false; DESCRIPTORS_CAPACITY],
+            chain_lengths: [0; DESCRIPTORS_CAPACITY],
             free_head: 0,
             free_count: size,
         }
     }
 
-    pub(super) fn reserve<E>(&self) -> Result<Chain, QueueError<E>> {
-        if self.free_count < CHAIN_DESCRIPTORS {
+    pub(super) fn reserve<E>(&self, length: u16) -> Result<Chain, QueueError<E>> {
+        if length == 0 || self.free_count < length {
             return Err(QueueError::Full);
         }
         let head = self.free_head;
-        let tail = self.link(head)?;
+        let tail = self.walk(head, length - 1)?;
         let next_free = self.link(tail)?;
         Ok(Chain {
             head,
             tail,
             next_free,
+            length,
         })
     }
 
     pub(super) fn commit(
         &mut self,
         Chain {
-            head, next_free, ..
+            head,
+            next_free,
+            length,
+            ..
         }: Chain,
     ) {
-        if let Some(issued) = self.issued.get_mut(usize::from(head)) {
-            *issued = true;
+        if let Some(chain_length) = self.chain_lengths.get_mut(usize::from(head)) {
+            *chain_length = length;
             self.free_head = next_free;
-            self.free_count -= CHAIN_DESCRIPTORS;
+            self.free_count -= length;
         }
     }
 
     pub(super) fn release<E>(&mut self, id: u32) -> Result<u16, QueueError<E>> {
         let head = u16::try_from(id).map_err(|_| QueueError::UnknownHead(id))?;
-        let tail = self.link(head)?;
-        let issued = self
-            .issued
-            .get_mut(usize::from(head))
-            .filter(|issued| **issued);
-        let tail_link = self.next.get_mut(usize::from(tail));
-        let (Some(issued), Some(tail_link)) = (issued, tail_link) else {
-            return Err(QueueError::UnknownHead(id));
-        };
+        let length = self
+            .chain_lengths
+            .get(usize::from(head))
+            .copied()
+            .filter(|length| *length != 0)
+            .ok_or(QueueError::UnknownHead(id))?;
+        let tail = self.walk(head, length - 1)?;
+        let tail_link = self
+            .next
+            .get_mut(usize::from(tail))
+            .ok_or(QueueError::UnknownHead(id))?;
 
-        *issued = false;
         *tail_link = self.free_head;
+        if let Some(chain_length) = self.chain_lengths.get_mut(usize::from(head)) {
+            *chain_length = 0;
+        }
         self.free_head = head;
-        self.free_count += CHAIN_DESCRIPTORS;
+        self.free_count += length;
         Ok(head)
+    }
+
+    fn walk<E>(&self, from: u16, links: u16) -> Result<u16, QueueError<E>> {
+        let mut descriptor = from;
+        for _ in 0..links {
+            descriptor = self.link(descriptor)?;
+        }
+        Ok(descriptor)
     }
 
     fn link<E>(&self, descriptor: u16) -> Result<u16, QueueError<E>> {

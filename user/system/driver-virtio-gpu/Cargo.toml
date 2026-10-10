@@ -24,6 +24,7 @@ program-entry = { workspace = true }
 runtime = { workspace = true }
 syscall = { workspace = true }
 virtio = { workspace = true }
+virtio-driver = { workspace = true }
 virtio-mmio-abi = { workspace = true }
 
 [build-dependencies]
