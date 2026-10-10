@@ -12,3 +12,6 @@
 relative fs=ram
 /broken
 /bad fs
+
+# Пары строки `/spare` в обратном порядке: путь получает то же дерево, что `/spare`.
+/reordered label=spare,fs=ram

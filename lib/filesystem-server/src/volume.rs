@@ -1,92 +1,65 @@
-//! Тома процесса: состояние файловой системы на значение атрибута `label` заявки.
+//! Тома процесса: у каждого набора атрибутов заявки своё состояние файловой системы.
 
 use alloc::vec::Vec;
 
+use component_abi::{AttributeSet, Attributes};
 use filesystem_abi::FileSystemError;
 
 use crate::service::FileSystemState;
 
-pub(crate) const VOLUME_LABEL: &[u8] = b"label";
-
-pub(crate) const DEFAULT_VOLUME: usize = 0;
-
 pub(crate) struct Volume {
-    label: Vec<u8>,
+    attributes: AttributeSet,
     state: FileSystemState,
 }
 
+#[derive(Default)]
 pub(crate) struct Volumes {
-    default: FileSystemState,
-    labelled: Vec<Volume>,
+    volumes: Vec<Volume>,
 }
 
 impl Volume {
-    pub(crate) fn new(label: &[u8], state: FileSystemState) -> Result<Self, FileSystemError> {
-        let mut owned = Vec::new();
-        owned
-            .try_reserve_exact(label.len())
-            .map_err(|_| FileSystemError::NoSpace)?;
-        owned.extend_from_slice(label);
-        Ok(Self {
-            label: owned,
+    pub(crate) fn new(attributes: Attributes<'_>, state: FileSystemState) -> Self {
+        Self {
+            attributes: AttributeSet::new(attributes),
             state,
-        })
+        }
     }
 }
 
 impl Volumes {
-    pub(crate) fn new(default: FileSystemState) -> Self {
-        Self {
-            default,
-            labelled: Vec::new(),
-        }
-    }
-
-    pub(crate) fn find(&self, label: &[u8]) -> Option<usize> {
-        if label.is_empty() {
-            return Some(DEFAULT_VOLUME);
-        }
-        self.labelled
+    pub(crate) fn find(&self, attributes: Attributes<'_>) -> Option<usize> {
+        self.volumes
             .iter()
-            .position(|volume| volume.label.as_slice() == label)
-            .map(|index| index.saturating_add(1))
+            .position(|volume| volume.attributes.as_attributes().same_set(attributes))
     }
 
     pub(crate) fn insert(&mut self, volume: Volume) -> Result<usize, FileSystemError> {
-        // Том с той же меткой, добавленный между поиском и вставкой, остаётся, а новый
+        // Том того же набора, добавленный между поиском и вставкой, остаётся, а новый
         // отбрасывается.
-        if let Some(index) = self.find(&volume.label) {
+        if let Some(index) = self.find(volume.attributes.as_attributes()) {
             return Ok(index);
         }
 
-        self.labelled
+        self.volumes
             .try_reserve(1)
             .map_err(|_| FileSystemError::NoSpace)?;
-        self.labelled.push(volume);
-        Ok(self.labelled.len())
+        self.volumes.push(volume);
+        Ok(self.volumes.len().saturating_sub(1))
     }
 
     pub(crate) fn of(&self, badge: u64) -> usize {
-        self.labelled
+        self.volumes
             .iter()
             .position(|volume| volume.state.serves(badge))
-            .map_or(DEFAULT_VOLUME, |index| index.saturating_add(1))
+            .unwrap_or_default()
     }
 
-    pub(crate) fn state(&mut self, volume: usize) -> &mut FileSystemState {
-        match volume
-            .checked_sub(1)
-            .and_then(|index| self.labelled.get_mut(index))
-        {
-            Some(volume) => &mut volume.state,
-            None => &mut self.default,
-        }
+    pub(crate) fn state(&mut self, volume: usize) -> Option<&mut FileSystemState> {
+        self.volumes.get_mut(volume).map(|volume| &mut volume.state)
     }
 
     pub(crate) fn remove_session(&mut self, badge: u64) {
-        self.default.remove_session(badge);
-
-        for volume in &mut self.labelled {
+        for volume in &mut self.volumes {
             volume.state.remove_session(badge);
         }
     }

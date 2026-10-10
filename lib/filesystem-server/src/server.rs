@@ -4,8 +4,9 @@ use alloc::boxed::Box;
 use core::{convert::Infallible, sync::atomic::AtomicU64};
 
 use component_abi::Attributes;
+use component_startup::SessionError;
 use filesystem::FileSystemBackend;
-use filesystem_abi::{FileSystemError, file_system};
+use filesystem_abi::file_system;
 use ipc::{
     Listener, RecvError,
     wire::{IpcError, MESSAGE_INLINE_MAX},
@@ -19,7 +20,7 @@ use crate::{
     error::{Error, Result, no_space},
     service::{FileSystemState, Frame, Serving},
     session,
-    volume::{DEFAULT_VOLUME, VOLUME_LABEL, Volume, Volumes},
+    volume::{Volume, Volumes},
 };
 
 static IMAGE: Once<ReadOnlyMapping> = Once::new();
@@ -49,59 +50,57 @@ where
     };
     let backend = found(image.map(ReadOnlyMapping::as_bytes))?;
     let state = FileSystemState::new(Box::new(backend), image, Resource::self_resource()?);
+    let mut volumes = Volumes::default();
+    let volume = volumes.insert(Volume::new(Attributes::empty(), state))?;
 
-    run(start, state, |shared, _| {
-        session::open_session(shared, DEFAULT_VOLUME)
+    run(start, volumes, move |shared, _| {
+        session::open_session(shared, volume).map_err(|_| SessionError::NoSpace)
     })
 }
 
-/// Обслуживает экспорт и файловые сессии томов, которые строит `volume`. Том называет значение
-/// атрибута `label` заявки. Первая заявка с меткой строит дерево, следующие получают то же.
-/// Заявка без `label` получает том по умолчанию, построенный до первой заявки. Тома делят
-/// бюджет процесса.
+/// Обслуживает экспорт и файловые сессии томов, которые строит `volume`. Заявки с одинаковым
+/// набором атрибутов получают сессии одного тома, порядок пар в заявке значения не имеет. Первая
+/// заявка с новым набором вызывает `volume` со своими атрибутами. Если `volume` отказал, заявка
+/// получает этот отказ, и том не создаётся. Тома делят бюджет процесса.
 pub fn serve_volumes<B>(
     start: Handle<kind::Port>,
-    mut volume: impl FnMut() -> Result<B> + Send + 'static,
+    mut volume: impl FnMut(Attributes<'_>) -> core::result::Result<B, SessionError> + Send + 'static,
 ) -> Result<Infallible>
 where
     B: FileSystemBackend + Send + 'static,
 {
-    let state = FileSystemState::new(Box::new(volume()?), None, Resource::self_resource()?);
-
-    run(start, state, move |shared, attributes| {
-        let label = attributes.value(VOLUME_LABEL).unwrap_or_default();
-        let found = shared.volumes.lock().find(label);
+    run(start, Volumes::default(), move |shared, attributes| {
+        let found = shared.volumes.lock().find(attributes);
         let index = if let Some(index) = found {
             index
         } else {
-            let backend = volume().map_err(|_| FileSystemError::NoSpace)?;
-            let state = FileSystemState::new(
-                Box::new(backend),
-                None,
-                Resource::self_resource().map_err(no_space)?,
-            );
-            shared.volumes.lock().insert(Volume::new(label, state)?)?
+            let backend = volume(attributes)?;
+            Resource::self_resource()
+                .map_err(no_space)
+                .map(|resource| FileSystemState::new(Box::new(backend), None, resource))
+                .and_then(|state| shared.volumes.lock().insert(Volume::new(attributes, state)))
+                .map_err(|_| SessionError::NoSpace)?
         };
-        session::open_session(shared, index)
+        session::open_session(shared, index).map_err(|_| SessionError::NoSpace)
     })
 }
 
 fn run(
     start: Handle<kind::Port>,
-    first: FileSystemState,
-    mut open: impl FnMut(&'static Shared, Attributes<'_>) -> core::result::Result<Port, FileSystemError>
+    volumes: Volumes,
+    mut open: impl FnMut(&'static Shared, Attributes<'_>) -> core::result::Result<Port, SessionError>
     + Send
     + 'static,
 ) -> Result<Infallible> {
     let shared: &'static Shared = Box::leak(Box::new(Shared {
-        volumes: Mutex::new(Volumes::new(first)),
+        volumes: Mutex::new(volumes),
         service: Port::create()?,
         next_badge: AtomicU64::new(0),
     }));
     let _ = spawn_owned(move || {
         let parent = component_abi::component_startup::Client::new(PortTransport::new(start));
         let _ = component_startup::serve_export::<file_system::Protocol>(&parent, |attributes| {
-            open(shared, attributes).map_err(|_| component_startup::SessionError::NoSpace)
+            open(shared, attributes)
         });
         process_exit(1)
     })?;
@@ -125,18 +124,22 @@ fn serve_sessions(shared: &Shared) {
             Err(RecvError::Closed) => break,
         };
         // Том выбирает значок сессии до разбора кадра. Кадр без известной сессии получает
-        // отказ `NoSession` от тома по умолчанию.
+        // отказ `NoSession` от первого тома. Таблица при кадре не пуста, потому что значок
+        // выдаётся только сессии тома, а тома не удаляются.
         let mut volumes = shared.volumes.lock();
         let volume = volumes.of(incoming.resources.badge);
+        let Some(state) = volumes.state(volume) else {
+            continue;
+        };
         let mut frame = Frame::default();
         let mut serving = Serving {
-            state: volumes.state(volume),
+            state: &mut *state,
             frame: &mut frame,
             service: &shared.service,
             next_badge: &shared.next_badge,
         };
         let delivered = file_system::dispatch(&mut serving, incoming).is_ok();
-        frame.end(delivered, volumes.state(volume));
+        frame.end(delivered, state);
     }
     log_line("service port closed");
 }

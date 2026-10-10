@@ -113,6 +113,13 @@ impl<'a> Attributes<'a> {
             .find(|pair| pair.key == key)
             .map(|pair| pair.value)
     }
+
+    /// Возвращает `true`, если оба набора состоят из одних и тех же пар ключ-значение в любом
+    /// порядке.
+    #[must_use]
+    pub fn same_set(self, other: Attributes<'_>) -> bool {
+        self.iter().count() == other.iter().count() && contains_all(other, self)
+    }
 }
 
 impl AttributeSet {
@@ -252,12 +259,13 @@ pub fn match_filters<'a>(
         return query.is_empty().then_some(Attributes::empty());
     }
 
-    filters.find(|filter| {
-        !filter.is_empty()
-            && filter
-                .iter()
-                .all(|pair| query.iter().any(|candidate| candidate == pair))
-    })
+    filters.find(|filter| !filter.is_empty() && contains_all(query, *filter))
+}
+
+fn contains_all(set: Attributes<'_>, pairs: Attributes<'_>) -> bool {
+    pairs
+        .iter()
+        .all(|pair| set.iter().any(|candidate| candidate == pair))
 }
 
 fn read_pair(bytes: &[u8]) -> Option<(Attribute<'_>, &[u8])> {
@@ -305,6 +313,24 @@ mod tests {
         assert_eq!(match_filters([first, second], query), Some(first));
         assert_eq!(match_filters([first], second), None);
         assert_eq!(match_filters([first, second], second), Some(second));
+    }
+
+    #[test]
+    fn sets_compare_pairs_regardless_of_their_order() {
+        let set = encoded(&[pair(b"fs", b"ram"), pair(b"label", b"spare")]);
+        let reordered = encoded(&[pair(b"label", b"spare"), pair(b"fs", b"ram")]);
+        let other_value = encoded(&[pair(b"fs", b"ram"), pair(b"label", b"other")]);
+        let subset = encoded(&[pair(b"fs", b"ram")]);
+        let set = Attributes::decode(&set).unwrap();
+        let reordered = Attributes::decode(&reordered).unwrap();
+        let other_value = Attributes::decode(&other_value).unwrap();
+        let subset = Attributes::decode(&subset).unwrap();
+
+        assert!(set.same_set(reordered));
+        assert!(!set.same_set(other_value));
+        assert!(!set.same_set(subset));
+        assert!(!subset.same_set(set));
+        assert!(Attributes::empty().same_set(Attributes::empty()));
     }
 
     #[test]

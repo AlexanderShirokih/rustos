@@ -10,7 +10,10 @@ pub(crate) fn open_session(shared: &Shared, volume: usize) -> Result<Port, FileS
 
     // Запись сессии создаётся до передачи её capability клиенту.
     let mut volumes = shared.volumes.lock();
-    volumes.state(volume).open_session(badge.get())?;
+    volumes
+        .state(volume)
+        .ok_or(FileSystemError::NoSpace)?
+        .open_session(badge.get())?;
 
     Ok(port)
 }

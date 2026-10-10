@@ -51,6 +51,7 @@ pub(crate) const PROBE: &str = "probe";
 const HELD: &str = "held";
 const STARVED: &str = "starved";
 const FILES: &str = "files";
+const CRASH_FILES: &str = "crash-files";
 const ROOT_VIEW: &str = "root";
 const RTC_REQUIREMENT: &str = "rtc";
 pub(crate) const PLATFORM_REQUIREMENT: &str = "platform";
@@ -60,6 +61,7 @@ const TMP_VIEW: &str = "tmp";
 const OTHER_VIEW: &str = "other";
 const BOOT_VIEW: &str = "boot";
 const NESTED_VIEW: &str = "nested";
+const REORDERED_VIEW: &str = "reordered";
 const HARDWARE_REQUIREMENT: &str = "hardware";
 const FEATURED_REQUIREMENT: &str = "featured";
 
@@ -1518,6 +1520,31 @@ fn a_component_that_faults_is_restarted() {
 }
 
 #[test_harness::test]
+fn a_refused_volume_build_leaves_no_volume_and_the_next_request_builds_it() {
+    let composition = scenario(&[CRASH_FS]);
+    let importer = composition.importer(&[crate::composition::Import {
+        declaration: RequirementDeclaration::session(CRASH_FILES, file_system::Protocol::ID),
+        namespace_root: None,
+    }]);
+    let bytes = query(&[pair("fs", "crash"), pair("build", "refused-once")]);
+    let attributes = Attributes::decode(&bytes).expect("query decodes");
+
+    let [refused, built] = [(); 2].map(|()| {
+        session::<file_system::Protocol>(
+            importer.handle(),
+            CRASH_FILES,
+            attributes,
+            COMPONENT_REPLY_TIMEOUT,
+        )
+        .map(drop)
+    });
+
+    test_harness::check_eq!(refused, Err(CallError::Remote(SessionError::Refused)));
+    test_harness::check_eq!(built, Ok(()));
+    finish(composition);
+}
+
+#[test_harness::test]
 fn a_restarted_file_system_serves_its_prefix_again_without_restarting_the_router() {
     let composition = scenario(&[
         ROUTER,
@@ -1614,9 +1641,9 @@ fn malformed_and_unserved_table_lines_are_logged_while_the_rest_mount() {
         "/",
         RESOLVE_TIMEOUT,
     );
-    // Три отказа разбора, монтирования `/tmp` и `/spare` и отказы строк `/boot`, `/stuck` и
-    // `/crash`. Строка `/boot/spare` ждёт монтирования `/boot`.
-    let router = await_component_lines(ROUTER_NAME, 8);
+    // Три отказа разбора, монтирования `/tmp`, `/spare` и `/reordered` и отказы строк `/boot`,
+    // `/stuck` и `/crash`. Строка `/boot/spare` ждёт монтирования `/boot`.
+    let router = await_component_lines(ROUTER_NAME, 9);
     let logged = |prefix: &str| router.iter().any(|line| line.starts_with(prefix));
 
     test_harness::check_eq!(tmp, Ok(()));
@@ -1867,6 +1894,23 @@ fn two_volumes_of_one_file_system_keep_their_trees_separate() {
         second_written,
         Err(CallError::Remote(FileSystemError::NotFound))
     );
+    finish(composition);
+}
+
+#[test_harness::test]
+fn table_lines_with_reordered_pairs_share_a_volume() {
+    let composition = scenario(&[ROUTER, RAM_FS]);
+    let importer = composition.importer(&[
+        view(SPARE_VIEW, "/spare"),
+        view(REORDERED_VIEW, "/reordered"),
+    ]);
+    let spare = resolved(&importer.port::<namespace::Protocol>(SPARE_VIEW), "/");
+    let reordered = resolved(&importer.port::<namespace::Protocol>(REORDERED_VIEW), "/");
+
+    write(&spare);
+    let shared = written(&reordered);
+
+    test_harness::check_eq!(shared, Ok(NodeKind::File));
     finish(composition);
 }
 

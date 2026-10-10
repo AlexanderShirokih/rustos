@@ -3,16 +3,20 @@
 
 extern crate alloc;
 
-use component_startup::component_manifest;
+use component_abi::Attributes;
+use component_startup::{SessionError, component_manifest};
 use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
 use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system};
-use filesystem_server::serve;
+use filesystem_server::serve_volumes;
 use runtime::{FAILED_EXIT_CODE, exit};
 use syscall::{Handle, USER_VA_END, kind};
 
 component_manifest! {
     exports: [file_system::Protocol => [{ fs = "crash" }]],
 }
+
+const BUILD_KEY: &[u8] = b"build";
+const REFUSED_ONCE: &[u8] = b"refused-once";
 
 struct CrashingFileSystem {
     inner: RamFileSystem,
@@ -133,11 +137,17 @@ fn kill_process_by_fault() -> ! {
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> filesystem_server::Result<()> {
-    let backend = |_| {
+    // Первая заявка с `build=refused-once` получает отказ построителя, следующие строят том.
+    let mut refused = false;
+    let backend = move |attributes: Attributes<'_>| {
+        if !refused && attributes.value(BUILD_KEY) == Some(REFUSED_ONCE) {
+            refused = true;
+            return Err(SessionError::Refused);
+        }
         Ok(CrashingFileSystem {
             inner: RamFileSystem::new(),
         })
     };
-    let Err(error) = serve(parent, None, backend);
+    let Err(error) = serve_volumes(parent, backend);
     Err(error)
 }
