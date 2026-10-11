@@ -8,13 +8,11 @@
 use alloc::vec::Vec;
 use core::{cmp::Ordering, iter};
 
-use filesystem_abi::{
-    DirCursor, DirEntry, FileSystemError, Listed, NodeInfo, NodeKind, PATH_MAX, Path,
-};
+use filesystem_abi::{DirCursor, DirEntry, FileSystemError, Listed, NodeKind, PATH_MAX, Path};
 use userland_image::{ImageDecodeError, decode};
 
 use crate::{
-    backend::{FileSystemBackend, kind_mismatch},
+    backend::{FileSystemBackend, NodeMetadata, kind_mismatch},
     node::{NodeId, Window},
     store::{ByteStore, StoreId},
 };
@@ -284,15 +282,15 @@ impl FileSystemBackend for ImageFileSystem {
         // Узлы дерева выведены из таблицы образа. Держателей она не считает.
     }
 
-    fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {
+    fn metadata(&self, node: NodeId) -> Result<NodeMetadata, FileSystemError> {
         let node = self.locate(node)?;
         if node.is_file() {
-            return Ok(NodeInfo {
+            return Ok(NodeMetadata {
                 kind: NodeKind::File,
                 size: node.record.data.len() as u64,
             });
         }
-        Ok(NodeInfo {
+        Ok(NodeMetadata {
             kind: NodeKind::Directory,
             size: self.entries_under(node.prefix(), node.index).count() as u64,
         })

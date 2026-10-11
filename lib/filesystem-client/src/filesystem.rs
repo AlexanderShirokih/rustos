@@ -101,10 +101,7 @@ impl<E: Environment> FileSystem<E> {
         self.at_path(path, |_, session, root| {
             let opened = open_in(session, route::within(path, root)?, OpenFlags::NONE)?;
             close_in(session, opened.fd);
-            Ok(NodeInfo {
-                kind: opened.kind,
-                size: opened.size,
-            })
+            Ok(opened.info)
         })
     }
 

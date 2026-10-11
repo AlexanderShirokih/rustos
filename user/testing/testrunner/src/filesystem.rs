@@ -423,8 +423,8 @@ fn filesystem_creates_and_writes_a_file() {
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    test_harness::check_eq!(opened.kind, NodeKind::File);
-    test_harness::check_eq!(opened.size, 0);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.size, 0);
 
     let payload = b"hello, file system";
     let count = write_all(&client, &buffer, &opened, 0, payload);
@@ -479,8 +479,8 @@ fn filesystem_stats_file_and_directory() {
         AccessMode::Read,
         OpenFlags::CREATE | OpenFlags::DIRECTORY,
     );
-    test_harness::check_eq!(directory.kind, NodeKind::Directory);
-    test_harness::check_eq!(directory.size, 0);
+    test_harness::check_eq!(directory.info.kind, NodeKind::Directory);
+    test_harness::check_eq!(directory.info.size, 0);
 
     let file = open(
         &client,
@@ -497,6 +497,36 @@ fn filesystem_stats_file_and_directory() {
     let directory_info = client.stat(directory.fd).expect("stat ok");
     test_harness::check_eq!(directory_info.kind, NodeKind::Directory);
     test_harness::check_eq!(directory_info.size, 1);
+}
+
+#[test_harness::test]
+fn filesystem_stat_of_an_open_node_matches_its_opening() {
+    let client = connect(ram_session());
+    let opened = open(
+        &client,
+        "/identity-stat",
+        AccessMode::ReadWrite,
+        OpenFlags::CREATE,
+    );
+
+    let info = client.stat(opened.fd).expect("stat ok");
+
+    test_harness::check_eq!(info, opened.info);
+    test_harness::check!(info.volume != 0);
+}
+
+#[test_harness::test]
+fn filesystem_volumes_of_different_servers_differ() {
+    let [ram, image] = [ram_session(), image_session()].map(|session| {
+        open(
+            &connect(session),
+            Path::ROOT.as_str(),
+            AccessMode::Read,
+            OpenFlags::DIRECTORY,
+        )
+    });
+
+    test_harness::check!(ram.info.volume != image.info.volume);
 }
 
 #[test_harness::test]
@@ -633,6 +663,7 @@ fn replaced_entry_kind() -> NodeKind {
         AccessMode::Read,
         OpenFlags::NONE,
     )
+    .info
     .kind
 }
 
@@ -701,7 +732,7 @@ fn namespace_grafts_the_session_it_is_handed() {
         AccessMode::Read,
         OpenFlags::NONE,
     );
-    test_harness::check_eq!(opened.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
 
     let absent = connect(image_session()).open(GRAFT_ENTRY, AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(absent, Err(CallError::Remote(FileSystemError::NotFound)));
@@ -764,7 +795,7 @@ fn namespace_resolves_a_pair_to_the_session_of_their_common_directory() {
         AccessMode::Read,
         OpenFlags::NONE,
     );
-    test_harness::check_eq!(opened.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
 }
 
 #[test_harness::test]
@@ -980,7 +1011,7 @@ fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
     let opened = connect(window)
         .open(Path::ROOT.as_str(), AccessMode::Read, OpenFlags::NONE)
         .expect("issued window keeps its root");
-    test_harness::check_eq!(opened.kind, NodeKind::Directory);
+    test_harness::check_eq!(opened.info.kind, NodeKind::Directory);
     let rerouted = session_for(SHADOW_MOUNT);
     let image_file = open(
         &connect(rerouted),
@@ -988,7 +1019,7 @@ fn a_closed_admin_session_ends_its_mount_and_keeps_issued_windows() {
         AccessMode::Read,
         OpenFlags::NONE,
     );
-    test_harness::check_eq!(image_file.kind, NodeKind::File);
+    test_harness::check_eq!(image_file.info.kind, NodeKind::File);
 }
 
 #[test_harness::test]
@@ -998,8 +1029,8 @@ fn filesystem_reads_a_file_from_the_image() {
     let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("map data buffer");
 
     let opened = open(&client, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
-    test_harness::check_eq!(opened.kind, NodeKind::File);
-    test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.size, IMAGE_FILE_BODY.len() as u64);
 
     let count = client.read(opened.fd, 0, BUFFER_SIZE).expect("read ok");
     test_harness::check_eq!(count, IMAGE_FILE_BODY.len() as u32);
@@ -1018,7 +1049,7 @@ fn filesystem_lists_the_image_directory() {
         AccessMode::Read,
         OpenFlags::DIRECTORY,
     );
-    test_harness::check_eq!(directory.kind, NodeKind::Directory);
+    test_harness::check_eq!(directory.info.kind, NodeKind::Directory);
 
     let names = walk_directory(&client, &buffer, directory.fd);
 
@@ -1067,9 +1098,9 @@ fn filesystem_hands_out_the_backing_window_of_an_image_file() {
 
     let window = MemoryRegion::from(client.backing_memory(opened.fd).expect("window granted"));
     let mapped = Mapping::full(&window, UserMemFlags::ReadOnly).expect("map backing window");
-    test_harness::check!(mapped.size_bytes() >= opened.size);
+    test_harness::check!(mapped.size_bytes() >= opened.info.size);
     test_harness::check_eq!(
-        buffer_head(&mapped, opened.size as usize),
+        buffer_head(&mapped, opened.info.size as usize),
         buffer_head(&buffer, count as usize)
     );
 
@@ -1082,8 +1113,8 @@ fn filesystem_serves_an_empty_file_from_the_image() {
     let _buffer = acquire_buffer(&client);
 
     let opened = open(&client, IMAGE_EMPTY_FILE, AccessMode::Read, OpenFlags::NONE);
-    test_harness::check_eq!(opened.kind, NodeKind::File);
-    test_harness::check_eq!(opened.size, 0);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.size, 0);
 
     let info = client.stat(opened.fd).expect("stat ok");
     test_harness::check_eq!(info.kind, NodeKind::File);
@@ -1498,7 +1529,7 @@ fn filesystem_creates_nothing_for_a_call_without_a_reply_channel() {
     let client = connect(ram_session());
     let missing = client
         .open(UNANSWERED_PATH, AccessMode::Read, OpenFlags::NONE)
-        .map(|opened| opened.kind);
+        .map(|opened| opened.info.kind);
     let created = open(
         &client,
         UNANSWERED_PATH,
@@ -1507,7 +1538,7 @@ fn filesystem_creates_nothing_for_a_call_without_a_reply_channel() {
     );
 
     test_harness::check_eq!(missing, Err(CallError::Remote(FileSystemError::NotFound)));
-    test_harness::check_eq!(created.kind, NodeKind::File);
+    test_harness::check_eq!(created.info.kind, NodeKind::File);
 }
 
 #[test_harness::test]
@@ -1529,7 +1560,7 @@ fn filesystem_serves_on_after_an_unknown_ordinal() {
         AccessMode::ReadWrite,
         OpenFlags::CREATE,
     );
-    test_harness::check_eq!(opened.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
 }
 
 #[test_harness::test]

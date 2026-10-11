@@ -5,7 +5,9 @@ use alloc::{boxed::Box, string::String};
 use core::sync::atomic::AtomicU64;
 
 use component_startup::{MintedSession, mint_session};
-use filesystem::{ByteStore, ClientId, FileSystemBackend, NodeId, OpenNode, Session, SessionTable};
+use filesystem::{
+    ByteStore, ClientId, FileSystemBackend, NodeId, NodeMetadata, OpenNode, Session, SessionTable,
+};
 use filesystem_abi::{
     AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
     Opened, PATH_MAX, Path, Written, file_system, rebase,
@@ -14,7 +16,7 @@ use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{
     Delivery, IssuedHandle, MemoryRegion, OwnedHandle, Port, ReadOnlyMapping, Resource, kind,
 };
-use runtime::MemoryAccess;
+use runtime::{MemoryAccess, random};
 
 use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};
 
@@ -30,6 +32,7 @@ pub(crate) struct Attachment {
 
 pub(crate) struct FileSystemState {
     backend: Box<dyn FileSystemBackend + Send>,
+    volume: u64,
     sessions: SessionTable<Attachment>,
     stores: StoreTable,
 }
@@ -79,6 +82,7 @@ impl FileSystemState {
     ) -> Self {
         Self {
             backend,
+            volume: volume_number(),
             sessions: SessionTable::new(),
             stores: StoreTable::new(resource, backing),
         }
@@ -174,6 +178,7 @@ impl Serving<'_> {
             backend,
             stores,
             sessions,
+            ..
         } = &mut *self.state;
         Ok((backend.as_mut(), stores, sessions.get_mut(client)?))
     }
@@ -265,7 +270,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         }
         let opened = open_in_backend(backend, stores, path, mode, flags)?;
         let node = opened.node;
-        let info = backend.metadata(node)?;
+        let metadata = backend.metadata(node)?;
         let fd = match self.state.open_node(client, node, mode) {
             Ok(fd) => fd,
             Err(error) => {
@@ -275,15 +280,14 @@ impl file_system::Service<Delivery> for Serving<'_> {
                     let FileSystemState {
                         backend, stores, ..
                     } = &mut *self.state;
-                    let _ = backend.unlink(stores, path, info.kind);
+                    let _ = backend.unlink(stores, path, metadata.kind);
                 }
                 return Err(error);
             }
         };
         Ok(Opened {
             fd,
-            kind: info.kind,
-            size: info.size,
+            info: node_info(self.state.volume, node, metadata),
         })
     }
 
@@ -350,9 +354,12 @@ impl file_system::Service<Delivery> for Serving<'_> {
         delivery: &Delivery,
         fd: NodeDescriptor,
     ) -> Result<NodeInfo, FileSystemError> {
+        let volume = self.state.volume;
         let (backend, _, session) = self.backend_stores_session(client_of(delivery)?)?;
         let open_node = readable(session.get(fd)?)?;
-        backend.metadata(open_node.node)
+        let metadata = backend.metadata(open_node.node)?;
+
+        Ok(node_info(volume, open_node.node, metadata))
     }
 
     fn list(
@@ -485,6 +492,22 @@ fn writable(open_node: OpenNode) -> Result<OpenNode, FileSystemError> {
         return Ok(open_node);
     }
     Err(FileSystemError::WrongMode)
+}
+
+fn volume_number() -> u64 {
+    let mut bytes = [0; size_of::<u64>()];
+    random::fill_bytes(&mut bytes);
+
+    u64::from_ne_bytes(bytes).max(1)
+}
+
+fn node_info(volume: u64, node: NodeId, metadata: NodeMetadata) -> NodeInfo {
+    NodeInfo {
+        kind: metadata.kind,
+        size: metadata.size,
+        volume,
+        node: u64::from(node.raw()),
+    }
 }
 
 struct OpenedNode {

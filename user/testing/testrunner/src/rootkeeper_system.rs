@@ -677,7 +677,15 @@ fn written(
 ) -> Result<NodeKind, CallError<FileSystemError>> {
     client
         .open(WRITTEN_PATH, AccessMode::Read, OpenFlags::NONE)
-        .map(|opened| opened.kind)
+        .map(|opened| opened.info.kind)
+}
+
+fn root_volume(client: &file_system::Client<SessionTransport>) -> u64 {
+    client
+        .open("/", AccessMode::Read, OpenFlags::DIRECTORY)
+        .expect("the volume root opens")
+        .info
+        .volume
 }
 
 fn logged(lines: &[String], expected: &str) -> usize {
@@ -1921,6 +1929,9 @@ fn two_volumes_of_one_file_system_keep_their_trees_separate() {
         second_written,
         Err(CallError::Remote(FileSystemError::NotFound))
     );
+    let [first_volume, second_volume] = [&first, &second].map(root_volume);
+    test_harness::check!(first_volume != second_volume);
+    test_harness::check!(first_volume != 0 && second_volume != 0);
     finish(composition);
 }
 

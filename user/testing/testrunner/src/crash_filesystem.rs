@@ -5,8 +5,8 @@ extern crate alloc;
 
 use component_abi::Attributes;
 use component_startup::{SessionError, component_manifest};
-use filesystem::{ByteStore, FileSystemBackend, NodeId, RamFileSystem, Window};
-use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path, file_system};
+use filesystem::{ByteStore, FileSystemBackend, NodeId, NodeMetadata, RamFileSystem, Window};
+use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeKind, Path, file_system};
 use filesystem_server::serve_volumes;
 use runtime::{FAILED_EXIT_CODE, exit};
 use syscall::{Handle, USER_VA_END, kind};
@@ -61,7 +61,7 @@ impl FileSystemBackend for CrashingFileSystem {
         self.inner.release(stores, node);
     }
 
-    fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {
+    fn metadata(&self, node: NodeId) -> Result<NodeMetadata, FileSystemError> {
         self.inner.metadata(node)
     }
 

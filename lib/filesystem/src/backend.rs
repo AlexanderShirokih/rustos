@@ -1,11 +1,20 @@
 //! Общая часть файловых систем: операции над деревом имён и над содержимым узлов.
 
-use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeInfo, NodeKind, Path};
+use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeKind, Path};
 
 use crate::{
     node::{NodeId, Window},
     store::{ByteStore, StoreId},
 };
+
+/// Вид узла бекенда и его размер.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeMetadata {
+    /// Вид узла.
+    pub kind: NodeKind,
+    /// Размер узла: у файла - длина содержимого в байтах, у каталога - число его записей.
+    pub size: u64,
+}
 
 /// Файловая система точки монтирования. Пути отсчитываются от её корня, [`NodeId`] действителен
 /// только внутри неё.
@@ -75,7 +84,7 @@ pub trait FileSystemBackend {
 
     /// Возвращает вид узла и его размер: длину файла в байтах либо число записей каталога. Если
     /// узел в системе отсутствует, возвращает `NotFound`.
-    fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError>;
+    fn metadata(&self, node: NodeId) -> Result<NodeMetadata, FileSystemError>;
 
     /// Копирует в `out` байты файла, начиная со смещения `offset`, и возвращает их число.
     /// Смещение от длины файла и дальше даёт ноль байт. Если узел оказался каталогом, возвращает

@@ -8,11 +8,11 @@
 
 use alloc::{string::String, vec, vec::Vec};
 
-use filesystem_abi::{DirCursor, DirEntry, FileSystemError, Listed, NodeInfo, NodeKind, Path};
+use filesystem_abi::{DirCursor, DirEntry, FileSystemError, Listed, NodeKind, Path};
 use userland::USERLAND_PAGE_SIZE;
 
 use crate::{
-    backend::FileSystemBackend,
+    backend::{FileSystemBackend, NodeMetadata},
     node::{NodeId, Window},
     store::{ByteStore, StoreId},
 };
@@ -389,17 +389,17 @@ impl FileSystemBackend for RamFileSystem {
         Ok(())
     }
 
-    fn metadata(&self, node: NodeId) -> Result<NodeInfo, FileSystemError> {
+    fn metadata(&self, node: NodeId) -> Result<NodeMetadata, FileSystemError> {
         Ok(match self.node(node)? {
-            Node::File(File::Heap(data)) => NodeInfo {
+            Node::File(File::Heap(data)) => NodeMetadata {
                 kind: NodeKind::File,
                 size: data.len() as u64,
             },
-            Node::File(File::Backed { len, .. }) => NodeInfo {
+            Node::File(File::Backed { len, .. }) => NodeMetadata {
                 kind: NodeKind::File,
                 size: *len as u64,
             },
-            Node::Directory(entries) => NodeInfo {
+            Node::Directory(entries) => NodeMetadata {
                 kind: NodeKind::Directory,
                 size: entries.iter().flatten().count() as u64,
             },

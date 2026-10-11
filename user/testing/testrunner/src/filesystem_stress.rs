@@ -173,9 +173,12 @@ impl Run {
             .client
             .open(&text, AccessMode::ReadWrite, OpenFlags::CREATE)
             .map_err(Mismatch::refused("open with CREATE"))?;
-        expect(opened.kind == NodeKind::File, "opened node is not a file")?;
         expect(
-            opened.size == expected,
+            opened.info.kind == NodeKind::File,
+            "opened node is not a file",
+        )?;
+        expect(
+            opened.info.size == expected,
             "opened size differs from the model",
         )?;
         self.files.entry(text.clone()).or_default();
@@ -202,7 +205,7 @@ impl Run {
             );
         }
         let opened = opened.map_err(Mismatch::refused("exclusive open of a free name"))?;
-        expect(opened.size == 0, "created node is not empty")?;
+        expect(opened.info.size == 0, "created node is not empty")?;
         self.files.insert(text.clone(), Vec::new());
         self.keep(Descriptor {
             fd: opened.fd,
@@ -226,7 +229,10 @@ impl Run {
             );
         };
         let opened = opened.map_err(Mismatch::refused("open of a known name"))?;
-        expect(opened.size == size, "opened size differs from the model")?;
+        expect(
+            opened.info.size == size,
+            "opened size differs from the model",
+        )?;
         self.keep(Descriptor {
             fd: opened.fd,
             mode: AccessMode::Read,
@@ -419,7 +425,7 @@ impl Run {
                 .map_err(Mismatch::refused(
                     "open of a node that outlived the session",
                 ))?;
-            expect(opened.size == size, "size is gone with the session")?;
+            expect(opened.info.size == size, "size is gone with the session")?;
             self.session
                 .client
                 .close(opened.fd)
@@ -466,7 +472,7 @@ impl Run {
                 .open(&text, AccessMode::Read, OpenFlags::NONE)
                 .map_err(Mismatch::refused("open of a node of the tree"))?;
             expect(
-                opened.size == content.len() as u64,
+                opened.info.size == content.len() as u64,
                 "size differs from the model",
             )?;
             let count = self

@@ -27,8 +27,8 @@ impl<E: Environment> OpenNode<E> {
         Self {
             session,
             descriptor: opened.fd,
-            kind: opened.kind,
-            size: opened.size,
+            kind: opened.info.kind,
+            size: opened.info.size,
             position: 0,
         }
     }

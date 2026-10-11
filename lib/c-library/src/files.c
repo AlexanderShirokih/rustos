@@ -37,10 +37,12 @@ const uint32_t c_library_s_ifchr = S_IFCHR;
 const uint8_t c_library_dt_reg = DT_REG;
 const uint8_t c_library_dt_dir = DT_DIR;
 
-/* Тип и размер узла от Rust-части. */
+/* Метаданные узла. Раскладка совпадает с Node в files.rs. */
 struct c_library_node {
     uint32_t mode;
     int64_t  size;
+    uint64_t volume;
+    uint64_t inode;
 };
 
 /* Поток каталога: DIR заголовка хранит текущую запись, listing - обход Rust-части. */
@@ -67,6 +69,8 @@ static void fill_stat(struct stat *st, const struct c_library_node *node)
     memset(st, 0, sizeof *st);
     st->st_mode = node->mode;
     st->st_size = node->size;
+    st->st_dev = node->volume;
+    st->st_ino = node->inode;
     st->st_nlink = 1;
 }
 

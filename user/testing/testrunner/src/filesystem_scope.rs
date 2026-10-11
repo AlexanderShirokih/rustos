@@ -41,8 +41,8 @@ fn filesystem_scopes_a_session_to_an_image_directory() {
     let scoped = connect(window_of(&parent, COMPONENT_DIRECTORY));
 
     let opened = open(&scoped, "/sample", AccessMode::Read, OpenFlags::NONE);
-    test_harness::check_eq!(opened.kind, NodeKind::File);
-    test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.size, IMAGE_FILE_BODY.len() as u64);
     let unread = scoped.read(opened.fd, 0, BUFFER_SIZE);
     test_harness::check_eq!(unread, Err(CallError::Remote(FileSystemError::NoBuffer)));
 
@@ -113,7 +113,7 @@ fn filesystem_scoped_windows_narrow_and_compose() {
     let first = connect(window_of(&client, &format!("{CHAIN_WINDOW}/outer")));
     let scoped = connect(window_of(&first, "/inner"));
     let reached = open(&scoped, "/leaf", AccessMode::Read, OpenFlags::NONE);
-    test_harness::check_eq!(reached.size, payload.len() as u64);
+    test_harness::check_eq!(reached.info.size, payload.len() as u64);
 
     let outside = scoped.open("/inner/leaf", AccessMode::Read, OpenFlags::NONE);
     test_harness::check_eq!(outside, Err(CallError::Remote(FileSystemError::NotFound)));
@@ -147,7 +147,9 @@ fn filesystem_scoped_session_writes_through_its_window() {
         AccessMode::Read,
         OpenFlags::NONE,
     );
-    test_harness::check_eq!(outer.size, payload.len() as u64);
+    test_harness::check_eq!(outer.info.size, payload.len() as u64);
+    test_harness::check_eq!(outer.info.volume, created.info.volume);
+    test_harness::check_eq!(outer.info.node, created.info.node);
 
     scoped.rename("/fresh", "/renamed").expect("rename ok");
     scoped
@@ -167,8 +169,8 @@ fn filesystem_open_root_accepts_any_existing_node() {
 
     let file = connect(window_of(&parent, IMAGE_FILE));
     let opened = open(&file, "/", AccessMode::Read, OpenFlags::NONE);
-    test_harness::check_eq!(opened.kind, NodeKind::File);
-    test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
+    test_harness::check_eq!(opened.info.kind, NodeKind::File);
+    test_harness::check_eq!(opened.info.size, IMAGE_FILE_BODY.len() as u64);
     test_harness::check_eq!(
         file.open("/child", AccessMode::Read, OpenFlags::NONE),
         Err(CallError::Remote(FileSystemError::NotADirectory))
@@ -180,7 +182,7 @@ fn filesystem_open_root_accepts_any_existing_node() {
 
     let scoped = connect(window_of(&parent, "/"));
     let opened = open(&scoped, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
-    test_harness::check_eq!(opened.size, IMAGE_FILE_BODY.len() as u64);
+    test_harness::check_eq!(opened.info.size, IMAGE_FILE_BODY.len() as u64);
 }
 
 #[test_harness::test]
@@ -205,7 +207,7 @@ fn filesystem_scoped_session_cannot_name_its_own_root() {
     test_harness::check_eq!(onto, Err(CallError::Remote(FileSystemError::InvalidPath)));
 
     let alive = open(&client, ROOT_WINDOW, AccessMode::Read, OpenFlags::DIRECTORY);
-    test_harness::check_eq!(alive.kind, NodeKind::Directory);
+    test_harness::check_eq!(alive.info.kind, NodeKind::Directory);
 
     client
         .unlink(ROOT_WINDOW, NodeKind::Directory)

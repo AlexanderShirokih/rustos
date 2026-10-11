@@ -62,7 +62,7 @@ fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
     let Ok(opened) = client.open(RECORD, AccessMode::Read, OpenFlags::NONE) else {
         return false;
     };
-    if opened.kind != NodeKind::File || opened.size != RECORD_BODY.len() as u64 {
+    if opened.info.kind != NodeKind::File || opened.info.size != RECORD_BODY.len() as u64 {
         return false;
     }
     let Ok(count) = client.read(opened.fd, 0, BUFFER_SIZE) else {

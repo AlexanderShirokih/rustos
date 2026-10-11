@@ -380,6 +380,28 @@ static void check_read_write(void)
     check(fstat(1, &st) == 0 && S_ISCHR(st.st_mode), "fstat on fd 1 reports a character device");
 }
 
+static void check_identity(void)
+{
+    struct stat by_path;
+    struct stat by_descriptor;
+    int         fd = open(SCRATCH "/identity", O_RDWR | O_CREAT, 0644);
+    check(stat(SCRATCH "/identity", &by_path) == 0 && fstat(fd, &by_descriptor) == 0 &&
+              by_path.st_dev == by_descriptor.st_dev && by_path.st_ino == by_descriptor.st_ino,
+          "stat and fstat report one node");
+    close(fd);
+
+    struct stat peer;
+    close(open(SCRATCH "/identity-peer", O_WRONLY | O_CREAT, 0644));
+    check(stat(SCRATCH "/identity-peer", &peer) == 0 && peer.st_dev == by_path.st_dev && peer.st_ino != by_path.st_ino,
+          "two files of /tmp share st_dev and differ in st_ino");
+
+    struct stat scratch;
+    struct stat image;
+    check(stat("/tmp", &scratch) == 0 && stat("/boot", &image) == 0 && scratch.st_dev != image.st_dev &&
+              scratch.st_dev != 0 && image.st_dev != 0,
+          "/tmp and /boot differ in a nonzero st_dev");
+}
+
 static void check_truncate(void)
 {
     char buffer[16];
@@ -483,6 +505,7 @@ static void check_files(void)
     check(mkdir(SCRATCH, 0755) == 0 && mkdir(SCRATCH_PEER, 0755) == 0, "mkdir creates the scratch directories");
     check_open();
     check_read_write();
+    check_identity();
     check_truncate();
     check_streams();
     check_paths();

@@ -11,6 +11,7 @@
 
 use std::{
     collections::BTreeMap,
+    hash::{DefaultHasher, Hash, Hasher},
     string::String,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -38,6 +39,8 @@ const BUFFER_SIZE: u32 = 4096;
 const ROOT: &str = "/";
 
 const TRUNCATED_BODY: usize = 4;
+
+const VOLUME: u64 = 0x5EED;
 
 type Shared = Arc<Mutex<Vec<u8>>>;
 
@@ -394,7 +397,7 @@ impl file_system::Service<MockResources> for SessionServer {
             tree.insert(full.clone(), node.clone());
             node
         };
-        let size = measure(&tree, &full, &node);
+        let info = info_of(&tree, &full, &node);
         drop(tree);
         let raw = self.next_descriptor;
         self.next_descriptor += 1;
@@ -402,8 +405,7 @@ impl file_system::Service<MockResources> for SessionServer {
         self.world.live.fetch_add(1, Ordering::SeqCst);
         Ok(Opened {
             fd: NodeDescriptor::from_raw(raw),
-            kind: kind_of(&node),
-            size,
+            info,
         })
     }
 
@@ -507,10 +509,7 @@ impl file_system::Service<MockResources> for SessionServer {
         let path = self.path_of(fd)?;
         let tree = self.filesystem.tree();
         let node = tree.get(&path).ok_or(FileSystemError::NotFound)?.clone();
-        Ok(NodeInfo {
-            kind: kind_of(&node),
-            size: measure(&tree, &path, &node),
-        })
+        Ok(info_of(&tree, &path, &node))
     }
 
     fn list(
@@ -862,6 +861,18 @@ fn kind_of(node: &Node) -> NodeKind {
     match node {
         Node::File(_) => NodeKind::File,
         Node::Directory => NodeKind::Directory,
+    }
+}
+
+fn info_of(tree: &BTreeMap<String, Node>, path: &str, node: &Node) -> NodeInfo {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+
+    NodeInfo {
+        kind: kind_of(node),
+        size: measure(tree, path, node),
+        volume: VOLUME,
+        node: hasher.finish(),
     }
 }
 
@@ -1382,24 +1393,23 @@ fn a_refused_descriptor_of_the_scoped_session_leaves_no_session_behind() {
 }
 
 #[test]
-fn metadata_reports_the_kind_and_the_size() {
+fn metadata_by_path_matches_the_open_node() {
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     let mut filesystem = routed(&world);
 
+    let file = filesystem.metadata(path("/data/first")).expect("metadata");
+    let opened = filesystem
+        .open(path("/data/first"), AccessMode::Read, OpenFlags::NONE)
+        .expect("open");
+    assert_eq!(opened.metadata().expect("stat"), file);
     assert_eq!(
-        filesystem.metadata(path("/data/first")).expect("metadata"),
-        NodeInfo {
-            kind: NodeKind::File,
-            size: 3,
-        }
+        (file.kind, file.size, file.volume),
+        (NodeKind::File, 3, VOLUME)
     );
-    assert_eq!(
-        filesystem.metadata(path("/data")).expect("metadata"),
-        NodeInfo {
-            kind: NodeKind::Directory,
-            size: 1,
-        }
-    );
+
+    let directory = filesystem.metadata(path("/data")).expect("metadata");
+    assert_eq!((directory.kind, directory.size), (NodeKind::Directory, 1));
+    assert_ne!(directory.node, file.node);
 }
 
 #[test]
@@ -1697,13 +1707,8 @@ fn a_mount_root_is_read_through_its_own_filesystem() {
     drop(listing);
 
     assert_eq!(names, [String::from("first"), String::from("nested")]);
-    assert_eq!(
-        filesystem.metadata(path("/tmp")).expect("metadata"),
-        NodeInfo {
-            kind: NodeKind::Directory,
-            size: 2,
-        }
-    );
+    let info = filesystem.metadata(path("/tmp")).expect("metadata");
+    assert_eq!((info.kind, info.size), (NodeKind::Directory, 2));
     assert_eq!(world.resolves().first(), Some(&String::from(ROOT)));
     assert!(world.resolves().contains(&String::from("/tmp")));
 }
@@ -1728,13 +1733,8 @@ fn a_mount_root_without_a_parent_directory_is_reachable() {
     let mut filesystem = routed(&world);
 
     assert_eq!(read_all(&mut filesystem, "/store/area/first", 8), b"one");
-    assert_eq!(
-        filesystem.metadata(path("/store/area")).expect("metadata"),
-        NodeInfo {
-            kind: NodeKind::Directory,
-            size: 1,
-        }
-    );
+    let info = filesystem.metadata(path("/store/area")).expect("metadata");
+    assert_eq!((info.kind, info.size), (NodeKind::Directory, 1));
 }
 
 #[test]

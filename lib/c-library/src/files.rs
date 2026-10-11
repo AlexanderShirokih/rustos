@@ -35,6 +35,8 @@ unsafe extern "C" {
 struct Node {
     mode: u32,
     size: i64,
+    volume: u64,
+    inode: u64,
 }
 
 impl Node {
@@ -46,6 +48,8 @@ impl Node {
         Self {
             mode,
             size: i64::try_from(info.size).unwrap_or(i64::MAX),
+            volume: info.volume,
+            inode: info.node,
         }
     }
 
@@ -53,6 +57,8 @@ impl Node {
         Self {
             mode: c_library_s_ifchr,
             size: 0,
+            volume: 0,
+            inode: 0,
         }
     }
 }

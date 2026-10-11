@@ -191,8 +191,12 @@ mod tests {
     const FD: NodeDescriptor = NodeDescriptor::from_raw(7);
     const OPENED: Opened = Opened {
         fd: FD,
-        kind: NodeKind::File,
-        size: 4096,
+        info: NodeInfo {
+            kind: NodeKind::File,
+            size: 4096,
+            volume: 0x5EED,
+            node: 9,
+        },
     };
     const WRITTEN: Written = Written {
         count: 12,
@@ -206,6 +210,8 @@ mod tests {
     const NODE_INFO: NodeInfo = NodeInfo {
         kind: NodeKind::Directory,
         size: 128,
+        volume: 0x5EED,
+        node: 3,
     };
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,7 +477,7 @@ mod tests {
                 client.acquire_buffer(0).map(|_| 0),
                 client
                     .open(path("/data/sample"), AccessMode::ReadWrite, flags)
-                    .map(|opened| opened.size as u32),
+                    .map(|opened| opened.info.size as u32),
                 client.close(FD),
                 client.read(FD, 1024, 4096),
                 client.write(FD, u64::MAX, 12).map(|written| written.count),
@@ -491,7 +497,7 @@ mod tests {
             [
                 Ok(0),
                 Err(CallError::Remote(FileSystemError::NoSpace)),
-                Ok(OPENED.size as u32),
+                Ok(OPENED.info.size as u32),
                 Ok(DONE),
                 Ok(READ_COUNT),
                 Ok(WRITTEN.count),
