@@ -1,15 +1,17 @@
 #![no_std]
 #![no_main]
 
-use core::{num::NonZeroU64, sync::atomic::AtomicU64};
+use core::num::NonZeroU64;
 
 use component_abi::component_startup as startup_contract;
 use component_startup::{
-    Requirements as _, SessionRequest, accept, component_manifest, mint_session,
+    Requirements as _, SessionPort, SessionRequest, accept, component_manifest,
 };
 use ipc::{CallError, Listener as _, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::Port;
-use runtime::{FAILED_EXIT_CODE, PortTransport, Timeout, exit, log_line, process_exit};
+use runtime::{
+    FAILED_EXIT_CODE, PortTransport, Timeout, exit, log_line, process_exit, spawn_bound,
+};
 use syscall::{Handle, Rights, kind};
 
 mod child_steps_protocol;
@@ -32,8 +34,7 @@ component_manifest! {
 
 struct Fixture {
     parent: Handle<kind::Port>,
-    export: Port,
-    next_badge: AtomicU64,
+    export: SessionPort,
     held: Option<SessionRequest>,
 }
 
@@ -44,13 +45,12 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .open()
         .map_err(|_| Failed)?;
     let logged = runtime::log::installed();
-    let export = Port::create().map_err(|_| Failed)?;
+    let export = SessionPort::create().map_err(|_| Failed)?;
 
-    let steps = steps.client();
+    let steps = steps.client().with_wait(Timeout::INFINITE);
     let mut fixture = Fixture {
         parent,
         export,
-        next_badge: AtomicU64::new(0),
         held: None,
     };
     let mut last = (outcome::STARTED, u64::from(logged));
@@ -74,13 +74,14 @@ impl Fixture {
     fn run(&mut self, step: Step) -> (u32, u64) {
         match step.action {
             action::ACCEPT => self.accept(Timeout::from_ns(step.argument)),
-            action::ANSWER_SESSION => match mint_session(&self.export, &self.next_badge) {
+            action::ANSWER_SESSION => match self.export.create_session() {
                 Ok(minted) => self.answer(Ok(minted.port)),
                 Err(_) => (outcome::NO_SESSION, 0),
             },
             action::ANSWER_BADGED => {
                 let copy = NonZeroU64::new(step.argument).and_then(|badge| {
                     self.export
+                        .port()
                         .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))
                         .ok()
                 });
@@ -104,6 +105,10 @@ impl Fixture {
             }
             action::EXIT => process_exit(step.argument),
             action::WAIT => wait(),
+            action::BOUND_FAILURE => match spawn_bound(|| Failed) {
+                Ok(_) => wait(),
+                Err(_) => (outcome::SPAWN_REFUSED, 0),
+            },
             _ => (outcome::UNKNOWN_STEP, 0),
         }
     }
@@ -134,7 +139,7 @@ impl Fixture {
 
     fn recv(&self, wait: Timeout) -> (u32, u64) {
         let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        match PortTransport::new(self.export.as_raw()).recv(&mut bytes, wait) {
+        match PortTransport::new(self.export.port().as_raw()).recv(&mut bytes, wait) {
             Ok(frame) => {
                 let badge = frame.resources.badge;
                 let _ = probe::dispatch(&mut Echo, frame);

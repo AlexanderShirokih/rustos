@@ -10,7 +10,7 @@
 //! снимают с вызывающего передачу состояния через сырой указатель.
 
 use alloc::boxed::Box;
-use core::{ptr::NonNull, time::Duration};
+use core::{fmt::Display, ptr::NonNull, time::Duration};
 
 use syscall::{
     Handle, MEMORY_ALLOCATE_GUARD_PAGE, PAGE_SIZE, Priority, SIGNALED, SyscallError, Timeout,
@@ -19,7 +19,7 @@ use syscall::{
 
 use crate::{
     futex::{Deadline, Futex, wait_deadline},
-    process::metering_handle,
+    process::{finish, metering_handle},
     svc::{
         IssuedHandle, memory_allocate, memory_free, process_self, signal_wait_one, thread_create,
         thread_exit, thread_exit_code,
@@ -249,6 +249,17 @@ where
     F: FnOnce() -> u32 + Send + 'static,
 {
     Builder::new().spawn_owned(body)
+}
+
+/// Запускает поток с телом `body`, чей возврат завершает процесс как отказ `run`: причина
+/// пишется в журнал строкой `stopped: {reason}`, и процесс завершается кодом
+/// [`FAILED_EXIT_CODE`](crate::FAILED_EXIT_CODE).
+pub fn spawn_bound<F, E>(body: F) -> Result<JoinHandle, SyscallError>
+where
+    F: FnOnce() -> E + Send + 'static,
+    E: Display,
+{
+    spawn_owned(move || finish(Err::<(), E>(body())))
 }
 
 extern "C" fn run_owned(payload: usize) -> u32 {

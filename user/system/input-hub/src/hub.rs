@@ -4,9 +4,8 @@
 //! запись, заменяется последовательностью начала сессии по текущей таблице.
 
 use alloc::{boxed::Box, collections::BTreeMap};
-use core::sync::atomic::AtomicU64;
 
-use component_startup::{MintedSession, SessionError, mint_session};
+use component_startup::{MintedSession, SessionError, SessionPort};
 use input_abi::{
     DeclareError, DescribeError, DeviceDescriptor, DeviceLayout, MESSAGE_RECORDS_MAX, NextError,
     RECORD_SIZE, Record, RecordBuf, Tracker, UpdateError, input, input_inject,
@@ -23,8 +22,6 @@ const START_RECORDS_LIMIT: usize = QUEUE_RECORDS_MAX - MESSAGE_RECORDS_MAX;
 type Debt = IssuedHandle<kind::Reply>;
 type Raw = [u8; RECORD_SIZE];
 
-static SOURCE_BADGES: AtomicU64 = AtomicU64::new(0);
-static INPUT_BADGES: AtomicU64 = AtomicU64::new(0);
 static HUB: Mutex<Hub> = Mutex::new(Hub {
     devices: BTreeMap::new(),
     sessions: BTreeMap::new(),
@@ -181,13 +178,12 @@ impl input::Service<Delivery> for Consumer {
     }
 }
 
-pub(crate) fn open_source(export: &Port) -> Result<Port, SessionError> {
-    let MintedSession { port, .. } =
-        mint_session(export, &SOURCE_BADGES).map_err(|_| SessionError::NoSpace)?;
+pub(crate) fn open_source(export: &SessionPort) -> Result<Port, SessionError> {
+    let MintedSession { port, .. } = export.create_session().map_err(|_| SessionError::NoSpace)?;
     Ok(port)
 }
 
-pub(crate) fn open_input(export: &Port) -> Result<Port, SessionError> {
+pub(crate) fn open_input(export: &SessionPort) -> Result<Port, SessionError> {
     let mut hub = HUB.lock();
     if hub.sessions.len() >= INPUT_SESSIONS_MAX {
         return Err(SessionError::NoSpace);
@@ -196,7 +192,7 @@ pub(crate) fn open_input(export: &Port) -> Result<Port, SessionError> {
     let mut queue = Queue::new().ok_or(SessionError::NoSpace)?;
     restart(&mut queue, &hub.devices);
     let MintedSession { badge, port } =
-        mint_session(export, &INPUT_BADGES).map_err(|_| SessionError::NoSpace)?;
+        export.create_session().map_err(|_| SessionError::NoSpace)?;
     let session = Session {
         queue,
         waiting: None,

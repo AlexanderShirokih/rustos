@@ -457,7 +457,6 @@ dependencies = [
  "ipc",
  "kernel-objects",
  "rtc-abi",
- "syscall",
  "userland-build",
 ]
 
@@ -1201,6 +1200,7 @@ dependencies = [
  "display-abi",
  "filesystem-abi",
  "input-abi",
+ "ipc",
  "kernel-objects",
  "slint",
  "slint-build",
@@ -2397,7 +2397,6 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "input-abi",
- "ipc",
  "kernel-objects",
  "program-entry",
  "runtime",

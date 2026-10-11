@@ -12,7 +12,7 @@ mod failed;
 use alloc::{boxed::Box, vec::Vec};
 
 use component_startup::{
-    Requirements as _, SessionEvent, SessionEvents, component_manifest, serve_export, whole_export,
+    Requirements as _, SessionEvent, SessionPort, component_manifest, serve_export, whole_export,
 };
 use display_abi::{
     Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES, display,
@@ -20,8 +20,8 @@ use display_abi::{
 use display_fixture_protocol::{DIMENSION, PHYSICAL_SIZE};
 use failed::Failed;
 use ipc::{IntoWireValue, wire::Cap};
-use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource};
-use runtime::{FAILED_EXIT_CODE, MemoryAccess, UserMemFlags, exit, log_fmt, log_line, spawn_owned};
+use kernel_objects::{Delivery, Mapping, MemoryRegion, Resource};
+use runtime::{MemoryAccess, UserMemFlags, log_line, spawn_bound};
 use syscall::{Handle, Rights, kind};
 
 const ROW_MAX_BYTES: usize = DIMENSION.width as usize * SURFACE_PIXEL_BYTES as usize;
@@ -147,15 +147,12 @@ impl display::Service<Delivery> for Screen {
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
-    let service = Port::create().map_err(|_| Failed)?;
+    let service = SessionPort::create().map_err(|_| Failed)?;
     let mut screen = Screen::new().ok_or(Failed)?;
-    let service: &'static Port = Box::leak(Box::new(service));
+    let service: &'static SessionPort = Box::leak(Box::new(service));
     let parent_port = DisplayStartup::from_parent(parent).parent;
-    let export_thread = spawn_owned(move || {
-        let failure = serve_export::<display::Protocol>(&parent_port, whole_export(service));
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    });
+    let export_thread =
+        spawn_bound(move || serve_export::<display::Protocol>(parent_port, whole_export(service)));
     if export_thread.is_err() {
         return Err(Failed);
     }
@@ -165,8 +162,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     Err(Failed)
 }
 
-fn serve(service: &Port, screen: &mut Screen) {
-    let mut events = SessionEvents::new(service);
+fn serve(service: &SessionPort, screen: &mut Screen) {
+    let mut events = service.events();
 
     while let Some(event) = events.recv() {
         match event {

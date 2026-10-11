@@ -1,6 +1,7 @@
 //! Обслуживание экспорта провайдером и создание портов сессий.
 
 use core::{
+    fmt,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -12,12 +13,23 @@ use syscall::{Rights, Timeout};
 
 use crate::request::accept;
 
-/// Порт сессии из [`mint_session`] и его значок.
+/// Порт сессий экспорта и счётчик его значков. Значок не повторяется и после отказа.
+#[derive(Debug)]
+pub struct SessionPort {
+    port: Port,
+    next_badge: AtomicU64,
+}
+
+/// Порт сессии из [`SessionPort::create_session`] и его значок.
 #[derive(Debug)]
 pub struct MintedSession {
     pub badge: NonZeroU64,
     pub port: Port,
 }
+
+/// Остановка [`serve_export`]: отказ `accept`.
+#[derive(Debug)]
+pub struct ExportStopped(CallError<AcceptError>);
 
 /// Событие порта сессий экспорта из [`SessionEvents::recv`].
 pub enum SessionEvent<'b> {
@@ -34,6 +46,49 @@ pub enum SessionEvent<'b> {
 pub struct SessionEvents<'p> {
     port: &'p Port,
     bytes: FrameBytes,
+}
+
+impl SessionPort {
+    /// Создаёт порт сессий экспорта.
+    pub fn create() -> Result<Self, Error> {
+        Ok(Self {
+            port: Port::create()?,
+            next_badge: AtomicU64::new(0),
+        })
+    }
+
+    /// Серверная сторона порта.
+    #[must_use]
+    pub const fn port(&self) -> &Port {
+        &self.port
+    }
+
+    /// Создаёт новый значок порта без capability.
+    pub fn create_badge(&self) -> NonZeroU64 {
+        NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Создаёт клиентскую capability порта с правами `WRITE | TRANSFER` под новым значком.
+    pub fn create_session(&self) -> Result<MintedSession, Error> {
+        let badge = self.create_badge();
+        let port = self
+            .port
+            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))?;
+
+        Ok(MintedSession { badge, port })
+    }
+
+    /// Бессрочный приём кадров порта, как [`SessionEvents::new`].
+    #[must_use]
+    pub const fn events(&self) -> SessionEvents<'_> {
+        SessionEvents::new(&self.port)
+    }
+}
+
+impl fmt::Display for ExportStopped {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "export {:?}", self.0)
+    }
 }
 
 impl<'p> SessionEvents<'p> {
@@ -69,41 +124,33 @@ impl<'p> SessionEvents<'p> {
 }
 
 /// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`. `open`
-/// строит порт сессии по атрибутам запроса импортёра либо отказывает. Возвращает отказ `accept`.
+/// строит порт сессии по атрибутам запроса импортёра либо отказывает. Цикл ждёт заявку
+/// бессрочно.
 pub fn serve_export<P: ipc::Protocol>(
-    parent: &component_startup::Client<PortTransport>,
+    parent: component_startup::Client<PortTransport>,
     mut open: impl FnMut(Attributes<'_>) -> Result<Port, SessionError>,
-) -> CallError<AcceptError> {
+) -> ExportStopped {
+    let parent = parent.with_wait(Timeout::INFINITE);
     loop {
-        match accept::<P>(parent) {
+        match accept::<P>(&parent) {
             Ok(request) => {
                 let session = open(request.attributes.as_attributes());
                 let _ = request.reply.send(session);
             }
-            Err(error) => return error,
+            Err(error) => return ExportStopped(error),
         }
     }
 }
 
-/// Обработчик [`serve_export`], выдающий порт `export` под новым значком при любых атрибутах
+/// Обработчик [`serve_export`], выдающий сессию `export` под новым значком при любых атрибутах
 /// запроса.
 pub fn whole_export(
-    export: &Port,
+    export: &SessionPort,
 ) -> impl FnMut(Attributes<'_>) -> Result<Port, SessionError> + '_ {
-    let next_badge = AtomicU64::new(0);
-
     move |_| {
-        mint_session(export, &next_badge)
+        export
+            .create_session()
             .map(|minted| minted.port)
             .map_err(|_| SessionError::NoSpace)
     }
-}
-
-/// Создаёт клиентскую capability порта `export` с правами `WRITE | TRANSFER` под новым значком
-/// из `next_badge`. Значок не повторяется и после отказа.
-pub fn mint_session(export: &Port, next_badge: &AtomicU64) -> Result<MintedSession, Error> {
-    let badge = NonZeroU64::MIN.saturating_add(next_badge.fetch_add(1, Ordering::Relaxed));
-    let port = export.duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))?;
-
-    Ok(MintedSession { badge, port })
 }

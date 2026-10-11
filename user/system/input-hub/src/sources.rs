@@ -5,10 +5,10 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use component_startup::{
-    Attributes, Found, IpcError, Providers, Session, StartupError, StartupFailure,
+    Attributes, Found, IpcError, Providers, Session, SessionPort, StartupError, StartupFailure,
 };
 use input_abi::input_source;
-use kernel_objects::{Port, SessionTransport};
+use kernel_objects::SessionTransport;
 use runtime::{log_fmt, sleep};
 use syscall::Timeout;
 
@@ -24,7 +24,7 @@ type Attached = input_source::Client<SessionTransport>;
 
 pub(crate) fn attach_sources(
     providers: &Providers<input_source::Protocol>,
-    sources: &Port,
+    sources: &SessionPort,
 ) -> StartupError {
     let watch = match providers.watch(Attributes::empty()) {
         Ok(watch) => watch,
@@ -55,7 +55,7 @@ pub(crate) fn attach_sources(
 
 fn attach(
     providers: &Providers<input_source::Protocol>,
-    sources: &Port,
+    sources: &SessionPort,
     found: Found,
     late: &mut Vec<Found>,
     attached: &mut Vec<Attached>,

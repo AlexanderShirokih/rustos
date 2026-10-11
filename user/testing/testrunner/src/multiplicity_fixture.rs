@@ -64,7 +64,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
             .map_err(|_| Failed)?;
         let value = u64::from(count);
 
-        if session.client().with_wait(SESSION_PING_TIMEOUT).ping(value) != Ok(value) {
+        if session.client().ping(value) != Ok(value) {
             return Err(Failed);
         }
         count = count.checked_add(1).ok_or(Failed)?;
@@ -88,7 +88,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .ok_or(Failed)?
         .map_err(|_| Failed)?;
     let image = requirements.images.open(&image).map_err(|_| Failed)?;
-    match image.client().with_wait(SESSION_PING_TIMEOUT).region() {
+    match image.client().region() {
         Ok(_) => log_line("image found"),
         _ => return Err(Failed),
     }
@@ -104,7 +104,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
             match found {
                 Some(Ok(found)) => {
                     let session = requirements.probes.open(&found).map_err(|_| Failed)?;
-                    if session.client().with_wait(SESSION_PING_TIMEOUT).ping(7) != Ok(7) {
+                    if session.client().ping(7) != Ok(7) {
                         return Err(Failed);
                     }
 
@@ -116,7 +116,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
                     )
                     .map_err(|_| Failed)?;
 
-                    if one.client().with_wait(SESSION_PING_TIMEOUT).ping(8) != Ok(8) {
+                    if one.client().ping(8) != Ok(8) {
                         return Err(Failed);
                     }
                     log_line("late provider");

@@ -328,7 +328,6 @@ fn ping(importer: &Importer, requirement: &str) -> Result<u64, IpcError> {
     importer
         .session::<probe::Protocol>(requirement)
         .client()
-        .with_wait(COMPONENT_REPLY_TIMEOUT)
         .ping(PING)
 }
 
@@ -336,7 +335,6 @@ fn ping_found(found: &Found) -> Result<u64, IpcError> {
     component_startup::open::<probe::Protocol>(found, COMPONENT_REPLY_TIMEOUT)
         .map_err(|_| IpcError::PeerClosed)?
         .client()
-        .with_wait(COMPONENT_REPLY_TIMEOUT)
         .ping(PING)
 }
 
@@ -448,10 +446,7 @@ fn featured_session(
         wait,
     )?;
 
-    Ok(session
-        .client()
-        .with_wait(COMPONENT_REPLY_TIMEOUT)
-        .ping(PING)?)
+    Ok(session.client().ping(PING)?)
 }
 
 fn await_featured(importer: &Importer, count: usize) -> usize {
@@ -479,10 +474,7 @@ pub(crate) fn platform_session(
     importer: &Importer,
     requirement: &str,
 ) -> platform::Client<SessionTransport> {
-    importer
-        .session::<platform::Protocol>(requirement)
-        .client()
-        .with_wait(COMPONENT_REPLY_TIMEOUT)
+    importer.session::<platform::Protocol>(requirement).client()
 }
 
 fn line(
@@ -2183,7 +2175,6 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
     )
     .expect("one export matches")
     .client()
-    .with_wait(COMPONENT_REPLY_TIMEOUT)
     .ping(PING);
 
     test_harness::check_eq!(unfiltered, [""]);
@@ -2213,12 +2204,7 @@ fn an_enumeration_of_alternatives_walks_the_values_in_order() {
         .next()
         .map(|found| {
             let opened = providers.open(&found.expect("result answered"));
-            opened.map(|opened| {
-                opened
-                    .client()
-                    .with_wait(COMPONENT_REPLY_TIMEOUT)
-                    .ping(PING)
-            })
+            opened.map(|opened| opened.client().ping(PING))
         });
     let unmatched = providers
         .all(AnyOf::new("kind", ["absent"]))
@@ -2245,7 +2231,6 @@ fn a_session_request_carries_pairs_outside_the_matched_filter() {
     )
     .expect("the filter kind=a matches")
     .client()
-    .with_wait(COMPONENT_REPLY_TIMEOUT)
     .ping(PING);
     let lines = await_component_lines(FILTERED.name, 2);
 

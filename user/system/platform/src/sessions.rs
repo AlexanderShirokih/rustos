@@ -98,10 +98,7 @@ impl Platform {
         self.sessions.lock().retain(|record| record.badge != badge);
     }
 
-    fn granted_description(
-        &self,
-        badge: u64,
-    ) -> Result<DescriptionRegion<OwnedHandle<kind::MemoryRegion>>, Refusal> {
+    fn granted_description(&self, badge: u64) -> Result<DescriptionRegion<MemoryRegion>, Refusal> {
         let mut sessions = self.sessions.lock();
         let record = sessions
             .iter_mut()
@@ -165,7 +162,7 @@ impl Platform {
         badge: u64,
         device: &str,
         resource: u16,
-    ) -> Result<MmioWindow<OwnedHandle<kind::MemoryRegion>>, Refusal> {
+    ) -> Result<MmioWindow<MemoryRegion>, Refusal> {
         let mut sessions = self.sessions.lock();
         if !sessions.iter().any(|record| record.badge == badge) {
             return Err(Refusal::NoSession);

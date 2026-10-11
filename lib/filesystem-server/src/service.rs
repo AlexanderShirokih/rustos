@@ -2,9 +2,8 @@
 //! `lib/filesystem` поверх состояния, разделённого с потоками экспорта и монтирования.
 
 use alloc::{boxed::Box, string::String};
-use core::sync::atomic::AtomicU64;
 
-use component_startup::{MintedSession, mint_session};
+use component_startup::{MintedSession, SessionPort};
 use filesystem::{
     ByteStore, ClientId, FileSystemBackend, NodeId, NodeMetadata, OpenNode, Session, SessionTable,
 };
@@ -45,8 +44,7 @@ pub(crate) struct Frame {
 pub(crate) struct Serving<'a> {
     pub(crate) state: &'a mut FileSystemState,
     pub(crate) frame: &'a mut Frame,
-    pub(crate) service: &'a Port,
-    pub(crate) next_badge: &'a AtomicU64,
+    pub(crate) service: &'a SessionPort,
 }
 
 fn scoped<'a>(
@@ -230,8 +228,7 @@ impl Serving<'_> {
         let root = scoped(&session.attachment().scope, path, &mut full)?;
         backend.lookup(root)?;
         let scope = window_scope(root);
-        let MintedSession { badge, port } =
-            mint_session(self.service, self.next_badge).map_err(no_space)?;
+        let MintedSession { badge, port } = self.service.create_session().map_err(no_space)?;
         // Сессия создаётся до того, как её капа ушла клиенту. Кадр по ней застанет
         // её созданной.
         self.state.open_session_scoped(badge.get(), scope)?;

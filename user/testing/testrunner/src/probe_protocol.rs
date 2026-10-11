@@ -6,10 +6,9 @@
 use core::fmt;
 
 use component_abi::{Attributes, component_startup as startup_contract};
-use component_startup::{SessionEvent, SessionEvents, accept, whole_export};
+use component_startup::{SessionEvent, SessionPort, accept, whole_export};
 use ipc::ReceivedResources;
-use kernel_objects::Port;
-use runtime::{PortTransport, log_fmt, process_exit, spawn_owned};
+use runtime::{PortTransport, Timeout, log_fmt, process_exit, spawn_owned};
 use syscall::{Handle, kind};
 
 ipc::protocol! {
@@ -45,9 +44,10 @@ impl fmt::Display for Pairs<'_> {
     }
 }
 
-pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> ! {
+pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static SessionPort) -> ! {
     let exporting = spawn_owned(move || {
-        let parent = startup_contract::Client::new(PortTransport::new(parent));
+        let parent =
+            startup_contract::Client::new(PortTransport::new(parent)).with_wait(Timeout::INFINITE);
         let mut open = whole_export(export);
         while let Ok(request) = accept::<probe::Protocol>(&parent) {
             let attributes = request.attributes.as_attributes();
@@ -63,7 +63,7 @@ pub(crate) fn serve_probe(parent: Handle<kind::Port>, export: &'static Port) -> 
         process_exit(1)
     }
 
-    let mut events = SessionEvents::new(export);
+    let mut events = export.events();
 
     while let Some(event) = events.recv() {
         if let SessionEvent::Frame(frame) = event {

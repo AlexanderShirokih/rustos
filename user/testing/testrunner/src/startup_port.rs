@@ -533,6 +533,29 @@ fn the_result_of_a_component_entry_sets_its_exit_code() {
 }
 
 #[test_harness::test]
+fn the_return_of_a_bound_thread_ends_its_process() {
+    start_component_relay(SharedSourceNames);
+    let log = ScenarioLogSessions
+        .session(STEPS_BADGE)
+        .expect("steps log session");
+    let parent = Parent::start();
+    let mut steps = Steps::new();
+    let provider = parent.add(steps.child(PROVIDER).log(Answer::log(log)));
+
+    test_harness::check_eq!(steps.next(), started(true));
+    steps.send(Step::bound_failure());
+    test_harness::check_eq!(
+        parent.departure(DEPARTURE_TIMEOUT),
+        Some(departed(
+            provider,
+            Outcome::Exit(COMPONENT_FAILED_EXIT_CODE)
+        ))
+    );
+    test_harness::check_eq!(await_component_lines(STEPS_SOURCE, 1), ["stopped: failed"]);
+    stop_component_relay();
+}
+
+#[test_harness::test]
 fn a_session_request_lost_with_the_provider_is_repeated_by_the_start() {
     let parent = Parent::start();
     let mut steps = Steps::new();

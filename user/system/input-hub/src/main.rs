@@ -12,19 +12,18 @@ use alloc::boxed::Box;
 use core::fmt;
 
 use component_startup::{
-    Requirements as _, SessionError, SessionEvent, SessionEvents, component_manifest,
-    component_startup as startup_contract, serve_export,
+    Requirements as _, SessionEvent, SessionPort, StartupError, component_manifest,
+    component_startup as startup_contract, serve_export, whole_export,
 };
 use input_abi::{input, input_inject, input_source};
-use kernel_objects::Port;
-use runtime::{FAILED_EXIT_CODE, PortTransport, exit, log_fmt, log_line, spawn_owned};
+use runtime::{PortTransport, spawn_bound};
 use syscall::{Handle, SyscallError, kind};
 
 mod hub;
 mod queue;
 mod sources;
 
-use hub::{Consumer, Source, input_gone, open_input, open_source, source_gone};
+use hub::{Consumer, Source, input_gone, open_input, source_gone};
 use sources::attach_sources;
 
 component_manifest! {
@@ -38,6 +37,8 @@ component_manifest! {
 enum Stopped {
     Runtime(kernel_objects::Error),
     ConsumerPortClosed,
+    SourcePortClosed,
+    SourceWatch(StartupError),
 }
 
 impl fmt::Display for Stopped {
@@ -45,6 +46,8 @@ impl fmt::Display for Stopped {
         match self {
             Self::Runtime(error) => error.fmt(formatter),
             Self::ConsumerPortClosed => formatter.write_str("consumer port closed"),
+            Self::SourcePortClosed => formatter.write_str("source port closed"),
+            Self::SourceWatch(error) => write!(formatter, "source watch: {error}"),
         }
     }
 }
@@ -64,15 +67,15 @@ impl From<SyscallError> for Stopped {
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let requirements = HubStartup::from_parent(parent);
-    let sources: &'static Port = Box::leak(Box::new(Port::create()?));
-    let consumers: &'static Port = Box::leak(Box::new(Port::create()?));
+    let sources: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
+    let consumers: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
 
     // Потоки источников, экспортов и подключения работают до конца процесса.
     let consumers_parent = requirements.parent;
     let watched = requirements.sources;
     let sources_parent = startup_contract::Client::new(PortTransport::new(parent));
-    let _ = spawn_owned(move || {
-        let mut events = SessionEvents::new(sources);
+    let _ = spawn_bound(move || {
+        let mut events = sources.events();
 
         while let Some(event) = events.recv() {
             match event {
@@ -82,21 +85,17 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
                 SessionEvent::Gone(badge) => source_gone(badge),
             }
         }
-        log_line("source port closed");
-        exit(FAILED_EXIT_CODE)
+        Stopped::SourcePortClosed
     })?;
-    let _ = spawn_owned(move || {
-        export::<input_inject::Protocol>(&sources_parent, sources, open_source)
+    let _ = spawn_bound(move || {
+        serve_export::<input_inject::Protocol>(sources_parent, whole_export(sources))
     })?;
-    let _ =
-        spawn_owned(move || export::<input::Protocol>(&consumers_parent, consumers, open_input))?;
-    let _ = spawn_owned(move || {
-        let failure = attach_sources(&watched, sources);
-        log_fmt(format_args!("source watch stopped: {failure}"));
-        exit(FAILED_EXIT_CODE)
+    let _ = spawn_bound(move || {
+        serve_export::<input::Protocol>(consumers_parent, |_| open_input(consumers))
     })?;
+    let _ = spawn_bound(move || Stopped::SourceWatch(attach_sources(&watched, sources)))?;
 
-    let mut events = SessionEvents::new(consumers);
+    let mut events = consumers.events();
 
     while let Some(event) = events.recv() {
         match event {
@@ -108,14 +107,4 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     }
 
     Err(Stopped::ConsumerPortClosed)
-}
-
-fn export<P: ipc::Protocol>(
-    parent: &startup_contract::Client<PortTransport>,
-    port: &Port,
-    open: fn(&Port) -> Result<Port, SessionError>,
-) -> u32 {
-    let failure = serve_export::<P>(parent, |_| open(port));
-    log_fmt(format_args!("export stopped: {failure:?}"));
-    exit(FAILED_EXIT_CODE)
 }

@@ -12,8 +12,6 @@ mod failed;
 
 use failed::Failed;
 
-const FILESYSTEM_REQUEST_TIMEOUT: Timeout = Timeout::from_secs(2);
-
 const BUFFER_SIZE: u32 = 4096;
 
 const RECORD: &str = "/sample";
@@ -40,9 +38,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .with_wait(Timeout::from_secs(5))
         .resolve(root)
         .map_err(|_| Failed)?;
-    let area = kernel_objects::Session::from_session(session)
-        .client()
-        .with_wait(FILESYSTEM_REQUEST_TIMEOUT);
+    let area = kernel_objects::Session::from_session(session).client();
 
     if inspect(&area) {
         log_line("area read");

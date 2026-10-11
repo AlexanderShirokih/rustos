@@ -1,17 +1,16 @@
 //! Точка входа процесса: требования, поток экспорта `VirtioMmio` и обслуживание шины.
 
 use alloc::boxed::Box;
-use core::{fmt, sync::atomic::AtomicU64};
+use core::fmt;
 
 use component_startup::{
-    SessionError, StartupError, component_manifest, mint_session, serve_export,
+    SessionPort, StartupError, component_manifest, serve_export, whole_export,
 };
-use kernel_objects::Port;
 use platform_abi::platform;
-use runtime::{FAILED_EXIT_CODE, exit, log_fmt, spawn_owned};
+use runtime::spawn_bound;
 use virtio_mmio_abi::virtio_mmio;
 
-use crate::bus::{Bus, Sessions};
+use crate::bus::Bus;
 
 component_manifest! {
     struct VirtioMmioStartup {
@@ -51,22 +50,13 @@ fn run(requirements: VirtioMmioStartup) -> Result<(), Stopped> {
         .map_err(Stopped::Startup)?
         .client();
     let mut bus = Bus::take(&platform).ok_or(Stopped::Description)?;
-    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
-    let sessions: &'static Sessions = Box::leak(Box::new(Sessions {
-        service,
-        next_badge: AtomicU64::new(0),
-    }));
+    let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
+    let sessions: &'static SessionPort = Box::leak(Box::new(sessions));
 
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let _ = spawn_owned(move || {
-        let failure = serve_export::<virtio_mmio::Protocol>(&exporter, |_| {
-            mint_session(&sessions.service, &sessions.next_badge)
-                .map(|minted| minted.port)
-                .map_err(|_| SessionError::NoSpace)
-        });
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
+    let _ = spawn_bound(move || {
+        serve_export::<virtio_mmio::Protocol>(exporter, whole_export(sessions))
     })
     .map_err(|_| Stopped::ExportThread)?;
 

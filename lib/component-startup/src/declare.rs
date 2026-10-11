@@ -131,7 +131,7 @@ macro_rules! component_manifest {
     ) => {
         $(#[$attribute])*
         $visibility struct $name {
-            /// Клиент стартовой сессии без срока ожидания.
+            /// Клиент стартовой сессии.
             pub parent: $crate::component_startup::Client<$crate::PortTransport>,
             $($(pub $requirement: $crate::component_manifest!(@field $kind($protocol)),)*)?
         }

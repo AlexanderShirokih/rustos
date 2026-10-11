@@ -38,7 +38,7 @@ ipc::protocol! {
 
 #[derive(Default)]
 struct Probe {
-    handed: Option<OwnedHandle<kind::Port>>,
+    handed: Option<Port>,
 }
 
 impl kind_probe::Service<Delivery> for Probe {

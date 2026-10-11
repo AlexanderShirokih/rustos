@@ -16,7 +16,7 @@ mod issued;
 mod port_transport;
 mod svc;
 
-pub use delivery::Delivery;
+pub use delivery::{Delivery, ReceivedSession};
 pub use ipc;
 pub use ipc_buffer::ipc_buffer_ptr;
 pub use issued::IssuedHandle;

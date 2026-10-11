@@ -7,13 +7,12 @@
 use alloc::boxed::Box;
 
 use component_startup::{
-    SessionEvent, SessionEvents, component_startup as startup_contract, serve_export, whole_export,
+    SessionEvent, SessionPort, component_startup as startup_contract, serve_export, whole_export,
 };
 use input_abi::{
     AttachError, AxisList, Binding, DeviceDescriptor, KeyList, Usage, input_inject, input_source,
 };
-use ipc::wire::Session;
-use kernel_objects::{Delivery, IssuedHandle, Port, SessionTransport, kind};
+use kernel_objects::{Delivery, Port, ReceivedSession, SessionTransport};
 use runtime::{PortTransport, Timeout, process_exit, spawn_owned};
 
 pub(crate) const SOURCE_DEVICE: &str = "source";
@@ -37,7 +36,7 @@ impl input_source::Service<Delivery> for Source {
     fn attach(
         &mut self,
         _frame: &Delivery,
-        inject: Session<input_inject::Protocol, IssuedHandle<kind::Port>>,
+        inject: ReceivedSession<input_inject::Protocol>,
     ) -> Result<(), AttachError> {
         if self.inject.is_some() {
             return Err(AttachError::Busy);
@@ -84,10 +83,10 @@ pub(crate) fn serve_source(
     attach: Attach,
     delay: Option<Timeout>,
 ) -> ! {
-    let Ok(export) = Port::create() else {
+    let Ok(export) = SessionPort::create() else {
         process_exit(1)
     };
-    let export: &'static Port = Box::leak(Box::new(export));
+    let export: &'static SessionPort = Box::leak(Box::new(export));
 
     let exporting = spawn_owned(move || {
         if let Some(delay) = delay
@@ -96,7 +95,7 @@ pub(crate) fn serve_source(
             let _ = idle.recv(delay);
         }
 
-        let _ = serve_export::<input_source::Protocol>(&parent, whole_export(export));
+        let _ = serve_export::<input_source::Protocol>(parent, whole_export(export));
         process_exit(1)
     });
     if exporting.is_err() {
@@ -107,7 +106,7 @@ pub(crate) fn serve_source(
         attach,
         inject: None,
     };
-    let mut events = SessionEvents::new(export);
+    let mut events = export.events();
 
     while let Some(event) = events.recv() {
         if let SessionEvent::Frame(frame) = event {

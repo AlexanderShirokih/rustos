@@ -13,12 +13,12 @@ use component_abi::{
     ATTRIBUTE_COUNT_MAX, ATTRIBUTE_KEY_MAX_BYTES, ATTRIBUTE_VALUE_MAX_BYTES, Attribute,
     AttributeSet, Attributes, attributes_len, encode_attributes_into,
 };
-use component_startup::{Import, session};
+use component_startup::{Import, SessionPort, session};
 use filesystem_abi::{
     FileSystemError, MountEnded, Path, file_system, file_system_mount, namespace,
 };
 use ipc::CallError;
-use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Session};
+use kernel_objects::{MemoryRegion, ReadOnlyMapping, Session};
 use runtime::{log_fmt, spawn_owned};
 use syscall::{Handle, Timeout, kind};
 
@@ -93,8 +93,8 @@ pub(crate) fn read(image: &Import<image::Protocol>) -> Vec<MountLine> {
 pub(crate) fn start(
     lines: Vec<MountLine>,
     parent: Handle<kind::Port>,
-    views: &'static Port,
-    export: &'static Port,
+    views: &'static SessionPort,
+    export: &'static SessionPort,
 ) {
     let enclosing: Vec<Option<String>> = lines.iter().map(|line| enclosing(&lines, line)).collect();
     for (line, enclosing) in lines.into_iter().zip(enclosing) {
@@ -158,8 +158,8 @@ fn mount(
     line: &MountLine,
     enclosing: Option<&str>,
     parent: Handle<kind::Port>,
-    views: &Port,
-    export: &Port,
+    views: &SessionPort,
+    export: &SessionPort,
 ) {
     let number = line.number;
     loop {
@@ -226,7 +226,7 @@ fn enclosing(lines: &[MountLine], line: &MountLine) -> Option<String> {
         .map(|other| other.path.clone())
 }
 
-fn await_mount(path: &str, views: &Port) -> Result<(), CallError<FileSystemError>> {
+fn await_mount(path: &str, views: &SessionPort) -> Result<(), CallError<FileSystemError>> {
     let view = open(views, path).map_err(CallError::Remote)?;
     // Разрешение в виде на путь родителя использует монтирования только на этом пути и под ним.
     // Под ним лежат лишь строки, ждущие того же родителя.

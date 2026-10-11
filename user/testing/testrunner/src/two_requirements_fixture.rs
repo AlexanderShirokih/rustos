@@ -2,7 +2,7 @@
 #![no_main]
 
 use component_startup::{StartupError, StartupFailure, component_manifest};
-use runtime::{ExitCode, FAILED_EXIT_CODE, Timeout};
+use runtime::{ExitCode, FAILED_EXIT_CODE};
 
 mod probe_protocol;
 mod startup_exit_protocol;
@@ -11,7 +11,6 @@ use probe_protocol::probe;
 use startup_exit_protocol::{FIRST_IPC_FAILED_EXIT_CODE, SECOND_SESSION_REFUSED_EXIT_CODE};
 
 const PING: u64 = 7;
-const PING_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 component_manifest! {
     struct TwoRequirementsStartup {
@@ -26,7 +25,7 @@ component_manifest! {
 fn run(requirements: TwoRequirementsStartup) -> ExitCode {
     let TwoRequirementsStartup { first, second, .. } = requirements;
     let first = match first.open() {
-        Ok(first) => first.client().with_wait(PING_TIMEOUT),
+        Ok(first) => first.client(),
         Err(StartupError {
             requirement: "first",
             failure: StartupFailure::Ipc(_),

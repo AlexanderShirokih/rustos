@@ -2,7 +2,7 @@
 //! capability региона - отображением данных сессии.
 
 use filesystem_abi::{FileSystemError, file_system, namespace};
-use kernel_objects::{IssuedHandle, Mapping, MemoryRegion, SessionTransport};
+use kernel_objects::{IssuedHandle, Mapping, MemoryRegion, ReceivedSession, SessionTransport};
 use syscall::{UserMemFlags, kind};
 
 use crate::{
@@ -50,7 +50,7 @@ impl Environment for FileSystemEnvironment {
 
     fn connect(
         &self,
-        session: ipc::wire::Session<file_system::Protocol, IssuedHandle<kind::Port>>,
+        session: ReceivedSession<file_system::Protocol>,
     ) -> Result<SessionTransport, FileSystemError> {
         Ok(kernel_objects::Session::from_session(session)
             .client()

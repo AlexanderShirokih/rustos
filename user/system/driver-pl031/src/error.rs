@@ -2,7 +2,7 @@ use core::fmt;
 
 use component_startup::{StartupError, StartupFailure};
 use ipc::{CallError, wire::IpcError};
-use platform_abi::{DescriptionError, PlatformError};
+use platform_abi::{DescriptionError, PlatformError, WindowRefusal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Error {
@@ -52,6 +52,16 @@ impl From<CallError<PlatformError>> for Error {
         match error {
             CallError::Remote(error) => Self::Platform(error),
             CallError::Ipc(error) => error.into(),
+        }
+    }
+}
+
+impl From<WindowRefusal> for Error {
+    fn from(refusal: WindowRefusal) -> Self {
+        match refusal {
+            WindowRefusal::Call(error) => error.into(),
+            WindowRefusal::Platform(error) => error.into(),
+            WindowRefusal::Map(error) => error.into(),
         }
     }
 }

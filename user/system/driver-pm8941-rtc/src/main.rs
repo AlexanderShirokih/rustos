@@ -11,17 +11,17 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::{fmt, sync::atomic::AtomicU64};
+use core::fmt;
 
 use component_startup::{
-    AnyOf, Providers, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
-    mint_session, serve_export,
+    AnyOf, Providers, SessionError, SessionEvent, SessionPort, StartupError, component_manifest,
+    serve_export,
 };
 use ipc::CallError;
 use kernel_objects::{Port, Session, SessionTransport, Signal};
 use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
 use rtc_abi::rtc;
-use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, spawn_owned};
+use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, spawn_bound};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use syscall::SIGNALED;
 
@@ -58,7 +58,7 @@ component_manifest! {
 }
 
 struct Shared {
-    service: Port,
+    sessions: SessionPort,
     clock: Mutex<Option<&'static Clock>>,
 }
 
@@ -106,7 +106,6 @@ impl Shared {
         &self,
         platform: &platform::Client<SessionTransport>,
         spmi: &Providers<spmi::Protocol>,
-        next_badge: &AtomicU64,
     ) -> Result<Port, SessionError> {
         let mut clock = self.clock.lock();
 
@@ -120,13 +119,14 @@ impl Shared {
             *clock = Some(Box::leak(Box::new(bound)));
         }
 
-        mint_session(&self.service, next_badge)
+        self.sessions
+            .create_session()
             .map(|minted| minted.port)
             .map_err(|_| SessionError::NoSpace)
     }
 
     fn serve(&self) {
-        let mut events = SessionEvents::new(&self.service);
+        let mut events = self.sessions.events();
 
         while let Some(event) = events.recv() {
             if let SessionEvent::Frame(frame) = event {
@@ -254,22 +254,17 @@ fn run(requirements: RtcStartup) -> Result<(), Stopped> {
         .map_err(Stopped::Startup)?
         .client()
         .with_wait(BUS_CALL_TIMEOUT);
-    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
+    let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
 
     let shared: &'static Shared = Box::leak(Box::new(Shared {
-        service,
+        sessions,
         clock: Mutex::new(None),
     }));
 
     // Поток экспорта работает до конца процесса и держит сессию `Platform`.
     let exporter = requirements.parent;
-    let _ = spawn_owned(move || {
-        let next_badge = AtomicU64::new(0);
-        let failure = serve_export::<rtc::Protocol>(&exporter, |_| {
-            shared.open(&platform, &requirements.spmi, &next_badge)
-        });
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
+    let _ = spawn_bound(move || {
+        serve_export::<rtc::Protocol>(exporter, |_| shared.open(&platform, &requirements.spmi))
     })
     .map_err(|_| Stopped::ExportThread)?;
 

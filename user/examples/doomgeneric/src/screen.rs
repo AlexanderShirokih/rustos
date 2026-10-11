@@ -9,7 +9,7 @@ use core::fmt;
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
 use ipc::{CallError, wire::IpcError};
 use kernel_objects::{Mapping, MemoryRegion, Session, SessionTransport};
-use runtime::{Mutex, Timeout, UserMemFlags, log_fmt};
+use runtime::{Mutex, UserMemFlags, log_fmt};
 
 use crate::frame::{FRAME_HEIGHT, FRAME_WIDTH};
 
@@ -19,8 +19,6 @@ const PIXEL_BYTES: usize = SURFACE_PIXEL_BYTES as usize;
 
 const ASPECT_WIDTH: u32 = 4;
 const ASPECT_HEIGHT: u32 = 3;
-
-const DISPLAY_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 static SCREEN: Mutex<Option<Screen>> = Mutex::new(None);
 
@@ -60,7 +58,7 @@ impl fmt::Display for ScreenError {
 
 impl Screen {
     pub(crate) fn open(session: Session<display::Protocol>) -> Result<Self, ScreenError> {
-        let client = session.client().with_wait(DISPLAY_REPLY_TIMEOUT);
+        let client = session.client();
         let dimension = client.dimension().map_err(ScreenError::Dimension)?;
 
         let upright = (dimension.width / ASPECT_WIDTH).min(dimension.height / ASPECT_HEIGHT);

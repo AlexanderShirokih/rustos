@@ -9,11 +9,11 @@
 extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{fmt, sync::atomic::AtomicU64};
+use core::fmt;
 
 use component_startup::{
-    MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
-    mint_session, serve_export,
+    MintedSession, SessionError, SessionEvent, SessionPort, StartupError, component_manifest,
+    serve_export,
 };
 use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, display};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
@@ -22,7 +22,7 @@ use kernel_objects::{
     Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport, WriteCombiningMapping,
 };
 use platform_abi::{DeviceId, MappedDescription, PlatformError, platform};
-use runtime::{FAILED_EXIT_CODE, MemoryAccess, Mutex, UserMemFlags, exit, log_fmt, spawn_owned};
+use runtime::{MemoryAccess, Mutex, UserMemFlags, log_fmt, spawn_bound};
 use syscall::{PAGE_SIZE, Rights, kind};
 
 component_manifest! {
@@ -34,14 +34,13 @@ component_manifest! {
 }
 
 struct Shared {
-    service: Port,
+    service: SessionPort,
     sessions: Mutex<Vec<Session>>,
 }
 
 struct Attacher {
     platform: platform::Client<SessionTransport>,
     description: MappedDescription,
-    next_badge: AtomicU64,
     screen: Option<&'static Screen>,
 }
 
@@ -94,8 +93,10 @@ impl fmt::Display for Stopped {
 impl Attacher {
     fn open(&mut self, shared: &Shared) -> Result<Port, SessionError> {
         let screen = self.screen()?;
-        let MintedSession { badge, port } =
-            mint_session(&shared.service, &self.next_badge).map_err(|_| SessionError::NoSpace)?;
+        let MintedSession { badge, port } = shared
+            .service
+            .create_session()
+            .map_err(|_| SessionError::NoSpace)?;
 
         shared.sessions.lock().push(Session {
             badge: badge.get(),
@@ -159,7 +160,7 @@ impl Attacher {
 
 impl Shared {
     fn serve(&self) {
-        let mut events = SessionEvents::new(&self.service);
+        let mut events = self.service.events();
 
         while let Some(event) = events.recv() {
             match event {
@@ -268,22 +269,18 @@ fn start(requirements: SimplefbStartup) -> Result<&'static Shared, Stopped> {
     let mut attacher = Attacher {
         platform,
         description,
-        next_badge: AtomicU64::new(0),
         screen: None,
     };
 
     let shared: &'static Shared = Box::leak(Box::new(Shared {
-        service: Port::create().map_err(|_| Stopped::ServicePort)?,
+        service: SessionPort::create().map_err(|_| Stopped::ServicePort)?,
         sessions: Mutex::new(Vec::new()),
     }));
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let _ = spawn_owned(move || {
-        let failure = serve_export::<display::Protocol>(&exporter, |_| attacher.open(shared));
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    })
-    .map_err(|_| Stopped::ExportThread)?;
+    let _ =
+        spawn_bound(move || serve_export::<display::Protocol>(exporter, |_| attacher.open(shared)))
+            .map_err(|_| Stopped::ExportThread)?;
 
     Ok(shared)
 }

@@ -21,6 +21,6 @@ pub use attribute::CONTROLLER_KEY;
 pub use description::{Ancestor, Description, DescriptionRegion, Device, Devices, Node};
 pub use device::{DEVICE_ID_MAX, DeviceId};
 pub use error::{DescriptionError, PlatformError};
-pub use mapped::MappedDescription;
+pub use mapped::{MappedDescription, WindowRefusal};
 pub use protocol::platform;
 pub use window::MmioWindow;

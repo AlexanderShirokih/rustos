@@ -54,4 +54,4 @@ pub use syscall_user::{
     signal_create, signal_set, signal_wait_many, signal_wait_one, thread_create, thread_exit,
     thread_exit_code, thread_self, thread_terminate, thread_yield,
 };
-pub use thread::{JoinHandle, sleep, spawn, spawn_owned};
+pub use thread::{JoinHandle, sleep, spawn, spawn_bound, spawn_owned};

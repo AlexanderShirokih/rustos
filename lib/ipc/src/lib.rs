@@ -44,9 +44,9 @@ pub mod wire;
 pub use call_error::CallError;
 pub use codec::{IntoWireValue, WireTyped, WireValue};
 pub use ordinal::ordinal_of;
-pub use protocol::Protocol;
 #[doc(hidden)]
 pub use protocol::{__protocol_answer, __protocol_call, __protocol_outcome, __protocol_send};
+pub use protocol::{DEFAULT_OPERATION_TIMEOUT, Protocol};
 pub use reply::Reply;
 pub use resources::{Received, ReceivedResources};
 #[doc(hidden)]

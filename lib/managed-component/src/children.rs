@@ -1,10 +1,5 @@
 use alloc::{string::String, vec::Vec};
-use core::{
-    any::TypeId,
-    mem::size_of,
-    num::NonZeroU64,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::{any::TypeId, mem::size_of, num::NonZeroU64};
 
 use component_abi::{AcceptError, AttributeSet, SessionError, SessionRequest, component_startup};
 use kernel_objects::{
@@ -33,8 +28,7 @@ type AcceptDebt = component_startup::accept::Reply<IssuedHandle<kind::Reply>>;
 /// добавлению записей, и затем закрывает порт.
 pub struct Children<'a, C, V> {
     pages: ImagePages<'a>,
-    port: Port,
-    next_badge: AtomicU64,
+    port: ::component_startup::SessionPort,
     entries: Vec<Entry<'a, C, V>>,
     importers: Vec<(u64, Importer<C>)>,
     holdings: Vec<(u64, Holdings)>,
@@ -172,8 +166,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     pub fn new(pages: ImagePages<'a>) -> Result<Self, Error> {
         Ok(Self {
             pages,
-            port: Port::create()?,
-            next_badge: AtomicU64::new(0),
+            port: ::component_startup::SessionPort::create()?,
             entries: Vec::new(),
             importers: Vec::new(),
             holdings: Vec::new(),
@@ -185,7 +178,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     /// Серверная сторона порта `ComponentStartup`.
     #[must_use]
     pub const fn port(&self) -> &Port {
-        &self.port
+        self.port.port()
     }
 
     /// Заводит запись `child` в [`Status::Waiting`] с бюджетом `budget_bytes` из `parent_resource`.
@@ -235,7 +228,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .iter_mut()
             .filter(|entry| launchable(entry.child))
         {
-            if let Some(outcome) = entry.launch(self.pages, &self.port, &self.next_badge) {
+            if let Some(outcome) = entry.launch(self.pages, &self.port) {
                 entry.state = State::Departed;
                 return Some(Departure {
                     child: entry.child,
@@ -492,7 +485,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         self.importers.try_reserve(1).map_err(|_| NO_MEMORY)?;
 
         // Запись импортёра существует до минта значка, чтобы обработать событие его ухода.
-        let badge = NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed));
+        let badge = self.port.create_badge();
         let index = self.insert_importer(
             badge.get(),
             Importer {
@@ -502,7 +495,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         );
 
         let rights = Rights::WRITE | Rights::TRANSFER;
-        let port = &self.port;
+        let port = self.port.port();
         let copy = copy_root::<kind::Port>(
             &mut self.holdings,
             owner,
@@ -528,8 +521,8 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     /// - ошибка ядра при копировании порта.
     pub fn importer(&mut self, key: C) -> Result<Port, Error> {
         self.importers.try_reserve(1).map_err(|_| NO_MEMORY)?;
-        let badge = NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed));
-        let port = self.port.duplicate(Rights::WRITE, Some(badge))?;
+        let badge = self.port.create_badge();
+        let port = self.port.port().duplicate(Rights::WRITE, Some(badge))?;
         self.insert_importer(badge.get(), Importer { key, owner: None });
         Ok(port)
     }
@@ -684,8 +677,7 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
     fn launch(
         &mut self,
         pages: ImagePages<'_>,
-        port: &Port,
-        next_badge: &AtomicU64,
+        port: &::component_startup::SessionPort,
     ) -> Option<Outcome> {
         let State::Waiting { exhausted_since } = &mut self.state else {
             return None;
@@ -702,7 +694,7 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
             Err(_) => return Some(Outcome::LaunchFailed),
         }
 
-        let Ok(session) = ::component_startup::mint_session(port, next_badge) else {
+        let Ok(session) = port.create_session() else {
             return Some(Outcome::LaunchFailed);
         };
         match load_program(

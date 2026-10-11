@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use core::fmt;
 
 use component_startup::{
-    AnyOf, Import, Providers, SessionEvent, SessionEvents, StartupError,
+    AnyOf, Import, Providers, SessionEvent, SessionPort, StartupError,
     component_startup as startup_contract, serve_export, whole_export,
 };
 use input_abi::{
@@ -13,9 +13,11 @@ use input_abi::{
     Usage, input_inject, input_source,
 };
 use ipc::CallError;
-use kernel_objects::{Delivery, IssuedHandle, Port, Session, SessionTransport, Signal, kind};
+use kernel_objects::{Delivery, ReceivedSession, Session, SessionTransport, Signal};
 use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
-use runtime::{FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_owned};
+use runtime::{
+    FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_bound, spawn_owned,
+};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
 use syscall::SIGNALED;
 
@@ -119,7 +121,7 @@ impl input_source::Service<Delivery> for Source {
     fn attach(
         &mut self,
         _frame: &Delivery,
-        inject: ipc::wire::Session<input_inject::Protocol, IssuedHandle<kind::Port>>,
+        inject: ReceivedSession<input_inject::Protocol>,
     ) -> Result<(), AttachError> {
         if self.attached {
             return Err(AttachError::Busy);
@@ -349,16 +351,13 @@ pub fn run(
         .client()
         .with_wait(CALL_TIMEOUT);
 
-    let export: &'static Port =
-        Box::leak(Box::new(Port::create().map_err(|_| Stopped::ExportPort)?));
+    let export: &'static SessionPort = Box::leak(Box::new(
+        SessionPort::create().map_err(|_| Stopped::ExportPort)?,
+    ));
 
     // Поток экспорта работает до конца процесса.
-    spawn_owned(move || {
-        let failure = serve_export::<input_source::Protocol>(&parent, whole_export(export));
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    })
-    .map_err(|_| Stopped::ExportThread)?;
+    spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(export)))
+        .map_err(|_| Stopped::ExportThread)?;
 
     let mut source = Source {
         key,
@@ -367,7 +366,7 @@ pub fn run(
         attached: false,
         refused: false,
     };
-    let mut events = SessionEvents::new(export);
+    let mut events = export.events();
 
     while let Some(event) = events.recv() {
         if let SessionEvent::Frame(frame) = event {

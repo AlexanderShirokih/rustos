@@ -5,12 +5,12 @@
 //! протоколу `VirtioMmio`.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering, fence};
+use core::sync::atomic::{Ordering, fence};
 
-use component_startup::{SessionEvent, SessionEvents, mint_session};
+use component_startup::{SessionEvent, SessionPort};
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, IrqLine, MmioMapping, Port, SessionTransport};
-use platform_abi::{DeviceId, MappedDescription, PlatformError, platform};
+use platform_abi::{DeviceId, MappedDescription, PlatformError, WindowRefusal, platform};
 use runtime::log_fmt;
 use syscall::{Rights, kind};
 use virtio::register;
@@ -24,11 +24,6 @@ const CONFIG_OFFSET: u64 = 0x100;
 const LINE_RIGHTS: Rights = Rights::from_bits_truncate(
     Rights::READ.bits() | Rights::WRITE.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
 );
-
-pub(crate) struct Sessions {
-    pub(crate) service: Port,
-    pub(crate) next_badge: AtomicU64,
-}
 
 pub(crate) struct Bus {
     transports: Vec<Transport>,
@@ -49,7 +44,7 @@ enum Slot {
 }
 
 struct Opener<'a> {
-    sessions: &'a Sessions,
+    sessions: &'a SessionPort,
     transports: &'a mut [Transport],
 }
 
@@ -57,7 +52,7 @@ struct Opener<'a> {
 enum Refusal {
     Call,
     Platform(PlatformError),
-    Map,
+    Window(WindowRefusal),
 }
 
 impl Bus {
@@ -79,8 +74,8 @@ impl Bus {
         Some(Self { transports })
     }
 
-    pub(crate) fn serve(&mut self, sessions: &Sessions) {
-        let mut events = SessionEvents::new(&sessions.service);
+    pub(crate) fn serve(&mut self, sessions: &SessionPort) {
+        let mut events = sessions.events();
 
         while let Some(event) = events.recv() {
             match event {
@@ -117,10 +112,7 @@ impl Transport {
         let line = platform
             .irq(id.as_str(), 0)
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
-        let window = platform
-            .mmio(id.as_str(), 0)
-            .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
-        let registers = MmioMapping::new(window.into()).map_err(|_| Refusal::Map)?;
+        let registers = platform.map_mmio(id.as_str(), 0).map_err(Refusal::Window)?;
         let device_type = registers.mmio().read::<u32>(register::DEVICE_ID);
 
         Ok(Self {
@@ -166,7 +158,7 @@ impl Transport {
 
     fn access(&self, offset: u64, bytes: u64) -> Result<usize, SlotError> {
         let aligned = offset.is_multiple_of(bytes);
-        let inside = offset + bytes <= self.registers.window().size;
+        let inside = u64::try_from(self.registers.size()).is_ok_and(|size| offset + bytes <= size);
 
         match usize::try_from(offset) {
             Ok(offset) if aligned && inside => Ok(offset),
@@ -208,7 +200,9 @@ impl Opener<'_> {
         let transport = matching
             .find(|transport| matches!(transport.slot, Slot::Free))
             .ok_or(VirtioMmioError::Busy)?;
-        let minted = mint_session(&self.sessions.service, &self.sessions.next_badge)
+        let minted = self
+            .sessions
+            .create_session()
             .map_err(|_| VirtioMmioError::NoSpace)?;
         transport.slot = Slot::Held {
             badge: minted.badge.get(),

@@ -7,16 +7,15 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::sync::atomic::AtomicU64;
 
 use component_startup::{
-    SessionError, SessionEvent, SessionEvents, component_manifest, mint_session, serve_export,
+    SessionError, SessionEvent, SessionPort, component_manifest, serve_export,
 };
 use io::mmio::Reg;
 use kernel_objects::{IrqLine, MmioMapping, Port, SessionTransport};
 use platform_abi::{MappedDescription, platform};
 use rtc_abi::rtc;
-use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, log_line, spawn_owned};
+use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, log_line, spawn_bound};
 
 mod error;
 
@@ -42,7 +41,7 @@ component_manifest! {
 }
 
 struct Shared {
-    service: Port,
+    sessions: SessionPort,
     device: Mutex<Option<&'static Pl031>>,
 }
 
@@ -55,7 +54,6 @@ impl Shared {
     fn open(
         &self,
         platform: &platform::Client<SessionTransport>,
-        next_badge: &AtomicU64,
     ) -> core::result::Result<Port, SessionError> {
         let mut device = self.device.lock();
 
@@ -68,13 +66,14 @@ impl Shared {
             *device = Some(Box::leak(Box::new(bound)));
         }
 
-        mint_session(&self.service, next_badge)
+        self.sessions
+            .create_session()
             .map(|minted| minted.port)
             .map_err(|_| SessionError::NoSpace)
     }
 
     fn serve(&self) {
-        let mut events = SessionEvents::new(&self.service);
+        let mut events = self.sessions.events();
 
         while let Some(event) = events.recv() {
             if let SessionEvent::Frame(frame) = event {
@@ -98,9 +97,8 @@ impl Pl031 {
             .map(|device| device.id().clone())
             .ok_or(Error::NoDevice)?;
         let line = IrqLine::from(platform.irq(id.as_str(), 0)?);
-        let window = platform.mmio(id.as_str(), 0)?;
         Ok(Self {
-            registers: MmioMapping::new(window.into()).map_err(kernel_objects::Error::from)?,
+            registers: platform.map_mmio(id.as_str(), 0)?,
             line,
         })
     }
@@ -140,19 +138,13 @@ impl<F: ipc::ReceivedResources> rtc::Service<F> for &Pl031 {
 fn run(requirements: RtcStartup) -> Result<()> {
     let platform = requirements.platform.open()?.client();
     let shared: &'static Shared = Box::leak(Box::new(Shared {
-        service: Port::create()?,
+        sessions: SessionPort::create()?,
         device: Mutex::new(None),
     }));
     // Поток экспорта работает до конца процесса и держит сессию `Platform`.
     let exporter = requirements.parent;
-    spawn_owned(move || {
-        let next_badge = AtomicU64::new(0);
-        let failure =
-            serve_export::<rtc::Protocol>(&exporter, |_| shared.open(&platform, &next_badge));
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    })
-    .map_err(|_| Error::Runtime)?;
+    spawn_bound(move || serve_export::<rtc::Protocol>(exporter, |_| shared.open(&platform)))
+        .map_err(|_| Error::Runtime)?;
 
     shared.serve();
     Err(Error::Ipc)

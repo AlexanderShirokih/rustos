@@ -225,7 +225,7 @@ pub(crate) fn image_session() -> Session<file_system::Protocol> {
 pub(crate) fn connect(
     session: Session<file_system::Protocol>,
 ) -> file_system::Client<SessionTransport> {
-    session.client().with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
+    session.client()
 }
 
 #[derive(Clone, Copy)]
@@ -320,7 +320,6 @@ fn connect_tampered(
         port: client.into_channel(),
         tamper,
     })
-    .with_wait(FILE_SYSTEM_REPLY_TIMEOUT)
 }
 
 fn connect_without_reply(

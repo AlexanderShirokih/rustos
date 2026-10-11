@@ -9,6 +9,7 @@
 )]
 
 use std::{
+    cell::RefCell,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -994,4 +995,60 @@ fn an_undelivered_aggregate_answer_comes_back_as_its_caller_reads_it() {
     assert_eq!(fates.closed(), 0);
     drop(lease);
     assert_eq!(fates.closed(), 1);
+}
+
+ipc::protocol! {
+    mod waits {
+        name = "Waits";
+
+        call fn quick() -> u32;
+        cast fn note();
+    }
+}
+
+#[derive(Default)]
+struct WaitRecorder {
+    waits: RefCell<Vec<Timeout>>,
+}
+
+impl Channel for WaitRecorder {
+    type Resources = MockResources;
+
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, MockResources>,
+        wait: Timeout,
+    ) -> Result<(), Unsent<'b, MockResources>> {
+        self.waits.borrow_mut().push(wait);
+        Err((IpcError::Timeout, frame))
+    }
+
+    fn call<'b>(
+        &self,
+        _frame: Outgoing<'b, MockResources>,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, MockResources>, IpcError> {
+        self.waits.borrow_mut().push(wait);
+        Err(IpcError::Timeout)
+    }
+}
+
+fn waits_of(client: waits::Client<WaitRecorder>) -> Vec<Timeout> {
+    let _ = client.quick();
+    let _ = client.note();
+    client.into_channel().waits.into_inner()
+}
+
+#[test]
+fn a_client_without_a_wait_waits_for_the_default_term() {
+    let client = waits::Client::new(WaitRecorder::default());
+
+    assert_eq!(waits_of(client), [ipc::DEFAULT_OPERATION_TIMEOUT; 2]);
+}
+
+#[test]
+fn the_caller_wait_replaces_the_default_term() {
+    let client = waits::Client::new(WaitRecorder::default()).with_wait(Timeout::INFINITE);
+
+    assert_eq!(waits_of(client), [Timeout::INFINITE; 2]);
 }

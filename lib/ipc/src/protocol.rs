@@ -6,6 +6,9 @@
 //! дескриптор типа. По дескрипторам полей const-функции [`crate::schema`] проверяют бюджет кадра
 //! и пространство `field_id` каждой операции.
 
+/// Срок ожидания получателя у клиента, которому вызывающий не задал срок.
+pub const DEFAULT_OPERATION_TIMEOUT: crate::Timeout = crate::Timeout::from_secs(5);
+
 /// Тип, представляющий один объявленный контракт.
 ///
 /// [`crate::protocol!`] порождает такой тип для каждого объявления. [`Protocol::ID`] отдаёт
@@ -99,8 +102,8 @@ pub trait Protocol {
 /// кадр, и её проверяет запись кадра. Кадр, который не помещается, клиент не отправляет и
 /// получает [`IpcError::FrameOverflow`](crate::wire::IpcError::FrameOverflow).
 ///
-/// Клиент ждёт получателя бессрочно, пока `Client::with_wait` не задаст срок. Срок ограничивает
-/// приём одностороннего кадра и ответ на вызов, а `Timeout::POLL` означает poll. По истечении срока
+/// Клиент ждёт получателя до [`DEFAULT_OPERATION_TIMEOUT`], пока `Client::with_wait` не задаст
+/// срок. Срок ограничивает приём одностороннего кадра и ответ на вызов. По истечении срока
 /// операция возвращает [`IpcError::Timeout`](crate::wire::IpcError::Timeout).
 ///
 /// Разбор кадра переносит capability каждого поля в прочитанное значение. Слот кадра берётся один
@@ -324,11 +327,12 @@ macro_rules! protocol {
             }
 
             impl<C: $crate::Channel> Client<C> {
-                /// Создаёт клиента поверх указанного канала. Клиент ждёт получателя бессрочно.
+                /// Создаёт клиента поверх указанного канала со сроком
+                /// [`DEFAULT_OPERATION_TIMEOUT`]($crate::DEFAULT_OPERATION_TIMEOUT).
                 pub fn new(channel: C) -> Self {
                     Self {
                         channel,
-                        wait: $crate::Timeout::INFINITE,
+                        wait: $crate::DEFAULT_OPERATION_TIMEOUT,
                     }
                 }
 

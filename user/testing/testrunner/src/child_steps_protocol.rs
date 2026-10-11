@@ -24,6 +24,7 @@ pub(crate) mod action {
     pub(crate) const RETURN_OK: u32 = 10;
     pub(crate) const RETURN_ERR: u32 = 11;
     pub(crate) const PANIC: u32 = 12;
+    pub(crate) const BOUND_FAILURE: u32 = 13;
 }
 
 pub(crate) mod outcome {
@@ -41,6 +42,7 @@ pub(crate) mod outcome {
     pub(crate) const LOGGED: u32 = 12;
     pub(crate) const NO_SESSION: u32 = 13;
     pub(crate) const UNKNOWN_STEP: u32 = 14;
+    pub(crate) const SPAWN_REFUSED: u32 = 15;
 }
 
 ipc::wire_value! {
@@ -126,6 +128,11 @@ impl Step {
     #[must_use]
     pub(crate) const fn panic() -> Self {
         Self::new(action::PANIC, 0)
+    }
+
+    #[must_use]
+    pub(crate) const fn bound_failure() -> Self {
+        Self::new(action::BOUND_FAILURE, 0)
     }
 
     const fn new(action: u32, argument: u64) -> Self {

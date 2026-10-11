@@ -7,8 +7,10 @@ use alloc::boxed::Box;
 use core::fmt::Debug;
 
 use bootstrap_abi::{features, hardware, image, system_info};
-use component_startup::{Attributes, Providers, Requirements as _, component_manifest};
-use kernel_objects::{Port, Session};
+use component_startup::{
+    Attributes, Providers, Requirements as _, SessionPort, component_manifest,
+};
+use kernel_objects::Session;
 use log_abi::journal;
 use runtime::{log_fmt, log_line};
 use syscall::{Handle, kind};
@@ -47,7 +49,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     log_opened("features", &requirements.features, drop)?;
     log_opened("journal", &requirements.journal, drop)?;
 
-    let export = Port::create().map_err(|_| Failed)?;
+    let export = SessionPort::create().map_err(|_| Failed)?;
     log_line("started");
     serve_probe(parent, Box::leak(Box::new(export)))
 }

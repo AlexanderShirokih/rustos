@@ -5,10 +5,10 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use component_startup::{Requirements as _, component_manifest};
+use component_startup::{Requirements as _, SessionPort, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, file_system, namespace};
 use ipc::CallError;
-use kernel_objects::{Port, Resource, SessionTransport};
+use kernel_objects::{Resource, SessionTransport};
 use runtime::{MemoryAccess, Timeout, log_line};
 use syscall::{Handle, kind};
 use userland::USERLAND_PAGE_SIZE;
@@ -43,15 +43,13 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .with_wait(CALL_TIMEOUT)
         .resolve(root)
         .map_err(|_| Failed)?;
-    let files = kernel_objects::Session::from_session(session)
-        .client()
-        .with_wait(CALL_TIMEOUT);
+    let files = kernel_objects::Session::from_session(session).client();
     let started_path = STARTED_PATH;
     let held_path = HELD_PATH;
 
     match files.open(started_path, AccessMode::Read, OpenFlags::NONE) {
         Ok(_) => {
-            let export = Port::create().map_err(|_| Failed)?;
+            let export = SessionPort::create().map_err(|_| Failed)?;
             log_line("started");
             serve_probe(parent, Box::leak(Box::new(export)))
         }

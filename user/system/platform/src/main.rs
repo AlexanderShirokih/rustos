@@ -12,18 +12,18 @@
 extern crate alloc;
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{fmt, sync::atomic::AtomicU64};
+use core::fmt;
 
 use bootstrap_abi::{features, hardware};
 use component_startup::{
-    MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
-    mint_session, serve_export,
+    MintedSession, SessionError, SessionEvent, SessionPort, StartupError, component_manifest,
+    serve_export,
 };
 use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
 use fdt::devicetree::DeviceTree;
 use kernel_objects::{IrqControl, MemoryRegion, Port, ReadOnlyMapping, SessionTransport};
 use platform_abi::{Description, platform};
-use runtime::{FAILED_EXIT_CODE, Mutex, exit, log_fmt, spawn_owned};
+use runtime::{Mutex, log_fmt, spawn_bound};
 
 mod sessions;
 
@@ -51,8 +51,7 @@ enum Stopped {
 
 struct Shared {
     sessions: Mutex<Vec<SessionRecord>>,
-    service: Port,
-    next_badge: AtomicU64,
+    service: SessionPort,
 }
 
 impl fmt::Display for Stopped {
@@ -75,7 +74,7 @@ fn run(requirements: PlatformStartup) -> Result<(), Stopped> {
     Err(Stopped::ServicePortClosed)
 }
 
-fn start(requirements: PlatformStartup) -> Result<(&'static Port, Platform), Stopped> {
+fn start(requirements: PlatformStartup) -> Result<(&'static SessionPort, Platform), Stopped> {
     let hardware = requirements
         .hardware
         .open()
@@ -100,17 +99,12 @@ fn start(requirements: PlatformStartup) -> Result<(&'static Port, Platform), Sto
 
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         sessions: Mutex::new(Vec::new()),
-        service: Port::create().map_err(|_| Stopped::ServicePort)?,
-        next_badge: AtomicU64::new(0),
+        service: SessionPort::create().map_err(|_| Stopped::ServicePort)?,
     }));
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let _ = spawn_owned(move || {
-        let failure = serve_export::<platform::Protocol>(&exporter, |_| open(shared));
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    })
-    .map_err(|_| Stopped::ExportThread)?;
+    let _ = spawn_bound(move || serve_export::<platform::Protocol>(exporter, |_| open(shared)))
+        .map_err(|_| Stopped::ExportThread)?;
 
     let description = Description::new(mapping.as_bytes(), u64::from(fdt.offset))
         .map_err(|_| Stopped::Description)?;
@@ -154,15 +148,17 @@ fn publish(features: &features::Client<SessionTransport>, description: &Descript
 }
 
 fn open(shared: &Shared) -> Result<Port, SessionError> {
-    let MintedSession { badge, port } =
-        mint_session(&shared.service, &shared.next_badge).map_err(|_| SessionError::NoSpace)?;
+    let MintedSession { badge, port } = shared
+        .service
+        .create_session()
+        .map_err(|_| SessionError::NoSpace)?;
     // Запись сессии создаётся до передачи порта драйверу, и первый кадр сессии её находит.
     shared.sessions.lock().push(SessionRecord::new(badge.get()));
     Ok(port)
 }
 
-fn serve(service: &Port, mut platform: Platform) {
-    let mut events = SessionEvents::new(service);
+fn serve(service: &SessionPort, mut platform: Platform) {
+    let mut events = service.events();
 
     while let Some(event) = events.recv() {
         match event {

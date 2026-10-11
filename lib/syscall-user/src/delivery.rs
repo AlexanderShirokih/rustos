@@ -5,6 +5,9 @@ use syscall::{Handle, IPC_BUFFER_MAX_CAPS, ObjectKind, kind};
 
 use crate::IssuedHandle;
 
+/// Сессия протокола `P`, принятая полем кадра. Порт сессии держит выданная ядром запись.
+pub type ReceivedSession<P> = ipc::wire::Session<P, IssuedHandle<kind::Port>>;
+
 /// Ресурсы кадра: значок, capability по слотам и канал ответа встречного вызова.
 ///
 /// У принятого кадра невзятые capability закрываются вместе со значением. Исходящий кадр

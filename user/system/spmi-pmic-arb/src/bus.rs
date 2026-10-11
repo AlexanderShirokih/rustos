@@ -3,9 +3,8 @@
 //! кадры - протокол `Spmi`.
 
 use alloc::vec::Vec;
-use core::sync::atomic::AtomicU64;
 
-use component_startup::{SessionEvent, SessionEvents, mint_session};
+use component_startup::{SessionEvent, SessionPort};
 use ipc::IntoWireValue;
 use kernel_objects::{Delivery, Port, Signal};
 use runtime::{Mutex, log_fmt};
@@ -18,11 +17,6 @@ use crate::windows::Windows;
 const SIGNAL_RIGHTS: Rights = Rights::from_bits_truncate(
     Rights::READ.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
 );
-
-pub(crate) struct Sessions {
-    pub(crate) service: Port,
-    pub(crate) next_badge: AtomicU64,
-}
 
 pub(crate) struct Bus {
     pub(crate) arbiter: Option<Arbiter<Windows>>,
@@ -46,7 +40,7 @@ struct Lease {
 }
 
 struct Opener<'a> {
-    sessions: &'a Sessions,
+    sessions: &'a SessionPort,
     bus: &'a mut Bus,
 }
 
@@ -121,7 +115,9 @@ impl Opener<'_> {
             return Err(SpmiError::Busy);
         }
 
-        let minted = mint_session(&self.sessions.service, &self.sessions.next_badge)
+        let minted = self
+            .sessions
+            .create_session()
             .map_err(|_| SpmiError::NoSpace)?;
 
         device.holder = Some(Holder {
@@ -240,8 +236,8 @@ impl spmi_device::Service<Delivery> for Held<'_> {
     }
 }
 
-pub(crate) fn serve(bus: &Mutex<Bus>, sessions: &Sessions) {
-    let mut events = SessionEvents::new(&sessions.service);
+pub(crate) fn serve(bus: &Mutex<Bus>, sessions: &SessionPort) {
+    let mut events = sessions.events();
 
     while let Some(event) = events.recv() {
         match event {

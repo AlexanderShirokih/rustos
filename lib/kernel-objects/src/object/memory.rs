@@ -682,6 +682,11 @@ impl MmioMapping {
         &self.window
     }
 
+    /// Размер устройства в байтах.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
     /// MMIO-хэндлер по началу устройства.
     pub fn mmio(&self) -> Mmio {
         Mmio::new(self.start)

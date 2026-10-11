@@ -59,7 +59,6 @@ fn session(importer: &Importer) -> display::Client<SessionTransport> {
     )
     .expect("session granted")
     .client()
-    .with_wait(DISPLAY_REPLY_TIMEOUT)
 }
 
 fn found(importer: &Importer) -> Vec<Found> {

@@ -1,9 +1,10 @@
 #![no_std]
 #![no_main]
 
-use component_startup::{Requirements as _, component_manifest, serve_export, whole_export};
+use component_startup::{
+    Requirements as _, SessionPort, component_manifest, serve_export, whole_export,
+};
 use filesystem_abi::file_system;
-use kernel_objects::Port;
 use syscall::{Handle, kind};
 
 mod failed;
@@ -20,7 +21,7 @@ component_manifest! {
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let requirements = UnresponsiveFileSystemStartup::from_parent(parent);
-    let service = Port::create().map_err(|_| Failed)?;
-    let _ = serve_export::<file_system::Protocol>(&requirements.parent, whole_export(&service));
+    let service = SessionPort::create().map_err(|_| Failed)?;
+    let _ = serve_export::<file_system::Protocol>(requirements.parent, whole_export(&service));
     Err(Failed)
 }

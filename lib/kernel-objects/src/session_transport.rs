@@ -4,10 +4,10 @@ use ipc::{
     Channel, FrameBytes, Incoming, Listener, Outgoing, RecvError, Unsent,
     wire::{IpcError, SessionHandle},
 };
-use syscall::{Timeout, kind};
+use syscall::Timeout;
 use syscall_user::{Delivery, PortTransport};
 
-use crate::handle::OwnedHandle;
+use crate::Port;
 
 /// Канал [`PortTransport`], владеющий capability своего порта.
 ///
@@ -15,13 +15,13 @@ use crate::handle::OwnedHandle;
 /// отправка требует `Rights::WRITE`, приём - `Rights::READ`.
 pub struct SessionTransport {
     transport: PortTransport,
-    _port: OwnedHandle<kind::Port>,
+    _port: Port,
 }
 
 impl SessionTransport {
     /// Канал, забирающий порт во владение.
     #[must_use]
-    pub fn new(port: OwnedHandle<kind::Port>) -> Self {
+    pub fn new(port: Port) -> Self {
         Self {
             transport: PortTransport::new(port.as_raw()),
             _port: port,
@@ -61,7 +61,7 @@ impl Listener for SessionTransport {
     }
 }
 
-impl SessionHandle for OwnedHandle<kind::Port> {
+impl SessionHandle for Port {
     type Channel = SessionTransport;
 
     fn into_channel(self) -> SessionTransport {

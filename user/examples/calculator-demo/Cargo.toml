@@ -32,7 +32,6 @@ components = { workspace = true }
 ipc = { workspace = true }
 rtc-abi = { workspace = true }
 kernel-objects = { workspace = true }
-syscall = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

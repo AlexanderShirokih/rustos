@@ -1,17 +1,17 @@
 use alloc::{boxed::Box, vec::Vec};
-use core::{fmt, sync::atomic::AtomicU64};
+use core::fmt;
 
 use component_startup::{
-    SessionError, StartupError, component_manifest, mint_session, serve_export,
+    SessionPort, StartupError, component_manifest, serve_export, whole_export,
 };
-use kernel_objects::{IrqLine, Port, SessionTransport};
+use kernel_objects::{IrqLine, SessionTransport};
 use platform_abi::{MappedDescription, platform};
-use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, log_line, spawn_owned};
+use runtime::{Mutex, Timeout, log_fmt, log_line, spawn_bound};
 use spmi_abi::spmi;
 use spmi_pmic_arb::{Arbiter, ArbiterNode, Refusal};
 
 use crate::{
-    bus::{Bus, Device, Sessions, serve},
+    bus::{Bus, Device, serve},
     windows::Windows,
 };
 
@@ -32,6 +32,7 @@ enum Stopped {
     ServicePort,
     ServiceThreads,
     ServicePortClosed,
+    ArbiterLine,
 }
 
 impl fmt::Display for Stopped {
@@ -42,6 +43,7 @@ impl fmt::Display for Stopped {
             Self::ServicePort => formatter.write_str("service port refused"),
             Self::ServiceThreads => formatter.write_str("service threads refused"),
             Self::ServicePortClosed => formatter.write_str("service port closed"),
+            Self::ArbiterLine => formatter.write_str("arbiter line lost"),
         }
     }
 }
@@ -55,38 +57,27 @@ fn run(requirements: SpmiStartup) -> Result<(), Stopped> {
         .map_err(Stopped::Startup)?
         .client();
     let (bus, line) = take(&platform).ok_or(Stopped::Arbiter)?;
-    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
+    let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
 
     let bus: &'static Mutex<Bus> = Box::leak(Box::new(Mutex::new(bus)));
-    let sessions: &'static Sessions = Box::leak(Box::new(Sessions {
-        service,
-        next_badge: AtomicU64::new(0),
-    }));
+    let sessions: &'static SessionPort = Box::leak(Box::new(sessions));
 
     // Поток прерываний и поток экспорта работают до конца процесса.
     let interrupts = line.map(|line| {
-        spawn_owned(move || {
+        spawn_bound(move || {
             while line.wait(Timeout::INFINITE).is_ok() {
                 bus.lock().deliver();
                 if line.ack().is_err() {
                     break;
                 }
             }
-            log_line("arbiter line lost");
-            exit(FAILED_EXIT_CODE)
+            Stopped::ArbiterLine
         })
     });
 
     let exporter = requirements.parent;
-    let export = spawn_owned(move || {
-        let failure = serve_export::<spmi::Protocol>(&exporter, |_| {
-            mint_session(&sessions.service, &sessions.next_badge)
-                .map(|minted| minted.port)
-                .map_err(|_| SessionError::NoSpace)
-        });
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    });
+    let export =
+        spawn_bound(move || serve_export::<spmi::Protocol>(exporter, whole_export(sessions)));
 
     if matches!(interrupts, Some(Err(_))) || export.is_err() {
         return Err(Stopped::ServiceThreads);

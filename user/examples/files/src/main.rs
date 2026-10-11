@@ -10,6 +10,7 @@ use components::{component_manifest, into_std_handle};
 use display_abi::display;
 use filesystem_abi::namespace;
 use input_abi::input;
+use ipc::Timeout;
 use slint::{ComponentHandle, ModelRc, VecModel};
 use slint_display::{ScreenPlatform, scale_factor};
 
@@ -48,7 +49,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let requirements = components::requirements::<FilesStartup>()?;
     let screen = requirements.screen.open()?.client();
     let namespace = requirements.namespace.open()?;
-    let input = requirements.input.open()?.client();
+    let input = requirements
+        .input
+        .open()?
+        .client()
+        .with_wait(Timeout::INFINITE);
     molecular::install_filesystem_root(into_std_handle(namespace.into_handle()))
         .map_err(|_| "filesystem root is already installed")?;
 

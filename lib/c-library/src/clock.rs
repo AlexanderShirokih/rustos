@@ -12,13 +12,11 @@ use core::{
 
 use component_startup::Session;
 use rtc_abi::rtc;
-use runtime::{Instant, Timeout};
+use runtime::Instant;
 
 use crate::errno::{Errno, fail};
 
 pub(crate) type ClockId = c_ulong;
-
-const NOW_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
 
 const NS_PER_SEC: u32 = 1_000_000_000;
 
@@ -100,7 +98,6 @@ pub fn install_realtime_clock(rtc: Session<rtc::Protocol>) -> Result<(), Realtim
 
     let seconds = rtc
         .client()
-        .with_wait(NOW_REPLY_TIMEOUT)
         .now()
         .map_err(|_| RealtimeClockError::Unavailable)?;
 

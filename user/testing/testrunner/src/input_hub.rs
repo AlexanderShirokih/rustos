@@ -133,10 +133,7 @@ fn published() -> (Composition, Importer) {
 }
 
 fn source(importer: &Importer) -> Source {
-    importer
-        .session::<input_inject::Protocol>(SOURCE)
-        .client()
-        .with_wait(CALL_WAIT)
+    importer.session::<input_inject::Protocol>(SOURCE).client()
 }
 
 pub(crate) fn consumer(session: &Session<input::Protocol>) -> Consumer {

@@ -11,13 +11,13 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{convert::Infallible, fmt};
 
 use component_startup::{
-    SessionEvent, SessionEvents, StartupError, component_manifest, serve_export, whole_export,
+    SessionEvent, SessionPort, StartupError, component_manifest, serve_export, whole_export,
 };
 use driver_virtio_input::Device;
 use input_abi::{AttachError, RecordsError, UpdateError, input_inject, input_source};
-use ipc::{CallError, wire::Session};
-use kernel_objects::{Delivery, IrqLine, IssuedHandle, Port, SessionTransport, kind};
-use runtime::{FAILED_EXIT_CODE, Timeout, exit, log_fmt, spawn_owned};
+use ipc::CallError;
+use kernel_objects::{Delivery, IrqLine, ReceivedSession, SessionTransport};
+use runtime::{Timeout, log_fmt, spawn_bound};
 use syscall::PAGE_SIZE;
 use virtio::{
     Buffer, DeviceMemory, DeviceType, QUEUE_REGION_BYTES, QueueError, SplitQueue, Token, Transport,
@@ -46,6 +46,7 @@ enum Stopped {
     ExportThread,
     ServicePortClosed,
     NoDevice,
+    Input(u16, Failure),
 }
 
 #[derive(Debug, PartialEq)]
@@ -85,6 +86,7 @@ impl fmt::Display for Stopped {
             Self::ExportThread => formatter.write_str("export thread refused"),
             Self::ServicePortClosed => formatter.write_str("service port closed"),
             Self::NoDevice => formatter.write_str("no input device attached"),
+            Self::Input(id, failure) => write!(formatter, "input device {id}: {failure:?}"),
         }
     }
 }
@@ -93,7 +95,7 @@ impl input_source::Service<Delivery> for Source {
     fn attach(
         &mut self,
         _frame: &Delivery,
-        inject: Session<input_inject::Protocol, IssuedHandle<kind::Port>>,
+        inject: ReceivedSession<input_inject::Protocol>,
     ) -> Result<(), AttachError> {
         if self.attached {
             return Err(AttachError::Busy);
@@ -142,10 +144,9 @@ impl Source {
                 "input device {id} attached: {}",
                 input.device.name()
             ));
-            spawn_owned(move || {
+            spawn_bound(move || {
                 let Err(failure) = input.serve(id, inject);
-                log_fmt(format_args!("input device {id} stopped: {failure:?}"));
-                exit(FAILED_EXIT_CODE)
+                Stopped::Input(id, failure)
             })
             .map_err(|_| AttachError::Refused)?;
         }
@@ -259,24 +260,21 @@ fn run(requirements: VirtioInputStartup) -> Result<(), Stopped> {
         .map_err(Stopped::Startup)?
         .client()
         .with_wait(CALL_TIMEOUT);
-    let export = Port::create().map_err(|_| Stopped::ServicePort)?;
-    let export: &'static Port = Box::leak(Box::new(export));
+    let export = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
+    let export: &'static SessionPort = Box::leak(Box::new(export));
 
     // Поток экспорта работает до конца процесса.
     let parent = requirements.parent;
-    let _ = spawn_owned(move || {
-        let failure = serve_export::<input_source::Protocol>(&parent, whole_export(export));
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    })
-    .map_err(|_| Stopped::ExportThread)?;
+    let _ =
+        spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(export)))
+            .map_err(|_| Stopped::ExportThread)?;
 
     let mut source = Source {
         bus,
         attached: false,
         refused: false,
     };
-    let mut events = SessionEvents::new(export);
+    let mut events = export.events();
 
     while let Some(event) = events.recv() {
         if let SessionEvent::Frame(frame) = event {

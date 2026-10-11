@@ -14,7 +14,7 @@ use alloc::collections::{BTreeMap, VecDeque, btree_map::Entry};
 
 use input_abi::{DeviceLayout, Kind, Record, Usage, input};
 use kernel_objects::{Session, SessionTransport};
-use runtime::{Mutex, log_fmt, spawn_owned};
+use runtime::{Mutex, Timeout, log_fmt, spawn_owned};
 use syscall::SyscallError;
 
 const KEYBOARD_PAGE: u16 = 0x07;
@@ -127,7 +127,7 @@ impl Device {
 }
 
 pub(crate) fn start(session: Session<input::Protocol>) -> Result<(), SyscallError> {
-    let client = session.client();
+    let client = session.client().with_wait(Timeout::INFINITE);
     spawn_owned(move || {
         read(&client);
         0

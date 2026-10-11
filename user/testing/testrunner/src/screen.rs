@@ -40,7 +40,6 @@ fn opened(screen: &Found) -> display::Client<SessionTransport> {
     component_startup::open::<display::Protocol>(screen, SCREEN_REPLY_TIMEOUT)
         .expect("screen opens")
         .client()
-        .with_wait(SCREEN_REPLY_TIMEOUT)
 }
 
 fn fill(

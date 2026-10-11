@@ -6,9 +6,8 @@ use core::error::Error;
 use std::{process, thread};
 
 use calculator_demo::calculator;
-use component_startup::{SessionEvent, SessionEvents, serve_export, whole_export};
+use component_startup::{SessionEvent, SessionPort, serve_export, whole_export};
 use components::component_manifest;
-use kernel_objects::Port;
 
 component_manifest! {
     struct CalculatorStartup {
@@ -26,13 +25,13 @@ impl<F: ipc::ReceivedResources> calculator::Service<F> for Calculator {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let CalculatorStartup { parent } = components::requirements::<CalculatorStartup>()?;
-    let service = Port::create()?;
+    let service = SessionPort::create()?;
 
     let port = &service;
     thread::scope(|scope| {
         scope.spawn(move || {
-            let failure = serve_export::<calculator::Protocol>(&parent, whole_export(port));
-            println!("export stopped: {failure:?}");
+            let failure = serve_export::<calculator::Protocol>(parent, whole_export(port));
+            println!("stopped: {failure}");
             process::exit(1);
         });
         println!("started");
@@ -42,9 +41,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn serve(service: &Port) {
+fn serve(service: &SessionPort) {
     let mut calculator = Calculator;
-    let mut events = SessionEvents::new(service);
+    let mut events = service.events();
 
     while let Some(event) = events.recv() {
         if let SessionEvent::Frame(frame) = event {

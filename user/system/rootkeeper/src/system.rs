@@ -22,8 +22,8 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
-    Delivery, Error, IssuedHandle, MemoryRegion, OwnedHandle, Port, ReadOnlyMapping, Resource,
-    RingProducer, Session, Signal, kind,
+    Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, RingProducer,
+    Session, Signal, kind,
 };
 use log_abi::{JOURNAL_SLOT_PAYLOAD, JournalError, LogBuffer, Subscription, journal, log};
 use log_relay::{JOURNAL_REGION_BYTES, Journal};
@@ -1138,8 +1138,7 @@ impl<'a> RootSystem<'a> {
         incarnation: u64,
         region: &MemoryRegion,
         signal: &Signal,
-    ) -> Result<Subscription<OwnedHandle<kind::MemoryRegion>, OwnedHandle<kind::Signal>>, GrantError>
-    {
+    ) -> Result<Subscription<MemoryRegion, Signal>, GrantError> {
         // Потребителю `WRITE` нужен для `tail` кольца и сброса сигнала.
         let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER;
         Ok(Subscription {

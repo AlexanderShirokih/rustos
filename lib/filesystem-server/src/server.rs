@@ -1,15 +1,15 @@
 //! Экспорт `FileSystem` и приём кадров файловых сессий всех томов процесса.
 
 use alloc::boxed::Box;
-use core::{convert::Infallible, sync::atomic::AtomicU64};
+use core::convert::Infallible;
 
 use component_abi::Attributes;
-use component_startup::{SessionError, SessionEvent, SessionEvents};
+use component_startup::{SessionError, SessionEvent, SessionPort};
 use filesystem::FileSystemBackend;
 use filesystem_abi::file_system;
 use ipc::wire::IpcError;
 use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Resource};
-use runtime::{Mutex, PortTransport, log_line, process_exit, spawn_owned};
+use runtime::{Mutex, PortTransport, log_line, spawn_bound};
 use spin::Once;
 use syscall::{Handle, kind};
 
@@ -24,8 +24,7 @@ static IMAGE: Once<ReadOnlyMapping> = Once::new();
 
 pub(crate) struct Shared {
     pub(crate) volumes: Mutex<Volumes>,
-    pub(crate) service: Port,
-    pub(crate) next_badge: AtomicU64,
+    pub(crate) service: SessionPort,
 }
 
 /// Строит бекенд из `backing` либо из `None` и обслуживает экспорт и файловые сессии одного
@@ -45,6 +44,7 @@ where
         }
         None => None,
     };
+
     let backend = found(image.map(ReadOnlyMapping::as_bytes))?;
     let state = FileSystemState::new(Box::new(backend), image, Resource::self_resource()?);
     let mut volumes = Volumes::default();
@@ -91,22 +91,20 @@ fn run(
 ) -> Result<Infallible> {
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         volumes: Mutex::new(volumes),
-        service: Port::create()?,
-        next_badge: AtomicU64::new(0),
+        service: SessionPort::create()?,
     }));
-    let _ = spawn_owned(move || {
+    let _ = spawn_bound(move || {
         let parent = component_abi::component_startup::Client::new(PortTransport::new(start));
-        let _ = component_startup::serve_export::<file_system::Protocol>(&parent, |attributes| {
+        component_startup::serve_export::<file_system::Protocol>(parent, |attributes| {
             open(shared, attributes)
-        });
-        process_exit(1)
+        })
     })?;
     serve_sessions(shared);
     Err(Error::Ipc(IpcError::PeerClosed))
 }
 
 fn serve_sessions(shared: &Shared) {
-    let mut events = SessionEvents::new(&shared.service);
+    let mut events = shared.service.events();
 
     while let Some(event) = events.recv() {
         let incoming = match event {
@@ -130,7 +128,6 @@ fn serve_sessions(shared: &Shared) {
             state: &mut *state,
             frame: &mut frame,
             service: &shared.service,
-            next_badge: &shared.next_badge,
         };
         let delivered = file_system::dispatch(&mut serving, incoming).is_ok();
         frame.end(delivered, state);

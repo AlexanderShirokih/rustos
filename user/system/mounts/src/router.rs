@@ -7,9 +7,8 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::AtomicU64;
 
-use component_startup::{MintedSession, SessionError, mint_session};
+use component_startup::{MintedSession, SessionError, SessionPort};
 use filesystem_abi::{
     FILE_SYSTEM_OPEN_ROOT_TIMEOUT, FileSystemError, MountEnded, PATH_MAX, Path, ResolvedPair,
     common_directory, file_system, file_system_mount, namespace, rebase,
@@ -18,19 +17,16 @@ use ipc::{
     CallError,
     wire::{IpcError, Session},
 };
-use kernel_objects::{Delivery, IssuedHandle, Port, SessionTransport, kind};
+use kernel_objects::{Delivery, IssuedHandle, Port, ReceivedSession, SessionTransport, kind};
 use runtime::{Mutex, log_fmt};
 
 const WAITING_REQUESTS_MAX: usize = 64;
 const VIEW_WAITING_REQUESTS_MAX: usize = 8;
 
 type Debt = IssuedHandle<kind::Reply>;
-type ReceivedSession = Session<file_system::Protocol, IssuedHandle<kind::Port>>;
 type FileSystemClient = Arc<Mutex<file_system::Client<SessionTransport>>>;
 type Route<'m> = Option<(&'m Mount, String, u32)>;
 
-static VIEW_BADGES: AtomicU64 = AtomicU64::new(0);
-static MOUNT_BADGES: AtomicU64 = AtomicU64::new(0);
 static TREE: Mutex<Tree> = Mutex::new(Tree {
     views: BTreeMap::new(),
     mount_sessions: BTreeSet::new(),
@@ -72,11 +68,11 @@ enum Pending {
 }
 
 pub(crate) struct Router {
-    pub(crate) views: &'static Port,
+    pub(crate) views: &'static SessionPort,
 }
 
 impl Pending {
-    fn reply(self, answer: Result<(ReceivedSession, u32), FileSystemError>) {
+    fn reply(self, answer: Result<(ReceivedSession<file_system::Protocol>, u32), FileSystemError>) {
         // Недоставленный ответ закрывает capability сессии, и файловая система снимает её по
         // уходу значка.
         match self {
@@ -91,13 +87,13 @@ impl Pending {
     }
 }
 
-pub(crate) fn open_view(export: &Port) -> Result<Port, SessionError> {
+pub(crate) fn open_view(export: &SessionPort) -> Result<Port, SessionError> {
     open(export, "/").map_err(|_| SessionError::NoSpace)
 }
 
-pub(crate) fn open_mount(export: &Port) -> Result<Port, SessionError> {
+pub(crate) fn open_mount(export: &SessionPort) -> Result<Port, SessionError> {
     let MintedSession { badge, port } =
-        mint_session(export, &MOUNT_BADGES).map_err(|_| SessionError::NoSpace)?;
+        export.create_session().map_err(|_| SessionError::NoSpace)?;
     TREE.lock().mount_sessions.insert(badge.get());
     Ok(port)
 }
@@ -159,7 +155,7 @@ impl file_system_mount::Service<Delivery> for Router {
         &mut self,
         frame: &Delivery,
         path: &str,
-        filesystem: ReceivedSession,
+        filesystem: ReceivedSession<file_system::Protocol>,
         call: file_system_mount::mount::Reply<Debt>,
     ) {
         let prefix = match Path::new(path) {
@@ -209,10 +205,11 @@ impl file_system_mount::Service<Delivery> for Router {
     }
 }
 
-pub(crate) fn open(export: &Port, path: &str) -> Result<Port, FileSystemError> {
+pub(crate) fn open(export: &SessionPort, path: &str) -> Result<Port, FileSystemError> {
     let path = Path::new(path)?;
-    let MintedSession { badge, port } =
-        mint_session(export, &VIEW_BADGES).map_err(|_| FileSystemError::NoSpace)?;
+    let MintedSession { badge, port } = export
+        .create_session()
+        .map_err(|_| FileSystemError::NoSpace)?;
     TREE.lock()
         .views
         .insert(badge.get(), String::from(path.as_str()));

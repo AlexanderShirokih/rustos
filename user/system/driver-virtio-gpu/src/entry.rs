@@ -3,19 +3,16 @@
 //! Первая заявка привязывает GPU, уход последней сессии освобождает его.
 
 use alloc::{boxed::Box, vec::Vec};
-use core::{fmt, sync::atomic::AtomicU64};
+use core::fmt;
 
 use component_startup::{
-    MintedSession, SessionError, SessionEvent, SessionEvents, StartupError, component_manifest,
-    mint_session, serve_export,
+    MintedSession, SessionError, SessionEvent, SessionPort, StartupError, component_manifest,
+    serve_export,
 };
 use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, display};
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport};
-use runtime::{
-    FAILED_EXIT_CODE, MemoryAccess, Mutex, Timeout, UserMemFlags, exit, log_fmt, log_line,
-    spawn_owned,
-};
+use runtime::{MemoryAccess, Mutex, Timeout, UserMemFlags, log_fmt, log_line, spawn_bound};
 use syscall::{PAGE_SIZE, Rights, kind};
 use virtio_mmio_abi::virtio_mmio;
 
@@ -51,8 +48,7 @@ impl fmt::Display for Stopped {
 }
 
 struct Shared {
-    service: Port,
-    next_badge: AtomicU64,
+    service: SessionPort,
     state: Mutex<State>,
 }
 
@@ -99,8 +95,7 @@ impl Shared {
             state.gpu = Some(gpu);
         }
 
-        let Ok(MintedSession { badge, port }) = mint_session(&self.service, &self.next_badge)
-        else {
+        let Ok(MintedSession { badge, port }) = self.service.create_session() else {
             state.release_when_unused();
             return Err(SessionError::NoSpace);
         };
@@ -112,7 +107,7 @@ impl Shared {
     }
 
     fn serve(&self) {
-        let mut events = SessionEvents::new(&self.service);
+        let mut events = self.service.events();
 
         while let Some(event) = events.recv() {
             match event {
@@ -209,21 +204,16 @@ fn run(requirements: VirtioGpuStartup) -> Result<(), Stopped> {
         .map_err(Stopped::Startup)?
         .client()
         .with_wait(BUS_CALL_TIMEOUT);
-    let service = Port::create().map_err(|_| Stopped::ServicePort)?;
+    let service = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
     let shared: &'static Shared = Box::leak(Box::new(Shared {
         service,
-        next_badge: AtomicU64::new(0),
         state: Mutex::new(State::default()),
     }));
 
     // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let _ = spawn_owned(move || {
-        let failure = serve_export::<display::Protocol>(&exporter, |_| shared.open(&bus));
-        log_fmt(format_args!("export stopped: {failure:?}"));
-        exit(FAILED_EXIT_CODE)
-    })
-    .map_err(|_| Stopped::ExportThread)?;
+    let _ = spawn_bound(move || serve_export::<display::Protocol>(exporter, |_| shared.open(&bus)))
+        .map_err(|_| Stopped::ExportThread)?;
 
     shared.serve();
     Err(Stopped::ServicePortClosed)
