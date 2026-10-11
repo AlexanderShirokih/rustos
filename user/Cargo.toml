@@ -3,14 +3,15 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/doomgeneric",
+    "apps/files",
+    "apps/journal",
+    "apps/physics",
     "examples/calculator-demo",
     "examples/clock-std",
-    "examples/doomgeneric",
-    "examples/files",
     "examples/files-demo",
     "examples/hello-c",
     "examples/hello-std",
-    "examples/physics",
     "system/driver-pl031",
     "system/driver-pm8941-pwrkey",
     "system/driver-pm8941-rtc",
@@ -20,12 +21,12 @@ members = [
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
     "system/input-hub",
-    "system/journal",
     "system/mounts",
     "system/platform",
     "system/rootkeeper",
     "system/spmi-pmic-arb",
     "system/virtio-mmio",
+    "system/launcher",
     "testing/c-selftest",
     "testing/cxx-exit",
     "testing/cxx-selftest",
@@ -33,6 +34,7 @@ members = [
     "testing/std-selftest",
     "testing/testrunner",
     "../lib/c-library",
+    "../lib/application-window",
     "../lib/component-startup",
     "../lib/components",
     "../lib/filesystem-server",
@@ -73,6 +75,8 @@ userland-loader = { path = "../lib/userland-loader" }
 virtio-driver = { path = "../lib/virtio-driver" }
 
 # Крейты корневого workspace
+application-abi = { path = "../lib/application-abi" }
+application-window = { path = "../lib/application-window" }
 bootstrap-abi = { path = "../lib/bootstrap-abi" }
 component-abi = { path = "../lib/component-abi" }
 device-resolver = { path = "../lib/device-resolver" }

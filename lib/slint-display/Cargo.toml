@@ -11,7 +11,10 @@ bench = false
 doctest = false
 
 [dependencies]
+application-window = { workspace = true }
+component-startup = { workspace = true }
 display-abi = { workspace = true }
+input-abi = { workspace = true }
 ipc = { workspace = true }
 kernel-objects = { workspace = true }
 slint = { workspace = true }

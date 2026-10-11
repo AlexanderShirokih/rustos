@@ -1,16 +1,26 @@
 //! Платформа Slint над сессией `Display`.
 //!
-//! [`ScreenPlatform::open`] ставит окно Slint на весь экран, [`ScreenPlatform::run`] крутит
-//! цикл кадра в том же потоке по задачам, таймерам и анимациям Slint, [`scale_factor`]
-//! выбирает масштаб окна по плотности экрана.
+//! [`ScreenPlatform::open`] ставит окно Slint на весь экран с масштабом по плотности экрана,
+//! [`ScreenPlatform::run`] крутит цикл кадра в том же потоке по задачам, таймерам и анимациям
+//! Slint. [`ScreenPlatform::release`] отдаёт экран, [`ScreenPlatform::attach`] подключает
+//! новую сессию экрана.
+//!
+//! [`ScreenPlatform::deliver_input`] переводит записи сессии `Input` в события окна.
+//!
+//! [`accept_window`] получает окно и сессию `Input` приложения вызовом `show` его экспорта
+//! `Application`.
+//!
 //! Slint собран с `unsafe-single-threaded` и не проверяет поток, его объекты использует
 //! только поток `open`. Другие потоки запускаются после `open` и передают работу через
 //! `slint::Weak::upgrade_in_event_loop` либо `slint::invoke_from_event_loop`.
 
+mod application;
 mod event_loop;
+mod input;
 mod pixel;
 mod scale;
 mod screen;
 
-pub use scale::scale_factor;
+pub use application::{Shown, accept_window};
+pub use application_window::WindowError;
 pub use screen::{ScreenError, ScreenPlatform};

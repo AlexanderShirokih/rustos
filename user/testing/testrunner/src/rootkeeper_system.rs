@@ -71,12 +71,10 @@ const WRITTEN_PATH: &str = "/written";
 const RENAMED_PATH: &str = "/renamed";
 const IMAGE_MOUNT: &str = "/boot";
 const NESTED_SPARE_MOUNT: &str = "/boot/spare";
-const NESTED_SPARE_PATH: &str = "/boot/spare/x";
 const AREA_SCOPE: &str = "/boot/scope-consumer-fixture";
 
 const STOPPED_LINE: &str = "stopped: failed";
 const DUPLICATE_REFUSED_LINES: [&str; 2] = ["Err(Syscall(AccessDenied))", STOPPED_LINE];
-const BOOT_REFUSAL: &str = "mount table line 2 /boot: filesystem refused: Remote(Unbound)";
 const TMP_MOUNT: &str = "mount /tmp";
 
 pub(crate) const COMPONENT_REPLY_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -541,20 +539,24 @@ fn region_base(region: &MemoryRegion) -> u64 {
     region.inspect().expect("region inspects").base
 }
 
-fn await_removed(composition: &Composition, name: &str) -> Option<RecordState> {
+pub(crate) fn await_status(
+    composition: &Composition,
+    name: &str,
+    status: Status,
+) -> Option<RecordState> {
     (0..POLL_ATTEMPTS).find_map(|_| {
         let state = composition.hold().record(name);
-        let removed = state.filter(|state| state.status == Status::Removed);
-        if removed.is_none() {
+        let reached = state.filter(|state| state.status == status);
+        if reached.is_none() {
             pause(POLL_INTERVAL);
         }
-        removed
+        reached
     })
 }
 
 fn spent(restarts_spent: u32) -> RecordState {
     RecordState {
-        status: Status::Removed,
+        status: Status::Departed,
         restarts_spent,
     }
 }
@@ -902,9 +904,9 @@ fn a_journal_subscriber_reads_the_lines_of_another_record() {
 }
 
 #[test_harness::test]
-fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
-    let composition = scenario(&[IDLE_EXPORT, NEIGHBOUR]);
-    let importer = composition.importer(&[probe_of(HELD), probe_of(PROBE)]);
+fn a_provider_out_of_restarts_refuses_waiting_importers_and_starts_on_a_new_one() {
+    let composition = scenario(&[IDLE_EXPORT]);
+    let importer = composition.importer(&[probe_of(HELD)]);
     let started = await_component_lines(IDLE_EXPORT.name, 1);
     let held = held_request(
         first_found::<probe::Protocol>(&importer, HELD),
@@ -915,37 +917,13 @@ fn the_importer_of_a_provider_out_of_restarts_gets_unavailable() {
 
     composition.terminate(IDLE_EXPORT.name, TERMINATE_EXIT_CODE);
     let held_answer = answered(held);
-    let again =
-        component_startup::open::<probe::Protocol>(&again, COMPONENT_REPLY_TIMEOUT).map(drop);
-    let pinged = ping(&importer, PROBE);
+    let again = held_request(again, COMPONENT_REPLY_TIMEOUT);
+    let restarted = await_component_lines(IDLE_EXPORT.name, 2);
 
     test_harness::check_eq!(started, ["started"]);
     test_harness::check_eq!(held_answer, UNAVAILABLE);
-    test_harness::check_eq!(again, Err(CallError::Remote(SessionError::Unavailable)));
-    test_harness::check_eq!(pinged, Ok(PING));
-    finish(composition);
-}
-
-#[test_harness::test]
-fn a_provider_that_exits_with_code_zero_leaves_its_importers_unavailable() {
-    let composition = scenario(&[ComponentSpec {
-        restarts: 2,
-        ..EXPORT
-    }]);
-    let importer = composition.importer(&[probe_of(PROBE)]);
-    let started = await_component_lines(EXPORT.name, 1);
-    let found = first_found::<probe::Protocol>(&importer, PROBE);
-
-    composition.terminate(EXPORT.name, 0);
-    let answer =
-        component_startup::open::<probe::Protocol>(&found, COMPONENT_REPLY_TIMEOUT).map(drop);
-    let again = requested::<probe::Protocol>(&importer, PROBE, COMPONENT_REPLY_TIMEOUT);
-    let removed = await_removed(&composition, EXPORT.name);
-
-    test_harness::check_eq!(started, ["started"]);
-    test_harness::check_eq!(answer, Err(CallError::Remote(SessionError::Unavailable)));
-    test_harness::check_eq!(again, Err(CallError::Remote(SessionError::Unbound)));
-    test_harness::check_eq!(removed, Some(spent(0)));
+    test_harness::check_eq!(restarted, ["started", "started"]);
+    test_harness::check_eq!(answered(again), TIMED_OUT);
     finish(composition);
 }
 
@@ -956,11 +934,11 @@ fn a_failing_child_spends_each_restart_once() {
         ..LOG_DUPLICATE
     }]);
 
-    let removed = await_removed(&composition, LOG_DUPLICATE.name);
+    let departed = await_status(&composition, LOG_DUPLICATE.name, Status::Departed);
     // Двойное списание тоже исчерпывает лимит, поэтому число запусков считается по строкам.
     let failures = await_component_lines(LOG_DUPLICATE.name, 6);
 
-    test_harness::check_eq!(removed, Some(spent(2)));
+    test_harness::check_eq!(departed, Some(spent(2)));
     test_harness::check_eq!(failures, DUPLICATE_REFUSED_LINES.repeat(3));
     finish(composition);
 }
@@ -972,10 +950,10 @@ fn a_child_taken_down_for_a_closed_startup_session_spends_a_restart() {
         ..CLOSED
     }]);
 
-    let removed = await_removed(&composition, CLOSED.name);
+    let departed = await_status(&composition, CLOSED.name, Status::Departed);
     let restarted = await_component_lines(CLOSED.name, 2);
 
-    test_harness::check_eq!(removed, Some(spent(1)));
+    test_harness::check_eq!(departed, Some(spent(1)));
     test_harness::check_eq!(restarted.len(), 2);
     finish(composition);
 }
@@ -1028,40 +1006,6 @@ fn a_provider_restart_leaves_its_importer_running() {
     test_harness::check_eq!(started, ["started"]);
     test_harness::check_eq!(incarnations, [2, 3]);
     test_harness::check_eq!(lines, ["started"]);
-    finish(composition);
-}
-
-#[test_harness::test]
-fn a_component_out_of_restarts_does_not_stop_the_root() {
-    let composition = scenario(&[
-        ComponentSpec {
-            restarts: 1,
-            ..ROUTER
-        },
-        NEIGHBOUR,
-    ]);
-    let importer = composition.importer(&[view(ROOT_VIEW, ""), probe_of(PROBE)]);
-    // Без файловых систем каждое воплощение маршрутизатора пишет отказ строки `/boot`.
-    let started = logged(
-        &await_component_lines_with_prefix(ROUTER_NAME, BOOT_REFUSAL, 1),
-        BOOT_REFUSAL,
-    );
-    let router = first_found::<namespace::Protocol>(&importer, ROOT_VIEW);
-
-    composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
-    let restarted = logged(
-        &await_component_lines_with_prefix(ROUTER_NAME, BOOT_REFUSAL, 2),
-        BOOT_REFUSAL,
-    );
-    composition.terminate(ROUTER_NAME, TERMINATE_EXIT_CODE);
-    let refused =
-        component_startup::open::<namespace::Protocol>(&router, COMPONENT_REPLY_TIMEOUT).map(drop);
-    let pinged = ping(&importer, PROBE);
-
-    test_harness::check_eq!(started, 1);
-    test_harness::check_eq!(restarted, 2);
-    test_harness::check_eq!(refused, Err(CallError::Remote(SessionError::Unavailable)));
-    test_harness::check_eq!(pinged, Ok(PING));
     finish(composition);
 }
 
@@ -1162,7 +1106,7 @@ fn a_session_to_a_hidden_export_is_unbound_until_the_feature_is_published() {
 }
 
 #[test_harness::test]
-fn a_record_waits_for_a_restarted_publisher_and_starts_once_it_is_removed() {
+fn a_record_waits_for_a_restarted_publisher_and_starts_once_it_stops() {
     let (composition, names) =
         started(&[PARENT, FEATURE_HOLDER], ExportIndex::EMPTY, SEARCH_LIMITS);
     let holding = await_component_lines(FEATURE_HOLDER.name, 1);
@@ -1684,31 +1628,6 @@ fn malformed_and_unserved_table_lines_are_logged_while_the_rest_mount() {
 }
 
 #[test_harness::test]
-fn a_removed_file_system_frees_its_prefix() {
-    let composition = scenario(&[ROUTER, IMAGE_FS, RAM_FS]);
-    let importer =
-        composition.importer(&[view(ROOT_VIEW, ""), view(SPARE_VIEW, NESTED_SPARE_MOUNT)]);
-    let spare = importer.port::<namespace::Protocol>(SPARE_VIEW);
-    let mounted = resolution(&spare, "/", RESOLVE_TIMEOUT);
-
-    composition.terminate(RAM_FS.name, TERMINATE_EXIT_CODE);
-    let freed = resolution(&spare, "/", FREED_PREFIX_TIMEOUT);
-    let root = importer.port::<namespace::Protocol>(ROOT_VIEW);
-    let nested = resolution(&root, NESTED_SPARE_PATH, RESOLVE_TIMEOUT);
-    // После снятия `/boot/spare` строка получает отказ `Unbound` либо `Unavailable` в
-    // зависимости от того, снята ли запись к повторному запросу строки.
-    let refusal = "mount table line 5 /boot/spare: filesystem refused";
-    let router = await_component_lines_with_prefix(ROUTER_NAME, refusal, 1);
-    let refused = router.iter().any(|line| line.starts_with(refusal));
-
-    test_harness::check_eq!(mounted, Ok(()));
-    test_harness::check_eq!(freed, Err(CallError::Ipc(IpcError::Timeout)));
-    test_harness::check_eq!(nested, Err(CallError::Remote(FileSystemError::NotFound)));
-    test_harness::check!(refused);
-    finish(composition);
-}
-
-#[test_harness::test]
 fn a_nested_table_line_mounts_after_a_mount_of_its_parent_path() {
     let composition = scenario(&[ROUTER, RAM_FS]);
     let importer = composition.importer(&[
@@ -2091,6 +2010,24 @@ fn a_watch_delivers_a_restarted_provider_again() {
 }
 
 #[test_harness::test]
+fn a_watch_delivers_a_provider_started_again_by_a_request() {
+    let composition = scenario(&[EXPORT]);
+    let importer = composition.importer(&[probe_of(PROBE)]);
+    let watch = watched(&importer, &[]);
+    let found = watch_next(&watch, COMPONENT_REPLY_TIMEOUT).expect("export found");
+
+    composition.terminate(EXPORT.name, 0);
+    let departed = await_status(&composition, EXPORT.name, Status::Departed).is_some();
+    let pinged = ping_found(&found);
+    let restarted = watch_next(&watch, HELD_REQUEST_TIMEOUT);
+
+    test_harness::check!(departed);
+    test_harness::check_eq!(pinged, Ok(PING));
+    test_harness::check_eq!(restarted.as_ref().map(ping_found), Some(Ok(PING)));
+    finish(composition);
+}
+
+#[test_harness::test]
 fn a_session_with_two_matching_exports_is_refused() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
@@ -2135,21 +2072,22 @@ fn a_found_export_opens_only_as_its_protocol() {
 }
 
 #[test_harness::test]
-fn next_skips_an_export_removed_after_all() {
+fn next_keeps_an_export_of_a_provider_after_its_exit() {
     let composition = scenario(&[EXPORT, NEIGHBOUR]);
     let importer = composition.importer(&[probe_of(PROBE)]);
     let started = await_component_lines(EXPORT.name, 1);
     let enumeration = enumerated(&importer, PROBE);
 
     composition.terminate(EXPORT.name, 0);
-    let remaining = await_found(&importer, PROBE, 1).len();
+    let departed = await_status(&composition, EXPORT.name, Status::Departed).is_some();
     let rest = drained(&enumeration);
-    let rest_pinged = rest.first().map(ping_found);
+    let pinged = rest.iter().map(ping_found).collect::<Vec<_>>();
+    let restarted = await_component_lines(EXPORT.name, 2);
 
     test_harness::check_eq!(started, ["started"]);
-    test_harness::check_eq!(remaining, 1);
-    test_harness::check_eq!(rest.len(), 1);
-    test_harness::check_eq!(rest_pinged, Some(Ok(PING)));
+    test_harness::check!(departed);
+    test_harness::check_eq!(pinged, [Ok(PING), Ok(PING)]);
+    test_harness::check_eq!(restarted, ["started", "started"]);
     finish(composition);
 }
 

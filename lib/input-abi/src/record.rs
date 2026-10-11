@@ -8,7 +8,7 @@ use ipc::{
     wire::{FIELD_DATA_MAX, IpcError, MessageBuf},
 };
 
-use crate::packed::Packed;
+use crate::{number::DeviceNumber, packed::Packed};
 
 /// Размер записи события в байтах.
 pub const RECORD_SIZE: usize = 16;
@@ -55,7 +55,7 @@ pub enum Kind {
 pub struct Record {
     pub kind: Kind,
     pub flags: u8,
-    pub device: u16,
+    pub device: Option<DeviceNumber>,
     pub code: u16,
     pub contact: u16,
     pub value: i64,
@@ -120,7 +120,7 @@ impl Kind {
 }
 
 impl Record {
-    const fn new(kind: Kind, device: u16) -> Self {
+    const fn new(kind: Kind, device: Option<DeviceNumber>) -> Self {
         Self {
             kind,
             flags: 0,
@@ -132,7 +132,7 @@ impl Record {
     }
 
     /// Нажатие либо отпускание клавиши с индексом `key`.
-    pub fn key(device: u16, key: u16, pressed: bool) -> Self {
+    pub fn key(device: Option<DeviceNumber>, key: u16, pressed: bool) -> Self {
         Self {
             code: key,
             value: i64::from(pressed),
@@ -141,7 +141,7 @@ impl Record {
     }
 
     /// Значение оси с индексом `axis` у контакта `contact` либо у устройства при [`NO_CONTACT`].
-    pub fn axis(device: u16, axis: u16, contact: u16, value: i64) -> Self {
+    pub fn axis(device: Option<DeviceNumber>, axis: u16, contact: u16, value: i64) -> Self {
         Self {
             code: axis,
             contact,
@@ -151,7 +151,7 @@ impl Record {
     }
 
     /// Начало касания контактом `contact`.
-    pub fn contact_down(device: u16, contact: u16) -> Self {
+    pub fn contact_down(device: Option<DeviceNumber>, contact: u16) -> Self {
         Self {
             contact,
             ..Self::new(Kind::ContactDown, device)
@@ -159,7 +159,7 @@ impl Record {
     }
 
     /// Конец касания контактом `contact`, при `cancel` - с флагом [`CANCEL`].
-    pub fn contact_up(device: u16, contact: u16, cancel: bool) -> Self {
+    pub fn contact_up(device: Option<DeviceNumber>, contact: u16, cancel: bool) -> Self {
         Self {
             flags: if cancel { CANCEL } else { 0 },
             contact,
@@ -168,7 +168,7 @@ impl Record {
     }
 
     /// Конец кадра со временем `nanos`.
-    pub fn frame(device: u16, nanos: u64) -> Self {
+    pub fn frame(device: Option<DeviceNumber>, nanos: u64) -> Self {
         Self {
             value: i64::from_le_bytes(nanos.to_le_bytes()),
             ..Self::new(Kind::Frame, device)
@@ -176,18 +176,18 @@ impl Record {
     }
 
     /// Появление устройства.
-    pub fn device_added(device: u16) -> Self {
-        Self::new(Kind::DeviceAdded, device)
+    pub fn device_added(device: DeviceNumber) -> Self {
+        Self::new(Kind::DeviceAdded, Some(device))
     }
 
     /// Уход устройства.
-    pub fn device_removed(device: u16) -> Self {
-        Self::new(Kind::DeviceRemoved, device)
+    pub fn device_removed(device: DeviceNumber) -> Self {
+        Self::new(Kind::DeviceRemoved, Some(device))
     }
 
     /// Сброс состояния всех устройств.
     pub fn resync() -> Self {
-        Self::new(Kind::Resync, 0)
+        Self::new(Kind::Resync, None)
     }
 
     /// Время записи `Frame` в наносекундах.
@@ -199,7 +199,7 @@ impl Record {
     pub fn to_bytes(&self) -> [u8; RECORD_SIZE] {
         let fields = [self.kind.raw(), self.flags]
             .into_iter()
-            .chain(self.device.to_le_bytes())
+            .chain(self.device.map_or(0, DeviceNumber::get).to_le_bytes())
             .chain(self.code.to_le_bytes())
             .chain(self.contact.to_le_bytes())
             .chain(self.value.to_le_bytes());
@@ -233,7 +233,7 @@ impl Record {
         Self {
             kind: Kind::from_raw(kind),
             flags,
-            device: u16::from_le_bytes([d0, d1]),
+            device: DeviceNumber::new(u16::from_le_bytes([d0, d1])),
             code: u16::from_le_bytes([k0, k1]),
             contact: u16::from_le_bytes([c0, c1]),
             value: i64::from_le_bytes([v0, v1, v2, v3, v4, v5, v6, v7]),

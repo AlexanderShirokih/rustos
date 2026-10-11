@@ -1,16 +1,18 @@
-//! Хаб ввода `input-hub`: протоколы `InputInject` и `Input` с ленивым запуском хаба из индекса
-//! образа и подключение источников `InputSource` под признаком публикатора.
+//! Сценарии хаба ввода `input-hub` проверяют протоколы `InputInject`, `Input` и `InputFocus` с
+//! ленивым запуском хаба из индекса образа и подключение источников `InputSource` под признаком
+//! публикатора.
 
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 
 use component_abi::RequirementDeclaration;
 use component_startup::SessionError;
 use input_abi::{
-    AxisDecl, AxisList, Binding, Command, DeclareError, DescribeError, DeviceDescriptor, KeyList,
-    Kind, NextError, Record, RecordsError, UpdateError, Usage, input, input_inject,
+    AxisDecl, AxisList, Binding, Command, DeclareError, DescribeError, DeviceDescriptor,
+    DeviceNumber, FocusError, FocusSession, KeyList, Kind, NextError, Record, RecordsError,
+    UpdateError, Usage, input, input_focus, input_inject,
 };
 use ipc::{CallError, Protocol};
-use kernel_objects::{Session, SessionTransport};
+use kernel_objects::{Port, Session, SessionTransport};
 use runtime::{JoinHandle, Mutex, PortTransport, Timeout, spawn_owned};
 
 use crate::{
@@ -22,6 +24,7 @@ use crate::{
 
 const SOURCE: &str = "source";
 const INPUT: &str = "input";
+const FOCUS: &str = "focus";
 
 const HUB: &str = "input-hub";
 const REFUSED_LINE: &str = "source attach failed: Remote(Refused)";
@@ -33,6 +36,10 @@ const REQUIREMENTS: &[Import] = &[
     },
     Import {
         declaration: RequirementDeclaration::session(INPUT, input::Protocol::ID),
+        namespace_root: None,
+    },
+    Import {
+        declaration: RequirementDeclaration::session(FOCUS, input_focus::Protocol::ID),
         namespace_root: None,
     },
 ];
@@ -68,6 +75,8 @@ const DECLARE_ATTEMPTS: usize = 64;
 
 type Source = input_inject::Client<SessionTransport>;
 type Consumer = input::Client<PortTransport>;
+type Holder = input_focus::Client<SessionTransport>;
+type App = FocusSession<Session<input::Protocol>>;
 type NextAnswer = Result<Vec<Record>, CallError<NextError>>;
 
 struct DescriptorParts {
@@ -171,7 +180,19 @@ fn keyboard(count: u16) -> DescriptorParts {
     }
 }
 
-fn declare(source: &Source, parts: &DescriptorParts) -> u16 {
+fn holder(importer: &Importer) -> Holder {
+    importer.session::<input_focus::Protocol>(FOCUS).client()
+}
+
+fn open_app(holder: &Holder) -> App {
+    let FocusSession { session, number } = holder.open().expect("focus session opened");
+    let session = Session::from_handle(Port::from(session.into_handle()));
+    test_harness::check_eq!(read(&consumer(&session)), Ok(vec![Record::resync()]));
+
+    FocusSession { session, number }
+}
+
+fn declare(source: &Source, parts: &DescriptorParts) -> DeviceNumber {
     source.declare(parts.descriptor()).expect("device declared")
 }
 
@@ -191,18 +212,18 @@ fn touch() -> Command {
     })
 }
 
-fn touch_frame(device: u16) -> Vec<Record> {
+fn touch_frame(device: DeviceNumber) -> Vec<Record> {
     vec![
-        Record::contact_down(device, CONTACT),
-        Record::axis(device, X, CONTACT, TOUCH_X),
-        Record::axis(device, Y, CONTACT, TOUCH_Y),
-        Record::frame(device, TOUCH_TIME),
+        Record::contact_down(Some(device), CONTACT),
+        Record::axis(Some(device), X, CONTACT, TOUCH_X),
+        Record::axis(Some(device), Y, CONTACT, TOUCH_Y),
+        Record::frame(Some(device), TOUCH_TIME),
     ]
 }
 
 fn update(
     source: &Source,
-    device: u16,
+    device: DeviceNumber,
     time: Option<u64>,
     command: &Command,
 ) -> Result<(), CallError<UpdateError>> {
@@ -230,7 +251,9 @@ fn attached(input: &Session<input::Protocol>, name: &str) -> bool {
     while let Ok(records) = read(&consumer) {
         let added = records.iter().any(|record| {
             record.kind == Kind::DeviceAdded
-                && consumer.describe(record.device).as_ref() == Ok(&expected)
+                && record
+                    .device
+                    .is_some_and(|device| consumer.describe(device).as_ref() == Ok(&expected))
         });
         if added {
             return true;
@@ -239,15 +262,15 @@ fn attached(input: &Session<input::Protocol>, name: &str) -> bool {
     false
 }
 
-fn pressed_keys(records: &[Record], device: u16) -> Vec<u16> {
+fn pressed_keys(records: &[Record], device: DeviceNumber) -> Vec<u16> {
     let mut pressed = BTreeSet::new();
     for record in records {
         match record.kind {
             Kind::Resync => pressed.clear(),
-            Kind::Key if record.device == device && record.value == 1 => {
+            Kind::Key if record.device == Some(device) && record.value == 1 => {
                 pressed.insert(record.code);
             }
-            Kind::Key if record.device == device => {
+            Kind::Key if record.device == Some(device) => {
                 pressed.remove(&record.code);
             }
             _ => {}
@@ -266,7 +289,7 @@ fn devices_of_one_source_get_distinct_numbers() {
     let second = declare(&source, &keyboard(1));
     let records = read_until(&consumer(&input), Record::device_added(second));
 
-    test_harness::check!(first != 0 && second != 0 && first != second);
+    test_harness::check!(first != second);
     test_harness::check_eq!(
         records,
         [
@@ -409,7 +432,7 @@ fn a_source_closed_mid_gesture_cancels_and_removes_its_device() {
     let source = source(&importer);
     let device = declare(&source, &touchscreen());
     update(&source, device, Some(TOUCH_TIME), &touch()).expect("touch accepted");
-    read_until(&consumer, Record::frame(device, TOUCH_TIME));
+    read_until(&consumer, Record::frame(Some(device), TOUCH_TIME));
 
     drop(source);
     let records = read_until(&consumer, Record::device_removed(device));
@@ -418,9 +441,9 @@ fn a_source_closed_mid_gesture_cancels_and_removes_its_device() {
     test_harness::check!(matches!(
         records.as_slice(),
         [up, frame, removed]
-            if *up == Record::contact_up(device, CONTACT, true)
+            if *up == Record::contact_up(Some(device), CONTACT, true)
                 && frame.kind == Kind::Frame
-                && frame.device == device
+                && frame.device == Some(device)
                 && *removed == Record::device_removed(device)
     ));
     test_harness::check_eq!(
@@ -594,5 +617,110 @@ fn a_source_accepting_after_the_open_timeout_is_attached_on_retry() {
 
     test_harness::check!(added);
     drop(input);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_focus_session_gets_no_frames_until_focus_starts_it_with_the_snapshot() {
+    let (composition, importer) = hub();
+    let input = importer.session::<input::Protocol>(INPUT);
+    let source = source(&importer);
+    let holder = holder(&importer);
+    let device = declare(&source, &touchscreen());
+    read_until(&consumer(&input), Record::device_added(device));
+    let app = open_app(&holder);
+
+    let pending = PendingNext::start(&app.session);
+    update(&source, device, Some(TOUCH_TIME), &touch()).expect("touch accepted");
+    let plain = read(&consumer(&input));
+    pause(HUB_SETTLE_WAIT);
+    let focused = holder.focus(Some(app.number));
+    let answer = pending.answer();
+
+    let mut expected = vec![Record::resync(), Record::device_added(device)];
+    expected.extend(touch_frame(device));
+    test_harness::check_eq!(plain, Ok(touch_frame(device)));
+    test_harness::check_eq!(focused, Ok(()));
+    test_harness::check_eq!(answer, Ok(expected));
+    drop((app, holder, source, input));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_session_losing_focus_gets_a_resync_without_devices() {
+    let (composition, importer) = hub();
+    let source = source(&importer);
+    let holder = holder(&importer);
+    let device = declare(&source, &touchscreen());
+    update(&source, device, Some(TOUCH_TIME), &touch()).expect("touch accepted");
+    let first = open_app(&holder);
+    let second = open_app(&holder);
+    holder.focus(Some(first.number)).expect("first focused");
+    read_until(
+        &consumer(&first.session),
+        Record::frame(Some(device), TOUCH_TIME),
+    );
+
+    let moved = holder.focus(Some(second.number));
+    let left = read(&consumer(&first.session));
+
+    test_harness::check_eq!(moved, Ok(()));
+    test_harness::check_eq!(left, Ok(vec![Record::resync()]));
+    drop((first, second, holder, source));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_reserved_device_is_hidden_from_the_focused_session_but_not_from_a_plain_one() {
+    let (composition, importer) = hub();
+    let input = importer.session::<input::Protocol>(INPUT);
+    let plain = consumer(&input);
+    let source = source(&importer);
+    let holder = holder(&importer);
+    let screen = declare(&source, &touchscreen());
+    let buttons = declare(&source, &keyboard(1));
+    read_until(&plain, Record::device_added(buttons));
+    let app = open_app(&holder);
+    holder.focus(Some(app.number)).expect("app focused");
+    read_until(&consumer(&app.session), Record::device_added(buttons));
+
+    let reserved = holder.reserve(buttons);
+    let removed = read(&consumer(&app.session));
+    let hidden = consumer(&app.session).describe(buttons);
+    let pending = PendingNext::start(&app.session);
+    update(&source, buttons, None, &command(|c| c.press(0))).expect("press accepted");
+    let pressed = read(&plain);
+    update(&source, screen, Some(TOUCH_TIME), &touch()).expect("touch accepted");
+    let answer = pending.answer();
+
+    test_harness::check_eq!(reserved, Ok(()));
+    test_harness::check_eq!(removed, Ok(vec![Record::device_removed(buttons)]));
+    test_harness::check_eq!(hidden, Err(CallError::Remote(DescribeError::UnknownDevice)));
+    test_harness::check!(matches!(
+        pressed.as_deref(),
+        Ok([key, frame]) if key.kind == Kind::Key && key.device == Some(buttons)
+            && frame.kind == Kind::Frame && frame.device == Some(buttons)
+    ));
+    test_harness::check_eq!(answer, Ok(touch_frame(screen)));
+    drop((app, holder, source, input));
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_second_holder_is_busy_until_the_first_closes_with_its_sessions() {
+    let (composition, importer) = hub();
+    let first = holder(&importer);
+    let second = holder(&importer);
+    let app = open_app(&first);
+
+    let refused = second.open().map(drop);
+    drop(first);
+    let closed = read(&consumer(&app.session));
+    let granted = second.open().map(drop);
+
+    test_harness::check_eq!(refused, Err(CallError::Remote(FocusError::Busy)));
+    test_harness::check!(closed.is_err());
+    test_harness::check_eq!(granted, Ok(()));
+    drop((app, second));
     finish(composition);
 }

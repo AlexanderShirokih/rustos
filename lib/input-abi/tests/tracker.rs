@@ -2,10 +2,11 @@
 
 use input_abi::{
     AxisDecl, AxisList, Binding, COMMAND_RECORDS_MAX, Command, CommandError, DeviceDescriptor,
-    DeviceLayout, KeyList, NO_CONTACT, Record, RecordBuf, RecordsError, Tracker, Usage,
+    DeviceLayout, DeviceNumber, KeyList, NO_CONTACT, Record, RecordBuf, RecordsError, Tracker,
+    Usage,
 };
 
-const DEVICE: u16 = 7;
+const DEVICE: DeviceNumber = DeviceNumber::new(7).expect("nonzero");
 const SCREEN_MAX: i32 = 1079;
 
 const X: u16 = 0;
@@ -117,7 +118,7 @@ fn refuse(tracker: &mut Tracker, command: &[u8], time: Option<u64>) -> CommandEr
 }
 
 fn axis(contact: u16, axis: u16, value: i64) -> Record {
-    Record::axis(DEVICE, axis, contact, value)
+    Record::axis(Some(DEVICE), axis, contact, value)
 }
 
 #[test]
@@ -137,13 +138,13 @@ fn two_contacts_of_one_command_come_in_one_frame() {
     assert_eq!(
         frame,
         [
-            Record::contact_down(DEVICE, 0),
+            Record::contact_down(Some(DEVICE), 0),
             axis(0, X, 1),
             axis(0, Y, 2),
-            Record::contact_down(DEVICE, 1),
+            Record::contact_down(Some(DEVICE), 1),
             axis(1, X, 3),
             axis(1, Y, 4),
-            Record::frame(DEVICE, 10),
+            Record::frame(Some(DEVICE), 10),
         ]
     );
 }
@@ -161,11 +162,11 @@ fn a_contact_outside_the_command_keeps_its_axes() {
         3,
     );
 
-    assert_eq!(frame, [axis(1, X, 9), Record::frame(DEVICE, 3)]);
+    assert_eq!(frame, [axis(1, X, 9), Record::frame(Some(DEVICE), 3)]);
     assert_eq!(
         snapshot(&touch)[..3],
         [
-            Record::contact_down(DEVICE, 0),
+            Record::contact_down(Some(DEVICE), 0),
             axis(0, X, 5),
             axis(0, Y, 6),
         ]
@@ -178,8 +179,11 @@ fn a_relative_axis_passes_its_delta_without_state() {
 
     let frame = apply(&mut mouse, command(|c| c.axis(X, 5)).as_slice(), None, 4);
 
-    assert_eq!(frame, [axis(NO_CONTACT, X, 5), Record::frame(DEVICE, 4)]);
-    assert_eq!(snapshot(&mouse), [Record::frame(DEVICE, 4)]);
+    assert_eq!(
+        frame,
+        [axis(NO_CONTACT, X, 5), Record::frame(Some(DEVICE), 4)]
+    );
+    assert_eq!(snapshot(&mouse), [Record::frame(Some(DEVICE), 4)]);
 }
 
 #[test]
@@ -193,17 +197,17 @@ fn a_released_contact_number_starts_a_new_touch_without_motion() {
     assert_eq!(
         up,
         [
-            Record::contact_up(DEVICE, 0, false),
-            Record::frame(DEVICE, 2)
+            Record::contact_up(Some(DEVICE), 0, false),
+            Record::frame(Some(DEVICE), 2)
         ]
     );
     assert_eq!(
         down,
         [
-            Record::contact_down(DEVICE, 0),
+            Record::contact_down(Some(DEVICE), 0),
             axis(0, X, 100),
             axis(0, Y, 200),
-            Record::frame(DEVICE, 3),
+            Record::frame(Some(DEVICE), 3),
         ]
     );
 }
@@ -223,11 +227,11 @@ fn a_key_and_a_touch_of_one_command_make_one_frame() {
     assert_eq!(
         frame,
         [
-            Record::key(DEVICE, POWER, true),
-            Record::contact_down(DEVICE, 0),
+            Record::key(Some(DEVICE), POWER, true),
+            Record::contact_down(Some(DEVICE), 0),
             axis(0, X, 1),
             axis(0, Y, 2),
-            Record::frame(DEVICE, 5),
+            Record::frame(Some(DEVICE), 5),
         ]
     );
 }
@@ -242,7 +246,10 @@ fn a_key_record_carries_the_index_of_the_key_in_the_list() {
 
     assert_eq!(
         frame,
-        [Record::key(DEVICE, 1, true), Record::frame(DEVICE, 1)]
+        [
+            Record::key(Some(DEVICE), 1, true),
+            Record::frame(Some(DEVICE), 1)
+        ]
     );
 }
 
@@ -260,7 +267,7 @@ fn a_refusal_mid_command_leaves_no_trace() {
         refuse(&mut touch, partial.as_slice(), None),
         CommandError::Conflict
     );
-    assert_eq!(snapshot(&touch), [Record::frame(DEVICE, 0)]);
+    assert_eq!(snapshot(&touch), [Record::frame(Some(DEVICE), 0)]);
 }
 
 #[test]
@@ -326,7 +333,7 @@ fn axis_and_key_refusals() {
         assert_eq!(refuse(&mut touch, command.as_slice(), None), expected);
     }
 
-    let mut two = Record::key(0, POWER, true);
+    let mut two = Record::key(None, POWER, true);
     two.value = 2;
     assert_eq!(
         refuse(&mut touch, &raw(&[two]), None),
@@ -369,13 +376,16 @@ fn time_and_encoding_refusals() {
     );
     let release = command(|c| c.release(POWER));
 
-    let mut foreign = Record::key(0, POWER, false);
-    foreign.device = 1;
-    let mut flagged = Record::key(0, POWER, false);
+    let mut foreign = Record::key(None, POWER, false);
+    foreign.device = Some(DeviceNumber::FIRST);
+    let mut flagged = Record::key(None, POWER, false);
     flagged.flags = 1;
     let mut misaligned = release.as_slice().to_vec();
     misaligned.push(0);
-    let long = raw(&vec![Record::key(0, POWER, false); COMMAND_RECORDS_MAX + 1]);
+    let long = raw(&vec![
+        Record::key(None, POWER, false);
+        COMMAND_RECORDS_MAX + 1
+    ]);
 
     let cases = [
         (
@@ -385,7 +395,11 @@ fn time_and_encoding_refusals() {
         ),
         (Vec::new(), None, CommandError::Malformed),
         (long, None, CommandError::Malformed),
-        (raw(&[Record::frame(0, 200)]), None, CommandError::Malformed),
+        (
+            raw(&[Record::frame(None, 200)]),
+            None,
+            CommandError::Malformed,
+        ),
         (raw(&[foreign]), None, CommandError::Malformed),
         (raw(&[flagged]), None, CommandError::Malformed),
         (misaligned, None, CommandError::Malformed),
@@ -412,7 +426,7 @@ fn a_command_without_time_after_a_future_frame_takes_that_frame_time() {
         20,
     );
 
-    assert_eq!(frame.last(), Some(&Record::frame(DEVICE, 500)));
+    assert_eq!(frame.last(), Some(&Record::frame(Some(DEVICE), 500)));
 }
 
 #[test]
@@ -429,18 +443,18 @@ fn a_snapshot_mid_gesture_holds_keys_and_contacts() {
     assert_eq!(
         snapshot(&touch),
         [
-            Record::key(DEVICE, VOLUME_UP, true),
-            Record::contact_down(DEVICE, 0),
+            Record::key(Some(DEVICE), VOLUME_UP, true),
+            Record::contact_down(Some(DEVICE), 0),
             axis(0, X, 9),
             axis(0, Y, 8),
-            Record::frame(DEVICE, 30),
+            Record::frame(Some(DEVICE), 30),
         ]
     );
 }
 
 #[test]
 fn a_tablet_snapshot_before_first_motion_is_only_a_frame() {
-    assert_eq!(snapshot(&tablet()), [Record::frame(DEVICE, 0)]);
+    assert_eq!(snapshot(&tablet()), [Record::frame(Some(DEVICE), 0)]);
 }
 
 #[test]
@@ -467,12 +481,12 @@ fn cancel_releases_contacts_and_keys_and_keeps_device_axes() {
     assert_eq!(
         out.records().collect::<Vec<_>>(),
         [
-            Record::contact_up(DEVICE, 0, true),
-            Record::key(DEVICE, ENTER, false),
-            Record::frame(DEVICE, 40),
+            Record::contact_up(Some(DEVICE), 0, true),
+            Record::key(Some(DEVICE), ENTER, false),
+            Record::frame(Some(DEVICE), 40),
         ]
     );
-    assert_eq!(snapshot(&touch), [Record::frame(DEVICE, 40)]);
+    assert_eq!(snapshot(&touch), [Record::frame(Some(DEVICE), 40)]);
 
     tablet.cancel(50, &mut out);
 
@@ -482,7 +496,7 @@ fn cancel_releases_contacts_and_keys_and_keeps_device_axes() {
         [
             axis(NO_CONTACT, X, 3),
             axis(NO_CONTACT, Y, 4),
-            Record::frame(DEVICE, 1),
+            Record::frame(Some(DEVICE), 1),
         ]
     );
 }

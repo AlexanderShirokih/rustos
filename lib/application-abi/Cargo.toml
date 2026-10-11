@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "application-abi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+display-abi = { workspace = true }
+input-abi = { workspace = true }
+ipc = { workspace = true }
+
+[dev-dependencies]
+ipc-test = { workspace = true }
+syscall = { workspace = true }
+
+[lints]
+workspace = true

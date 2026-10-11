@@ -68,12 +68,14 @@ impl SessionPort {
         NonZeroU64::MIN.saturating_add(self.next_badge.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Создаёт клиентскую capability порта с правами `WRITE | TRANSFER` под новым значком.
+    /// Создаёт клиентскую capability порта с правами `DUPLICATE | WRITE | TRANSFER` под новым
+    /// значком. Закрытие клиентской capability отзывает её производные.
     pub fn create_session(&self) -> Result<MintedSession, Error> {
         let badge = self.create_badge();
-        let port = self
-            .port
-            .duplicate(Rights::WRITE | Rights::TRANSFER, Some(badge))?;
+        let port = self.port.duplicate(
+            Rights::DUPLICATE | Rights::WRITE | Rights::TRANSFER,
+            Some(badge),
+        )?;
 
         Ok(MintedSession { badge, port })
     }

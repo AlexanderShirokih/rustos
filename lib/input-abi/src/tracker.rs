@@ -3,6 +3,7 @@
 use crate::{
     command::COMMAND_RECORDS_MAX,
     descriptor::{AXES_MAX, AxisDecl, AxisMode, CONTACTS_MAX, DeviceLayout, KEYS_MAX},
+    number::DeviceNumber,
     record::{CANCEL, Kind, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records},
 };
 
@@ -17,7 +18,7 @@ const KEY_WORDS: usize = KEYS_MAX / 64;
 /// отмену состояния. Время приёма команды задаёт вызывающий.
 #[derive(Debug, Clone)]
 pub struct Tracker {
-    device: u16,
+    device: DeviceNumber,
     layout: DeviceLayout,
     state: State,
 }
@@ -79,7 +80,7 @@ struct SeenInCommand {
 
 impl Tracker {
     /// Трекер устройства `device` без нажатых клавиш, значений осей и занятых контактов.
-    pub fn new(device: u16, layout: DeviceLayout) -> Self {
+    pub fn new(device: DeviceNumber, layout: DeviceLayout) -> Self {
         Self {
             device,
             layout,
@@ -149,7 +150,7 @@ impl Tracker {
         for record in Records::read(command).into_iter().flatten() {
             emit(out, self.normalized(&record));
         }
-        emit(out, Record::frame(self.device, frame_time));
+        emit(out, Record::frame(Some(self.device), frame_time));
         Ok(())
     }
 
@@ -159,7 +160,7 @@ impl Tracker {
     pub fn snapshot(&self, out: &mut RecordBuf) {
         out.clear();
         for key in self.state.pressed.iter() {
-            emit(out, Record::key(self.device, key, true));
+            emit(out, Record::key(Some(self.device), key, true));
         }
 
         let values = (0..)
@@ -167,7 +168,7 @@ impl Tracker {
             .take(self.layout.device_axes.len());
         for (index, value) in values {
             if let Some(value) = value {
-                let record = Record::axis(self.device, index, NO_CONTACT, i64::from(value));
+                let record = Record::axis(Some(self.device), index, NO_CONTACT, i64::from(value));
                 emit(out, record);
             }
         }
@@ -176,17 +177,17 @@ impl Tracker {
             if !contact.busy {
                 continue;
             }
-            emit(out, Record::contact_down(self.device, number));
+            emit(out, Record::contact_down(Some(self.device), number));
             let values = (0..)
                 .zip(contact.values)
                 .take(self.layout.contact_axes.len());
             for (index, value) in values {
-                let record = Record::axis(self.device, index, number, i64::from(value));
+                let record = Record::axis(Some(self.device), index, number, i64::from(value));
                 emit(out, record);
             }
         }
 
-        emit(out, Record::frame(self.device, self.state.last_frame));
+        emit(out, Record::frame(Some(self.device), self.state.last_frame));
     }
 
     /// Освобождает контакты и отпускает клавиши. Заменяет содержимое `out` кадром отмены:
@@ -202,15 +203,15 @@ impl Tracker {
 
         for (number, contact) in self.contacts() {
             if contact.busy {
-                emit(out, Record::contact_up(self.device, number, true));
+                emit(out, Record::contact_up(Some(self.device), number, true));
             }
         }
         for key in self.state.pressed.iter() {
-            emit(out, Record::key(self.device, key, false));
+            emit(out, Record::key(Some(self.device), key, false));
         }
 
         let time = self.frame_time(now);
-        emit(out, Record::frame(self.device, time));
+        emit(out, Record::frame(Some(self.device), time));
         for contact in &mut self.state.contacts {
             contact.busy = false;
         }
@@ -224,7 +225,7 @@ impl Tracker {
         seen: &mut SeenInCommand,
         record: &Record,
     ) -> Result<(), CommandError> {
-        if record.device != 0 {
+        if record.device.is_some() {
             return Err(CommandError::Malformed);
         }
 
@@ -378,10 +379,16 @@ impl Tracker {
 
     fn normalized(&self, record: &Record) -> Record {
         match record.kind {
-            Kind::Key => Record::key(self.device, record.code, record.value == 1),
-            Kind::Axis => Record::axis(self.device, record.code, record.contact, record.value),
-            Kind::ContactDown => Record::contact_down(self.device, record.contact),
-            _ => Record::contact_up(self.device, record.contact, record.flags & CANCEL != 0),
+            Kind::Key => Record::key(Some(self.device), record.code, record.value == 1),
+            Kind::Axis => {
+                Record::axis(Some(self.device), record.code, record.contact, record.value)
+            }
+            Kind::ContactDown => Record::contact_down(Some(self.device), record.contact),
+            _ => Record::contact_up(
+                Some(self.device),
+                record.contact,
+                record.flags & CANCEL != 0,
+            ),
         }
     }
 }

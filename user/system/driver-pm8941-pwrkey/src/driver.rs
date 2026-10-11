@@ -9,8 +9,8 @@ use component_startup::{
     component_startup as startup_contract, serve_export, whole_export,
 };
 use input_abi::{
-    AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, KeyList, UpdateError,
-    Usage, input_inject, input_source,
+    AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, DeviceNumber, KeyList,
+    UpdateError, Usage, input_inject, input_source,
 };
 use ipc::CallError;
 use kernel_objects::{Delivery, ReceivedSession, Session, SessionTransport, Signal};
@@ -67,7 +67,7 @@ struct Button {
     _bus: spmi::Client<SessionTransport>,
     device: spmi_device::Client<SessionTransport>,
     inject: input_inject::Client<SessionTransport>,
-    number: u16,
+    number: DeviceNumber,
     signal: Signal,
     status: u16,
     status_bit: u8,

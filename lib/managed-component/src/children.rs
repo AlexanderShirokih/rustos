@@ -409,7 +409,11 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         }
         entry.state = State::Removed;
         entry.reserve = None;
+        self.refuse_pending(child);
+    }
 
+    /// Отвечает `SessionError::Unavailable` заявкам к экспортам записи `child`.
+    pub fn refuse_pending(&mut self, child: C) {
         let mut index = 0;
         while let Some(pending) = self.requests.get(index) {
             if pending.provider == child {
@@ -525,6 +529,14 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         let port = self.port.port().duplicate(Rights::WRITE, Some(badge))?;
         self.insert_importer(badge.get(), Importer { key, owner: None });
         Ok(port)
+    }
+
+    /// Есть ли у записи `child` заявки, ещё не выданные провайдеру.
+    #[must_use]
+    pub fn has_pending(&self, child: C) -> bool {
+        self.requests
+            .iter()
+            .any(|pending| pending.provider == child)
     }
 
     #[must_use]

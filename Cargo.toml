@@ -6,6 +6,7 @@ members = [
     "kernel/hal-aarch64-asid",
     "kernel/hal-aarch64-paging",
     "kernel/hal-common",
+    "lib/application-abi",
     "lib/bootstrap-abi",
     "lib/display-abi",
     "lib/input-abi",
@@ -91,6 +92,7 @@ slint-build = { version = "=1.18.1", features = ["sdf-fonts"] }
 # Внутренние крейты workspace
 ipc = { path = "lib/ipc" }
 ipc-test = { path = "lib/ipc-test" }
+application-abi = { path = "lib/application-abi" }
 bootstrap-abi = { path = "lib/bootstrap-abi" }
 display-abi = { path = "lib/display-abi" }
 input-abi = { path = "lib/input-abi" }

@@ -1,15 +1,20 @@
-//! Таблица устройств и сессии `Input`.
+//! Таблица устройств, сессии `Input` и фокус.
 //!
-//! Каждая запись добавляется в очереди после изменения таблицы. Очередь, которая не вмещает
-//! запись, заменяется последовательностью начала сессии по текущей таблице.
+//! Каждая запись добавляется после изменения таблицы в очереди сессий, которым видно её
+//! устройство.
 
-use alloc::{boxed::Box, collections::BTreeMap};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use component_startup::{MintedSession, SessionError, SessionPort};
 use input_abi::{
-    DeclareError, DescribeError, DeviceDescriptor, DeviceLayout, MESSAGE_RECORDS_MAX, NextError,
-    RECORD_SIZE, Record, RecordBuf, Tracker, UpdateError, input, input_inject,
+    DeclareError, DescribeError, DeviceDescriptor, DeviceLayout, DeviceNumber, FocusError,
+    FocusNumber, FocusSession, MESSAGE_RECORDS_MAX, NextError, RECORD_SIZE, Record, RecordBuf,
+    Tracker, UpdateError, input, input_focus, input_inject,
 };
+use ipc::IntoWireValue;
 use kernel_objects::{Delivery, IssuedHandle, Port, kind};
 use runtime::{Instant, Mutex};
 
@@ -21,18 +26,23 @@ const START_RECORDS_LIMIT: usize = QUEUE_RECORDS_MAX - MESSAGE_RECORDS_MAX;
 
 type Debt = IssuedHandle<kind::Reply>;
 type Raw = [u8; RECORD_SIZE];
+type Devices = BTreeMap<DeviceNumber, Box<Device>>;
 
 static HUB: Mutex<Hub> = Mutex::new(Hub {
     devices: BTreeMap::new(),
     sessions: BTreeMap::new(),
-    next_device: Some(1),
+    holding: None,
+    next_device: Some(DeviceNumber::FIRST),
+    next_app: Some(FocusNumber::FIRST),
     start_records_max: 1,
 });
 
 struct Hub {
-    devices: BTreeMap<u16, Box<Device>>,
+    devices: Devices,
     sessions: BTreeMap<u64, Session>,
-    next_device: Option<u16>,
+    holding: Option<Holding>,
+    next_device: Option<DeviceNumber>,
+    next_app: Option<FocusNumber>,
     start_records_max: usize,
 }
 
@@ -47,30 +57,47 @@ struct Session {
     waiting: Option<input::next::Reply<Debt>>,
 }
 
+struct Holding {
+    badge: u64,
+    apps: BTreeMap<FocusNumber, App>,
+    focused: Option<FocusNumber>,
+    reserved: BTreeSet<DeviceNumber>,
+}
+
+struct App {
+    badge: u64,
+    session: Session,
+}
+
 pub(crate) struct Source;
 
 pub(crate) struct Consumer;
 
+pub(crate) struct Holder {
+    pub(crate) consumers: &'static SessionPort,
+}
+
 impl Hub {
-    fn broadcast(&mut self, records: &[Raw]) {
+    fn broadcast(&mut self, device: DeviceNumber, records: &[Raw]) {
         let Self {
-            devices, sessions, ..
+            devices,
+            sessions,
+            holding,
+            ..
         } = self;
+
         for session in sessions.values_mut() {
-            if session.queue.fits(records.len()) {
-                session.queue.push(records);
-            } else {
-                restart(&mut session.queue, devices);
-            }
-            session.answer();
+            session.deliver(records, devices, |_| true);
+        }
+
+        if let Some(holding) = holding
+            && !holding.reserved.contains(&device)
+        {
+            holding.deliver(records, devices);
         }
     }
 
-    fn broadcast_one(&mut self, record: Record) {
-        self.broadcast(&[record.to_bytes()]);
-    }
-
-    fn remove(&mut self, number: u16) {
+    fn remove(&mut self, number: DeviceNumber) {
         let Some(device) = self.devices.get_mut(&number) else {
             return;
         };
@@ -79,17 +106,94 @@ impl Hub {
             .tracker
             .cancel(Instant::now().as_nanos(), &mut cancel);
         if !cancel.is_empty() {
-            self.broadcast(as_raw(&cancel));
+            self.broadcast(number, as_raw(&cancel));
         }
 
         if let Some(device) = self.devices.remove(&number) {
             self.start_records_max -= 1 + device.snapshot_max;
         }
-        self.broadcast_one(Record::device_removed(number));
+        self.broadcast(number, &[Record::device_removed(number).to_bytes()]);
+        // Резерв снимается после рассылки, поэтому сессии фокуса, не видевшие устройство, не
+        // получают его `DeviceRemoved`.
+        if let Some(holding) = &mut self.holding {
+            holding.reserved.remove(&number);
+        }
+    }
+
+    fn session_mut(&mut self, badge: u64) -> Option<&mut Session> {
+        self.sessions.get_mut(&badge).or_else(|| {
+            self.holding
+                .as_mut()?
+                .apps
+                .values_mut()
+                .find(|app| app.badge == badge)
+                .map(|app| &mut app.session)
+        })
+    }
+
+    fn shows(&self, badge: u64, device: DeviceNumber) -> bool {
+        if self.sessions.contains_key(&badge) {
+            return true;
+        }
+
+        self.holding.as_ref().is_some_and(|holding| {
+            holding
+                .focused
+                .and_then(|number| holding.apps.get(&number))
+                .is_some_and(|app| app.badge == badge)
+                && !holding.reserved.contains(&device)
+        })
+    }
+
+    fn sessions_len(&self) -> usize {
+        self.sessions.len()
+            + self
+                .holding
+                .as_ref()
+                .map_or(0, |holding| holding.apps.len())
     }
 }
 
 impl Session {
+    fn start(devices: &Devices, shows: impl Fn(DeviceNumber) -> bool) -> Option<Self> {
+        let mut session = Self {
+            queue: Queue::new()?,
+            waiting: None,
+        };
+
+        session.restart(devices, shows);
+
+        Some(session)
+    }
+
+    fn deliver(
+        &mut self,
+        records: &[Raw],
+        devices: &Devices,
+        shows: impl Fn(DeviceNumber) -> bool,
+    ) {
+        if self.queue.fits(records.len()) {
+            self.queue.push(records);
+        } else {
+            self.restart(devices, shows);
+        }
+        self.answer();
+    }
+
+    fn restart(&mut self, devices: &Devices, shows: impl Fn(DeviceNumber) -> bool) {
+        self.queue.clear();
+        self.queue.push(&[Record::resync().to_bytes()]);
+
+        let mut snapshot = RecordBuf::new();
+        for (&number, device) in devices {
+            if shows(number) {
+                self.queue.push(&[Record::device_added(number).to_bytes()]);
+                device.tracker.snapshot(&mut snapshot);
+                self.queue.push(as_raw(&snapshot));
+            }
+        }
+    }
+
     fn answer(&mut self) {
         if self.queue.is_empty() {
             return;
@@ -101,12 +205,69 @@ impl Session {
     }
 }
 
+impl Holding {
+    fn deliver(&mut self, records: &[Raw], devices: &Devices) {
+        let Self {
+            apps,
+            focused,
+            reserved,
+            ..
+        } = self;
+
+        if let Some(app) = focused.and_then(|number| apps.get_mut(&number)) {
+            app.session
+                .deliver(records, devices, |device| !reserved.contains(&device));
+        }
+    }
+
+    fn refocus(&mut self, number: Option<FocusNumber>, devices: &Devices) {
+        let previous = core::mem::replace(&mut self.focused, number);
+        if previous == number {
+            return;
+        }
+
+        if let Some(app) = previous.and_then(|previous| self.apps.get_mut(&previous)) {
+            app.session.restart(devices, |_| false);
+            app.session.answer();
+        }
+
+        let reserved = &self.reserved;
+        if let Some(app) = number.and_then(|number| self.apps.get_mut(&number)) {
+            app.session
+                .restart(devices, |device| !reserved.contains(&device));
+            app.session.answer();
+        }
+    }
+
+    fn reserve(&mut self, device: DeviceNumber, devices: &Devices) {
+        if self.reserved.insert(device) {
+            self.deliver(&[Record::device_removed(device).to_bytes()], devices);
+        }
+    }
+
+    fn close(&mut self, badge: u64) {
+        let Some(number) = self
+            .apps
+            .iter()
+            .find(|(_, app)| app.badge == badge)
+            .map(|(&number, _)| number)
+        else {
+            return;
+        };
+
+        self.apps.remove(&number);
+        if self.focused == Some(number) {
+            self.focused = None;
+        }
+    }
+}
+
 impl input_inject::Service<Delivery> for Source {
     fn declare(
         &mut self,
         frame: &Delivery,
         descriptor: DeviceDescriptor<'_>,
-    ) -> Result<u16, DeclareError> {
+    ) -> Result<DeviceNumber, DeclareError> {
         let layout = descriptor.layout()?;
         let snapshot_max = layout.snapshot_records_max();
 
@@ -117,7 +278,7 @@ impl input_inject::Service<Delivery> for Source {
         }
 
         let number = hub.next_device.ok_or(DeclareError::NoSpace)?;
-        hub.next_device = number.checked_add(1);
+        hub.next_device = number.next();
         let device = Device {
             owner: frame.badge,
             tracker: Tracker::new(number, layout),
@@ -125,14 +286,14 @@ impl input_inject::Service<Delivery> for Source {
         };
         hub.devices.insert(number, Box::new(device));
         hub.start_records_max = start_records_max;
-        hub.broadcast_one(Record::device_added(number));
+        hub.broadcast(number, &[Record::device_added(number).to_bytes()]);
         Ok(number)
     }
 
     fn update(
         &mut self,
         frame: &Delivery,
-        device: u16,
+        device: DeviceNumber,
         time: Option<u64>,
         records: &[u8],
     ) -> Result<(), UpdateError> {
@@ -146,7 +307,7 @@ impl input_inject::Service<Delivery> for Source {
 
         let mut command = RecordBuf::new();
         owned.tracker.apply(records, time, now, &mut command)?;
-        hub.broadcast(as_raw(&command));
+        hub.broadcast(device, as_raw(&command));
         Ok(())
     }
 }
@@ -155,7 +316,7 @@ impl input::Service<Delivery> for Consumer {
     fn next(&mut self, frame: &Delivery, reply: input::next::Reply<Debt>) {
         let mut hub = HUB.lock();
         // Без сессии долг разрушается, и вызыватель получает `PeerClosed`.
-        let Some(session) = hub.sessions.get_mut(&frame.badge) else {
+        let Some(session) = hub.session_mut(frame.badge) else {
             return;
         };
 
@@ -169,12 +330,92 @@ impl input::Service<Delivery> for Consumer {
         session.answer();
     }
 
-    fn describe(&mut self, _frame: &Delivery, device: u16) -> Result<DeviceLayout, DescribeError> {
-        HUB.lock()
-            .devices
+    fn describe(
+        &mut self,
+        frame: &Delivery,
+        device: DeviceNumber,
+    ) -> Result<DeviceLayout, DescribeError> {
+        let hub = HUB.lock();
+        if !hub.shows(frame.badge, device) {
+            return Err(DescribeError::UnknownDevice);
+        }
+
+        hub.devices
             .get(&device)
             .map(|device| device.tracker.layout().clone())
             .ok_or(DescribeError::UnknownDevice)
+    }
+}
+
+impl input_focus::Service<Delivery> for Holder {
+    fn open(
+        &mut self,
+        frame: &Delivery,
+    ) -> impl IntoWireValue<Delivery, Read = Result<FocusSession, FocusError>> {
+        let mut hub = HUB.lock();
+        let total = hub.sessions_len();
+        let Hub {
+            devices,
+            holding,
+            next_app,
+            ..
+        } = &mut *hub;
+        let holding = claim(holding, frame.badge)?;
+        if total >= INPUT_SESSIONS_MAX {
+            return Err(FocusError::NoSpace);
+        }
+
+        let number = next_app.ok_or(FocusError::NoSpace)?;
+        let session = Session::start(devices, |_| false).ok_or(FocusError::NoSpace)?;
+        let MintedSession { badge, port } = self
+            .consumers
+            .create_session()
+            .map_err(|_| FocusError::NoSpace)?;
+
+        *next_app = number.next();
+        holding.apps.insert(
+            number,
+            App {
+                badge: badge.get(),
+                session,
+            },
+        );
+
+        Ok(FocusSession {
+            session: kernel_objects::Session::from_handle(port),
+            number,
+        })
+    }
+
+    fn focus(&mut self, frame: &Delivery, session: Option<FocusNumber>) -> Result<(), FocusError> {
+        let mut hub = HUB.lock();
+        let Hub {
+            devices, holding, ..
+        } = &mut *hub;
+        let holding = claim(holding, frame.badge)?;
+
+        if let Some(number) = session
+            && !holding.apps.contains_key(&number)
+        {
+            return Err(FocusError::UnknownSession);
+        }
+
+        holding.refocus(session, devices);
+        Ok(())
+    }
+
+    fn reserve(&mut self, frame: &Delivery, device: DeviceNumber) -> Result<(), FocusError> {
+        let mut hub = HUB.lock();
+        let Hub {
+            devices, holding, ..
+        } = &mut *hub;
+        let holding = claim(holding, frame.badge)?;
+        if !devices.contains_key(&device) {
+            return Err(FocusError::UnknownDevice);
+        }
+
+        holding.reserve(device, devices);
+        Ok(())
     }
 }
 
@@ -185,19 +426,15 @@ pub(crate) fn open_source(export: &SessionPort) -> Result<Port, SessionError> {
 
 pub(crate) fn open_input(export: &SessionPort) -> Result<Port, SessionError> {
     let mut hub = HUB.lock();
-    if hub.sessions.len() >= INPUT_SESSIONS_MAX {
+    if hub.sessions_len() >= INPUT_SESSIONS_MAX {
         return Err(SessionError::NoSpace);
     }
 
-    let mut queue = Queue::new().ok_or(SessionError::NoSpace)?;
-    restart(&mut queue, &hub.devices);
+    let session = Session::start(&hub.devices, |_| true).ok_or(SessionError::NoSpace)?;
     let MintedSession { badge, port } =
         export.create_session().map_err(|_| SessionError::NoSpace)?;
-    let session = Session {
-        queue,
-        waiting: None,
-    };
     hub.sessions.insert(badge.get(), session);
+
     Ok(port)
 }
 
@@ -214,18 +451,37 @@ pub(crate) fn source_gone(badge: u64) {
 }
 
 pub(crate) fn input_gone(badge: u64) {
-    // Разрушенный долг ожидающего `next` даёт ушедшему клиенту `PeerClosed`.
-    HUB.lock().sessions.remove(&badge);
+    let mut hub = HUB.lock();
+    if hub.sessions.remove(&badge).is_none()
+        && let Some(holding) = &mut hub.holding
+    {
+        holding.close(badge);
+    }
 }
 
-fn restart(queue: &mut Queue, devices: &BTreeMap<u16, Box<Device>>) {
-    queue.clear();
-    queue.push(&[Record::resync().to_bytes()]);
-    let mut snapshot = RecordBuf::new();
-    for (&number, device) in devices {
-        queue.push(&[Record::device_added(number).to_bytes()]);
-        device.tracker.snapshot(&mut snapshot);
-        queue.push(as_raw(&snapshot));
+pub(crate) fn holder_gone(badge: u64) {
+    let mut hub = HUB.lock();
+    if hub
+        .holding
+        .as_ref()
+        .is_some_and(|holding| holding.badge == badge)
+    {
+        hub.holding = None;
+    }
+}
+
+fn claim(holding: &mut Option<Holding>, badge: u64) -> Result<&mut Holding, FocusError> {
+    let holding = holding.get_or_insert_with(|| Holding {
+        badge,
+        apps: BTreeMap::new(),
+        focused: None,
+        reserved: BTreeSet::new(),
+    });
+
+    if holding.badge == badge {
+        Ok(holding)
+    } else {
+        Err(FocusError::Busy)
     }
 }
 

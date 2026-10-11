@@ -26,5 +26,5 @@ executable = "hello-std"
 memory_limit = "8M"
 
 [[components]]
-executable = "journal"
+executable = "launcher"
 memory_limit = "16M"

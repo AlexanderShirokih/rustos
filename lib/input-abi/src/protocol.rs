@@ -1,10 +1,11 @@
-//! Протоколы хаба ввода [`input_inject`] для источников и [`input`] для потребителей, протокол
-//! источника [`input_source`].
+//! Протоколы хаба ввода [`input_inject`] для источников, [`input`] для потребителей и
+//! [`input_focus`] для держателя фокуса, протокол источника [`input_source`].
 
 use ipc::{WireTyped, schema::max_body_len, wire::BODY_MAX};
 
 use crate::{
     descriptor::{DescriptorError, DeviceDescriptor, DeviceLayout},
+    number::{DeviceNumber, FocusNumber},
     record::RecordBuf,
     tracker::CommandError,
 };
@@ -56,7 +57,7 @@ ipc::wire_enum! {
     /// Отказ выдачи дескриптора.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum DescribeError {
-        /// Номер не принадлежит объявленному устройству.
+        /// Устройство не объявлено либо не видно сессии.
         UnknownDevice = 1,
     }
 }
@@ -69,6 +70,32 @@ ipc::wire_enum! {
         Busy = 1,
         /// Источник не может обслуживать свои устройства.
         Refused = 2,
+    }
+}
+
+ipc::wire_enum! {
+    /// Отказ операции держателя фокуса.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FocusError {
+        /// Фокусом владеет другая сессия `InputFocus`.
+        Busy = 1,
+        /// Достигнут предел сессий `Input` либо исчерпаны память очереди или номера сессий фокуса.
+        NoSpace = 2,
+        /// Номер не принадлежит открытой сессии фокуса.
+        UnknownSession = 3,
+        /// Номер не принадлежит объявленному устройству.
+        UnknownDevice = 4,
+    }
+}
+
+ipc::wire_value! {
+    /// Сессия `Input`, открытая держателю фокуса, и её номер для [`input_focus`]`::focus`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FocusSession<S = ipc::wire::Session<crate::input::Protocol>> {
+        /// Сессия `Input`, которую держатель передаёт приложению.
+        pub session: S,
+        /// Номер сессии.
+        pub number: FocusNumber,
     }
 }
 
@@ -108,15 +135,14 @@ ipc::protocol! {
     pub mod input_inject {
         name = "InputInject";
 
-        /// Проверяет дескриптор и выдаёт устройству номер. Номера начинаются с 1 и не
-        /// повторяются.
-        call fn declare(descriptor: DeviceDescriptor) -> Result<u16, DeclareError>;
+        /// Проверяет дескриптор и выдаёт устройству номер.
+        call fn declare(descriptor: DeviceDescriptor) -> Result<DeviceNumber, DeclareError>;
 
         /// Применяет команду из записей `records` к устройству `device` и добавляет её кадр в
-        /// очередь каждой сессии `Input`. Команда без времени `time` получает время приёма.
-        /// Ответ не ждёт чтения кадра потребителями.
+        /// очередь каждой сессии `Input`, которой видно устройство. Команда без времени `time`
+        /// получает время приёма. Ответ не ждёт чтения кадра потребителями.
         call fn update(
-            device: u16,
+            device: DeviceNumber,
             time: Option<u64>,
             records: &[u8],
         ) -> Result<(), UpdateError>;
@@ -124,11 +150,16 @@ ipc::protocol! {
 }
 
 ipc::protocol! {
-    /// Потребитель ввода: очередь кадров всех устройств и их дескрипторы.
+    /// Протокол потребителя ввода отдаёт очередь кадров видимых устройств и их дескрипторы.
     ///
-    /// Очередь сессии начинается с записи `Resync`, за которой для каждого устройства в порядке
-    /// номеров идут `DeviceAdded` и снимок. Очередь, которая не вмещает новый кадр, заменяется
-    /// такой же последовательностью по текущему состоянию устройств.
+    /// Обычной сессии видно каждое устройство. Сессии из [`input_focus`]`::open` устройства
+    /// видны, только пока она в фокусе, а зарезервированные не видны никогда.
+    ///
+    /// Очередь сессии начинается с записи `Resync`, за которой для каждого видимого устройства в
+    /// порядке номеров идут `DeviceAdded` и снимок. Такая последовательность по текущему
+    /// состоянию заменяет очередь, которая не вмещает новый кадр, и очередь сессии, у которой
+    /// сменился фокус. Зарезервированное устройство уходит из очереди сессии фокуса записью
+    /// `DeviceRemoved`.
     pub mod input {
         name = "Input";
 
@@ -136,8 +167,28 @@ ipc::protocol! {
         /// сколько их помещается в ответ. Пустая очередь задерживает ответ до первой записи.
         call(defer) fn next() -> Result<RecordBuf, NextError>;
 
-        /// Отдаёт дескриптор объявленного устройства `device`.
-        call fn describe(device: u16) -> Result<DeviceLayout, DescribeError>;
+        /// Отдаёт дескриптор устройства `device`, видимого сессии.
+        call fn describe(device: DeviceNumber) -> Result<DeviceLayout, DescribeError>;
+    }
+}
+
+ipc::protocol! {
+    /// Протокол держателя фокуса открывает сессии `Input` приложений, выбирает сессию в фокусе
+    /// и скрывает от сессий фокуса устройства, которые держатель оставляет себе.
+    ///
+    /// Держатель один. Операции другой сессии `InputFocus` получают `Busy`, пока держатель не
+    /// закроет свою. Закрытие сессии держателя закрывает его сессии фокуса и снимает резервы.
+    pub mod input_focus {
+        name = "InputFocus";
+
+        /// Открывает сессию `Input` вне фокуса.
+        call fn open() -> own Result<FocusSession, FocusError>;
+
+        /// Передаёт фокус сессии с номером `session` либо снимает фокус при `None`.
+        call fn focus(session: Option<FocusNumber>) -> Result<(), FocusError>;
+
+        /// Скрывает устройство `device` от сессий фокуса до его ухода.
+        call fn reserve(device: DeviceNumber) -> Result<(), FocusError>;
     }
 }
 

@@ -67,8 +67,24 @@ package = "driver-virtio-input"
 path = "/driver-virtio-input"
 
 [[programs]]
+package = "launcher"
+path = "/launcher"
+
+[[programs]]
 package = "journal"
 path = "/journal"
+
+[[programs]]
+package = "files"
+path = "/files"
+
+[[programs]]
+package = "physics"
+path = "/physics"
+
+[[programs]]
+package = "doomgeneric"
+path = "/doom"
 
 [[programs]]
 package = "hello-std"
@@ -85,3 +101,7 @@ path = "/clock-std"
 [[files]]
 path = "/mounts/table"
 source = "user/system/rootkeeper/mounts"
+
+[[files]]
+path = "/doom/freedoom1.wad"
+source = "target/third-party/freedoom/freedoom-0.13.0/freedoom1.wad"

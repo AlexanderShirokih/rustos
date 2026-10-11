@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "application-abi"
+version = "0.1.0"
+dependencies = [
+ "display-abi",
+ "input-abi",
+ "ipc",
+ "ipc-test",
+ "syscall",
+]
+
+[[package]]
 name = "bootstrap-abi"
 version = "0.1.0"
 dependencies = [

@@ -7,6 +7,7 @@ use component_startup::{Attributes, Found};
 use display_abi::{Area, DisplayError, display};
 use ipc::{CallError, Protocol};
 use kernel_objects::{MemoryRegion, SessionTransport};
+use managed_component::Status;
 use runtime::Timeout;
 use userland_image::ComponentSpec;
 
@@ -14,7 +15,9 @@ use crate::{
     composition::Importer,
     display_fixture_protocol::{DIMENSION, PHYSICAL_SIZE},
     log_relay::await_component_lines,
-    rootkeeper_system::{await_revoked, finish, fixture, indexed, query, registered, scenario},
+    rootkeeper_system::{
+        await_revoked, await_status, finish, fixture, indexed, query, registered, scenario,
+    },
 };
 
 const SCREEN: &str = "screen";
@@ -212,6 +215,27 @@ fn a_session_starts_an_image_program_under_its_index_name() {
 
     test_harness::check_eq!(dimension, DIMENSION);
     test_harness::check_eq!(lines, ["started"]);
+    drop(screen);
+    finish(composition);
+}
+
+#[test_harness::test]
+fn a_session_starts_an_image_program_again_after_its_exit() {
+    let (composition, _) = indexed(&[]);
+    let importer = composition.importer(SCREENS);
+    drop(session(&importer));
+    let started = await_component_lines(DISPLAY.name, 1);
+
+    composition.terminate(DISPLAY.name, 0);
+    let departed = await_status(&composition, DISPLAY.name, Status::Departed).is_some();
+    let screen = session(&importer);
+    let dimension = screen.dimension();
+    let restarted = await_component_lines(DISPLAY.name, 2);
+
+    test_harness::check_eq!(started, ["started"]);
+    test_harness::check!(departed);
+    test_harness::check_eq!(dimension, Ok(DIMENSION));
+    test_harness::check_eq!(restarted, ["started", "started"]);
     drop(screen);
     finish(composition);
 }

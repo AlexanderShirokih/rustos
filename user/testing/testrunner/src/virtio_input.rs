@@ -222,7 +222,7 @@ fn qemu_input_devices_are_added_with_their_keys_and_axes() {
         let added = records
             .records()
             .filter(|record| record.kind == Kind::DeviceAdded);
-        layouts.extend(added.filter_map(|record| consumer.describe(record.device).ok()));
+        layouts.extend(added.filter_map(|record| consumer.describe(record.device?).ok()));
     }
     let bus = bus_session(&importer);
     if layouts.is_empty() && open_slot(&bus, DeviceType::Input).err() == Some(NO_DEVICE) {

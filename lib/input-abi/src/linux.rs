@@ -84,6 +84,7 @@ mod tests {
     #[test]
     fn platform_buttons_are_the_named_usages() {
         assert_eq!(Usage::from_linux_key(116), Some(Usage::POWER));
+        assert_eq!(Usage::from_linux_key(102), Some(Usage::HOME));
         assert_eq!(Usage::from_linux_key(114), Some(Usage::VOLUME_DOWN));
         assert_eq!(Usage::from_linux_key(115), Some(Usage::VOLUME_UP));
     }

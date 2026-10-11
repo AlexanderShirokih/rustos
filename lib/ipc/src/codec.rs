@@ -1,6 +1,8 @@
 //! Кодек записи поля: чтение [`WireValue`], запись [`IntoWireValue`] и дескриптор схемы
 //! [`WireTyped`].
 
+use core::num::{NonZeroU16, NonZeroU32};
+
 use syscall::ObjectKind;
 
 use crate::{
@@ -84,6 +86,34 @@ int_wire_value!(i16, encode_i16, decode_i16, WireType::Int(2));
 int_wire_value!(i32, encode_i32, decode_i32, WireType::Int(4));
 int_wire_value!(i64, encode_i64, decode_i64, WireType::Int(8));
 int_wire_value!(bool, encode_bool, decode_bool, WireType::Bool);
+
+macro_rules! nonzero_wire_value {
+    ($ty:ty, $raw:ty) => {
+        impl<'a, R: ReceivedResources> WireValue<'a, R> for $ty {
+            type Owned = Self;
+
+            fn from_field(data: &'a [u8], frame: &mut R) -> Result<Self, IpcError> {
+                <$ty>::new(<$raw as WireValue<'a, R>>::from_field(data, frame)?)
+                    .ok_or(IpcError::InvalidValue)
+            }
+        }
+
+        impl<R: ReceivedResources> IntoWireValue<R> for $ty {
+            type Read = Self;
+
+            fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+                self.get().write_into(frame, field_id)
+            }
+        }
+
+        impl WireTyped for $ty {
+            const WIRE_TYPE: WireType = <$raw as WireTyped>::WIRE_TYPE;
+        }
+    };
+}
+
+nonzero_wire_value!(NonZeroU16, u16);
+nonzero_wire_value!(NonZeroU32, u32);
 
 impl<'a, R: ReceivedResources> WireValue<'a, R> for &'a str {
     type Owned = Self;
@@ -329,6 +359,34 @@ mod tests {
             bool = true,
             bool = false
         );
+    }
+
+    #[test]
+    fn a_nonzero_integer_round_trips_and_zero_is_refused() {
+        let value = core::num::NonZeroU16::new(0xABCD).expect("nonzero");
+        let zero = field_with(&0u16.to_le_bytes());
+
+        assert_eq!(round_trip(value), value);
+        assert_eq!(
+            <core::num::NonZeroU16 as WireValue<'_, TestFrame>>::from_field(
+                only_field(&zero),
+                &mut TestFrame::default(),
+            ),
+            Err(IpcError::InvalidValue)
+        );
+    }
+
+    crate::wire_value! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct Cursor(u32);
+    }
+
+    #[test]
+    fn a_newtype_travels_as_its_inner_value() {
+        let (bytes, _) = encode(Cursor(0x0123_4567));
+
+        assert_eq!(only_field(&bytes), &0x0123_4567u32.to_le_bytes());
+        assert_eq!(round_trip(Cursor(7)), Cursor(7));
     }
 
     #[test]

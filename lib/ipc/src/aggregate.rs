@@ -22,8 +22,52 @@
 /// Поле передаётся вложенной записью из записей полей и терминатора. Capability полей
 /// передаются в общих слотах кадра. Поле, которого нет в принятом кадре, даёт `MissingField`,
 /// неизвестное поле пропускается. Число полей вместе с вложенными проверяет const-ассерт.
+///
+/// Структура с одним безымянным полем передаётся записью этого поля без вложенной записи.
+/// Тип поля не содержит capability, и его `Owned` совпадает с ним самим.
+///
+/// ```
+/// ipc::wire_value! {
+///     pub struct Offset(u32);
+/// }
+/// ```
 #[macro_export]
 macro_rules! wire_value {
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident ( $(#[$field_attr:meta])* $field_vis:vis $ty:ty ) ;
+    ) => {
+        $(#[$attr])*
+        $vis struct $name($(#[$field_attr])* $field_vis $ty);
+
+        impl<'wire, __Frame: $crate::ReceivedResources> $crate::WireValue<'wire, __Frame> for $name {
+            type Owned = Self;
+
+            fn from_field(
+                data: &'wire [u8],
+                frame: &mut __Frame,
+            ) -> ::core::result::Result<Self, $crate::wire::IpcError> {
+                <$ty as $crate::WireValue<'wire, __Frame>>::from_field(data, frame).map($name)
+            }
+        }
+
+        impl<__Frame: $crate::ReceivedResources> $crate::IntoWireValue<__Frame> for $name {
+            type Read = Self;
+
+            fn write_into(
+                self,
+                frame: &mut $crate::wire::MessageBuf<__Frame>,
+                field_id: u8,
+            ) -> ::core::result::Result<(), $crate::wire::IpcError> {
+                $crate::IntoWireValue::write_into(self.0, frame, field_id)
+            }
+        }
+
+        impl $crate::WireTyped for $name {
+            const WIRE_TYPE: $crate::schema::WireType = <$ty as $crate::WireTyped>::WIRE_TYPE;
+        }
+    };
+
     (
         $(#[$attr:meta])*
         $vis:vis struct $name:ident $(<$lt:lifetime>)? {

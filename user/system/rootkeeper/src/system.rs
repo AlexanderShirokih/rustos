@@ -216,7 +216,7 @@ struct Watch<'a> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExportKey<'a> {
-    Record { record: u16, restarts: u32 },
+    Record { record: u16, incarnation: u32 },
     Program(&'a str),
 }
 
@@ -232,6 +232,7 @@ pub struct RootSystem<'a> {
     image: &'a SystemImage,
     kernel: Handle<kind::Port>,
     restarts_used: Vec<u32>,
+    incarnations: Vec<u32>,
     features_closed: Vec<bool>,
     importers: Vec<Vec<ImporterBinding>>,
     searches: Vec<Search<'a>>,
@@ -298,6 +299,7 @@ impl<'a> RootSystem<'a> {
             image,
             kernel,
             restarts_used: alloc::vec![0],
+            incarnations: alloc::vec![0],
             features_closed: alloc::vec![false],
             importers: Vec::new(),
             searches: Vec::new(),
@@ -361,6 +363,7 @@ impl<'a> RootSystem<'a> {
         let reserved = self.records.try_reserve(1).is_ok()
             && self.logs.try_reserve(1).is_ok()
             && self.restarts_used.try_reserve(1).is_ok()
+            && self.incarnations.try_reserve(1).is_ok()
             && self.features_closed.try_reserve(1).is_ok();
         if !reserved {
             return Err(AddFailure::Resource(NO_MEMORY));
@@ -386,6 +389,7 @@ impl<'a> RootSystem<'a> {
         });
         self.logs.push(log);
         self.restarts_used.push(0);
+        self.incarnations.push(0);
         self.features_closed.push(false);
         Ok(record)
     }
@@ -526,7 +530,10 @@ impl<'a> RootSystem<'a> {
             .any(|((record, &closed), index)| {
                 record.publisher()
                     && !closed
-                    && self.children.status(Holder::Record(index)) != Some(Status::Removed)
+                    && matches!(
+                        self.children.status(Holder::Record(index)),
+                        Some(Status::Waiting | Status::Running)
+                    )
             })
     }
 
@@ -567,12 +574,28 @@ impl<'a> RootSystem<'a> {
                 && *used < restarts
             {
                 *used += 1;
-                self.children.restart(child);
+                self.relaunch(record);
                 return;
             }
             self.log(format_args!("{name} restart limit reached"));
         }
-        self.children.remove(child);
+        match departure.outcome {
+            Outcome::LaunchFailed | Outcome::BudgetNotReturned => self.children.remove(child),
+            _ if retry => self.children.refuse_pending(child),
+            _ if self.children.has_pending(child) => self.relaunch(record),
+            _ => {}
+        }
+    }
+
+    fn relaunch(&mut self, record: u16) {
+        let child = Holder::Record(record);
+        if self.children.status(child) != Some(Status::Departed) {
+            return;
+        }
+        if let Some(incarnation) = self.incarnations.get_mut(usize::from(record)) {
+            *incarnation = incarnation.wrapping_add(1);
+        }
+        self.children.restart(child);
     }
 
     fn declared(
@@ -759,6 +782,7 @@ impl<'a> RootSystem<'a> {
             let _ = reply.send(Err::<Port, _>(SessionError::Unavailable));
             return;
         }
+        self.relaunch(provider);
 
         self.children.request(
             Holder::Record(provider),
@@ -797,8 +821,8 @@ impl<'a> RootSystem<'a> {
                 // Перезапущенный провайдер - новый экспорт: сессия к прежнему экземпляру мертва.
                 _ => ExportKey::Record {
                     record,
-                    restarts: self
-                        .restarts_used
+                    incarnation: self
+                        .incarnations
                         .get(usize::from(record))
                         .copied()
                         .unwrap_or(0),

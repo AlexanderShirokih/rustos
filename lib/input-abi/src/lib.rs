@@ -11,14 +11,21 @@
 //! относительная передаёт приращение. [`Tracker`] держит состояние устройства, применяет к нему
 //! [`Command`] целиком либо отклоняет её без последствий, строит снимок состояния и отменяет его.
 //!
-//! Протокол [`input_inject`] принимает от источников дескрипторы устройств и их команды, протокол
-//! [`input`] отдаёт потребителю очередь кадров всех устройств и дескриптор устройства по номеру.
+//! Протокол [`input_inject`] принимает от источников дескрипторы устройств и их команды.
+//!
+//! Протокол [`input`] отдаёт потребителю очередь кадров видимых ему устройств и дескриптор
+//! устройства по номеру.
+//!
+//! Протокол [`input_focus`] открывает держателю фокуса сессии `Input`, выбирает сессию в фокусе
+//! и резервирует устройства.
+//!
 //! Протокол [`input_source`] передаёт источнику сессию `InputInject`.
 #![cfg_attr(not(test), no_std)]
 
 mod command;
 mod descriptor;
 mod linux;
+mod number;
 mod packed;
 mod protocol;
 mod record;
@@ -30,9 +37,10 @@ pub use descriptor::{
     AXES_MAX, AXIS_DECL_SIZE, AxisDecl, AxisList, AxisMode, Binding, CONTACTS_MAX, DEVICE_NAME_MAX,
     DescriptorError, DeviceDescriptor, DeviceLayout, KEYS_MAX, KeyList,
 };
+pub use number::{DeviceNumber, FocusNumber};
 pub use protocol::{
-    AttachError, DeclareError, DescribeError, NextError, UpdateError, input, input_inject,
-    input_source,
+    AttachError, DeclareError, DescribeError, FocusError, FocusSession, NextError, UpdateError,
+    input, input_focus, input_inject, input_source,
 };
 pub use record::{
     CANCEL, Kind, MESSAGE_RECORDS_MAX, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records,

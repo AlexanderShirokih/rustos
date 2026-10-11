@@ -1,0 +1,233 @@
+import "@inter/Inter-Regular.ttf";
+
+export struct Tile {
+    title: string,
+    letter: string,
+    accent: color,
+}
+
+global Theme {
+    out property <color> text: #111827;
+    out property <color> muted: #4b5563;
+    out property <color> faint: #9ca3af;
+    out property <color> panel: #ffffff;
+    out property <color> edge: #e5e7eb;
+    out property <color> focus: #3b82f6;
+    out property <color> chosen: #eff6ff;
+}
+
+component Stat inherits VerticalLayout {
+    in property <string> value;
+    in property <string> label;
+
+    horizontal-stretch: 1;
+    spacing: 4px;
+
+    Text {
+        text: root.value;
+        color: Theme.text;
+        font-size: 18px;
+    }
+
+    Text {
+        text: root.label;
+        color: Theme.faint;
+        font-size: 12px;
+    }
+}
+
+component AppTile inherits Rectangle {
+    in property <Tile> tile;
+    in property <bool> chosen;
+    in property <length> size;
+
+    callback clicked();
+
+    width: root.size;
+    height: root.size + 30px;
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Rectangle {
+        y: 0;
+        height: root.size;
+        border-radius: root.size * 0.26;
+        border-width: root.chosen ? 3px : 0px;
+        border-color: Theme.focus;
+
+        Rectangle {
+            x: 6px;
+            y: 6px;
+            width: parent.width - 12px;
+            height: parent.height - 12px;
+            border-radius: self.width * 0.24;
+            background: root.tile.accent;
+
+            Text {
+                text: root.tile.letter;
+                color: #ffffff;
+                font-size: parent.width * 0.42;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    Text {
+        y: root.size + 6px;
+        width: root.width;
+        text: root.tile.title;
+        color: Theme.text;
+        font-size: 14px;
+        horizontal-alignment: center;
+    }
+}
+
+export component Launcher inherits Window {
+    in property <[Tile]> tiles;
+    in property <int> selected;
+    in property <string> clock;
+    in property <string> cpus;
+    in property <string> memory;
+    in property <string> uptime;
+
+    callback next();
+    callback previous();
+    callback open(int);
+
+    default-font-family: "Inter";
+    background: @linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+
+    FocusScope {
+        init => {
+            self.focus();
+        }
+
+        key-pressed(event) => {
+            if event.text == Key.DownArrow || event.text == Key.RightArrow {
+                root.next();
+            } else if event.text == Key.UpArrow || event.text == Key.LeftArrow {
+                root.previous();
+            } else {
+                return reject;
+            }
+            accept
+        }
+
+        key-released(event) => {
+            if event.text == Key.Return {
+                root.open(root.selected);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    VerticalLayout {
+        Rectangle {
+            height: 40px;
+            background: #ffffffcc;
+
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+
+                Text {
+                    text: "RustOS";
+                    color: Theme.text;
+                    font-size: 15px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Text {
+                    text: root.clock;
+                    color: Theme.text;
+                    font-size: 15px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Theme.edge;
+        }
+
+        HorizontalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            alignment: center;
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                preferred-width: 560px;
+                padding-top: 20px;
+                padding-bottom: 32px;
+                spacing: 12px;
+                alignment: start;
+
+                Rectangle {
+                    border-radius: 18px;
+                    border-width: 1px;
+                    border-color: Theme.edge;
+                    background: Theme.panel;
+
+                    HorizontalLayout {
+                        padding: 18px;
+                        spacing: 12px;
+
+                        Stat {
+                            value: root.cpus;
+                            label: "Processors";
+                        }
+
+                        Stat {
+                            value: root.memory;
+                            label: "Memory, MiB";
+                        }
+
+                        Stat {
+                            value: root.uptime;
+                            label: "Uptime";
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    padding-top: 12px;
+
+                    Text {
+                        text: "Applications";
+                        color: Theme.faint;
+                        font-size: 13px;
+                    }
+                }
+
+                Rectangle {
+                    property <int> columns: 4;
+                    property <length> gap: 16px;
+                    property <length> size: (self.width - (self.columns - 1) * self.gap) / self.columns;
+                    property <length> stride: self.size + 30px + self.gap;
+
+                    height: Math.ceil(root.tiles.length / self.columns) * self.stride;
+
+                    for tile[index] in root.tiles: AppTile {
+                        x: Math.mod(index, parent.columns) * (parent.size + parent.gap);
+                        y: Math.floor(index / parent.columns) * parent.stride;
+                        size: parent.size;
+                        tile: tile;
+                        chosen: index == root.selected;
+                        clicked => {
+                            root.open(index);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

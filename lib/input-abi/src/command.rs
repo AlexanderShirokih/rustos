@@ -25,22 +25,22 @@ impl Command {
 
     /// Нажатие клавиши с индексом `key`.
     pub fn press(&mut self, key: u16) -> Result<&mut Self, RecordsError> {
-        self.push(Record::key(0, key, true))
+        self.push(Record::key(None, key, true))
     }
 
     /// Отпускание клавиши с индексом `key`.
     pub fn release(&mut self, key: u16) -> Result<&mut Self, RecordsError> {
-        self.push(Record::key(0, key, false))
+        self.push(Record::key(None, key, false))
     }
 
     /// Значение либо приращение оси устройства с индексом `axis`.
     pub fn axis(&mut self, axis: u16, value: i64) -> Result<&mut Self, RecordsError> {
-        self.push(Record::axis(0, axis, NO_CONTACT, value))
+        self.push(Record::axis(None, axis, NO_CONTACT, value))
     }
 
     /// Начало касания контактом `contact`.
     pub fn down(&mut self, contact: u16) -> Result<&mut Self, RecordsError> {
-        self.push(Record::contact_down(0, contact))
+        self.push(Record::contact_down(None, contact))
     }
 
     /// Значение оси с индексом `axis` у контакта `contact`.
@@ -50,17 +50,17 @@ impl Command {
         axis: u16,
         value: i64,
     ) -> Result<&mut Self, RecordsError> {
-        self.push(Record::axis(0, axis, contact, value))
+        self.push(Record::axis(None, axis, contact, value))
     }
 
     /// Конец касания контактом `contact`.
     pub fn up(&mut self, contact: u16) -> Result<&mut Self, RecordsError> {
-        self.push(Record::contact_up(0, contact, false))
+        self.push(Record::contact_up(None, contact, false))
     }
 
     /// Отмена касания контактом `contact` вместе с жестом.
     pub fn cancel(&mut self, contact: u16) -> Result<&mut Self, RecordsError> {
-        self.push(Record::contact_up(0, contact, true))
+        self.push(Record::contact_up(None, contact, true))
     }
 
     /// Раскладка записей команды.

@@ -1,9 +1,14 @@
 #![allow(clippy::expect_used)]
 
 use input_abi::{
-    CANCEL, Command, Kind, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records, RecordsError,
+    CANCEL, Command, DeviceNumber, Kind, NO_CONTACT, RECORD_SIZE, Record, RecordBuf, Records,
+    RecordsError,
 };
 use ipc::{WireValue, wire::IpcError};
+
+fn device(raw: u16) -> DeviceNumber {
+    DeviceNumber::new(raw).expect("nonzero")
+}
 
 fn read(bytes: &[u8]) -> Vec<Record> {
     Records::read(bytes).expect("aligned").collect()
@@ -12,14 +17,14 @@ fn read(bytes: &[u8]) -> Vec<Record> {
 #[test]
 fn a_record_of_every_kind_reads_back_as_written() {
     let written = [
-        Record::key(1, 3, true),
-        Record::axis(2, 0, NO_CONTACT, -5),
-        Record::axis(3, 1, 7, i64::MAX),
-        Record::contact_down(4, 15),
-        Record::contact_up(5, 9, true),
-        Record::frame(6, u64::MAX),
-        Record::device_added(7),
-        Record::device_removed(8),
+        Record::key(Some(device(1)), 3, true),
+        Record::axis(Some(device(2)), 0, NO_CONTACT, -5),
+        Record::axis(Some(device(3)), 1, 7, i64::MAX),
+        Record::contact_down(Some(device(4)), 15),
+        Record::contact_up(Some(device(5)), 9, true),
+        Record::frame(Some(device(6)), u64::MAX),
+        Record::device_added(device(7)),
+        Record::device_removed(device(8)),
         Record::resync(),
     ];
     let mut buf = RecordBuf::new();
@@ -35,23 +40,23 @@ fn a_record_of_every_kind_reads_back_as_written() {
 
 #[test]
 fn device_removed_reads_as_the_leaving_device() {
-    let bytes = Record::device_removed(3).to_bytes();
+    let bytes = Record::device_removed(device(3)).to_bytes();
 
     let records = read(&bytes);
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].kind, Kind::DeviceRemoved);
-    assert_eq!(records[0].device, 3);
+    assert_eq!(records[0].device, Some(device(3)));
 }
 
 #[test]
 fn an_unknown_kind_between_known_records_reads_as_skippable() {
-    let mut unknown = Record::frame(1, 0).to_bytes();
+    let mut unknown = Record::frame(Some(device(1)), 0).to_bytes();
     unknown[0] = 0xEE;
     let bytes = [
-        Record::key(1, 2, true).to_bytes(),
+        Record::key(Some(device(1)), 2, true).to_bytes(),
         unknown,
-        Record::frame(1, 10).to_bytes(),
+        Record::frame(Some(device(1)), 10).to_bytes(),
     ]
     .concat();
 
@@ -86,13 +91,13 @@ fn a_built_command_reads_as_the_same_records_in_order() {
     assert_eq!(
         read(command.as_bytes()),
         [
-            Record::key(0, 0, true),
-            Record::key(0, 2, false),
-            Record::axis(0, 0, NO_CONTACT, -3),
-            Record::contact_down(0, 2),
-            Record::axis(0, 1, 2, 40),
-            Record::contact_up(0, 1, false),
-            Record::contact_up(0, 0, true),
+            Record::key(None, 0, true),
+            Record::key(None, 2, false),
+            Record::axis(None, 0, NO_CONTACT, -3),
+            Record::contact_down(None, 2),
+            Record::axis(None, 1, 2, 40),
+            Record::contact_up(None, 1, false),
+            Record::contact_up(None, 0, true),
         ]
     );
 }

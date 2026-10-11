@@ -14,7 +14,7 @@ use component_startup::{
     SessionEvent, SessionPort, StartupError, component_manifest, serve_export, whole_export,
 };
 use driver_virtio_input::Device;
-use input_abi::{AttachError, RecordsError, UpdateError, input_inject, input_source};
+use input_abi::{AttachError, DeviceNumber, RecordsError, UpdateError, input_inject, input_source};
 use ipc::CallError;
 use kernel_objects::{Delivery, IrqLine, ReceivedSession, SessionTransport};
 use runtime::{Timeout, log_fmt, spawn_bound};
@@ -46,7 +46,7 @@ enum Stopped {
     ExportThread,
     ServicePortClosed,
     NoDevice,
-    Input(u16, Failure),
+    Input(DeviceNumber, Failure),
 }
 
 #[derive(Debug, PartialEq)]
@@ -189,7 +189,7 @@ impl Input {
 
     fn serve(
         mut self,
-        id: u16,
+        id: DeviceNumber,
         inject: &input_inject::Client<SessionTransport>,
     ) -> Result<Infallible, Failure> {
         loop {
@@ -205,7 +205,7 @@ impl Input {
 
     fn drain(
         &mut self,
-        id: u16,
+        id: DeviceNumber,
         inject: &input_inject::Client<SessionTransport>,
     ) -> Result<(), Failure> {
         while let Some(done) = self

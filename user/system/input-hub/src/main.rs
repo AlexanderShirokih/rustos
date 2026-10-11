@@ -1,7 +1,8 @@
 //! Хаб ввода держит устройства источников и раздаёт их кадры. Протокол `InputInject` объявляет
-//! устройства и применяет их команды, протокол `Input` отдаёт сессии очередь кадров всех
-//! устройств и дескриптор устройства по номеру. Каждому видимому экспорту `InputSource` хаб
-//! передаёт новую сессию `InputInject`.
+//! устройства и применяет их команды, протокол `Input` отдаёт сессии очередь кадров видимых ей
+//! устройств и дескриптор устройства по номеру. Протокол `InputFocus` открывает держателю фокуса
+//! сессии `Input` и выбирает, какой из них видны устройства. Каждому видимому экспорту
+//! `InputSource` хаб передаёт новую сессию `InputInject`.
 
 #![no_std]
 #![no_main]
@@ -15,7 +16,7 @@ use component_startup::{
     Requirements as _, SessionEvent, SessionPort, StartupError, component_manifest,
     component_startup as startup_contract, serve_export, whole_export,
 };
-use input_abi::{input, input_inject, input_source};
+use input_abi::{input, input_focus, input_inject, input_source};
 use runtime::{PortTransport, spawn_bound};
 use syscall::{Handle, SyscallError, kind};
 
@@ -23,13 +24,13 @@ mod hub;
 mod queue;
 mod sources;
 
-use hub::{Consumer, Source, input_gone, open_input, source_gone};
+use hub::{Consumer, Holder, Source, holder_gone, input_gone, open_input, source_gone};
 use sources::attach_sources;
 
 component_manifest! {
     struct HubStartup {
         requirements: { sources: all(input_source::Protocol) },
-        exports: [input_inject::Protocol, input::Protocol],
+        exports: [input_inject::Protocol, input::Protocol, input_focus::Protocol],
     }
 }
 
@@ -38,6 +39,7 @@ enum Stopped {
     Runtime(kernel_objects::Error),
     ConsumerPortClosed,
     SourcePortClosed,
+    FocusPortClosed,
     SourceWatch(StartupError),
 }
 
@@ -47,6 +49,7 @@ impl fmt::Display for Stopped {
             Self::Runtime(error) => error.fmt(formatter),
             Self::ConsumerPortClosed => formatter.write_str("consumer port closed"),
             Self::SourcePortClosed => formatter.write_str("source port closed"),
+            Self::FocusPortClosed => formatter.write_str("focus port closed"),
             Self::SourceWatch(error) => write!(formatter, "source watch: {error}"),
         }
     }
@@ -69,11 +72,13 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let requirements = HubStartup::from_parent(parent);
     let sources: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
     let consumers: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
+    let holders: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
 
     // Потоки источников, экспортов и подключения работают до конца процесса.
     let consumers_parent = requirements.parent;
     let watched = requirements.sources;
     let sources_parent = startup_contract::Client::new(PortTransport::new(parent));
+    let holders_parent = startup_contract::Client::new(PortTransport::new(parent));
     let _ = spawn_bound(move || {
         let mut events = sources.events();
 
@@ -92,6 +97,23 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     })?;
     let _ = spawn_bound(move || {
         serve_export::<input::Protocol>(consumers_parent, |_| open_input(consumers))
+    })?;
+    let _ = spawn_bound(move || {
+        let mut holder = Holder { consumers };
+        let mut events = holders.events();
+
+        while let Some(event) = events.recv() {
+            match event {
+                SessionEvent::Frame(frame) => {
+                    let _ = input_focus::dispatch(&mut holder, frame);
+                }
+                SessionEvent::Gone(badge) => holder_gone(badge),
+            }
+        }
+        Stopped::FocusPortClosed
+    })?;
+    let _ = spawn_bound(move || {
+        serve_export::<input_focus::Protocol>(holders_parent, whole_export(holders))
     })?;
     let _ = spawn_bound(move || Stopped::SourceWatch(attach_sources(&watched, sources)))?;
 

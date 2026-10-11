@@ -75,6 +75,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "application-abi"
+version = "0.1.0"
+dependencies = [
+ "display-abi",
+ "input-abi",
+ "ipc",
+]
+
+[[package]]
+name = "application-window"
+version = "0.1.0"
+dependencies = [
+ "application-abi",
+ "component-startup",
+ "display-abi",
+ "input-abi",
+ "ipc",
+ "kernel-objects",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -895,6 +916,8 @@ dependencies = [
 name = "doomgeneric"
 version = "0.1.0"
 dependencies = [
+ "application-abi",
+ "application-window",
  "c-library",
  "component-startup",
  "display-abi",
@@ -1196,12 +1219,9 @@ dependencies = [
 name = "files"
 version = "0.1.0"
 dependencies = [
+ "application-abi",
  "components",
- "display-abi",
  "filesystem-abi",
- "input-abi",
- "ipc",
- "kernel-objects",
  "slint",
  "slint-build",
  "slint-display",
@@ -2397,6 +2417,7 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "input-abi",
+ "ipc",
  "kernel-objects",
  "program-entry",
  "runtime",
@@ -2528,8 +2549,9 @@ dependencies = [
 name = "journal"
 version = "0.1.0"
 dependencies = [
+ "application-abi",
+ "component-startup",
  "components",
- "display-abi",
  "ipc",
  "kernel-objects",
  "log-abi",
@@ -2589,6 +2611,26 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
+]
+
+[[package]]
+name = "launcher"
+version = "0.1.0"
+dependencies = [
+ "application-abi",
+ "bootstrap-abi",
+ "component-startup",
+ "components",
+ "display-abi",
+ "input-abi",
+ "ipc",
+ "kernel-objects",
+ "rtc-abi",
+ "slint",
+ "slint-build",
+ "slint-display",
+ "syscall",
+ "userland-build",
 ]
 
 [[package]]
@@ -3545,8 +3587,8 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "physics"
 version = "0.1.0"
 dependencies = [
+ "application-abi",
  "components",
- "display-abi",
  "slint",
  "slint-build",
  "slint-display",
@@ -4330,7 +4372,10 @@ dependencies = [
 name = "slint-display"
 version = "0.1.0"
 dependencies = [
+ "application-window",
+ "component-startup",
  "display-abi",
+ "input-abi",
  "ipc",
  "kernel-objects",
  "slint",

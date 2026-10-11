@@ -27,6 +27,7 @@ impl Usage {
     pub const LEFT: Self = Self::new(0x07, 0x50);
     pub const DOWN: Self = Self::new(0x07, 0x51);
     pub const UP: Self = Self::new(0x07, 0x52);
+    pub const HOME: Self = Self::new(0x07, 0x4A);
 
     pub const POWER: Self = Self::new(0x07, 0x66);
     pub const VOLUME_UP: Self = Self::new(0x07, 0x80);

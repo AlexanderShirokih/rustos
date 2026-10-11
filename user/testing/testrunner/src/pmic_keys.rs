@@ -5,7 +5,9 @@ use alloc::{string::String, vec::Vec};
 
 use component_abi::RequirementDeclaration;
 use driver_pm8941_pwrkey::{Generation, Key, PWRKEY, RESIN, usage};
-use input_abi::{AttachError, DeviceLayout, Kind, Usage, input, input_inject, input_source};
+use input_abi::{
+    AttachError, DeviceLayout, DeviceNumber, Kind, Usage, input, input_inject, input_source,
+};
 use ipc::{CallError, Protocol};
 use kernel_objects::Session;
 use runtime::{PortTransport, Timeout};
@@ -54,7 +56,7 @@ fn consumer(session: &Session<input::Protocol>) -> Consumer {
     input::Client::new(PortTransport::new(session.handle().as_raw())).with_wait(REPLY_TIMEOUT)
 }
 
-fn added(consumer: &Consumer, layouts: &[DeviceLayout]) -> Vec<Option<u16>> {
+fn added(consumer: &Consumer, layouts: &[DeviceLayout]) -> Vec<Option<DeviceNumber>> {
     let mut numbers = alloc::vec![None; layouts.len()];
 
     while numbers.iter().any(Option::is_none) {
@@ -62,16 +64,17 @@ fn added(consumer: &Consumer, layouts: &[DeviceLayout]) -> Vec<Option<u16>> {
             break;
         };
 
-        for record in records
+        for device in records
             .records()
             .filter(|record| record.kind == Kind::DeviceAdded)
+            .filter_map(|record| record.device)
         {
-            let described = consumer.describe(record.device);
+            let described = consumer.describe(device);
             let found = layouts
                 .iter()
                 .position(|layout| described.as_ref() == Ok(layout));
             if let Some(slot) = found.and_then(|index| numbers.get_mut(index)) {
-                *slot = Some(record.device);
+                *slot = Some(device);
             }
         }
     }
