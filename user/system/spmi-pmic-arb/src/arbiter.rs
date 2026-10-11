@@ -1,9 +1,9 @@
 use alloc::vec::Vec;
 
-use spmi_abi::DeviceError;
+use spmi_abi::{DeviceError, Trigger};
 
 use crate::{
-    peripheral::{Interrupt, Trigger},
+    peripheral::Interrupt,
     registers::{Registers, Window},
 };
 

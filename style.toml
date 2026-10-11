@@ -242,5 +242,5 @@ device only. Code written for one SoC family is listed in not_under of this rule
 message = "board or SoC named in shared code, use a synthetic tree with generic names"
 target = "line"
 extension = ["rs"]
-not_under = ["tools/style/tests/"]
+not_under = ["tools/style/tests/", "user/system/pinctrl-msm/"]
 pattern = "(?i)(?:^|[^a-z0-9])(?:lavender|xiaomi|redmi|raspberry|rpi\\d|sdm\\d{3}|msm\\d{4}|bcm\\d{4})(?:[^a-z0-9]|$)|include_(?:bytes|str)!\\([^)]*devices/"

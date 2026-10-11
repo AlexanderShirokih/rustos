@@ -1,3 +1,5 @@
+use core::iter;
+
 use fdt::{
     devicetree::{self, DeviceTree, TreeWalk},
     devicetreeext::{
@@ -47,6 +49,13 @@ pub struct Devices<'a> {
     path: DeviceId,
     path_depth: usize,
     hidden_below: Option<usize>,
+}
+
+/// Запись свойства из [`Node::specifiers`].
+pub struct Specifier<'a> {
+    /// Путь узла по ссылке записи.
+    pub node: DeviceId,
+    arguments: &'a [u8],
 }
 
 /// Предок узла из [`Description::ancestors`].
@@ -125,6 +134,20 @@ impl<'a> Description<'a> {
 }
 
 impl<'a> Node<'a> {
+    /// Доступные потомки узла в порядке описания. Узел со статусом, отличным от `okay` и `ok`,
+    /// не выдаётся.
+    pub fn children(&self) -> impl Iterator<Item = Node<'a>> + 'a {
+        self.node
+            .children()
+            .filter(NodeExt::is_available)
+            .map(|node| Node { node })
+    }
+
+    /// Имена свойств узла в порядке описания.
+    pub fn property_names(&self) -> impl Iterator<Item = &'a str> + 'a {
+        self.node.properties().map(|property| property.name())
+    }
+
     /// Значение свойства `name` как одно big-endian число из четырёх байт.
     pub fn u32(&self, name: &str) -> Result<Option<u32>, DescriptionError> {
         self.value(name, |value| value.try_into().ok().map(u32::from_be_bytes))
@@ -148,6 +171,46 @@ impl<'a> Node<'a> {
             rest.is_empty()
                 .then(|| cells.iter().map(|cell| u32::from_be_bytes(*cell)))
         })
+    }
+
+    /// Пути узлов, на которые ссылается свойство `name`, в порядке значения независимо от
+    /// статуса узлов и их предков либо `None` для узла без свойства `name`. Свойство должно
+    /// быть списком ссылок без аргументов, как `pinctrl-0` и `interrupt-parent`.
+    ///
+    /// Отказы элемента:
+    /// - [`DescriptionError::InvalidValue`] - ссылка не называет узла, называет корень либо
+    ///   значение повреждено;
+    /// - [`DescriptionError::PathTooLong`] - путь узла длиннее
+    ///   [`DEVICE_ID_MAX`](crate::DEVICE_ID_MAX) байт.
+    pub fn references(
+        &self,
+        name: &str,
+    ) -> Option<impl Iterator<Item = Result<DeviceId, DescriptionError>> + use<'a>> {
+        let found = self.node.references(name)?;
+        Some(found.map(|found| device_id(&found.ok_or(DescriptionError::InvalidValue)?)))
+    }
+
+    /// Записи свойства `name` либо `None` для узла без него. Запись - путь узла по ссылке и
+    /// ячейки аргументов, число которых задаёт свойство `cells` этого узла.
+    ///
+    /// Отказы элемента, последнего в итераторе:
+    /// - [`DescriptionError::InvalidValue`] - ссылка не называет узла либо называет корень, у
+    ///   узла нет свойства `cells` либо запись короче своих аргументов;
+    /// - [`DescriptionError::PathTooLong`] - путь узла длиннее
+    ///   [`DEVICE_ID_MAX`](crate::DEVICE_ID_MAX) байт.
+    pub fn specifiers(
+        &self,
+        name: &str,
+        cells: &'a str,
+    ) -> Option<impl Iterator<Item = Result<Specifier<'a>, DescriptionError>> + use<'a>> {
+        let found = self.node.specifiers(name, cells)?;
+        Some(found.map(|found| {
+            let found = found.ok_or(DescriptionError::InvalidValue)?;
+            Ok(Specifier {
+                node: device_id(&found.path)?,
+                arguments: found.arguments,
+            })
+        }))
     }
 
     /// Значение свойства `name` как строка до первого нуля.
@@ -250,6 +313,17 @@ impl<'a> Iterator for Devices<'a> {
     }
 }
 
+impl Specifier<'_> {
+    /// Ячейки аргументов записи в порядке значения.
+    pub fn cells(&self) -> impl Iterator<Item = u32> + '_ {
+        self.arguments
+            .as_chunks::<CELL_BYTES>()
+            .0
+            .iter()
+            .map(|cell| u32::from_be_bytes(*cell))
+    }
+}
+
 impl<'a> Ancestors<'a> {
     fn new(found: &NodePath<'a>) -> Option<Self> {
         let mut path = DeviceId::EMPTY;
@@ -282,4 +356,18 @@ impl<'a> Iterator for Ancestors<'a> {
             node: Node { node },
         })
     }
+}
+
+fn device_id(found: &NodePath<'_>) -> Result<DeviceId, DescriptionError> {
+    if found.ancestors().is_empty() {
+        return Err(DescriptionError::InvalidValue);
+    }
+
+    let mut path = DeviceId::EMPTY;
+    let nodes = found.ancestors().iter().skip(1).copied();
+    for node in nodes.chain(iter::once(found.node())) {
+        path.push(node.name())
+            .ok_or(DescriptionError::PathTooLong)?;
+    }
+    Ok(path)
 }

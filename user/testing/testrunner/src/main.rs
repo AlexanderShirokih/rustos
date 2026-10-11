@@ -5,6 +5,8 @@
 //! `bench` - замеры, любое другое значение - обычные тесты. Строки прогона уходят в
 //! системный журнал bootstrap-контрактом по стартовому handle процесса.
 
+// Деревья `fdt_test::tree!` тестов раскрываются глубже предела рекурсии по умолчанию.
+#![recursion_limit = "256"]
 #![no_std]
 #![no_main]
 #![allow(unsafe_code)]
@@ -66,6 +68,8 @@ mod memory_stress;
 mod mismatched_kind;
 mod owned_handle;
 mod parent;
+mod pins;
+mod pmic_gpio;
 mod pmic_keys;
 mod port;
 mod port_liveness;
@@ -75,6 +79,7 @@ mod process_handles;
 mod process_lifecycle;
 mod process_start;
 mod received_frame;
+mod register_model;
 mod resource_exhaustion;
 mod resource_split;
 mod ring_transport;

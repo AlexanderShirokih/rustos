@@ -205,6 +205,15 @@ package = "spmi-pmic-arb"
 path = "/spmi-pmic-arb"
 
 [[programs]]
+package = "pinctrl-msm"
+bin = "pinctrl-sdm660"
+path = "/pinctrl-sdm660"
+
+[[programs]]
+package = "pinctrl-spmi-gpio"
+path = "/pinctrl-spmi-gpio"
+
+[[programs]]
 package = "platform"
 path = "/platform"
 

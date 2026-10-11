@@ -1,0 +1,37 @@
+[package]
+license = "GPL-3.0-only"
+name = "pinctrl-msm"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[package.metadata.userland]
+stack_size = 65536
+
+[[bin]]
+name = "pinctrl-sdm660"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[dependencies]
+kernel-objects = { workspace = true }
+component-startup = { workspace = true }
+ipc = { workspace = true }
+pins-abi = { workspace = true }
+platform-abi = { workspace = true }
+program-entry = { workspace = true }
+runtime = { workspace = true }
+syscall = { workspace = true }
+
+[build-dependencies]
+userland-build = { workspace = true }
+
+[lints]
+workspace = true

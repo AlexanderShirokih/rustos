@@ -245,6 +245,9 @@ io = { workspace = true }
 ipc = { workspace = true }
 log-abi = { workspace = true }
 log-relay = { workspace = true }
+pinctrl-msm = { path = "../../system/pinctrl-msm" }
+pinctrl-spmi-gpio = { path = "../../system/pinctrl-spmi-gpio" }
+pins-abi = { workspace = true }
 platform-abi = { workspace = true }
 program-entry = { workspace = true }
 runtime = { workspace = true }

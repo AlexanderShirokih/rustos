@@ -38,6 +38,12 @@ impl Window {
         Self::Config,
     ];
 
+    /// Возвращает номер окна, различный у разных окон.
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
+        self as usize
+    }
+
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Core => "core",

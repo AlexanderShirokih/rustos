@@ -35,6 +35,7 @@ members = [
     "lib/filesystem",
     "lib/filesystem-abi",
     "lib/filesystem-client",
+    "lib/pins-abi",
     "lib/spmi-abi",
     "lib/userland",
     "lib/userland-image",
@@ -128,6 +129,7 @@ userland = { path = "lib/userland" }
 userland-build = { path = "lib/userland-build" }
 userland-image = { path = "lib/userland-image" }
 rtc-abi = { path = "lib/rtc-abi" }
+pins-abi = { path = "lib/pins-abi" }
 spmi-abi = { path = "lib/spmi-abi" }
 virtio-mmio-abi = { path = "lib/virtio-mmio-abi" }
 process = { path = "kernel/process" }

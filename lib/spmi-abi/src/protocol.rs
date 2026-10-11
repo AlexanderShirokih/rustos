@@ -1,6 +1,9 @@
 use syscall::kind;
 
-use crate::error::{DeviceError, SpmiError};
+use crate::{
+    error::{DeviceError, SpmiError},
+    trigger::Trigger,
+};
 
 ipc::protocol! {
     /// Шина устройств PMIC за арбитром SPMI.
@@ -18,12 +21,26 @@ ipc::protocol! {
         call fn open(
             device: &str,
         ) -> own Result<ipc::wire::Session<crate::spmi_device::Protocol>, SpmiError>;
+
+        /// Выдаёт сессию устройства `device`, как `open`, с `count` блоками подряд с блока
+        /// записи `reg` узла устройства. Число блоков устройства, у которого одна запись `reg`
+        /// на все блоки, называет его драйвер.
+        ///
+        /// Отказы:
+        /// - `NoDevice`, `Busy`, `NoSpace` - как у `open`;
+        /// - `Range` - у узла нет своего `reg` либо в нём больше одной записи, `count` равен 0,
+        ///   последний блок выше 0xFF либо блок после первого принадлежит другому устройству
+        ///   того же ведомого.
+        call fn open_blocks(
+            device: &str,
+            count: u8,
+        ) -> own Result<ipc::wire::Session<crate::spmi_device::Protocol>, SpmiError>;
     }
 }
 
 ipc::protocol! {
-    /// Устройство PMIC, выданное сессии: блоки регистров из `reg` его узла и прерывания из
-    /// `interrupts`.
+    /// Устройство PMIC, выданное сессии: блоки регистров из `reg` его узла либо блоки
+    /// `open_blocks`, прерывания из `interrupts` и прерывания битов блоков.
     pub mod spmi_device {
         name = "SpmiDevice";
 
@@ -79,5 +96,39 @@ ipc::protocol! {
         /// - `Unavailable` - прерывание не выдано сессии;
         /// - `Failed` - арбитр не выполнил команду.
         call fn ack(resource: u16) -> Result<(), DeviceError>;
+
+        /// Выдаёт копию `Signal` прерывания бита `bit` блока `block` устройства с условием
+        /// `trigger` и разрешает прерывание. Срабатывание поднимает `SIGNALED` и запрещает
+        /// прерывание до `block_ack`. Повторный вызов и `irq` записи того же бита блока выдают
+        /// копию того же `Signal`. Уход
+        /// клиента сессии запрещает прерывание и отзывает каждую выданную ему копию.
+        ///
+        /// Отказы:
+        /// - `OutOfRange` - блок не принадлежит устройству либо бит вне 0..=7;
+        /// - `Denied` - канал блока принадлежит другой среде исполнения;
+        /// - `Failed` - арбитр не выполнил команду;
+        /// - `Unavailable` - шина не смогла создать либо скопировать `Signal`.
+        call fn block_irq(
+            block: u8,
+            bit: u8,
+            trigger: Trigger,
+        ) -> own Result<ipc::wire::Cap<kind::Signal>, DeviceError>;
+
+        /// Снимает защёлку прерывания бита `bit` блока `block`, опускает `SIGNALED` его
+        /// `Signal` и снова разрешает прерывание.
+        ///
+        /// Отказы:
+        /// - `OutOfRange`, `Denied` - как у `block_irq`;
+        /// - `Unavailable` - прерывание не выдано сессии;
+        /// - `Failed` - арбитр не выполнил команду.
+        call fn block_ack(block: u8, bit: u8) -> Result<(), DeviceError>;
+
+        /// Запрещает прерывание бита `bit` блока `block` и отзывает каждую копию его `Signal`.
+        /// Следующий `block_irq` выдаёт новый `Signal`.
+        ///
+        /// Отказы:
+        /// - `OutOfRange` - как у `block_irq`;
+        /// - `Unavailable` - прерывание не выдано сессии.
+        call fn block_release(block: u8, bit: u8) -> Result<(), DeviceError>;
     }
 }

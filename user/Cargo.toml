@@ -22,6 +22,8 @@ members = [
     "system/filesystem-ramfs",
     "system/input-hub",
     "system/mounts",
+    "system/pinctrl-msm",
+    "system/pinctrl-spmi-gpio",
     "system/platform",
     "system/rootkeeper",
     "system/spmi-pmic-arb",
@@ -91,6 +93,7 @@ io = { path = "../lib/io" }
 ipc = { path = "../lib/ipc" }
 kernel-objects = { path = "../lib/kernel-objects" }
 log-abi = { path = "../lib/log-abi" }
+pins-abi = { path = "../lib/pins-abi" }
 platform-abi = { path = "../lib/platform-abi" }
 program-entry = { path = "../lib/program-entry" }
 rtc-abi = { path = "../lib/rtc-abi" }

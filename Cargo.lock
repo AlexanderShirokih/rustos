@@ -301,6 +301,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pins-abi"
+version = "0.1.0"
+dependencies = [
+ "fdt-test",
+ "ipc",
+ "platform-abi",
+ "syscall",
+]
+
+[[package]]
 name = "platform-abi"
 version = "0.1.0"
 dependencies = [

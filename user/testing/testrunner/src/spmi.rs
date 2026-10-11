@@ -5,21 +5,21 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::cell::{Cell, RefCell};
 
 use component_abi::{RequirementDeclaration, SessionError};
-use component_startup::{AnyOf, Providers};
 use fdt_test::Token;
 use ipc::{CallError, Protocol};
 use kernel_objects::{Error, Session, SessionTransport, Signal};
-use platform_abi::{CONTROLLER_KEY, Description, DeviceId};
+use platform_abi::{Description, DeviceId};
 use runtime::Timeout;
-use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
+use spmi_abi::{DeviceError, SpmiError, Trigger, spmi, spmi_device};
 use spmi_pmic_arb::{
     Arbiter, ArbiterNode, Interrupt, Peripheral, Refusal, Registers, SkipReason, Skipped, Span,
-    Trigger, Window,
+    Window,
 };
 use syscall::{SIGNALED, SyscallError};
 
 use crate::{
-    composition::{Importer, pause, request},
+    composition::{Importer, compatibles, controller_provider, pause, request},
+    register_model::RegisterFile,
     rootkeeper_system::{
         POLL_ATTEMPTS, POLL_INTERVAL, await_revoked, finish, platform_describes, with_description,
         with_drivers,
@@ -99,6 +99,44 @@ const PON_TREE: &[Token<'static>] = &fdt_test::tree! {
                     compatible = "qcom,pm8941-resin";
                     interrupts = <0 0x08 1 3>;
                 };
+            };
+        };
+    };
+};
+
+const BLOCKS_TREE: &[Token<'static>] = &fdt_test::tree! {
+    spmi@0 {
+        compatible = "qcom,spmi-pmic-arb";
+        "reg-names" = "core", "chnls", "obsrvr", "intr", "cnfg";
+        "qcom,ee" = <0>;
+        #address-cells = <2>;
+        #size-cells = <0>;
+        pmic@2 {
+            compatible = "qcom,pm660l", "qcom,spmi-pmic";
+            reg = <2 0>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            gpio@c000 {
+                compatible = "test,gpio";
+                reg = <0xc000>;
+            };
+            lpg@c400 {
+                compatible = "test,lpg";
+                reg = <0xc400>;
+            };
+            last@ff00 {
+                compatible = "test,last";
+                reg = <0xff00>;
+            };
+        };
+        pmic@3 {
+            compatible = "qcom,pm660l", "qcom,spmi-pmic";
+            reg = <3 0>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+            neighbour@c100 {
+                compatible = "test,neighbour";
+                reg = <0xc100>;
             };
         };
     };
@@ -192,7 +230,7 @@ pub(crate) const SPMI_IMPORTS: &[crate::composition::Import] = &[crate::composit
 }];
 
 struct Model {
-    registers: RefCell<BTreeMap<(usize, usize), u32>>,
+    registers: RegisterFile,
     pmic: RefCell<BTreeMap<(usize, usize), u8>>,
     status: Cell<u32>,
     commands: Cell<usize>,
@@ -215,7 +253,7 @@ enum Step {
 impl Model {
     fn new(version: u32) -> Self {
         let model = Self {
-            registers: RefCell::new(BTreeMap::new()),
+            registers: RegisterFile::new(),
             pmic: RefCell::new(BTreeMap::new()),
             status: Cell::new(STATUS_DONE),
             commands: Cell::new(0),
@@ -232,14 +270,11 @@ impl Model {
     }
 
     fn load(&self, window: Window, offset: usize) -> u32 {
-        let key = (window as usize, offset);
-        self.registers.borrow().get(&key).copied().unwrap_or(0)
+        self.registers.get(window.as_usize(), offset)
     }
 
     fn store(&self, window: Window, offset: usize, value: u32) {
-        self.registers
-            .borrow_mut()
-            .insert((window as usize, offset), value);
+        self.registers.set(window.as_usize(), offset, value);
 
         if matches!(window, Window::Interrupts) {
             self.steps
@@ -369,6 +404,69 @@ fn devices_lie_below_the_pmic_nodes_with_their_sid_and_blocks() {
     );
     test_harness::check_eq!(clock, [0x060, 0x061]);
     test_harness::check_eq!(led, [0x2D0]);
+}
+
+fn with_blocks(tree: &[Token<'_>], path: &str, count: u8) -> Result<Vec<u16>, SpmiError> {
+    let devices: Vec<_> = peripherals(tree)
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    described(tree, path)
+        .with_blocks(count, &devices)
+        .map(|peripheral| peripheral.ppids().collect())
+}
+
+#[test_harness::test]
+fn blocks_named_by_the_driver_follow_the_single_reg_up_to_another_device_of_the_slave() {
+    let four = with_blocks(BLOCKS_TREE, "/spmi@0/pmic@2/gpio@c000", 4);
+    let into_neighbour = with_blocks(BLOCKS_TREE, "/spmi@0/pmic@2/gpio@c000", 8);
+
+    test_harness::check_eq!(four, Ok([0x2C0, 0x2C1, 0x2C2, 0x2C3].into()));
+    test_harness::check_eq!(into_neighbour, Err(SpmiError::Range));
+}
+
+#[test_harness::test]
+fn blocks_named_by_the_driver_need_one_own_reg_and_stay_below_block_0xff() {
+    let refused = [
+        with_blocks(PON_TREE, "/spmi@0/pmic@0/pon@800/pwrkey", 1),
+        with_blocks(TREE, "/spmi@0/pmic@0/rtc@6000", 1),
+        with_blocks(BLOCKS_TREE, "/spmi@0/pmic@2/gpio@c000", 0),
+        with_blocks(BLOCKS_TREE, "/spmi@0/pmic@2/last@ff00", 2),
+    ];
+
+    test_harness::check_eq!(refused, [const { Err(SpmiError::Range) }; 4]);
+    test_harness::check_eq!(
+        with_blocks(BLOCKS_TREE, "/spmi@0/pmic@2/last@ff00", 1),
+        Ok([0x2FF].into())
+    );
+}
+
+#[test_harness::test]
+fn an_interrupt_of_a_block_bit_lies_in_the_blocks_of_the_session() {
+    let devices: Vec<_> = peripherals(BLOCKS_TREE)
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    let gpio = described(BLOCKS_TREE, "/spmi@0/pmic@2/gpio@c000")
+        .with_blocks(4, &devices)
+        .expect("four blocks");
+
+    test_harness::check_eq!(
+        gpio.block_interrupt(0xC3, 7, Trigger::Both),
+        Ok(Interrupt {
+            ppid: 0x2C3,
+            bit: 7,
+            trigger: Trigger::Both
+        })
+    );
+    test_harness::check_eq!(
+        gpio.block_interrupt(0xC4, 0, Trigger::Both),
+        Err(DeviceError::OutOfRange)
+    );
+    test_harness::check_eq!(
+        gpio.block_interrupt(0xC0, 8, Trigger::Both),
+        Err(DeviceError::OutOfRange)
+    );
 }
 
 #[test_harness::test]
@@ -676,32 +774,14 @@ pub(crate) fn described_device(compatible: &str) -> Option<(String, Vec<String>)
 }
 
 fn controller_compatibles(description: &Description<'_>, id: &DeviceId) -> Vec<String> {
-    let Some(controller) = spmi_abi::controller(description, id) else {
-        return Vec::new();
-    };
-    let Ok(Some(compatible)) = controller.strings("compatible") else {
-        return Vec::new();
-    };
-    compatible.map(String::from).collect()
+    compatibles(spmi_abi::controller(description, id))
 }
 
 pub(crate) fn spmi_bus(
     importer: &Importer,
     controller: &[String],
 ) -> spmi::Client<SessionTransport> {
-    let providers = Providers::<spmi::Protocol>::new(importer.handle(), SPMI_REQUIREMENT);
-    let found = providers
-        .all(AnyOf::new(
-            CONTROLLER_KEY,
-            controller.iter().map(String::as_str),
-        ))
-        .expect("spmi enumeration")
-        .next()
-        .expect("spmi export")
-        .expect("spmi export found");
-    providers
-        .open(&found)
-        .expect("spmi session")
+    controller_provider::<spmi::Protocol>(importer.handle(), SPMI_REQUIREMENT, controller)
         .client()
         .with_wait(SPMI_REPLY_TIMEOUT)
 }

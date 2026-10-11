@@ -1623,3 +1623,123 @@ fn regions_are_ordered_by_base_and_disjoint() {
 
     assert!(ordered);
 }
+
+const REFERENCE_TREE: &[Token<'static>] = &fdt_test::tree! {
+    soc {
+        pinctrl@1000 {
+            phandle = <1>;
+            uart-state {
+                phandle = <2>;
+                tx-pins {
+                    phandle = <3>;
+                };
+            };
+        };
+        serial@2000 {
+            "pinctrl-0" = <3 1 4>;
+        };
+    };
+};
+
+#[test]
+fn references_resolve_to_nested_nodes_with_their_ancestors() {
+    let dtb = fdt_test::build(REFERENCE_TREE);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let serial = node_path(&dt, "/soc/serial@2000").unwrap().node();
+
+    let found: Vec<_> = serial
+        .references("pinctrl-0")
+        .unwrap()
+        .map(|found| {
+            found.map(|found| {
+                (
+                    found.node().name(),
+                    found.ancestors().iter().map(Node::name).collect::<Vec<_>>(),
+                )
+            })
+        })
+        .collect();
+
+    assert_eq!(
+        found,
+        [
+            Some(("tx-pins", vec!["", "soc", "pinctrl@1000", "uart-state"])),
+            Some(("pinctrl@1000", vec!["", "soc"])),
+            None,
+        ]
+    );
+    assert!(serial.references("pinctrl-1").is_none());
+}
+
+#[test]
+fn a_referenced_node_keeps_its_phandle_out_of_its_properties() {
+    let dtb = fdt_test::build(REFERENCE_TREE);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let state = node_path(&dt, "/soc/pinctrl@1000/uart-state")
+        .unwrap()
+        .node();
+
+    assert_eq!(state.properties().count(), 0);
+    assert!(state.prop("phandle").is_none());
+}
+
+const SPECIFIER_TREE: &[Token<'static>] = &fdt_test::tree! {
+    soc {
+        gpio@1000 {
+            #gpio-cells = <2>;
+            phandle = <1>;
+        };
+        gpio@2000 {
+            #gpio-cells = <1>;
+            phandle = <2>;
+        };
+        plain@3000 {
+            phandle = <3>;
+        };
+        keys {
+            gpios = <1 7 1 2 3 1 9 0>;
+            short-gpios = <2 4 1 5>;
+            plain-gpios = <2 4 3 1>;
+            dangling-gpios = <2 4 9 1>;
+        };
+    };
+};
+
+fn specifiers(property: &str) -> Vec<Option<(String, Vec<u8>)>> {
+    let dtb = fdt_test::build(SPECIFIER_TREE);
+    let dt = DeviceTree::from_bytes(&dtb).unwrap();
+    let keys = node_path(&dt, "/soc/keys").unwrap().node();
+
+    keys.specifiers(property, "#gpio-cells")
+        .unwrap()
+        .map(|found| found.map(|found| (found.path.node().name().into(), found.arguments.to_vec())))
+        .collect()
+}
+
+#[test]
+fn specifiers_take_the_argument_count_of_each_referenced_node() {
+    assert_eq!(
+        specifiers("gpios"),
+        [
+            Some(("gpio@1000".into(), vec![0, 0, 0, 7, 0, 0, 0, 1])),
+            Some(("gpio@2000".into(), vec![0, 0, 0, 3])),
+            Some(("gpio@1000".into(), vec![0, 0, 0, 9, 0, 0, 0, 0])),
+        ]
+    );
+}
+
+#[test]
+fn a_short_record_a_node_without_the_count_and_a_dangling_reference_end_the_specifiers() {
+    assert_eq!(
+        specifiers("short-gpios"),
+        [Some(("gpio@2000".into(), vec![0, 0, 0, 4])), None]
+    );
+    assert_eq!(
+        specifiers("plain-gpios"),
+        [Some(("gpio@2000".into(), vec![0, 0, 0, 4])), None]
+    );
+    assert_eq!(
+        specifiers("dangling-gpios"),
+        [Some(("gpio@2000".into(), vec![0, 0, 0, 4])), None]
+    );
+}

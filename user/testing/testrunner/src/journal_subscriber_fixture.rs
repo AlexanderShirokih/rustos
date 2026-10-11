@@ -32,13 +32,13 @@ component_manifest! {
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
-    let subscription = JournalSubscriberStartup::from_parent(parent)
+    // Уход сессии снимает подписку, и строки после подписки приходят, пока сессия жива.
+    let journal = JournalSubscriberStartup::from_parent(parent)
         .journal
         .open()
         .map_err(|_| Failed)?
-        .client()
-        .subscribe()
-        .map_err(|_| Failed)?;
+        .client();
+    let subscription = journal.subscribe().map_err(|_| Failed)?;
     let ring = RingConsumer::new(
         MemoryRegion::from(subscription.region),
         JOURNAL_SLOT_PAYLOAD,

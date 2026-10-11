@@ -1,3 +1,5 @@
+use core::cmp::Ordering;
+
 /// Предельная длина [`DeviceId`] в байтах.
 pub const DEVICE_ID_MAX: usize = 255;
 
@@ -71,3 +73,15 @@ impl PartialEq for DeviceId {
 }
 
 impl Eq for DeviceId {}
+
+impl PartialOrd for DeviceId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DeviceId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}

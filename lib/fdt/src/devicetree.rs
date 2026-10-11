@@ -7,6 +7,8 @@ use crate::{
     devicetreeext::node_path,
 };
 
+const PHANDLE: &str = "phandle";
+
 /// Узел Device Tree.
 #[derive(Clone, Copy)]
 pub struct Node<'a> {
@@ -39,6 +41,24 @@ impl<'a> Node<'a> {
 
     pub fn prop(&self, prop_name: &str) -> Option<Property<'a>> {
         self.properties().find(|p| p.name == prop_name)
+    }
+
+    pub(crate) fn phandle(&self) -> Option<u32> {
+        let mut walker = DeviceTreeWalker::new(self.blocks, self.offset);
+        loop {
+            if let ValueNode::Property(property) = walker.next_value()?
+                && property.name == PHANDLE
+            {
+                return property.try_as_u32(0);
+            }
+        }
+    }
+
+    pub(crate) fn tree(&self) -> TreeWalk<'a> {
+        TreeWalk {
+            walker: DeviceTreeWalker::new(self.blocks, self.blocks.structure_start),
+            depth: 0,
+        }
     }
 
     pub fn children(&self) -> NodeIter<'a> {
@@ -265,7 +285,7 @@ impl<'a> DeviceTree<'a> {
     /// Все узлы дерева в порядке описания вместе с глубиной. Глубина корня - ноль.
     pub fn walk(&'a self) -> TreeWalk<'a> {
         TreeWalk {
-            walker: DeviceTreeWalker::new(self.blocks, self.header.struct_off as usize),
+            walker: DeviceTreeWalker::new(self.blocks, self.blocks.structure_start),
             depth: 0,
         }
     }
@@ -275,7 +295,7 @@ impl<'a> DeviceTree<'a> {
     }
 
     fn root_nodes(&'a self) -> NodeIter<'a> {
-        let walker = DeviceTreeWalker::new(self.blocks, self.header.struct_off as usize);
+        let walker = DeviceTreeWalker::new(self.blocks, self.blocks.structure_start);
         NodeIter { walker }
     }
 }
@@ -333,6 +353,8 @@ struct FdtHeader {
 #[derive(Clone, Copy)]
 struct Blocks<'a> {
     blob_through_structure: &'a [u8],
+
+    structure_start: usize,
 
     strings: &'a [u8],
 }
@@ -434,6 +456,7 @@ impl<'a> Blocks<'a> {
 
         Ok(Self {
             blob_through_structure,
+            structure_start,
             strings,
         })
     }
@@ -667,8 +690,8 @@ impl<'a> Iterator for PropertyIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.walker.next_value()? {
-                ValueNode::Property(p) => return Some(p),
-                ValueNode::Node(_) => {}
+                ValueNode::Property(p) if p.name != PHANDLE => return Some(p),
+                ValueNode::Property(_) | ValueNode::Node(_) => {}
             }
         }
     }

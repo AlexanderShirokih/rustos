@@ -8,7 +8,9 @@
 mod controller;
 mod error;
 mod protocol;
+mod trigger;
 
 pub use controller::controller;
 pub use error::{DeviceError, SpmiError};
 pub use protocol::{spmi, spmi_device};
+pub use trigger::Trigger;

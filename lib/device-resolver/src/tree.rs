@@ -1,7 +1,7 @@
 use core::iter;
 
 use fdt::{
-    devicetree::{DeviceTree, Node},
+    devicetree::DeviceTree,
     devicetreeext::{NodeExt, NodePath, PropExt, available_path, translate_window},
 };
 use platform_abi::DeviceId;
@@ -12,8 +12,7 @@ use crate::{
 };
 
 const CELL_SIZE: usize = size_of::<u32>();
-
-const DESCRIPTION_DEPTH_MAX: usize = 16;
+const INTERRUPT_PARENT: &str = "interrupt-parent";
 
 /// Описание платформы поверх device tree.
 pub struct DeviceTreePlatform<'a> {
@@ -34,21 +33,17 @@ impl<'a> DeviceTreePlatform<'a> {
         Self { tree, bindings }
     }
 
-    fn root(&self) -> Result<Node<'a>, ResolveError> {
-        self.tree.root().ok_or(ResolveError::Malformed)
-    }
-
     fn device(&self, id: &DeviceId) -> Result<NodePath<'a>, ResolveError> {
         available_path(self.tree, id.as_str()).ok_or(ResolveError::DeviceNotFound)
     }
 
     fn controller(&self, path: &NodePath<'a>) -> Result<Controller<'_>, ResolveError> {
-        let phandle = iter::once(path.node())
+        let node = iter::once(path.node())
             .chain(path.ancestors().iter().rev().copied())
-            .find_map(|node| node.interrupt_parent())
-            .ok_or(ResolveError::Malformed)?;
-        let node = by_phandle(self.root()?, phandle, DESCRIPTION_DEPTH_MAX)
-            .ok_or(ResolveError::Malformed)?;
+            .find_map(|node| node.references(INTERRUPT_PARENT))
+            .and_then(|mut parents| parents.next().flatten())
+            .ok_or(ResolveError::Malformed)?
+            .node();
         let binding = node
             .prop("compatible")
             .and_then(PropExt::into_string_list_iter)
@@ -107,17 +102,4 @@ impl PlatformDescription for DeviceTreePlatform<'_> {
             size: window.size as u64,
         })
     }
-}
-
-fn by_phandle(bus: Node<'_>, phandle: u32, depth: usize) -> Option<Node<'_>> {
-    let depth = depth.checked_sub(1)?;
-    for child in bus.children() {
-        if child.phandle() == Some(phandle) {
-            return Some(child);
-        }
-        if let Some(found) = by_phandle(child, phandle, depth) {
-            return Some(found);
-        }
-    }
-    None
 }

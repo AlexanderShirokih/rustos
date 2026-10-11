@@ -4,13 +4,15 @@
 //! Устройство - доступный узел с непустым `compatible` ниже узла PMIC. Каждая запись `reg`
 //! устройства - 16-битный адрес начала блока из 256 регистров. Узел без `reg` получает блоки
 //! ближайшего предка ниже узла PMIC, у которого `reg` есть, и остаётся отдельным устройством.
+//! Устройство с одной своей записью `reg` выдаётся и с числом блоков подряд, которое называет
+//! драйвер.
 //! Запись `interrupts` - четыре ячейки: SID, номер блока, бит 0..7 и тип `IRQ_TYPE_*`.
 
 use alloc::vec::Vec;
 use core::iter;
 
 use platform_abi::{Ancestor, Description, DescriptionError, DeviceId, Node};
-use spmi_abi::DeviceError;
+use spmi_abi::{DeviceError, SpmiError, Trigger};
 
 use crate::{arbiter::COMMAND_BYTES_MAX, registers::Window};
 
@@ -23,6 +25,8 @@ const BLOCK_ADDRESS_MAX: u32 = 0xFFFF;
 const INTERRUPT_CELLS: usize = 4;
 const INTERRUPT_BIT_MAX: u32 = 7;
 
+const INTERRUPT_PARENT: &str = "interrupt-parent";
+
 const ADDRESS_CELLS_DEFAULT: u32 = 2;
 const SIZE_CELLS_DEFAULT: u32 = 1;
 
@@ -31,7 +35,6 @@ const SIZE_CELLS_DEFAULT: u32 = 1;
 pub struct ArbiterNode {
     ee: u8,
     resources: [u16; Window::ALL.len()],
-    phandle: Option<u32>,
 }
 
 /// Отказ в разборе узла арбитра.
@@ -53,6 +56,7 @@ pub struct Peripheral {
     id: DeviceId,
     sid: u8,
     blocks: Vec<u8>,
+    base: Option<u8>,
     interrupts: Vec<Result<Interrupt, DeviceError>>,
 }
 
@@ -96,24 +100,8 @@ pub struct Interrupt {
     pub trigger: Trigger,
 }
 
-/// Условие срабатывания прерывания, тип `IRQ_TYPE_*` описания.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trigger {
-    /// Подъём.
-    Rising,
-    /// Спад.
-    Falling,
-    /// Подъём и спад.
-    Both,
-    /// Высокий уровень.
-    High,
-    /// Низкий уровень.
-    Low,
-}
-
 impl ArbiterNode {
-    /// Разбирает узел арбитра `id`: среду исполнения `qcom,ee`, номера окон в `reg-names` и
-    /// `phandle`.
+    /// Разбирает узел арбитра `id`: среду исполнения `qcom,ee` и номера окон в `reg-names`.
     ///
     /// Отказы:
     /// - `Missing` - по пути нет узла;
@@ -145,13 +133,7 @@ impl ArbiterNode {
                 .ok_or(NodeError::Window(window))?;
         }
 
-        let phandle = node.u32("phandle").map_err(NodeError::Description)?;
-
-        Ok(Self {
-            ee,
-            resources,
-            phandle,
-        })
+        Ok(Self { ee, resources })
     }
 
     /// Среда исполнения процессора.
@@ -181,115 +163,14 @@ impl ArbiterNode {
             };
 
             found.push(
-                self.peripheral(description, id, &pmic, device.id())
-                    .map_err(|reason| Skipped {
-                        id: device.id().clone(),
-                        reason,
-                    }),
+                peripheral(description, id, &pmic, device.id()).map_err(|reason| Skipped {
+                    id: device.id().clone(),
+                    reason,
+                }),
             );
         }
 
         found
-    }
-
-    fn peripheral(
-        &self,
-        description: &Description<'_>,
-        arbiter: &DeviceId,
-        pmic: &Ancestor<'_>,
-        id: &DeviceId,
-    ) -> Result<Peripheral, SkipReason> {
-        let sid = pmic
-            .node
-            .cells("reg")
-            .ok()
-            .flatten()
-            .and_then(|mut cells| cells.next())
-            .filter(|sid| *sid <= SID_MAX)
-            .and_then(|sid| u8::try_from(sid).ok())
-            .ok_or(SkipReason::Sid)?;
-
-        let node = description.find(id.as_str()).ok_or(SkipReason::Block)?;
-        let (holder, parent) =
-            blocks_holder_with_parent(description, &pmic.id, id, node).ok_or(SkipReason::Block)?;
-
-        let address_cells = cell_count(&parent, "#address-cells", ADDRESS_CELLS_DEFAULT)?;
-        let size_cells = cell_count(&parent, "#size-cells", SIZE_CELLS_DEFAULT)?;
-
-        let reg: Vec<u32> = holder
-            .cells("reg")
-            .map_err(|_| SkipReason::Block)?
-            .map(Iterator::collect)
-            .unwrap_or_default();
-
-        let entry = address_cells + size_cells;
-        if address_cells != 1 || !reg.len().is_multiple_of(entry) {
-            return Err(SkipReason::Block);
-        }
-
-        let blocks = reg
-            .chunks(entry)
-            .map(|cells| {
-                cells
-                    .first()
-                    .filter(|address| {
-                        address.is_multiple_of(BLOCK_BYTES) && **address <= BLOCK_ADDRESS_MAX
-                    })
-                    .and_then(|address| u8::try_from(address / BLOCK_BYTES).ok())
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or(SkipReason::Block)?;
-
-        let interrupt_cells = node
-            .cells("interrupts")
-            .ok()
-            .flatten()
-            .map(Iterator::collect::<Vec<_>>)
-            .filter(|cells| cells.len().is_multiple_of(INTERRUPT_CELLS))
-            .filter(|_| self.delivers(description, arbiter, id, node))
-            .unwrap_or_default();
-
-        let interrupts = interrupt_cells
-            .as_chunks::<INTERRUPT_CELLS>()
-            .0
-            .iter()
-            .map(|entry| interrupt(sid, &blocks, *entry))
-            .collect();
-
-        Ok(Peripheral {
-            id: id.clone(),
-            sid,
-            blocks,
-            interrupts,
-        })
-    }
-
-    fn delivers(
-        &self,
-        description: &Description<'_>,
-        arbiter: &DeviceId,
-        id: &DeviceId,
-        node: Node<'_>,
-    ) -> bool {
-        if let Ok(Some(parent)) = node.u32("interrupt-parent") {
-            return self.phandle == Some(parent);
-        }
-
-        for ancestor in description.ancestors(id) {
-            if ancestor.id == *arbiter {
-                return true;
-            }
-
-            if ancestor.node.bytes("#interrupt-cells").is_some() {
-                return false;
-            }
-
-            if let Ok(Some(parent)) = ancestor.node.u32("interrupt-parent") {
-                return self.phandle == Some(parent);
-            }
-        }
-
-        false
     }
 }
 
@@ -334,6 +215,65 @@ impl Peripheral {
             .get(usize::from(resource))
             .copied()
             .unwrap_or(Err(DeviceError::NotDescribed))
+    }
+
+    /// Устройство с `count` блоками подряд с блока единственной записи `reg` своего узла.
+    /// Устройства `devices` нужны для проверки, что блоки после первого не принадлежат другому
+    /// устройству того же ведомого.
+    ///
+    /// Отказы:
+    /// - `Range` - у узла нет своего `reg` либо в нём больше одной записи, `count` равен 0,
+    ///   последний блок выше 0xFF либо блок после первого принадлежит другому устройству того
+    ///   же ведомого.
+    pub fn with_blocks<'p>(
+        &self,
+        count: u8,
+        devices: impl IntoIterator<Item = &'p Peripheral>,
+    ) -> Result<Self, SpmiError> {
+        let first = self.base.ok_or(SpmiError::Range)?;
+        let last = count
+            .checked_sub(1)
+            .and_then(|extra| first.checked_add(extra))
+            .ok_or(SpmiError::Range)?;
+        let blocks: Vec<u8> = (first..=last).collect();
+        let tail = blocks.get(1..).unwrap_or_default();
+
+        let foreign = devices
+            .into_iter()
+            .filter(|device| device.sid == self.sid && device.id != self.id)
+            .any(|device| device.blocks.iter().any(|block| tail.contains(block)));
+        if foreign {
+            return Err(SpmiError::Range);
+        }
+
+        Ok(Self {
+            id: self.id.clone(),
+            sid: self.sid,
+            blocks,
+            base: self.base,
+            interrupts: self.interrupts.clone(),
+        })
+    }
+
+    /// Прерывание бита `bit` блока `block` устройства с условием `trigger`.
+    ///
+    /// Отказы:
+    /// - `OutOfRange` - блок не принадлежит устройству либо бит вне 0..=7.
+    pub fn block_interrupt(
+        &self,
+        block: u8,
+        bit: u8,
+        trigger: Trigger,
+    ) -> Result<Interrupt, DeviceError> {
+        if !self.blocks.contains(&block) || u32::from(bit) > INTERRUPT_BIT_MAX {
+            return Err(DeviceError::OutOfRange);
+        }
+
+        Ok(Interrupt {
+            ppid: ppid(self.sid, block),
+            bit,
+            trigger,
+        })
     }
 }
 
@@ -414,6 +354,115 @@ const fn trigger(kind: u32) -> Option<Trigger> {
         8 => Some(Trigger::Low),
         _ => None,
     }
+}
+
+fn peripheral(
+    description: &Description<'_>,
+    arbiter: &DeviceId,
+    pmic: &Ancestor<'_>,
+    id: &DeviceId,
+) -> Result<Peripheral, SkipReason> {
+    let sid = pmic
+        .node
+        .cells("reg")
+        .ok()
+        .flatten()
+        .and_then(|mut cells| cells.next())
+        .filter(|sid| *sid <= SID_MAX)
+        .and_then(|sid| u8::try_from(sid).ok())
+        .ok_or(SkipReason::Sid)?;
+
+    let node = description.find(id.as_str()).ok_or(SkipReason::Block)?;
+    let (holder, parent) =
+        blocks_holder_with_parent(description, &pmic.id, id, node).ok_or(SkipReason::Block)?;
+
+    let address_cells = cell_count(&parent, "#address-cells", ADDRESS_CELLS_DEFAULT)?;
+    let size_cells = cell_count(&parent, "#size-cells", SIZE_CELLS_DEFAULT)?;
+
+    let reg: Vec<u32> = holder
+        .cells("reg")
+        .map_err(|_| SkipReason::Block)?
+        .map(Iterator::collect)
+        .unwrap_or_default();
+
+    let entry = address_cells + size_cells;
+    if address_cells != 1 || !reg.len().is_multiple_of(entry) {
+        return Err(SkipReason::Block);
+    }
+
+    let blocks = reg
+        .chunks(entry)
+        .map(|cells| {
+            cells
+                .first()
+                .filter(|address| {
+                    address.is_multiple_of(BLOCK_BYTES) && **address <= BLOCK_ADDRESS_MAX
+                })
+                .and_then(|address| u8::try_from(address / BLOCK_BYTES).ok())
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(SkipReason::Block)?;
+
+    let interrupt_cells = node
+        .cells("interrupts")
+        .ok()
+        .flatten()
+        .map(Iterator::collect::<Vec<_>>)
+        .filter(|cells| cells.len().is_multiple_of(INTERRUPT_CELLS))
+        .filter(|_| delivers(description, arbiter, id, node))
+        .unwrap_or_default();
+
+    let interrupts = interrupt_cells
+        .as_chunks::<INTERRUPT_CELLS>()
+        .0
+        .iter()
+        .map(|entry| interrupt(sid, &blocks, *entry))
+        .collect();
+
+    let base = blocks
+        .first()
+        .copied()
+        .filter(|_| blocks.len() == 1 && node.bytes("reg").is_some());
+
+    Ok(Peripheral {
+        id: id.clone(),
+        sid,
+        blocks,
+        base,
+        interrupts,
+    })
+}
+
+fn delivers(
+    description: &Description<'_>,
+    arbiter: &DeviceId,
+    id: &DeviceId,
+    node: Node<'_>,
+) -> bool {
+    if let Some(delivers) = names_arbiter(&node, arbiter) {
+        return delivers;
+    }
+
+    for ancestor in description.ancestors(id) {
+        if ancestor.id == *arbiter {
+            return true;
+        }
+
+        if ancestor.node.bytes("#interrupt-cells").is_some() {
+            return false;
+        }
+
+        if let Some(delivers) = names_arbiter(&ancestor.node, arbiter) {
+            return delivers;
+        }
+    }
+
+    false
+}
+
+fn names_arbiter(node: &Node<'_>, arbiter: &DeviceId) -> Option<bool> {
+    let mut parents = node.references(INTERRUPT_PARENT)?;
+    Some(parents.next().and_then(Result::ok).as_ref() == Some(arbiter))
 }
 
 fn ppid(sid: u8, block: u8) -> u16 {

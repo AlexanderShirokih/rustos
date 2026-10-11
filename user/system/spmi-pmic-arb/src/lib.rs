@@ -9,7 +9,5 @@ mod peripheral;
 mod registers;
 
 pub use arbiter::{Arbiter, Refusal, Version};
-pub use peripheral::{
-    ArbiterNode, Interrupt, NodeError, Peripheral, SkipReason, Skipped, Span, Trigger,
-};
+pub use peripheral::{ArbiterNode, Interrupt, NodeError, Peripheral, SkipReason, Skipped, Span};
 pub use registers::{Registers, Window};

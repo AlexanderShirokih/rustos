@@ -53,7 +53,7 @@ impl Default for CellsSize {
     }
 }
 
-pub trait NodeExt {
+pub trait NodeExt<'a> {
     /// Узел доступен, если у него нет свойства `status` либо его значение `okay` или `ok`.
     fn is_available(&self) -> bool;
 
@@ -64,18 +64,25 @@ pub trait NodeExt {
     /// потомок). Трансляция адресов промежуточных шин (`ranges`) не выполняется.
     fn first_reg_base(&self, bus: &Node<'_>) -> Option<u64>;
 
-    /// Значение свойства `phandle`: идентификатор, которым на узел ссылаются
-    /// другие узлы.
-    fn phandle(&self) -> Option<u32>;
-
-    /// Phandle контроллера прерываний узла из свойства `interrupt-parent`.
-    fn interrupt_parent(&self) -> Option<u32>;
-
     /// Число ячеек одного interrupt-specifier из свойства `#interrupt-cells`.
     fn interrupt_cells(&self) -> Option<usize>;
+
+    /// Возвращает узлы, на которые ссылается свойство `name`, в порядке значения, каждый с
+    /// предками, либо `None` для узла без свойства `name`. Свойство должно быть списком ссылок
+    /// без аргументов, как `pinctrl-0` и `interrupt-parent`. Элемент равен `None` для
+    /// ссылки без узла в пределах [`BUS_PATH_MAX_NODES`] узлов от корня и для неполной ячейки
+    /// в конце значения.
+    fn references(&self, name: &str) -> Option<References<'a>>;
+
+    /// Возвращает записи свойства `name` в порядке значения либо `None` для узла без свойства
+    /// `name`. Запись - ссылка на узел и ячейки аргументов, число которых задаёт свойство
+    /// `cells` этого узла, как `#gpio-cells` у записей `gpios`. Элемент равен `None` для ссылки
+    /// без узла, узла без свойства `cells` и записи короче своих аргументов. После такого
+    /// элемента итератор не выдаёт записей.
+    fn specifiers(&self, name: &str, cells: &'a str) -> Option<Specifiers<'a>>;
 }
 
-impl NodeExt for Node<'_> {
+impl<'a> NodeExt<'a> for Node<'a> {
     fn is_available(&self) -> bool {
         self.prop("status")
             .is_none_or(|prop| matches!(prop.as_cstr(), Some("okay" | "ok")))
@@ -100,17 +107,24 @@ impl NodeExt for Node<'_> {
         windows.get(0).map(|window| window.offset as u64)
     }
 
-    fn phandle(&self) -> Option<u32> {
-        self.prop("phandle")?.try_as_u32(0)
-    }
-
-    fn interrupt_parent(&self) -> Option<u32> {
-        self.prop("interrupt-parent")?.try_as_u32(0)
-    }
-
     fn interrupt_cells(&self) -> Option<usize> {
         let cells = self.prop("#interrupt-cells")?.try_as_u32(0)?;
         Some(cells as usize)
+    }
+
+    fn references(&self, name: &str) -> Option<References<'a>> {
+        Some(References {
+            node: *self,
+            cells: self.prop(name)?.value().chunks(size_of::<u32>()),
+        })
+    }
+
+    fn specifiers(&self, name: &str, cells: &'a str) -> Option<Specifiers<'a>> {
+        Some(Specifiers {
+            node: *self,
+            value: self.prop(name)?.value(),
+            cells,
+        })
     }
 }
 
@@ -144,7 +158,29 @@ pub enum SkippedWindow {
     Inadmissible,
 }
 
-/// Узел, который нашёл [`node_path`], и его предки от корня дерева.
+/// Узлы по ссылкам свойства из [`NodeExt::references`].
+pub struct References<'a> {
+    node: Node<'a>,
+    cells: core::slice::Chunks<'a, u8>,
+}
+
+/// Записи свойства из [`NodeExt::specifiers`].
+pub struct Specifiers<'a> {
+    node: Node<'a>,
+    value: &'a [u8],
+    cells: &'a str,
+}
+
+/// Запись свойства из [`NodeExt::specifiers`].
+#[derive(Clone, Copy)]
+pub struct Specifier<'a> {
+    /// Узел по ссылке записи с предками.
+    pub path: NodePath<'a>,
+    /// Байты ячеек аргументов записи.
+    pub arguments: &'a [u8],
+}
+
+/// Узел дерева и его предки от корня дерева.
 #[derive(Clone, Copy)]
 pub struct NodePath<'a> {
     node: Node<'a>,
@@ -161,6 +197,48 @@ impl<'a> NodePath<'a> {
     /// Предки найденного узла от корня, последним - его родитель.
     pub fn ancestors(&self) -> &[Node<'a>] {
         self.ancestors.get(..self.len).unwrap_or_default()
+    }
+}
+
+impl<'a> Iterator for References<'a> {
+    type Item = Option<NodePath<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let cell = self.cells.next()?;
+        Some(
+            cell.try_into()
+                .ok()
+                .and_then(|cell| path_by_phandle(&self.node, u32::from_be_bytes(cell))),
+        )
+    }
+}
+
+impl<'a> Iterator for Specifiers<'a> {
+    type Item = Option<Specifier<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.value.is_empty() {
+            return None;
+        }
+
+        let found = self.split();
+        if found.is_none() {
+            self.value = &[];
+        }
+        Some(found)
+    }
+}
+
+impl<'a> Specifiers<'a> {
+    fn split(&mut self) -> Option<Specifier<'a>> {
+        let (reference, rest) = self.value.split_first_chunk::<4>()?;
+        let path = path_by_phandle(&self.node, u32::from_be_bytes(*reference))?;
+        let count = path.node().prop(self.cells)?.try_as_u32(0)?;
+        let length = usize::try_from(count).ok()?.checked_mul(size_of::<u32>())?;
+        let (arguments, rest) = rest.split_at_checked(length)?;
+
+        self.value = rest;
+        Some(Specifier { path, arguments })
     }
 }
 
@@ -190,6 +268,31 @@ pub fn node_path<'a>(dt: &'a DeviceTree<'a>, path: &str) -> Option<NodePath<'a>>
     }
 
     Some(found)
+}
+
+fn path_by_phandle<'a>(member: &Node<'a>, phandle: u32) -> Option<NodePath<'a>> {
+    let (_, root) = member.tree().next()?;
+    let mut ancestors = [root; BUS_PATH_MAX_NODES - 1];
+
+    for (depth, node) in member.tree() {
+        if depth >= BUS_PATH_MAX_NODES {
+            continue;
+        }
+
+        if node.phandle() == Some(phandle) {
+            return Some(NodePath {
+                node,
+                ancestors,
+                len: depth,
+            });
+        }
+
+        if let Some(slot) = ancestors.get_mut(depth) {
+            *slot = node;
+        }
+    }
+
+    None
 }
 
 /// Как [`node_path`], но возвращает `None` и тогда, когда узел либо его предок недоступен по

@@ -3640,6 +3640,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b330c9d1b92dfe68442ca20b009c717d5f0b1e3cf4965e62f704c3c6e95a1305"
 
 [[package]]
+name = "pinctrl-msm"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "ipc",
+ "kernel-objects",
+ "pins-abi",
+ "platform-abi",
+ "program-entry",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
+name = "pinctrl-spmi-gpio"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "ipc",
+ "kernel-objects",
+ "pins-abi",
+ "platform-abi",
+ "program-entry",
+ "runtime",
+ "spmi-abi",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
+name = "pins-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "platform-abi",
+ "syscall",
+]
+
+[[package]]
 name = "piper"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4753,6 +4793,9 @@ dependencies = [
  "log-abi",
  "log-relay",
  "managed-component",
+ "pinctrl-msm",
+ "pinctrl-spmi-gpio",
+ "pins-abi",
  "platform-abi",
  "program-entry",
  "rootkeeper",

@@ -11,11 +11,12 @@ use component_abi::{
     Attributes, RequirementDeclaration, STARTUP_REQUEST_TIMEOUT, SessionError,
     component_startup as startup_contract,
 };
-use component_startup::Found;
+use component_startup::{AnyOf, Found, Providers};
 use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
 use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
+use platform_abi::{CONTROLLER_KEY, Node};
 use rootkeeper::{
     BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::Relay, turn,
 };
@@ -344,6 +345,34 @@ pub(crate) fn request<P: Protocol>(
     wait: Timeout,
 ) -> Result<Session<P>, CallError<SessionError>> {
     component_startup::session::<P>(importer, requirement, Attributes::empty(), wait)
+}
+
+pub(crate) fn controller_provider<P: Protocol>(
+    importer: Handle<kind::Port>,
+    requirement: &'static str,
+    compatibles: &[String],
+) -> Session<P> {
+    let providers = Providers::<P>::new(importer, requirement);
+    let found = providers
+        .all(AnyOf::new(
+            CONTROLLER_KEY,
+            compatibles.iter().map(String::as_str),
+        ))
+        .expect("provider enumeration")
+        .next()
+        .expect("provider export")
+        .expect("provider export found");
+    providers.open(&found).expect("provider session")
+}
+
+pub(crate) fn compatibles<'a>(controllers: impl IntoIterator<Item = Node<'a>>) -> Vec<String> {
+    let mut compatibles = Vec::new();
+    for controller in controllers {
+        if let Ok(Some(names)) = controller.strings("compatible") {
+            compatibles.extend(names.map(String::from));
+        }
+    }
+    compatibles
 }
 
 pub(crate) fn drained(enumeration: &Session<startup_contract::Protocol>) -> Vec<Found> {
