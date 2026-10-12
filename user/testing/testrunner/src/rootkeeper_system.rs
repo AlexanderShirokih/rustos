@@ -21,7 +21,9 @@ use kernel_objects::{
 use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
 use managed_component::Status;
-use platform_abi::{Description, DescriptionRegion, MappedDescription, PlatformError, platform};
+use platform_abi::{
+    Description, DescriptionRegion, DeviceId, MappedDescription, PlatformError, platform,
+};
 use rootkeeper::{
     BootFailure, RecordState, SEARCH_LIMITS, SearchLimits, Stopped,
     relay::{ComponentNames, LogSessions as _, LogSources, log_badge},
@@ -114,7 +116,6 @@ pub(crate) const PL031: &str = "/pl031@9010000";
 pub(crate) const FIRST_VIRTIO: &str = "/virtio_mmio@a000000";
 const SECOND_VIRTIO: &str = "/virtio_mmio@a000200";
 const ABSENT: &str = "/absent@0";
-const RELATIVE: &str = "pl031@9010000";
 
 const VIRTIO_REGION: u64 = 0xa00_0000;
 const VIRTIO_STRIDE: u64 = 0x200;
@@ -481,14 +482,18 @@ fn line(
     session: &platform::Client<SessionTransport>,
     device: &str,
 ) -> Result<IrqLine, CallError<PlatformError>> {
-    session.irq(device, 0).map(IrqLine::from)
+    session
+        .irq(DeviceId::new(device).expect("absolute path"), 0)
+        .map(IrqLine::from)
 }
 
 fn window(
     session: &platform::Client<SessionTransport>,
     device: &str,
 ) -> Result<MmioWindow, CallError<PlatformError>> {
-    session.mmio(device, 0).map(MmioWindow::from)
+    session
+        .mmio(DeviceId::new(device).expect("absolute path"), 0)
+        .map(MmioWindow::from)
 }
 
 fn description(
@@ -1254,7 +1259,6 @@ fn a_device_outside_the_platform_description_is_not_described() {
 
     let absent_line = line(&session, ABSENT).map(drop);
     let absent_window = window(&session, ABSENT).map(drop);
-    let relative_line = line(&session, RELATIVE).map(drop);
 
     test_harness::check_eq!(
         absent_line,
@@ -1262,10 +1266,6 @@ fn a_device_outside_the_platform_description_is_not_described() {
     );
     test_harness::check_eq!(
         absent_window,
-        Err(CallError::Remote(PlatformError::NotDescribed))
-    );
-    test_harness::check_eq!(
-        relative_line,
         Err(CallError::Remote(PlatformError::NotDescribed))
     );
     drop(session);

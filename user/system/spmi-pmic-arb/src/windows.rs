@@ -18,7 +18,7 @@ impl Windows {
         id: &DeviceId,
         node: &ArbiterNode,
     ) -> Result<Self, WindowRefusal> {
-        let region = |window| platform.map_mmio(id.as_str(), node.resource(window));
+        let region = |window| platform.map_mmio(id, node.resource(window));
 
         Ok(Self {
             core: region(Window::Core)?,

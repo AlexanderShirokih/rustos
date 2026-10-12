@@ -266,7 +266,8 @@ impl<'a> Controller<'a> {
     }
 
     fn open(&mut self, badge: u64, device: &str) -> Result<(), PinsError> {
-        let plan = self.tlmm.plan(&self.description, device, &self.claims)?;
+        let device = DeviceId::new(device).expect("absolute path");
+        let plan = self.tlmm.plan(&self.description, &device, &self.claims)?;
         self.tlmm.apply(&plan);
         plan.claim(&mut self.claims, badge);
         Ok(())
@@ -472,8 +473,12 @@ fn the_board_controller_refuses_sdc_groups_and_nodes_without_state() {
             .client()
             .with_wait(PINS_REPLY_TIMEOUT);
 
-    let sdc = client.open(BOARD_SDC_HOST).map(drop);
-    let no_state = client.open(BOARD_NO_STATE).map(drop);
+    let sdc = client
+        .open(DeviceId::new(BOARD_SDC_HOST).expect("absolute path"))
+        .map(drop);
+    let no_state = client
+        .open(DeviceId::new(BOARD_NO_STATE).expect("absolute path"))
+        .map(drop);
 
     test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));
     test_harness::check_eq!(sdc, Err(CallError::Remote(PinsError::Unsupported)));

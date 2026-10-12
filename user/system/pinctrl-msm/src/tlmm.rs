@@ -111,17 +111,15 @@ impl<R: Registers> Tlmm<R> {
     pub fn plan(
         &self,
         description: &Description<'_>,
-        device: &str,
+        device: &DeviceId,
         claims: &Claims,
     ) -> Result<Plan, PinsError> {
-        let id = DeviceId::new(device)
-            .filter(|id| description.node(id).is_some())
-            .ok_or(PinsError::NoDevice)?;
+        description.node(device).ok_or(PinsError::NoDevice)?;
         if claims.holds_device(device) {
             return Err(PinsError::Busy);
         }
 
-        let states: Vec<_> = default_states(description, device)
+        let states: Vec<_> = default_states(description, device.as_str())
             .ok_or(PinsError::Unsupported)?
             .into_iter()
             .filter(|state| state.controller == self.id)
@@ -162,7 +160,7 @@ impl<R: Registers> Tlmm<R> {
         }
 
         Ok(Plan {
-            device: id,
+            device: device.clone(),
             settings: parsed,
             pins,
         })

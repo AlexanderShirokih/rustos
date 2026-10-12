@@ -7,11 +7,10 @@ ipc::protocol! {
     pub mod pins {
         name = "Pins";
 
-        /// Выдаёт сессию выводов узла, путь которого в описании равен `device`, как путь
-        /// `DeviceId` в `Platform`, и применяет к выводам состояние `default` узла. Узел и
-        /// выводы его состояния заняты до ухода клиента сессии.
+        /// Выдаёт сессию выводов узла `device` и применяет к выводам состояние `default` узла.
+        /// Узел и выводы его состояния заняты до ухода клиента сессии.
         call fn open(
-            device: &str,
+            device: platform_abi::DeviceId,
         ) -> own Result<ipc::wire::Session<crate::device_pins::Protocol>, PinsError>;
     }
 }
@@ -35,7 +34,7 @@ ipc::protocol! {
         /// - `Busy` - вывод занят сессией другого узла;
         /// - `Denied` - контроллер запретил этой среде исполнения обращение к выводу;
         /// - `Failed` - контроллер не выполнил чтение либо запись регистров.
-        call fn input(node: &str, property: &str, index: u8) -> Result<u8, PinsError>;
+        call fn input(node: platform_abi::DeviceId, property: &str, index: u8) -> Result<u8, PinsError>;
 
         /// Возвращает `true`, если уровень вывода линии `line` высокий, а её запись не
         /// содержит флага `GPIO_ACTIVE_LOW`, либо уровень низкий, а запись содержит этот флаг.

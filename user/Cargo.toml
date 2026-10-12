@@ -12,6 +12,7 @@ members = [
     "examples/files-demo",
     "examples/hello-c",
     "examples/hello-std",
+    "system/clk-qcom",
     "system/driver-pl031",
     "system/driver-pm8941-pwrkey",
     "system/driver-pm8941-rtc",
@@ -80,6 +81,7 @@ virtio-driver = { path = "../lib/virtio-driver" }
 application-abi = { path = "../lib/application-abi" }
 application-window = { path = "../lib/application-window" }
 bootstrap-abi = { path = "../lib/bootstrap-abi" }
+clocks-abi = { path = "../lib/clocks-abi" }
 component-abi = { path = "../lib/component-abi" }
 device-resolver = { path = "../lib/device-resolver" }
 display-abi = { path = "../lib/display-abi" }

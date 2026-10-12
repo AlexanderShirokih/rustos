@@ -144,7 +144,7 @@ impl Attacher {
 
         let window = self
             .platform
-            .mmio(id.as_str(), 0)
+            .mmio(id.clone(), 0)
             .map_err(|error| error.fold(|_| OpenRefusal::PlatformCall, OpenRefusal::Platform))?;
         framebuffer
             .fits(window.size)

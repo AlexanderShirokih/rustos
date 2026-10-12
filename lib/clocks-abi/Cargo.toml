@@ -1,0 +1,13 @@
+[package]
+license.workspace = true
+name = "clocks-abi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ipc = { workspace = true }
+platform-abi = { workspace = true }
+
+[lints]
+workspace = true

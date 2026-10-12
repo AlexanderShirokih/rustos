@@ -7,11 +7,10 @@ ipc::protocol! {
     pub mod platform {
         name = "Platform";
 
-        /// Выдаёт копию линии прерывания `resource` устройства `device`. `device` - путь
-        /// [`DeviceId`](crate::DeviceId), `resource` - номер спецификатора в `interrupts`
-        /// устройства.
+        /// Выдаёт копию линии прерывания `resource` устройства `device`. `resource` - номер
+        /// спецификатора в `interrupts` устройства.
         call fn irq(
-            device: &str,
+            device: crate::DeviceId,
             resource: u16,
         ) -> own Result<ipc::wire::Cap<kind::IrqLine>, PlatformError>;
 
@@ -19,7 +18,7 @@ ipc::protocol! {
         /// смещение и размер окна. `resource` - номер записи в `reg` устройства. Окна устройств
         /// сессии в одном регионе приходят этим регионом, каждое со своим смещением.
         call fn mmio(
-            device: &str,
+            device: crate::DeviceId,
             resource: u16,
         ) -> own Result<MmioWindow, PlatformError>;
 

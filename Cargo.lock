@@ -35,6 +35,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clocks-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "platform-abi",
+]
+
+[[package]]
 name = "component-abi"
 version = "0.1.0"
 dependencies = [

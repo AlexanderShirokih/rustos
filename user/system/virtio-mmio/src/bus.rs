@@ -111,9 +111,9 @@ impl Bus {
 impl Transport {
     fn take(platform: &platform::Client<SessionTransport>, id: &DeviceId) -> Result<Self, Refusal> {
         let line = platform
-            .irq(id.as_str(), 0)
+            .irq(id.clone(), 0)
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
-        let registers = platform.map_mmio(id.as_str(), 0).map_err(Refusal::Window)?;
+        let registers = platform.map_mmio(id, 0).map_err(Refusal::Window)?;
         let device_type = registers.mmio().read::<u32>(register::DEVICE_ID);
 
         Ok(Self {

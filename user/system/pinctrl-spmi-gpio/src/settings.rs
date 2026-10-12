@@ -90,17 +90,15 @@ impl Plan {
 /// - [`PinsError::Busy`] - вывод занят сессией в `claims`.
 pub fn plan(
     description: &Description<'_>,
-    device: &str,
+    device: &DeviceId,
     claims: &Claims,
 ) -> Result<Plan, PinsError> {
-    let id = DeviceId::new(device)
-        .filter(|id| description.node(id).is_some())
-        .ok_or(PinsError::NoDevice)?;
+    description.node(device).ok_or(PinsError::NoDevice)?;
     if claims.holds_device(device) {
         return Err(PinsError::Busy);
     }
 
-    let states: Vec<_> = default_states(description, device)
+    let states: Vec<_> = default_states(description, device.as_str())
         .ok_or(PinsError::Unsupported)?
         .into_iter()
         .filter(|state| served(description, &state.controller))
@@ -135,7 +133,7 @@ pub fn plan(
     }
 
     Ok(Plan {
-        device: id,
+        device: device.clone(),
         controllers,
         settings,
         pins,

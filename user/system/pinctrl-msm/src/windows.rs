@@ -24,9 +24,7 @@ impl Windows {
     ) -> Result<Self, Refusal> {
         let region = |tile: Tile| {
             let resource = tile.resource(node).ok_or(Refusal::Unnamed(tile))?;
-            platform
-                .map_mmio(id.as_str(), resource)
-                .map_err(Refusal::Window)
+            platform.map_mmio(id, resource).map_err(Refusal::Window)
         };
 
         Ok(Self {

@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use component_startup::{SessionEvent, SessionPort};
 use ipc::IntoWireValue;
 use kernel_objects::{Delivery, OwnedHandle, Port, Signal};
+use platform_abi::DeviceId;
 use runtime::{Mutex, log_fmt};
 use spmi_abi::{DeviceError, SpmiError, Trigger, spmi, spmi_device};
 use spmi_pmic_arb::{Arbiter, Interrupt, Peripheral};
@@ -87,11 +88,11 @@ impl Bus {
 }
 
 impl Opener<'_> {
-    fn open(&mut self, device: &str, count: Option<u8>) -> Result<Port, SpmiError> {
+    fn open(&mut self, device: &DeviceId, count: Option<u8>) -> Result<Port, SpmiError> {
         let devices = &mut self.bus.devices;
         let index = devices
             .iter()
-            .position(|each| each.peripheral.id().as_str() == device)
+            .position(|each| each.peripheral.id() == device)
             .ok_or(SpmiError::NoDevice)?;
         let described = devices.get(index).ok_or(SpmiError::NoDevice)?;
         if described.holder.is_some() {
@@ -139,21 +140,21 @@ impl spmi::Service<Delivery> for Opener<'_> {
     fn open(
         &mut self,
         _frame: &Delivery,
-        device: &str,
+        device: DeviceId,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<spmi_device::Protocol>, SpmiError>>
     {
         // Порт сессии устройства выпускает эта шина, и она же обслуживает на нём `SpmiDevice`.
-        Opener::open(self, device, None).map(kernel_objects::Session::from_handle)
+        Opener::open(self, &device, None).map(kernel_objects::Session::from_handle)
     }
 
     fn open_blocks(
         &mut self,
         _frame: &Delivery,
-        device: &str,
+        device: DeviceId,
         count: u8,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<spmi_device::Protocol>, SpmiError>>
     {
-        Opener::open(self, device, Some(count)).map(kernel_objects::Session::from_handle)
+        Opener::open(self, &device, Some(count)).map(kernel_objects::Session::from_handle)
     }
 }
 

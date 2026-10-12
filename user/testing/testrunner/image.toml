@@ -210,6 +210,11 @@ package = "spmi-pmic-arb"
 path = "/spmi-pmic-arb"
 
 [[programs]]
+package = "clk-qcom"
+bin = "gcc-sdm660"
+path = "/gcc-sdm660"
+
+[[programs]]
 package = "pinctrl-msm"
 bin = "pinctrl-sdm660"
 path = "/pinctrl-sdm660"

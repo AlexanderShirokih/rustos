@@ -5,6 +5,7 @@ use kernel_objects::{
 
 use crate::{
     description::{Description, DescriptionRegion},
+    device::DeviceId,
     error::{DescriptionError, PlatformError},
     protocol::platform,
 };
@@ -50,9 +51,9 @@ impl MappedDescription {
 impl platform::Client<SessionTransport> {
     /// Берёт окно `resource` устройства `device` и отображает его, как [`MmioMapping::new`].
     /// Окно отзывается с концом сессии `Platform`, которая его выдала.
-    pub fn map_mmio(&self, device: &str, resource: u16) -> Result<MmioMapping, WindowRefusal> {
+    pub fn map_mmio(&self, device: &DeviceId, resource: u16) -> Result<MmioMapping, WindowRefusal> {
         let window = self
-            .mmio(device, resource)
+            .mmio(device.clone(), resource)
             .map_err(|error| error.fold(WindowRefusal::Call, WindowRefusal::Platform))?;
 
         MmioMapping::new(MmioWindow::from(window))

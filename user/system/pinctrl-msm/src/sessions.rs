@@ -7,7 +7,7 @@ use ipc::IntoWireValue;
 use kernel_objects::{Delivery, Port, Signal};
 use pinctrl_msm::Tlmm;
 use pins_abi::{Claims, PinsError, device_pins, pins};
-use platform_abi::Description;
+use platform_abi::{Description, DeviceId};
 
 use crate::windows::Windows;
 
@@ -25,7 +25,7 @@ struct Opener<'a, 'd> {
 struct Held;
 
 impl Opener<'_, '_> {
-    fn open(&mut self, device: &str) -> Result<Port, PinsError> {
+    fn open(&mut self, device: &DeviceId) -> Result<Port, PinsError> {
         let plan = self.controller.tlmm.plan(
             self.controller.description,
             device,
@@ -47,12 +47,12 @@ impl pins::Service<Delivery> for Opener<'_, '_> {
     fn open(
         &mut self,
         _frame: &Delivery,
-        device: &str,
+        device: DeviceId,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<device_pins::Protocol>, PinsError>>
     {
         // Порт сессии выводов выпускает этот контроллер, и он же обслуживает на нём
         // `DevicePins`.
-        Opener::open(self, device).map(kernel_objects::Session::from_handle)
+        Opener::open(self, &device).map(kernel_objects::Session::from_handle)
     }
 }
 
@@ -60,7 +60,7 @@ impl device_pins::Service<Delivery> for Held {
     fn input(
         &mut self,
         _frame: &Delivery,
-        _node: &str,
+        _node: DeviceId,
         _property: &str,
         _index: u8,
     ) -> Result<u8, PinsError> {

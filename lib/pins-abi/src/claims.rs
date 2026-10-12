@@ -1,6 +1,6 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use platform_abi::DeviceId;
+use platform_abi::{DeviceClaims, DeviceId};
 
 /// Вывод контроллера выводов.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -14,7 +14,7 @@ pub struct Pin {
 /// Узлы и выводы, занятые сессиями поставщика выводов, по значкам сессий.
 #[derive(Default)]
 pub struct Claims {
-    devices: BTreeMap<u64, DeviceId>,
+    devices: DeviceClaims,
     pins: BTreeMap<Pin, u64>,
 }
 
@@ -22,14 +22,14 @@ impl Claims {
     /// Таблица без занятых узлов.
     pub const fn new() -> Self {
         Self {
-            devices: BTreeMap::new(),
+            devices: DeviceClaims::new(),
             pins: BTreeMap::new(),
         }
     }
 
-    /// Возвращает `true`, если узел с путём `device` занят какой-либо сессией.
-    pub fn holds_device(&self, device: &str) -> bool {
-        self.devices.values().any(|held| held.as_str() == device)
+    /// Возвращает `true`, если узел `device` занят какой-либо сессией.
+    pub fn holds_device(&self, device: &DeviceId) -> bool {
+        self.devices.holds_device(device)
     }
 
     /// Возвращает `true`, если какая-либо сессия занимает хотя бы один вывод из `pins`.
@@ -39,12 +39,12 @@ impl Claims {
 
     /// Возвращает `true`, если сессия со значком `badge` занимает узел.
     pub fn holds_session(&self, badge: u64) -> bool {
-        self.devices.contains_key(&badge)
+        self.devices.holds_session(badge)
     }
 
     /// Занимает узел `device` и выводы `pins` сессией со значком `badge`.
     pub fn claim(&mut self, badge: u64, device: DeviceId, pins: Vec<Pin>) {
-        self.devices.insert(badge, device);
+        self.devices.claim(badge, device);
         self.pins.extend(pins.into_iter().map(|pin| (pin, badge)));
     }
 
@@ -60,7 +60,7 @@ impl Claims {
 
     /// Освобождает узел и выводы сессии со значком `badge`.
     pub fn release(&mut self, badge: u64) {
-        self.devices.remove(&badge);
+        self.devices.release(badge);
         self.pins.retain(|_, holder| *holder != badge);
     }
 }

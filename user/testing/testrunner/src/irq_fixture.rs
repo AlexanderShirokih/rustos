@@ -3,7 +3,7 @@
 
 use component_startup::{Requirements as _, component_manifest};
 use kernel_objects::MemoryRegion;
-use platform_abi::platform;
+use platform_abi::{DeviceId, platform};
 use runtime::{log_fmt, log_line};
 use syscall::{Handle, kind};
 
@@ -24,8 +24,11 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .open()
         .map_err(|_| Failed)?
         .client();
-    let device = "/pl031@9010000";
-    let (Ok(_line), Ok(window)) = (platform.irq(device, 0), platform.mmio(device, 0)) else {
+    let Some(device) = DeviceId::new("/pl031@9010000") else {
+        return Err(Failed);
+    };
+    let (Ok(_line), Ok(window)) = (platform.irq(device.clone(), 0), platform.mmio(device, 0))
+    else {
         log_line("resources refused");
         return Err(Failed);
     };

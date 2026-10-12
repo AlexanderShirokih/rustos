@@ -234,6 +234,8 @@ bench = false
 [dependencies]
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
+clk-qcom = { path = "../../system/clk-qcom" }
+clocks-abi = { workspace = true }
 component-abi = { workspace = true }
 component-startup = { workspace = true }
 display-abi = { workspace = true }

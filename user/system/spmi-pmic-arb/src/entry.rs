@@ -134,7 +134,7 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
 
     let line = arbiter
         .as_ref()
-        .map(|_| platform.irq(id.as_str(), 0))
+        .map(|_| platform.irq(id.clone(), 0))
         .transpose()
         .inspect_err(|error| log_fmt(format_args!("{} line refused: {error:?}", id.as_str())))
         .ok()?

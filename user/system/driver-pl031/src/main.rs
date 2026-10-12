@@ -96,9 +96,9 @@ impl Pl031 {
             .next()
             .map(|device| device.id().clone())
             .ok_or(Error::NoDevice)?;
-        let line = IrqLine::from(platform.irq(id.as_str(), 0)?);
+        let line = IrqLine::from(platform.irq(id.clone(), 0)?);
         Ok(Self {
-            registers: platform.map_mmio(id.as_str(), 0)?,
+            registers: platform.map_mmio(&id, 0)?,
             line,
         })
     }

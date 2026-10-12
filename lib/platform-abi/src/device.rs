@@ -1,5 +1,11 @@
 use core::cmp::Ordering;
 
+use ipc::{
+    IntoWireValue, ReceivedResources, WireTyped, WireValue,
+    schema::WireType,
+    wire::{IpcError, MessageBuf, value},
+};
+
 /// Предельная длина [`DeviceId`] в байтах.
 pub const DEVICE_ID_MAX: usize = 255;
 
@@ -64,6 +70,26 @@ impl DeviceId {
         self.len = end;
         Some(())
     }
+}
+
+impl<'a, R: ReceivedResources> WireValue<'a, R> for DeviceId {
+    type Owned = Self;
+
+    fn from_field(data: &'a [u8], _frame: &mut R) -> Result<Self, IpcError> {
+        Self::new(value::decode_str(data)?).ok_or(IpcError::InvalidValue)
+    }
+}
+
+impl<R: ReceivedResources> IntoWireValue<R> for DeviceId {
+    type Read = Self;
+
+    fn write_into(self, frame: &mut MessageBuf<R>, field_id: u8) -> Result<(), IpcError> {
+        frame.write_field(field_id, self.as_str().as_bytes())
+    }
+}
+
+impl WireTyped for DeviceId {
+    const WIRE_TYPE: WireType = WireType::Str;
 }
 
 impl PartialEq for DeviceId {

@@ -39,6 +39,7 @@ mod answer_exhaustion_protocol;
 mod c_selftest;
 mod child_steps_protocol;
 mod clock;
+mod clocks;
 mod composition;
 mod cxx_exit;
 mod cxx_selftest;

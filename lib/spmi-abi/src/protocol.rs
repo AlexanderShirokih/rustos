@@ -10,8 +10,8 @@ ipc::protocol! {
     pub mod spmi {
         name = "Spmi";
 
-        /// Выдаёт сессию устройства за арбитром, путь узла которого в описании равен `device`,
-        /// как путь `DeviceId` в `Platform`. Устройство занято до ухода клиента сессии.
+        /// Выдаёт сессию устройства за арбитром с узлом `device`. Устройство занято до ухода
+        /// клиента сессии.
         ///
         /// Отказы:
         /// - `NoDevice` - путь не называет устройство за арбитром либо шина не работает с
@@ -19,7 +19,7 @@ ipc::protocol! {
         /// - `Busy` - устройство занято сессией другого клиента;
         /// - `NoSpace` - шине не хватает ресурса на сессию устройства.
         call fn open(
-            device: &str,
+            device: platform_abi::DeviceId,
         ) -> own Result<ipc::wire::Session<crate::spmi_device::Protocol>, SpmiError>;
 
         /// Выдаёт сессию устройства `device`, как `open`, с `count` блоками подряд с блока
@@ -32,7 +32,7 @@ ipc::protocol! {
         ///   последний блок выше 0xFF либо блок после первого принадлежит другому устройству
         ///   того же ведомого.
         call fn open_blocks(
-            device: &str,
+            device: platform_abi::DeviceId,
             count: u8,
         ) -> own Result<ipc::wire::Session<crate::spmi_device::Protocol>, SpmiError>;
     }

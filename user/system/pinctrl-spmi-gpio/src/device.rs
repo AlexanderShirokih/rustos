@@ -43,7 +43,7 @@ impl Device {
             .client()
             .with_wait(BUS_CALL_TIMEOUT);
         let device = bus
-            .open_blocks(controller.id.as_str(), controller.pins())
+            .open_blocks(controller.id.clone(), controller.pins())
             .map_err(|_| PinsError::Failed)?;
 
         Ok(Self {

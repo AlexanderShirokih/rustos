@@ -79,15 +79,14 @@ impl Driver<'_> {
 }
 
 impl Opener<'_, '_> {
-    fn open(&mut self, device: &str) -> Result<Port, PinsError> {
+    fn open(&mut self, device: DeviceId) -> Result<Port, PinsError> {
         let driver = &mut *self.driver;
-        let plan = plan(driver.description, device, &driver.claims)?;
+        let plan = plan(driver.description, &device, &driver.claims)?;
         for controller in plan.controllers() {
             let settings = plan.settings(&controller.id);
             driver.gpio(controller)?.apply(&settings)?;
         }
 
-        let node = DeviceId::new(device).ok_or(PinsError::NoDevice)?;
         let minted = self
             .sessions
             .create_session()
@@ -98,7 +97,7 @@ impl Opener<'_, '_> {
         driver.sessions.insert(
             badge,
             NodeSession {
-                node,
+                node: device,
                 lines: Vec::new(),
             },
         );
@@ -110,7 +109,7 @@ impl pins::Service<Delivery> for Opener<'_, '_> {
     fn open(
         &mut self,
         _frame: &Delivery,
-        device: &str,
+        device: DeviceId,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<device_pins::Protocol>, PinsError>>
     {
         // Порт сессии выводов выпускает этот контроллер, и он же обслуживает на нём
@@ -128,8 +127,7 @@ impl Held<'_, '_> {
             .ok_or(PinsError::NotIssued)
     }
 
-    fn issue(&mut self, node: &str, property: &str, index: u8) -> Result<u8, PinsError> {
-        let node = DeviceId::new(node).ok_or(PinsError::NoDevice)?;
+    fn issue(&mut self, node: DeviceId, property: &str, index: u8) -> Result<u8, PinsError> {
         let session = self
             .driver
             .sessions
@@ -196,7 +194,7 @@ impl device_pins::Service<Delivery> for Held<'_, '_> {
     fn input(
         &mut self,
         _frame: &Delivery,
-        node: &str,
+        node: DeviceId,
         property: &str,
         index: u8,
     ) -> Result<u8, PinsError> {

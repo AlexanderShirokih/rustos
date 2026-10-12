@@ -183,7 +183,7 @@ impl Node {
             .client()
             .with_wait(CALL_TIMEOUT);
         let device = Session::<spmi_device::Protocol>::from_session(
-            bus.open(id.as_str()).map_err(Failure::Bus)?,
+            bus.open(id.clone()).map_err(Failure::Bus)?,
         )
         .client()
         .with_wait(CALL_TIMEOUT);

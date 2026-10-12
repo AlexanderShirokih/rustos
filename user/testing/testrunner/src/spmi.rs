@@ -790,11 +790,12 @@ pub(crate) fn open(
     bus: &spmi::Client<SessionTransport>,
     path: &str,
 ) -> Result<spmi_device::Client<SessionTransport>, CallError<SpmiError>> {
-    bus.open(path).map(|session| {
-        Session::<spmi_device::Protocol>::from_session(session)
-            .client()
-            .with_wait(SPMI_REPLY_TIMEOUT)
-    })
+    bus.open(DeviceId::new(path).expect("absolute path"))
+        .map(|session| {
+            Session::<spmi_device::Protocol>::from_session(session)
+                .client()
+                .with_wait(SPMI_REPLY_TIMEOUT)
+        })
 }
 
 #[test_harness::test]

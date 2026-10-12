@@ -171,7 +171,7 @@ impl Clock {
             .map_err(Failure::Startup)?
             .client()
             .with_wait(BUS_CALL_TIMEOUT);
-        let device = bus.open(id.as_str()).map_err(Failure::Bus)?;
+        let device = bus.open(id.clone()).map_err(Failure::Bus)?;
 
         let clock = Self {
             _bus: bus,

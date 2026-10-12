@@ -584,12 +584,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "clk-qcom"
+version = "0.1.0"
+dependencies = [
+ "clocks-abi",
+ "component-startup",
+ "kernel-objects",
+ "platform-abi",
+ "program-entry",
+ "runtime",
+ "userland-build",
+]
+
+[[package]]
 name = "clock-std"
 version = "0.1.0"
 dependencies = [
  "components",
  "rtc-abi",
  "userland-build",
+]
+
+[[package]]
+name = "clocks-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "platform-abi",
 ]
 
 [[package]]
@@ -4775,6 +4796,8 @@ name = "testrunner"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
+ "clk-qcom",
+ "clocks-abi",
  "component-abi",
  "component-startup",
  "display-abi",

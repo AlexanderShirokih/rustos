@@ -56,7 +56,6 @@ pub(crate) struct Platform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
     NoSession,
-    InvalidDevice,
     Resolve(ResolveError),
     LineTaken,
     WindowTaken,
@@ -128,16 +127,15 @@ impl Platform {
         })
     }
 
-    fn line(&self, badge: u64, device: &str, resource: u16) -> Result<IrqLine, Refusal> {
+    fn line(&self, badge: u64, device: &DeviceId, resource: u16) -> Result<IrqLine, Refusal> {
         let mut sessions = self.sessions.lock();
         let record = sessions
             .iter_mut()
             .find(|record| record.badge == badge)
             .ok_or(Refusal::NoSession)?;
-        let device = DeviceId::new(device).ok_or(Refusal::InvalidDevice)?;
         let interrupt = self
             .resolver
-            .interrupt(&device, resource)
+            .interrupt(device, resource)
             .map_err(Refusal::Resolve)?;
         if let Some(held) = record.lines.iter().find(|held| held.line == interrupt.line) {
             return copy(&held.root, RESOURCE_RIGHTS);
@@ -161,17 +159,16 @@ impl Platform {
     fn window(
         &self,
         badge: u64,
-        device: &str,
+        device: &DeviceId,
         resource: u16,
     ) -> Result<MmioWindow<MemoryRegion>, Refusal> {
         let mut sessions = self.sessions.lock();
         if !sessions.iter().any(|record| record.badge == badge) {
             return Err(Refusal::NoSession);
         }
-        let device = DeviceId::new(device).ok_or(Refusal::InvalidDevice)?;
         let mmio = self
             .resolver
-            .mmio(&device, resource)
+            .mmio(device, resource)
             .map_err(Refusal::Resolve)?;
         let found = self
             .hardware
@@ -217,21 +214,25 @@ impl platform::Service<Delivery> for Platform {
     fn irq(
         &mut self,
         frame: &Delivery,
-        device: &str,
+        device: DeviceId,
         resource: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::IrqLine>, PlatformError>> {
-        self.line(frame.badge, device, resource)
-            .map_err(|refusal| Self::refuse(format_args!("{device} irq {resource}"), refusal))
+        self.line(frame.badge, &device, resource)
+            .map_err(|refusal| {
+                Self::refuse(format_args!("{} irq {resource}", device.as_str()), refusal)
+            })
     }
 
     fn mmio(
         &mut self,
         frame: &Delivery,
-        device: &str,
+        device: DeviceId,
         resource: u16,
     ) -> impl IntoWireValue<Delivery, Read = Result<MmioWindow, PlatformError>> {
-        self.window(frame.badge, device, resource)
-            .map_err(|refusal| Self::refuse(format_args!("{device} mmio {resource}"), refusal))
+        self.window(frame.badge, &device, resource)
+            .map_err(|refusal| {
+                Self::refuse(format_args!("{} mmio {resource}", device.as_str()), refusal)
+            })
     }
 
     fn description(
@@ -246,8 +247,7 @@ impl platform::Service<Delivery> for Platform {
 impl Refusal {
     const fn error(self) -> PlatformError {
         match self {
-            Self::InvalidDevice
-            | Self::Resolve(
+            Self::Resolve(
                 ResolveError::DeviceNotFound
                 | ResolveError::NoInterrupts
                 | ResolveError::NoMmio
@@ -270,7 +270,6 @@ impl Refusal {
     const fn reason(self) -> &'static str {
         match self {
             Self::NoSession => "session not opened",
-            Self::InvalidDevice => "device id malformed",
             Self::Resolve(ResolveError::DeviceNotFound) => "device not described by the platform",
             Self::Resolve(ResolveError::NoInterrupts) => "device described without interrupts",
             Self::Resolve(ResolveError::NoMmio) => "device described without mmio windows",
