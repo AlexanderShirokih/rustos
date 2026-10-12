@@ -1,0 +1,53 @@
+// Свойства lavender, которых нет в описании платы Linux.
+/dts-v1/;
+/plugin/;
+
+&{/} {
+	qcom,msm-id = <0x640d 0x10000>;
+	qcom,board-id = <0x102 0>;
+};
+
+&{/chosen/framebuffer@9d400000} {
+	width-mm = <67>;
+	height-mm = <145>;
+};
+
+&pm660l_gpios {
+	vol_up_default: vol-up-default-state {
+		pins = "gpio7";
+		function = "normal";
+		bias-pull-up;
+		input-enable;
+		qcom,drive-strength = <0>;
+	};
+};
+
+&{/gpio-keys} {
+	pinctrl-0 = <&vol_up_default>;
+	pinctrl-names = "default";
+};
+
+&blsp_i2c1 {
+	status = "okay";
+
+	touchscreen@62 {
+		compatible = "novatek,nt36672a-ts";
+		reg = <0x62>;
+		interrupts-extended = <&tlmm 67 1>; // IRQ_TYPE_EDGE_RISING
+		reset-gpios = <&tlmm 66 1>; // GPIO_ACTIVE_LOW
+		iovcc-supply = <&vreg_l11a_1p8>;
+		pinctrl-0 = <&ts_default>;
+		pinctrl-names = "default";
+		touchscreen-size-x = <1080>;
+		touchscreen-size-y = <2340>;
+	};
+};
+
+&tlmm {
+	ts_default: ts-default-state {
+		pins = "gpio66", "gpio67";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-pull-up;
+	};
+};

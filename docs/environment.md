@@ -22,6 +22,7 @@ Toolchain, компоненты и bare-таргет зафиксированы 
 | `cmake` | Сборка рантаймов C++ из архива релиза LLVM |
 | `unzip` | Распаковка архивов стороннего кода |
 | `mkbootimg` | Сборка Android boot image |
+| `dtc` | Наложение оверлея на дерево платы (`dtc`, `fdtoverlay`, `fdtput`) |
 | `similarity-rs` | Проверка дублирования |
 | `cargo-fuzz` | Сборка и запуск fuzz-целей |
 
@@ -43,7 +44,8 @@ sudo apt-get install -y -t bookworm-backports qemu-system-arm
 ELF-объекты. Для этой сборки подходит GNU `ar` из binutils. Системный `ar`
 macOS не поддерживает ELF.
 
-`mkbootimg` должен быть доступен в `PATH` при сборке Android-образа.
+`mkbootimg` должен быть доступен в `PATH` при сборке Android-образа, `dtc`,
+`fdtoverlay` и `fdtput` — при сборке для спеки с `boot.dtb_overlay`.
 Нужную версию `similarity-rs` задаёт
 [similarity.toml](../similarity.toml); команда
 `cargo xtask similarity` печатает строку установки при отсутствии анализатора.
@@ -56,7 +58,7 @@ macOS не поддерживает ELF.
 Каталог `bin` пакета `llvm` добавляется в `PATH` вручную:
 
 ```bash
-brew install meson ninja cmake lld llvm
+brew install meson ninja cmake lld llvm dtc
 export PATH="$(brew --prefix llvm)/bin:$PATH"
 ```
 

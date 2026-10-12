@@ -107,8 +107,36 @@ fn make_kernel_gz(ctx: &BuildContext) -> Result<()> {
     Ok(())
 }
 
+fn make_board_dtb(ctx: &BuildContext) -> Result<PathBuf> {
+    let base = ctx.dtb_path()?;
+    let Some(overlay) = ctx.dtb_overlay_source()? else {
+        return Ok(base);
+    };
+
+    let mut dtc = Command::new("dtc");
+    dtc.args(["-q", "-I", "dts", "-O", "dtb", "-o"])
+        .arg(ctx.board_dtbo())
+        .arg(&overlay);
+    shell::run(&mut dtc, "dtc")?;
+
+    let mut fdtoverlay = Command::new("fdtoverlay");
+    fdtoverlay
+        .arg("-i")
+        .arg(&base)
+        .arg("-o")
+        .arg(ctx.board_dtb())
+        .arg(ctx.board_dtbo());
+    shell::run(&mut fdtoverlay, "fdtoverlay")?;
+
+    let mut fdtput = Command::new("fdtput");
+    fdtput.arg("-r").arg(ctx.board_dtb()).arg("/__symbols__");
+    shell::run(&mut fdtput, "fdtput")?;
+
+    Ok(ctx.board_dtb())
+}
+
 fn make_boot_img(ctx: &BuildContext, version: BootImageVersion) -> Result<()> {
-    let dtb_path = ctx.dtb_path()?;
+    let dtb_path = make_board_dtb(ctx)?;
     let base = ctx.spec.boot.base.unwrap_or(0);
     let kernel_offset = format!("{:#x}", ctx.spec.boot.offset.saturating_sub(base));
 

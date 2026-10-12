@@ -3,7 +3,12 @@ device:
   arch: aarch64
 
 boot:
+  # Базовое дерево собрано из `arch/arm64/boot/dts/qcom/sdm660-xiaomi-lavender.dts`
+  # Linux v6.16 командой `clang -E -P -nostdinc -undef -D__DTS__ -x assembler-with-cpp
+  # -I include -I arch/arm64/boot/dts/qcom <dts> | dtc -@ -I dts -O dtb`. Таблица
+  # `__symbols__` даёт оверлею метки узлов.
   dtb: /devices/dtb/sdm660-lavender.dtb
+  dtb_overlay: /devices/dtb/sdm660-lavender.dtso
   format: android_boot_v1
   offset: 0x40080000
   base: 0x40000000

@@ -43,6 +43,7 @@ pub(crate) struct BootSection {
     pub(crate) format: BootFormat,
     pub(crate) offset: u64,
     pub(crate) dtb: Option<String>,
+    pub(crate) dtb_overlay: Option<String>,
     pub(crate) base: Option<u64>,
     #[serde(default)]
     pub(crate) ext: BootExt,
@@ -110,6 +111,14 @@ impl BuildContext {
         self.build_dir.join("boot.img")
     }
 
+    pub(crate) fn board_dtb(&self) -> PathBuf {
+        self.build_dir.join("board.dtb")
+    }
+
+    pub(crate) fn board_dtbo(&self) -> PathBuf {
+        self.build_dir.join("board.dtbo")
+    }
+
     pub(crate) fn dtb_path(&self) -> Result<PathBuf> {
         let dtb = self
             .spec
@@ -118,9 +127,22 @@ impl BuildContext {
             .as_ref()
             .context("boot.dtb is required for android boot format")?;
 
-        let path = self.project_root.join(dtb.trim_start_matches('/'));
+        self.spec_file(dtb, "DTB")
+    }
+
+    pub(crate) fn dtb_overlay_source(&self) -> Result<Option<PathBuf>> {
+        self.spec
+            .boot
+            .dtb_overlay
+            .as_ref()
+            .map(|overlay| self.spec_file(overlay, "DTB overlay"))
+            .transpose()
+    }
+
+    fn spec_file(&self, spec_path: &str, what: &str) -> Result<PathBuf> {
+        let path = self.project_root.join(spec_path.trim_start_matches('/'));
         if !path.exists() {
-            bail!("DTB not found at {}", path.display());
+            bail!("{what} not found at {}", path.display());
         }
         Ok(path)
     }
