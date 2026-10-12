@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::fmt;
 
 use component_startup::{
@@ -58,12 +58,11 @@ fn run(requirements: PinsStartup) -> Result<(), Stopped> {
         .ok_or(Stopped::Description)?;
     let description = mapped.description().map_err(|_| Stopped::Description)?;
     let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let sessions: &'static SessionPort = Box::leak(Box::new(sessions));
+    let sessions = Arc::new(sessions);
 
-    // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let export =
-        spawn_bound(move || serve_export::<pins::Protocol>(exporter, whole_export(sessions)));
+    let port = Arc::clone(&sessions);
+    let export = spawn_bound(move || serve_export::<pins::Protocol>(exporter, whole_export(&port)));
     if export.is_err() {
         return Err(Stopped::ServiceThread);
     }
@@ -75,6 +74,6 @@ fn run(requirements: PinsStartup) -> Result<(), Stopped> {
         claims: Claims::new(),
         sessions: BTreeMap::new(),
     });
-    serve(&driver, sessions);
+    serve(&driver, &sessions);
     Err(Stopped::ServicePortClosed)
 }

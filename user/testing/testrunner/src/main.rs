@@ -53,6 +53,7 @@ mod filesystem_stress;
 mod fixture;
 mod fixture_protocol;
 mod futex;
+mod gpio_keys;
 mod heap;
 mod heap_bench;
 mod input_hub;

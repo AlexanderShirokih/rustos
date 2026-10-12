@@ -58,6 +58,14 @@ pub struct Specifier<'a> {
     arguments: &'a [u8],
 }
 
+/// Потомок узла из [`Description::children`].
+pub struct Child<'a> {
+    /// Путь потомка.
+    pub id: DeviceId,
+    /// Узел потомка.
+    pub node: Node<'a>,
+}
+
 /// Предок узла из [`Description::ancestors`].
 pub struct Ancestor<'a> {
     /// Путь предка.
@@ -117,6 +125,32 @@ impl<'a> Description<'a> {
     /// `None`.
     pub fn find(&'a self, path: &str) -> Option<Node<'a>> {
         node_path(&self.tree, path).map(|found| Node { node: found.node() })
+    }
+
+    /// Доступные потомки узла устройства `id` с их путями в порядке описания. Недоступный узел
+    /// либо узел с недоступным предком потомков не имеет. Потомок, путь которого длиннее
+    /// [`DEVICE_ID_MAX`](crate::DEVICE_ID_MAX) байт либо [`BUS_PATH_MAX_NODES`] узлов, даёт
+    /// [`DescriptionError::PathTooLong`].
+    pub fn children(
+        &'a self,
+        id: &DeviceId,
+    ) -> impl Iterator<Item = Result<Child<'a>, DescriptionError>> + use<'a> {
+        let parent = id.clone();
+        let depth = parent.as_str().matches('/').count().saturating_add(1);
+
+        self.node(id)
+            .into_iter()
+            .flat_map(|node| node.node.children().filter(NodeExt::is_available))
+            .map(move |node| {
+                let mut id = parent.clone();
+                if depth >= BUS_PATH_MAX_NODES || id.push(node.name()).is_none() {
+                    return Err(DescriptionError::PathTooLong);
+                }
+                Ok(Child {
+                    id,
+                    node: Node { node },
+                })
+            })
     }
 
     /// Предки узла `id` от родителя до потомка корня независимо от статуса. Отсутствующий узел

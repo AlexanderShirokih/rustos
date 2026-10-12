@@ -10,7 +10,7 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::fmt;
 
 use component_startup::{
@@ -59,7 +59,7 @@ component_manifest! {
 
 struct Shared {
     sessions: SessionPort,
-    clock: Mutex<Option<&'static Clock>>,
+    clock: Mutex<Option<Arc<Clock>>>,
 }
 
 struct Clock {
@@ -116,7 +116,7 @@ impl Shared {
             })?;
 
             log_fmt(format_args!("{COMPATIBLE} bound"));
-            *clock = Some(Box::leak(Box::new(bound)));
+            *clock = Some(Arc::new(bound));
         }
 
         self.sessions
@@ -130,9 +130,9 @@ impl Shared {
 
         while let Some(event) = events.recv() {
             if let SessionEvent::Frame(frame) = event {
-                let clock = *self.clock.lock();
-                if let Some(mut clock) = clock {
-                    let _ = rtc::dispatch(&mut clock, frame);
+                let clock = self.clock.lock().clone();
+                if let Some(clock) = clock {
+                    let _ = rtc::dispatch(&mut &*clock, frame);
                 }
             }
         }
@@ -256,15 +256,16 @@ fn run(requirements: RtcStartup) -> Result<(), Stopped> {
         .with_wait(BUS_CALL_TIMEOUT);
     let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
 
-    let shared: &'static Shared = Box::leak(Box::new(Shared {
+    let shared = Arc::new(Shared {
         sessions,
         clock: Mutex::new(None),
-    }));
+    });
 
-    // Поток экспорта работает до конца процесса и держит сессию `Platform`.
+    // Поток экспорта держит сессию `Platform`.
     let exporter = requirements.parent;
+    let opener = Arc::clone(&shared);
     let _ = spawn_bound(move || {
-        serve_export::<rtc::Protocol>(exporter, |_| shared.open(&platform, &requirements.spmi))
+        serve_export::<rtc::Protocol>(exporter, |_| opener.open(&platform, &requirements.spmi))
     })
     .map_err(|_| Stopped::ExportThread)?;
 

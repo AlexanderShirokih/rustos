@@ -1,4 +1,4 @@
-use core::cmp::Ordering;
+use core::{cmp::Ordering, fmt};
 
 use ipc::{
     IntoWireValue, ReceivedResources, WireTyped, WireValue,
@@ -90,6 +90,15 @@ impl<R: ReceivedResources> IntoWireValue<R> for DeviceId {
 
 impl WireTyped for DeviceId {
     const WIRE_TYPE: WireType = WireType::Str;
+}
+
+impl fmt::Debug for DeviceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("DeviceId")
+            .field(&self.as_str())
+            .finish()
+    }
 }
 
 impl PartialEq for DeviceId {

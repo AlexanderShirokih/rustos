@@ -1,4 +1,4 @@
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::fmt;
 
 use component_startup::{
@@ -64,12 +64,11 @@ fn run(requirements: PinsStartup) -> Result<(), Stopped> {
     let description = mapped.description().map_err(|_| Stopped::Description)?;
     let tlmm = take(&platform, &description).ok_or(Stopped::Controller)?;
     let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let sessions: &'static SessionPort = Box::leak(Box::new(sessions));
+    let sessions = Arc::new(sessions);
 
-    // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let export =
-        spawn_bound(move || serve_export::<pins::Protocol>(exporter, whole_export(sessions)));
+    let port = Arc::clone(&sessions);
+    let export = spawn_bound(move || serve_export::<pins::Protocol>(exporter, whole_export(&port)));
     if export.is_err() {
         return Err(Stopped::ServiceThread);
     }
@@ -79,7 +78,7 @@ fn run(requirements: PinsStartup) -> Result<(), Stopped> {
         tlmm,
         claims: Claims::new(),
     };
-    serve(&mut controller, sessions);
+    serve(&mut controller, &sessions);
     Err(Stopped::ServicePortClosed)
 }
 

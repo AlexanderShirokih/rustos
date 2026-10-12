@@ -1,7 +1,7 @@
 //! Источник ввода `InputSource` одной кнопки PON: подключение по описанию платформы и передача
 //! нажатий хабу по прерыванию кнопки.
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::fmt;
 
 use component_startup::{
@@ -351,12 +351,9 @@ pub fn run(
         .client()
         .with_wait(CALL_TIMEOUT);
 
-    let export: &'static SessionPort = Box::leak(Box::new(
-        SessionPort::create().map_err(|_| Stopped::ExportPort)?,
-    ));
-
-    // Поток экспорта работает до конца процесса.
-    spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(export)))
+    let export = Arc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
+    let port = Arc::clone(&export);
+    spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(&port)))
         .map_err(|_| Stopped::ExportThread)?;
 
     let mut source = Source {
@@ -371,7 +368,6 @@ pub fn run(
     while let Some(event) = events.recv() {
         if let SessionEvent::Frame(frame) = event {
             let _ = input_source::dispatch(&mut source, frame);
-            // Процесс завершается после ответа `Refused`.
             if source.refused {
                 exit(FAILED_EXIT_CODE)
             }

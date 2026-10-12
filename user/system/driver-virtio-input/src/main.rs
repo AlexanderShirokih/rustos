@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::{convert::Infallible, fmt};
 
 use component_startup::{
@@ -104,7 +104,7 @@ impl input_source::Service<Delivery> for Source {
         let inject = kernel_objects::Session::from_session(inject)
             .client()
             .with_wait(CALL_TIMEOUT);
-        let result = self.attach_inputs(Box::leak(Box::new(inject)));
+        let result = self.attach_inputs(&Arc::new(inject));
         // Отказ до ответа хабу завершает процесс после ответа `Refused`.
         self.refused = result.is_err();
         result
@@ -114,7 +114,7 @@ impl input_source::Service<Delivery> for Source {
 impl Source {
     fn attach_inputs(
         &self,
-        inject: &'static input_inject::Client<SessionTransport>,
+        inject: &Arc<input_inject::Client<SessionTransport>>,
     ) -> Result<(), AttachError> {
         // Шина отвечает `NoDevice` либо `Busy`, когда свободных транспортов ввода не остаётся.
         let mut slots = Vec::new();
@@ -144,8 +144,9 @@ impl Source {
                 "input device {id} attached: {}",
                 input.device.name()
             ));
+            let inject = Arc::clone(inject);
             spawn_bound(move || {
-                let Err(failure) = input.serve(id, inject);
+                let Err(failure) = input.serve(id, &inject);
                 Stopped::Input(id, failure)
             })
             .map_err(|_| AttachError::Refused)?;
@@ -261,12 +262,12 @@ fn run(requirements: VirtioInputStartup) -> Result<(), Stopped> {
         .client()
         .with_wait(CALL_TIMEOUT);
     let export = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let export: &'static SessionPort = Box::leak(Box::new(export));
+    let export = Arc::new(export);
 
-    // Поток экспорта работает до конца процесса.
     let parent = requirements.parent;
+    let port = Arc::clone(&export);
     let _ =
-        spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(export)))
+        spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(&port)))
             .map_err(|_| Stopped::ExportThread)?;
 
     let mut source = Source {

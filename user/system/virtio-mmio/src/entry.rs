@@ -1,6 +1,6 @@
 //! Точка входа процесса: требования, поток экспорта `VirtioMmio` и обслуживание шины.
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::fmt;
 
 use component_startup::{
@@ -51,15 +51,14 @@ fn run(requirements: VirtioMmioStartup) -> Result<(), Stopped> {
         .client();
     let mut bus = Bus::take(&platform).ok_or(Stopped::Description)?;
     let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let sessions: &'static SessionPort = Box::leak(Box::new(sessions));
+    let sessions = Arc::new(sessions);
 
-    // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let _ = spawn_bound(move || {
-        serve_export::<virtio_mmio::Protocol>(exporter, whole_export(sessions))
-    })
-    .map_err(|_| Stopped::ExportThread)?;
+    let port = Arc::clone(&sessions);
+    let _ =
+        spawn_bound(move || serve_export::<virtio_mmio::Protocol>(exporter, whole_export(&port)))
+            .map_err(|_| Stopped::ExportThread)?;
 
-    bus.serve(sessions);
+    bus.serve(&sessions);
     Err(Stopped::ServicePortClosed)
 }

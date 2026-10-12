@@ -1,4 +1,4 @@
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::fmt;
 
 use clk_qcom::{Gcc, SDM660};
@@ -65,12 +65,12 @@ fn run(requirements: ClocksStartup) -> Result<(), Stopped> {
     let description = mapped.description().map_err(|_| Stopped::Description)?;
     let gcc = take(&platform, &description).ok_or(Stopped::Controller)?;
     let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let sessions: &'static SessionPort = Box::leak(Box::new(sessions));
+    let sessions = Arc::new(sessions);
 
-    // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
+    let port = Arc::clone(&sessions);
     let export =
-        spawn_bound(move || serve_export::<clocks::Protocol>(exporter, whole_export(sessions)));
+        spawn_bound(move || serve_export::<clocks::Protocol>(exporter, whole_export(&port)));
     if export.is_err() {
         return Err(Stopped::ServiceThread);
     }
@@ -80,7 +80,7 @@ fn run(requirements: ClocksStartup) -> Result<(), Stopped> {
         gcc,
         claims: DeviceClaims::new(),
     };
-    serve(&mut controller, sessions);
+    serve(&mut controller, &sessions);
     Err(Stopped::ServicePortClosed)
 }
 

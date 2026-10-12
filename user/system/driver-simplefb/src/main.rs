@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
 use component_startup::{
@@ -41,7 +41,7 @@ struct Shared {
 struct Attacher {
     platform: platform::Client<SessionTransport>,
     description: MappedDescription,
-    screen: Option<&'static Screen>,
+    screen: Option<Arc<Screen>>,
 }
 
 struct Screen {
@@ -52,7 +52,7 @@ struct Screen {
 
 struct Session {
     badge: u64,
-    screen: &'static Screen,
+    screen: Arc<Screen>,
     surface: Option<Surface>,
 }
 
@@ -106,9 +106,9 @@ impl Attacher {
         Ok(port)
     }
 
-    fn screen(&mut self) -> Result<&'static Screen, SessionError> {
-        if let Some(screen) = self.screen {
-            return Ok(screen);
+    fn screen(&mut self) -> Result<Arc<Screen>, SessionError> {
+        if let Some(screen) = &self.screen {
+            return Ok(Arc::clone(screen));
         }
 
         let screen = self.attach().map_err(|refusal| {
@@ -125,9 +125,9 @@ impl Attacher {
             framebuffer.stride(),
             framebuffer.format()
         ));
-        // Экран держит окно до конца процесса, и закрытие окна отзывает выведенные из него
-        // страницы.
-        Ok(*self.screen.insert(Box::leak(Box::new(screen))))
+        // Закрытие окна экрана отзывает выведенные из него страницы, поэтому `Attacher` держит
+        // экран до конца процесса.
+        Ok(Arc::clone(self.screen.insert(Arc::new(screen))))
     }
 
     fn attach(&self) -> Result<Screen, OpenRefusal> {
@@ -258,7 +258,7 @@ fn run(requirements: SimplefbStartup) -> Result<(), Stopped> {
     Err(Stopped::ServicePortClosed)
 }
 
-fn start(requirements: SimplefbStartup) -> Result<&'static Shared, Stopped> {
+fn start(requirements: SimplefbStartup) -> Result<Arc<Shared>, Stopped> {
     let platform = requirements
         .platform
         .open()
@@ -272,15 +272,17 @@ fn start(requirements: SimplefbStartup) -> Result<&'static Shared, Stopped> {
         screen: None,
     };
 
-    let shared: &'static Shared = Box::leak(Box::new(Shared {
+    let shared = Arc::new(Shared {
         service: SessionPort::create().map_err(|_| Stopped::ServicePort)?,
         sessions: Mutex::new(Vec::new()),
-    }));
-    // Поток экспорта работает до конца процесса.
+    });
+
     let exporter = requirements.parent;
-    let _ =
-        spawn_bound(move || serve_export::<display::Protocol>(exporter, |_| attacher.open(shared)))
-            .map_err(|_| Stopped::ExportThread)?;
+    let opener = Arc::clone(&shared);
+    let _ = spawn_bound(move || {
+        serve_export::<display::Protocol>(exporter, |_| attacher.open(&opener))
+    })
+    .map_err(|_| Stopped::ExportThread)?;
 
     Ok(shared)
 }

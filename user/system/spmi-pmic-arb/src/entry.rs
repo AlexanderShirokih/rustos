@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
 use component_startup::{
@@ -59,14 +59,14 @@ fn run(requirements: SpmiStartup) -> Result<(), Stopped> {
     let (bus, line) = take(&platform).ok_or(Stopped::Arbiter)?;
     let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
 
-    let bus: &'static Mutex<Bus> = Box::leak(Box::new(Mutex::new(bus)));
-    let sessions: &'static SessionPort = Box::leak(Box::new(sessions));
+    let bus = Arc::new(Mutex::new(bus));
+    let sessions = Arc::new(sessions);
 
-    // Поток прерываний и поток экспорта работают до конца процесса.
+    let delivered = Arc::clone(&bus);
     let interrupts = line.map(|line| {
         spawn_bound(move || {
             while line.wait(Timeout::INFINITE).is_ok() {
-                bus.lock().deliver();
+                delivered.lock().deliver();
                 if line.ack().is_err() {
                     break;
                 }
@@ -76,14 +76,14 @@ fn run(requirements: SpmiStartup) -> Result<(), Stopped> {
     });
 
     let exporter = requirements.parent;
-    let export =
-        spawn_bound(move || serve_export::<spmi::Protocol>(exporter, whole_export(sessions)));
+    let port = Arc::clone(&sessions);
+    let export = spawn_bound(move || serve_export::<spmi::Protocol>(exporter, whole_export(&port)));
 
     if matches!(interrupts, Some(Err(_))) || export.is_err() {
         return Err(Stopped::ServiceThreads);
     }
 
-    serve(bus, sessions);
+    serve(&bus, &sessions);
     Err(Stopped::ServicePortClosed)
 }
 

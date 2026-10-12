@@ -2,7 +2,7 @@
 //!
 //! Первая заявка привязывает GPU, уход последней сессии освобождает его.
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
 use component_startup::{
@@ -205,14 +205,14 @@ fn run(requirements: VirtioGpuStartup) -> Result<(), Stopped> {
         .client()
         .with_wait(BUS_CALL_TIMEOUT);
     let service = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let shared: &'static Shared = Box::leak(Box::new(Shared {
+    let shared = Arc::new(Shared {
         service,
         state: Mutex::new(State::default()),
-    }));
+    });
 
-    // Поток экспорта работает до конца процесса.
     let exporter = requirements.parent;
-    let _ = spawn_bound(move || serve_export::<display::Protocol>(exporter, |_| shared.open(&bus)))
+    let opener = Arc::clone(&shared);
+    let _ = spawn_bound(move || serve_export::<display::Protocol>(exporter, |_| opener.open(&bus)))
         .map_err(|_| Stopped::ExportThread)?;
 
     shared.serve();

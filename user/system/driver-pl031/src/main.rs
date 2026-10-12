@@ -6,7 +6,7 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use component_startup::{
     SessionError, SessionEvent, SessionPort, component_manifest, serve_export,
@@ -42,7 +42,7 @@ component_manifest! {
 
 struct Shared {
     sessions: SessionPort,
-    device: Mutex<Option<&'static Pl031>>,
+    device: Mutex<Option<Arc<Pl031>>>,
 }
 
 struct Pl031 {
@@ -63,7 +63,7 @@ impl Shared {
                 SessionError::Refused
             })?;
             log_fmt(format_args!("{COMPATIBLE} bound"));
-            *device = Some(Box::leak(Box::new(bound)));
+            *device = Some(Arc::new(bound));
         }
 
         self.sessions
@@ -77,9 +77,9 @@ impl Shared {
 
         while let Some(event) = events.recv() {
             if let SessionEvent::Frame(frame) = event {
-                let device = *self.device.lock();
-                if let Some(mut device) = device {
-                    let _ = rtc::dispatch(&mut device, frame);
+                let device = self.device.lock().clone();
+                if let Some(device) = device {
+                    let _ = rtc::dispatch(&mut &*device, frame);
                 }
             }
         }
@@ -137,13 +137,15 @@ impl<F: ipc::ReceivedResources> rtc::Service<F> for &Pl031 {
 #[program_entry::component]
 fn run(requirements: RtcStartup) -> Result<()> {
     let platform = requirements.platform.open()?.client();
-    let shared: &'static Shared = Box::leak(Box::new(Shared {
+    let shared = Arc::new(Shared {
         sessions: SessionPort::create()?,
         device: Mutex::new(None),
-    }));
-    // Поток экспорта работает до конца процесса и держит сессию `Platform`.
+    });
+
+    // Поток экспорта держит сессию `Platform`.
     let exporter = requirements.parent;
-    spawn_bound(move || serve_export::<rtc::Protocol>(exporter, |_| shared.open(&platform)))
+    let opener = Arc::clone(&shared);
+    spawn_bound(move || serve_export::<rtc::Protocol>(exporter, |_| opener.open(&platform)))
         .map_err(|_| Error::Runtime)?;
 
     shared.serve();

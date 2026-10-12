@@ -23,7 +23,9 @@ mod window;
 
 pub use attribute::CONTROLLER_KEY;
 pub use claims::DeviceClaims;
-pub use description::{Ancestor, Description, DescriptionRegion, Device, Devices, Node, Specifier};
+pub use description::{
+    Ancestor, Child, Description, DescriptionRegion, Device, Devices, Node, Specifier,
+};
 pub use device::{DEVICE_ID_MAX, DeviceId};
 pub use error::{DescriptionError, PlatformError};
 pub use mapped::{MappedDescription, WindowRefusal};

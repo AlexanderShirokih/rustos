@@ -240,6 +240,64 @@ fn ancestors_go_from_the_parent_up_to_a_child_of_the_root_regardless_of_status()
 }
 
 #[test]
+fn children_are_the_available_child_nodes_with_their_paths() {
+    let tokens = [
+        Token::Node("keys"),
+        Token::Node("up"),
+        Token::End,
+        Token::Node("off"),
+        Token::Strings("status", &["disabled"]),
+        Token::End,
+        Token::Node("down@1"),
+        Token::End,
+        Token::End,
+        Token::Node("hidden"),
+        Token::Strings("status", &["disabled"]),
+        Token::Node("inner"),
+        Token::End,
+        Token::End,
+    ];
+    let blob = fdt_test::build(&tokens);
+    let description = Description::new(&blob, 0).unwrap();
+    let children = |path| {
+        description
+            .children(&DeviceId::new(path).unwrap())
+            .map(|child| child.map(|child| child.id.as_str().to_owned()))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        children("/keys"),
+        [Ok("/keys/up".to_owned()), Ok("/keys/down@1".to_owned())]
+    );
+    assert!(children("/hidden").is_empty());
+    assert!(children("/absent").is_empty());
+}
+
+#[test]
+fn a_child_past_the_longest_path_is_refused() {
+    let mut tokens = vec![Token::Node("d"); BUS_PATH_MAX_NODES];
+    tokens.extend((0..BUS_PATH_MAX_NODES).map(|_| Token::End));
+    let blob = fdt_test::build(&tokens);
+    let description = Description::new(&blob, 0).unwrap();
+    let children = |depth| {
+        description
+            .children(&DeviceId::new(&"/d".repeat(depth)).unwrap())
+            .map(|child| child.map(|child| child.id.as_str().to_owned()))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        children(BUS_PATH_MAX_NODES - 2),
+        [Ok("/d".repeat(BUS_PATH_MAX_NODES - 1))]
+    );
+    assert_eq!(
+        children(BUS_PATH_MAX_NODES - 1),
+        [Err(DescriptionError::PathTooLong)]
+    );
+}
+
+#[test]
 fn an_ancestor_path_equals_the_same_path_given_as_an_id() {
     let tokens = [
         Token::Node("a"),
@@ -257,7 +315,10 @@ fn an_ancestor_path_equals_the_same_path_given_as_an_id() {
         .map(|ancestor| ancestor.id)
         .collect();
 
-    assert!(ancestors == [DeviceId::new("/a/b").unwrap(), DeviceId::new("/a").unwrap()]);
+    assert_eq!(
+        ancestors,
+        [DeviceId::new("/a/b").unwrap(), DeviceId::new("/a").unwrap()]
+    );
 }
 
 #[test]

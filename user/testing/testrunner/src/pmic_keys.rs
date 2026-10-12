@@ -4,7 +4,7 @@
 use alloc::{string::String, vec::Vec};
 
 use component_abi::RequirementDeclaration;
-use driver_pm8941_pwrkey::{Generation, Key, PWRKEY, RESIN, usage};
+use driver_pm8941_pwrkey::{Generation, PWRKEY, RESIN, usage};
 use input_abi::{
     AttachError, DeviceLayout, DeviceNumber, Kind, Usage, input, input_inject, input_source,
 };
@@ -40,14 +40,15 @@ const IMPORTS: &[Import] = &[
 ];
 
 const PON: &str = "qcom,pm8998-pon";
+const GPIO_KEYS: &str = "gpio-keys";
 const PON_PULL_CTL: u16 = 0x870;
 
 const REPLY_TIMEOUT: Timeout = Timeout::from_secs(15);
 
 type Consumer = input::Client<PortTransport>;
 
-fn layout(key: &Key, usage: Usage) -> DeviceLayout {
-    with_key_descriptor(key.name, usage, |descriptor| descriptor.layout())
+fn layout(name: &str, usage: Usage) -> DeviceLayout {
+    with_key_descriptor(name, usage, |descriptor| descriptor.layout())
         .expect("name fits")
         .expect("descriptor is valid")
 }
@@ -122,18 +123,20 @@ fn the_board_buttons_are_attached_input_sources_with_their_keys() {
     }
 
     let pon = described_device(PON).expect("pon described");
+    let mut layouts = alloc::vec![
+        layout(PWRKEY.name, Usage::POWER),
+        layout(RESIN.name, Usage::VOLUME_DOWN),
+    ];
+    // Повторный `attach` ниже требует `Busy`, и он не должен опередить подключение хабом.
+    if platform_has_compatible(GPIO_KEYS) {
+        layouts.push(layout(GPIO_KEYS, Usage::VOLUME_UP));
+    }
 
     let composition = with_drivers();
     let importer = composition.importer(IMPORTS);
     let input = importer.session::<input::Protocol>(INPUT);
 
-    let numbers = added(
-        &consumer(&input),
-        &[
-            layout(&PWRKEY, Usage::POWER),
-            layout(&RESIN, Usage::VOLUME_DOWN),
-        ],
-    );
+    let numbers = added(&consumer(&input), &layouts);
 
     let sources = importer.found::<input_source::Protocol>(SOURCES);
     let reattached: Vec<_> = sources
