@@ -3,7 +3,7 @@
 
 use alloc::{format, string::String, vec::Vec};
 
-use bootstrap_abi::hardware;
+use bootstrap_abi::{bootstrap, hardware};
 use component_abi::{
     AcceptError, Attribute, LOG_REQUIREMENT, RequirementDeclaration, STARTUP_REQUEST_TIMEOUT,
     SessionError, SessionRequirement, attributes_len, component_startup as startup_contract,
@@ -24,7 +24,7 @@ use managed_component::Status;
 use platform_abi::{Description, DescriptionRegion, MappedDescription, PlatformError, platform};
 use rootkeeper::{
     BootFailure, RecordState, SEARCH_LIMITS, SearchLimits, Stopped,
-    relay::{ComponentNames, LogSessions as _, LogSources, Relay, log_badge},
+    relay::{ComponentNames, LogSessions as _, LogSources, log_badge},
 };
 use rtc_abi::rtc;
 use runtime::{JoinHandle, PortTransport, Timeout, spawn_owned};
@@ -38,7 +38,10 @@ use crate::{
         image, pause, request, view,
     },
     filesystem::{IMAGE_FILE, LEAK_ROUNDS, connect, open},
-    journal_fixture_protocol::{REPORT_SEPARATOR, WATCHED_SOURCE},
+    journal_fixture_protocol::{
+        END_LINE, END_SOURCE, GAP_MARK, KERNEL_MARK, READY_LINE, REPORT_SEPARATOR, TIME_MARK,
+        WATCHED_SOURCE,
+    },
     log_relay::{
         ScenarioLogSessions, await_component_lines, await_component_lines_with_prefix,
         await_component_sources, start_component_relay, stop_component_relay,
@@ -141,6 +144,8 @@ const LOG_DUPLICATE: ComponentSpec<'static> =
 
 const JOURNAL_SUBSCRIBER: ComponentSpec<'static> =
     fixture("/journal-subscriber-fixture", "journal-subscriber-fixture");
+
+const FAULT: ComponentSpec<'static> = fixture("/fault-fixture", WATCHED_SOURCE);
 
 pub(crate) const NEIGHBOUR: ComponentSpec<'static> = ComponentSpec {
     name: "neighbour",
@@ -280,14 +285,11 @@ fn started(
 ) -> (Composition, ComponentNames) {
     let plan = encoded(records);
     let names = ComponentNames::of(&plan);
-    let journal = start_component_relay(names.clone());
+    start_component_relay(names.clone());
     let composition = Composition::start(
         plan,
         index,
-        Relay {
-            sources: LogSources::new(names.clone(), ScenarioLogSessions),
-            journal,
-        },
+        LogSources::new(names.clone(), ScenarioLogSessions),
         limits,
     );
     (composition, names)
@@ -889,18 +891,65 @@ fn a_child_log_session_refuses_duplicate() {
     finish(composition);
 }
 
+fn journal_report(watched: ComponentSpec<'static>, watched_lines: usize) -> Vec<String> {
+    let (composition, names) = started(
+        &[PARENT, JOURNAL_SUBSCRIBER],
+        ExportIndex::EMPTY,
+        SEARCH_LIMITS,
+    );
+    let ready = await_component_lines(JOURNAL_SUBSCRIBER.name, 1);
+    test_harness::check_eq!(ready, [READY_LINE]);
+
+    registered(&composition, &names, watched).expect("watched record added");
+    // Relay передаёт строку записи ядру раньше, чем она видна здесь, поэтому отметка конца
+    // попадает в лог после строк записи. Подписчик сам ждёт строку rootkeeper.
+    await_component_lines(WATCHED_SOURCE, watched_lines);
+    bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()))
+        .log_str(END_SOURCE, END_LINE)
+        .expect("end mark logged");
+    let lines = await_component_lines(JOURNAL_SUBSCRIBER.name, 2);
+    finish(composition);
+    let report: Vec<String> = lines
+        .get(1)
+        .map(|report| report.split(REPORT_SEPARATOR).map(String::from).collect())
+        .unwrap_or_default();
+    test_harness::check!(
+        report
+            .iter()
+            .all(|part| part != GAP_MARK && part != TIME_MARK)
+    );
+    report
+}
+
+fn stopped_line(line: &str) -> bool {
+    line.starts_with(&format!("{WATCHED_SOURCE} stopped with exit code"))
+}
+
+// Порядок строки rootkeeper и строк записи в логе не задан.
 #[test_harness::test]
 fn a_journal_subscriber_reads_the_lines_of_another_record() {
-    let watched = ComponentSpec {
-        name: WATCHED_SOURCE,
-        ..LOG_DUPLICATE
-    };
-    let composition = scenario(&[watched, JOURNAL_SUBSCRIBER]);
+    let report = journal_report(
+        ComponentSpec {
+            name: WATCHED_SOURCE,
+            ..LOG_DUPLICATE
+        },
+        DUPLICATE_REFUSED_LINES.len(),
+    );
 
-    let report = await_component_lines(JOURNAL_SUBSCRIBER.name, 1);
+    let (stopped, watched): (Vec<&String>, Vec<&String>) =
+        report.iter().partition(|line| stopped_line(line));
+    test_harness::check_eq!(watched, DUPLICATE_REFUSED_LINES);
+    test_harness::check_eq!(stopped.len(), 1);
+}
 
-    test_harness::check_eq!(report, [DUPLICATE_REFUSED_LINES.join(REPORT_SEPARATOR)]);
-    finish(composition);
+#[test_harness::test]
+fn a_journal_subscriber_reads_the_kernel_line_of_a_crashed_record() {
+    let report = journal_report(FAULT, 0);
+
+    let kernel = format!("{KERNEL_MARK}EL0 exception in '{WATCHED_SOURCE}'");
+    test_harness::check!(report.first().is_some_and(|line| line.starts_with(&kernel)));
+    test_harness::check!(report.get(1).is_some_and(|line| stopped_line(line)));
+    test_harness::check_eq!(report.len(), 2);
 }
 
 #[test_harness::test]
@@ -1769,14 +1818,11 @@ fn a_started_consumer_discovers_a_provider_added_at_runtime() {
 fn registration_refuses_invalid_declarations_without_stopping_the_parent() {
     let plan = encoded(&[PARENT, EXPORT]);
     let names = ComponentNames::of(&plan);
-    let journal = start_component_relay(names.clone());
+    start_component_relay(names.clone());
     let composition = Composition::start(
         plan,
         ExportIndex::EMPTY,
-        Relay {
-            sources: LogSources::new(names.clone(), ScenarioLogSessions),
-            journal,
-        },
+        LogSources::new(names.clone(), ScenarioLogSessions),
         SEARCH_LIMITS,
     );
     let importer = composition.importer(&[probe_of(PROBE)]);

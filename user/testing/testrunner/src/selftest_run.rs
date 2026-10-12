@@ -28,6 +28,7 @@ pub(crate) struct Stand {
     pub(crate) entry: &'static str,
     pub(crate) name: &'static str,
     pub(crate) badge: NonZeroU64,
+    pub(crate) timeout: Timeout,
 }
 
 impl Stand {
@@ -51,7 +52,7 @@ impl Stand {
         );
 
         test_harness::check_eq!(
-            parent.departure(PROCESS_TIMEOUT),
+            parent.departure(self.timeout),
             Some(Departure { child, outcome })
         );
 

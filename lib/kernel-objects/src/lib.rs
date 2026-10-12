@@ -8,7 +8,8 @@
 //! [`SessionTransport`] передаёт кадры контракта через порт и владеет capability этого
 //! порта. [`Session`] владеет портом сессии протокола и строит поверх него клиента этого
 //! протокола. [`RingProducer`] и [`RingConsumer`] передают поток кадров через кольцо в
-//! разделяемой памяти, и capability такое кольцо не переносит.
+//! разделяемой памяти, и capability такое кольцо не переносит. [`LogConsumer`] читает кольцо
+//! лога ядра.
 //!
 //! Крейт берёт прямой зависимостью и программа на стандартной библиотеке, и программа без неё.
 
@@ -17,14 +18,16 @@
 
 mod error;
 mod handle;
+mod log_consumer;
 mod object;
 mod ring_transport;
 mod session_transport;
 
 pub use error::{Error, Result};
 pub use handle::{BorrowedHandle, OwnedHandle};
+pub use log_consumer::LogConsumer;
 pub use object::{
-    AnonymousMapping, IrqControl, IrqLine, MapError, MappedPages, Mapping, MemoryRegion,
+    AnonymousMapping, IrqControl, IrqLine, LoadWords, MapError, MappedPages, Mapping, MemoryRegion,
     MmioMapping, MmioWindow, Port, Process, ReadOnlyMapping, RegionInfo, RegionKind, Reply,
     Resource, ServicePort, Signal, Thread, ThreadEntry, WriteCombiningMapping, wait_any,
 };

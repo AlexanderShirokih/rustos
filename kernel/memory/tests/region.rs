@@ -130,7 +130,7 @@ fn virtual_drop_returns_frames_to_allocator() {
     let fa = leak_fa();
     let region =
         MemoryRegion::create_virtual(fa, nz(3), AccessMask::RW).expect("alloc must succeed");
-    assert_eq!(region.size_bytes(), 3 * PAGE_SIZE);
+    assert_eq!(region.size_bytes().get(), 3 * PAGE_SIZE);
     assert_eq!(region.kind_tag(), 1);
     assert_eq!(fa.deallocated().len(), 0);
     drop(region);
@@ -155,7 +155,7 @@ fn slice_physical_narrows_pa_size_and_access() {
         .slice(0x1000, nz(0x1000), AccessMask::R, SliceProfile::Inherited)
         .expect("in-bounds slice with subset access");
     assert_eq!(sub.kind_tag(), 2);
-    assert_eq!(sub.size_bytes(), 0x1000);
+    assert_eq!(sub.size_bytes().get(), 0x1000);
     assert_eq!(sub.access_mask().bits(), AccessMask::R.bits());
     assert_eq!(sub.profile(), MemoryProfile::Device);
     assert_eq!(sub.physical_base(), Some(aligned_pa(0x4000_1000)));
@@ -360,7 +360,7 @@ fn physical_drop_does_nothing() {
     let region =
         MemoryRegion::create_physical_device(aligned_pa(0x4000_0000), nz(PAGE_SIZE), AccessMask::R);
     assert_eq!(region.kind_tag(), 2);
-    assert_eq!(region.size_bytes(), PAGE_SIZE);
+    assert_eq!(region.size_bytes().get(), PAGE_SIZE);
     drop(region);
 }
 

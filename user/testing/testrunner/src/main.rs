@@ -59,6 +59,7 @@ mod ipc_buffer;
 mod ipc_raw;
 mod irq_provision;
 mod journal_fixture_protocol;
+mod kernel_log;
 mod load_program;
 mod log_fixture_protocol;
 mod log_relay;

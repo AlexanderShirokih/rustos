@@ -24,6 +24,7 @@ const STAND: Stand = Stand {
     entry: "/std-selftest/exec",
     name: "std-selftest",
     badge: SELFTEST_BADGE,
+    timeout: PROCESS_TIMEOUT,
 };
 
 const NAMESPACE_REQUIREMENT: &str = "namespace";
@@ -31,7 +32,7 @@ const NAMESPACE_REQUIREMENT: &str = "namespace";
 #[test_harness::test]
 fn std_selftest_program_passes_its_checks() {
     let failing = mount_failing();
-    let clock = SelftestClock::start(PROCESS_TIMEOUT);
+    let clock = SelftestClock::start(STAND.timeout);
 
     let lines = STAND.run(
         |child| {

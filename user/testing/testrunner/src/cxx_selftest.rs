@@ -7,12 +7,16 @@
 
 use managed_component::Outcome;
 
-use crate::{log_relay::CXX_SELFTEST_BADGE, selftest_run::Stand};
+use crate::{
+    log_relay::CXX_SELFTEST_BADGE,
+    selftest_run::{PROCESS_TIMEOUT, Stand},
+};
 
 const STAND: Stand = Stand {
     entry: "/cxx-selftest/exec",
     name: "cxx-selftest",
     badge: CXX_SELFTEST_BADGE,
+    timeout: PROCESS_TIMEOUT,
 };
 
 const ABORT_EXIT_CODE: u32 = 134;

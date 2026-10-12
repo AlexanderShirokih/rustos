@@ -5,9 +5,8 @@
 //! строки. Источник строки сервер контракта выводит из значка сессии.
 //! [`log::Client::write_str`] режет сообщение длиннее кадра на несколько вызовов.
 //!
-//! Модуль [`journal`] подписывает читателя на строки журнала через кольцо в разделяемой
-//! памяти. [`LineFrames`] режет строку на кадры кольца, [`JournalAssembler`] собирает её
-//! обратно.
+//! [`RingWriter`] и [`RingReader`] пишут и читают кольцо лога ядра, [`LogRing`] выдаёт его
+//! регион и сигнал. Модуль [`journal`] выдаёт подписчику это кольцо.
 //!
 //! [`LogBuffer`] копит строку на стеке до отправки, [`LineAssembler`] собирает строки из
 //! потока фрагментов, [`chunks`] режет текст по границе символа. [`Utf8Assembler`] собирает
@@ -20,16 +19,19 @@ extern crate std;
 
 mod buffer;
 mod journal_session;
+mod level;
 mod line;
+mod log_ring;
 mod utf8;
 mod write;
 
 pub use buffer::{LogBuffer, chunks};
-pub use journal_session::{
-    JOURNAL_RING_SLOTS, JOURNAL_SLOT_PAYLOAD, JournalAssembler, JournalEntry, JournalError,
-    LineFrames, Subscription, gap_frame, journal,
-};
+pub use journal_session::{JournalError, journal};
+pub use level::Level;
 pub use line::LineAssembler;
+pub use log_ring::{
+    Entry, LogRing, RECORD_MAX, Record, RecordBuf, RingReader, RingWriter, WordLoad, ring_words,
+};
 pub use utf8::Utf8Assembler;
 
 /// Граница доверенного источника строки. Его назначает сервер контракта по значку сессии.

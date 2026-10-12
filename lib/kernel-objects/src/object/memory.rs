@@ -22,6 +22,7 @@ use core::{
     borrow::Borrow,
     fmt, mem,
     ops::{Deref, Range},
+    sync::atomic::AtomicU64,
 };
 
 const _: () = assert!(
@@ -31,6 +32,7 @@ const _: () = assert!(
 
 use bootstrap_abi::DeviceWindow;
 use io::mmio::Mmio;
+use log_abi::WordLoad;
 use syscall::{
     MEMORY_REGION_CONTIGUOUS, MEMORY_REGION_WRITE_COMBINING, MemoryAccess, MemoryProfile,
     SyscallError, UserMemFlags, kind,
@@ -216,6 +218,11 @@ pub struct WriteCombiningMapping {
 pub struct ReadOnlyMapping<R = MemoryRegion> {
     mapping: Mapping<R>,
 }
+
+/// Слова отображения, доступные только атомарной загрузкой. Запись через вид невозможна, и он
+/// годится для отображения на чтение страниц, которые пишет другая сторона.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadWords<'a>(&'a [AtomicU64]);
 
 /// Анонимный маппинг (allocate-fastpath). Освобождается в `Drop` через
 /// `memory_free`.
@@ -599,6 +606,17 @@ impl<R: Borrow<MemoryRegion>> Mapping<R> {
     pub fn remap(&self, flags: UserMemFlags) -> Result<()> {
         unit(svc::memory_remap(self.va, self.size_bytes, flags.raw()))
     }
+
+    /// Целые слова отображения для атомарных загрузок. Вид заимствует отображение.
+    pub fn load_words(&self) -> LoadWords<'_> {
+        // Проверка в голове модуля исключает 32-битный таргет, и приведение не усекает значение.
+        #[allow(clippy::cast_possible_truncation)]
+        let len = self.size_bytes as usize / WORD;
+        // SAFETY: срез заимствует `Mapping`, поэтому отображение `[va, va + size_bytes)` не
+        // снимается раньше среза. Вид даёт только загрузки `Relaxed`, допустимые из памяти только
+        // для чтения.
+        LoadWords(unsafe { core::slice::from_raw_parts(self.va as *const AtomicU64, len) })
+    }
 }
 
 impl<R> Deref for Mapping<R> {
@@ -807,6 +825,16 @@ impl<R: Borrow<MemoryRegion>> ReadOnlyMapping<R> {
     /// Снимает отображение и возвращает регион открытым.
     pub fn into_region(self) -> R {
         self.mapping.into_region()
+    }
+}
+
+impl WordLoad for LoadWords<'_> {
+    fn word_count(&self) -> usize {
+        self.0.len()
+    }
+
+    fn load(&self, index: usize) -> Option<u64> {
+        self.0.load(index)
     }
 }
 

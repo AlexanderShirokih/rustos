@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::fmt::Display;
 
 use drivers_common::{BootServices, RuntimeDriverRegistry, scanner::EmbeddedDriversScanner};
@@ -15,7 +15,7 @@ use crate::{
     irq_bridge,
     irq_control_adapter::InterruptsControlAdapter,
     kernel_context::KernelContext,
-    power,
+    log_ring, power,
     scheduler_bootstrap::{BootstrapSchedulerError, KernelTimerSource, bootstrap_scheduler},
 };
 
@@ -121,11 +121,12 @@ where
     ) -> Result<(), scheduler::SpawnError>,
 {
     info!("Starting kmain");
+    log_ring::install(context);
 
     let pending = collect_into_pending_drivers(driver_scanner)?;
 
     context.with_runtime_state(|services, registry| {
-        run_all_drivers(services, registry, pending, kout)
+        run_kernel_services(services, registry, pending, kout)
     })?;
 
     install_interrupts_hook(context)?;
@@ -171,16 +172,20 @@ fn collect_into_pending_drivers(
         .collect()
 }
 
-fn run_all_drivers(
+fn run_kernel_services(
     services: &mut BootServices,
     registry: &mut RuntimeDriverRegistry,
     pending: Vec<PendingDriver>,
     kout: &BufferedWriter,
 ) -> Result<(), BootError> {
     let mut console_bound = false;
+    let mut clock_bound = false;
     let result = run_retry_passes(pending, services, registry, |services| {
         if !console_bound {
             console_bound = bind_console(services, kout);
+        }
+        if !clock_bound {
+            clock_bound = bind_clock(services);
         }
     });
 
@@ -208,6 +213,14 @@ fn bind_console(services: &BootServices, buffered: &BufferedWriter) -> bool {
     // не проходит через локи `STDOUT` и `BufferedWriter`.
     klog::set_panic_stdout(console.clone());
     buffered.attach(&console);
+    true
+}
+
+fn bind_clock(services: &BootServices) -> bool {
+    let Some(timer) = services.timer() else {
+        return false;
+    };
+    klog::set_clock(Box::new(move || timer.now_ns()));
     true
 }
 
@@ -239,7 +252,7 @@ mod tests {
     use io::writer::Writer;
     use klog::BufferedWriter;
 
-    use super::{BootError, run_all_drivers};
+    use super::{BootError, run_kernel_services};
     use crate::driver_init::PendingDriver;
 
     #[derive(Default)]
@@ -302,7 +315,7 @@ mod tests {
             },
         ];
 
-        let error = run_all_drivers(&mut services, &mut registry, pending, kout)
+        let error = run_kernel_services(&mut services, &mut registry, pending, kout)
             .expect_err("the second driver fails");
 
         assert!(matches!(

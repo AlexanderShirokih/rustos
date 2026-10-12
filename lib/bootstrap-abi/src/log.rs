@@ -78,6 +78,19 @@ mod tests {
                 u32,
             >(1)
         }
+
+        fn acquire_log(
+            &mut self,
+            _frame: &MockResources,
+        ) -> impl ipc::IntoWireValue<MockResources, Read = Result<log_abi::LogRing, u32>> {
+            Err::<
+                log_abi::LogRing<
+                    MockHandle<syscall::kind::MemoryRegion>,
+                    MockHandle<syscall::kind::Signal>,
+                >,
+                u32,
+            >(1)
+        }
     }
 
     #[test]

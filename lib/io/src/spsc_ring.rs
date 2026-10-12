@@ -217,18 +217,6 @@ impl SpscRing {
         self.occupied(head, tail) == self.capacity
     }
 
-    /// Число свободных слотов для производителя. Вызывается **только производителем**.
-    ///
-    /// Кольцо, чей `tail` потребитель отвёл дальше [`capacity`](Self::capacity) от `head`,
-    /// считается полным. Число не превышает `capacity` при любых значениях индексов в регионе.
-    #[must_use]
-    #[inline]
-    pub fn free_slots(&self) -> usize {
-        let head = self.head_ref().load(Ordering::Relaxed);
-        let tail = self.tail_ref().load(Ordering::Acquire);
-        self.capacity - self.occupied(head, tail)
-    }
-
     /// Вставляет кадр в кольцо. Вызывается **только производителем**.
     ///
     /// # Ошибки
@@ -564,11 +552,9 @@ mod tests {
         assert_eq!(ring.capacity(), 4);
 
         for i in 0..4u8 {
-            assert_eq!(ring.free_slots(), usize::from(4 - i));
             assert!(ring.try_push(&[i]).is_ok());
         }
         assert!(ring.is_full());
-        assert_eq!(ring.free_slots(), 0);
         assert_eq!(ring.try_push(&[42]), Err(RingError::Full));
     }
 
@@ -597,12 +583,12 @@ mod tests {
                         ring.slot_len_ref(slot).store(u32::MAX, Ordering::Relaxed);
                     }
 
-                    let free = ring.free_slots();
-                    assert!(
-                        free <= ring.capacity(),
-                        "head {head}, tail {tail}: {free} free"
+                    let full = ring.is_full();
+                    assert_eq!(
+                        ring.try_push(&[0x5A; 8]).is_ok(),
+                        !full,
+                        "head {head}, tail {tail}"
                     );
-                    assert_eq!(ring.try_push(&[0x5A; 8]).is_ok(), free > 0);
 
                     let mut buf = [0u8; 8];
                     if let Ok(popped) = ring.try_pop(&mut buf) {

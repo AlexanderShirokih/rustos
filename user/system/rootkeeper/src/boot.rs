@@ -3,7 +3,7 @@ use alloc::format;
 use bootstrap_abi::bootstrap;
 use component_abi::{PROTOCOL_ID_MAX, decode_manifest};
 use kernel_objects::{MemoryRegion, ReadOnlyMapping, kind};
-use log_relay::{Journal, JournalSink, KernelLogSink, LogRelayThread};
+use log_relay::{KernelLogSink, LogRelayThread};
 use managed_component::ImagePages;
 use runtime::{Mutex, PortTransport, Timeout};
 use syscall::{Handle, ProcessName};
@@ -16,7 +16,7 @@ use userland_image::{
 use crate::{
     AddFailure, BudgetFailure, Component, RootSystem, SEARCH_LIMITS, SearchLimits, Stopped,
     SystemImage,
-    relay::{ComponentNames, LogSources, Relay},
+    relay::{ComponentNames, LogSources},
     system::log_line,
     turn,
 };
@@ -105,14 +105,14 @@ impl SystemImage {
 
 impl<'a> RootSystem<'a> {
     /// Добавляет начальные компоненты через API родителя. План нужен только этому адаптеру.
-    /// Программы индекса `index` становятся провайдерами по заявке, журналы записей и подписку
-    /// на строки relay выдаёт `relay`, пределы состояния запросов задают `limits`.
+    /// Программы индекса `index` становятся провайдерами по заявке, журналы записей выдаёт
+    /// `sources`, пределы состояния запросов задают `limits`.
     pub fn bring_up(
         image: &'a SystemImage,
         plan: BootPlan<'a>,
         index: ExportIndex<'a>,
         kernel: Handle<kind::Port>,
-        relay: Relay,
+        sources: LogSources,
         limits: SearchLimits,
     ) -> Result<Self, BootFailure> {
         let boot = plan.component(0).ok_or(BootFailure::PlanMissing)?;
@@ -127,7 +127,7 @@ impl<'a> RootSystem<'a> {
         {
             return Err(BootFailure::BadImage);
         }
-        let mut system = Self::new(image, kernel, boot, manifest, index, relay, limits)
+        let mut system = Self::new(image, kernel, boot, manifest, index, sources, limits)
             .map_err(BootFailure::Budget)?;
 
         for (record, component) in plan.components().enumerate().skip(1) {
@@ -184,17 +184,12 @@ pub fn run(kernel: Handle<kind::Port>) -> Stopped {
         Err(failure) => return refuse_boot(kernel, failure),
     };
     let names = ComponentNames::of(&plan);
-    let journal = Journal::new();
-    let sink = JournalSink::new(journal.clone(), KernelLogSink::new(kernel));
-    let Ok(relay) = LogRelayThread::start(names.clone(), sink) else {
+    let Ok(relay) = LogRelayThread::start(names.clone(), KernelLogSink::new(kernel)) else {
         log_line(kernel, format_args!("log relay not started"));
         return Stopped::Startup;
     };
-    let relay = Relay {
-        sources: LogSources::new(names, relay),
-        journal,
-    };
-    let system = match RootSystem::bring_up(&image, plan, index, kernel, relay, SEARCH_LIMITS) {
+    let sources = LogSources::new(names, relay);
+    let system = match RootSystem::bring_up(&image, plan, index, kernel, sources, SEARCH_LIMITS) {
         Ok(system) => Mutex::new(system),
         Err(failure) => return refuse_boot(kernel, failure),
     };

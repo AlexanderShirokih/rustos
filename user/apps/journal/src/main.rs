@@ -1,6 +1,6 @@
 //! Просмотр системного журнала на экране. Программа экспортирует `Application` с именем
-//! `journal`, получает окно вызовом `show` и показывает последние записи журнала
-//! на всей поверхности окна по сетке моноширинного шрифта. Отказ подписки программа показывает
+//! `journal`, получает окно вызовом `show` и показывает последние записи лога ядра на всей
+//! поверхности окна по сетке моноширинного шрифта. Отказ подписки программа показывает
 //! строкой с причиной, отказ окна её завершает.
 
 use core::error::Error;
@@ -48,12 +48,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let columns = usize::try_from(window.get_columns())?;
     let mut view = JournalView::new(columns);
+    window.set_source_column(i32::try_from(JournalView::source_column())?);
     window.set_text_column(i32::try_from(view.text_column())?);
 
     match subscribe(&journal) {
         Ok(follower) => {
             let weak = window.as_weak();
-            thread::spawn(move || follow(&follower, view, &weak));
+            thread::spawn(move || follow(follower, view, &weak));
         }
         Err(reason) => {
             println!("{reason}");

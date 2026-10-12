@@ -387,6 +387,7 @@ name = "bootstrap-abi"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "log-abi",
  "syscall",
 ]
 
@@ -2580,6 +2581,7 @@ dependencies = [
  "bootstrap-abi",
  "io",
  "ipc",
+ "log-abi",
  "syscall",
  "syscall-user",
 ]
@@ -2767,7 +2769,6 @@ name = "log-relay"
 version = "0.1.0"
 dependencies = [
  "bootstrap-abi",
- "io",
  "ipc",
  "kernel-objects",
  "log-abi",

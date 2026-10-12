@@ -19,6 +19,7 @@ version = "0.1.0"
 dependencies = [
  "ipc",
  "ipc-test",
+ "log-abi",
  "rustc-std-workspace-core",
  "syscall",
 ]
@@ -229,6 +230,7 @@ dependencies = [
  "bootstrap-abi",
  "io",
  "ipc",
+ "log-abi",
  "rustc-std-workspace-core",
  "syscall",
  "syscall-user",
@@ -245,6 +247,7 @@ dependencies = [
  "ipc",
  "kbase",
  "klog",
+ "log-abi",
  "memory",
  "process",
  "scheduler",
@@ -262,6 +265,7 @@ version = "0.1.0"
 dependencies = [
  "io",
  "kbase",
+ "log-abi",
  "spin",
 ]
 

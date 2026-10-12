@@ -202,7 +202,7 @@ pub(crate) fn sys_process_load_image(
         let region = loader_table
             .with_lock(|tbl| tbl.get_object::<MemoryRegion>(region_handle_id, needed_rights))
             .map_err(map_ipc_error)?;
-        if u64::try_from(region.size_bytes()).is_ok_and(|size| size != seg.mapped_size) {
+        if u64::try_from(region.size_bytes().get()).is_ok_and(|size| size != seg.mapped_size) {
             return Err(SyscallError::InvalidArgument);
         }
         if !region.access_mask().allows(access_mask_for(flags)) {

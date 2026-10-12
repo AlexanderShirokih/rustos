@@ -18,7 +18,8 @@ use ipc::{
     wire::{Cap, IpcError as WireError, MESSAGE_INLINE_MAX, MessageBuf, Session},
 };
 use kbase::{LockCell, MutexCell};
-use klog::{info, warn};
+use klog::warn;
+use log_abi::LogRing;
 use memory::{
     AccessMask, MemoryRegion, PAGE_SIZE, frame_allocator::FrameCount, page_round_up,
     physical_address::PageAlignedAddress,
@@ -31,12 +32,22 @@ use userland_image::{ImageDecodeError, component_name, decode};
 
 use crate::{
     kernel_context::{BootDtb, UserlandImage},
+    log_ring,
     user_process::{SpawnUserError, UserProcessLauncher},
 };
 
-const SENDER_PORT_RIGHTS: Rights = Rights::from_bits_truncate(
-    Rights::WRITE.bits() | Rights::TRANSFER.bits() | Rights::DUPLICATE.bits(),
-);
+const SENDER_PORT_RIGHTS: Rights = Rights::WRITE
+    .union(Rights::TRANSFER)
+    .union(Rights::DUPLICATE);
+
+const LOG_REGION_RIGHTS: Rights = Rights::READ
+    .union(Rights::DUPLICATE)
+    .union(Rights::TRANSFER);
+
+const LOG_SIGNAL_RIGHTS: Rights = Rights::READ
+    .union(Rights::WRITE)
+    .union(Rights::DUPLICATE)
+    .union(Rights::TRANSFER);
 
 const HARDWARE_BADGE: u64 = 1;
 const SYSTEM_INFO_BADGE: u64 = 2;
@@ -317,11 +328,8 @@ impl<K: ObjectKind> Drop for KernelEntry<K> {
 
 impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
     fn log(&mut self, _frame: &BootstrapFrame, tag: &str, message: &str) {
-        if tag.is_empty() {
-            info!("{}", message);
-        } else {
-            info!(tag; "{}", message);
-        }
+        klog::log_user(tag, message);
+        log_ring::notify();
     }
 
     fn acquire_userland_image(
@@ -356,6 +364,24 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
             .map_err(|_| ACQUIRE_FAILED)
             .and_then(|cap| self.vend::<kind::Port>(cap))
             .map(Session::<system_info::Protocol, _>::from_handle)
+    }
+
+    fn acquire_log(
+        &mut self,
+        _frame: &BootstrapFrame,
+    ) -> impl IntoWireValue<BootstrapFrame, Read = Result<LogRing, u32>> {
+        let (region, signal) = log_ring::acquire().ok_or(ACQUIRE_FAILED)?;
+
+        Ok(LogRing {
+            region: self.vend::<kind::MemoryRegion>(Capability::new(
+                CapabilityTarget::Memory(region),
+                LOG_REGION_RIGHTS,
+            ))?,
+            signal: self.vend::<kind::Signal>(Capability::new(
+                CapabilityTarget::Signal(signal),
+                LOG_SIGNAL_RIGHTS,
+            ))?,
+        })
     }
 }
 

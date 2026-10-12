@@ -8,7 +8,6 @@ use drivers_common::services::interrupts::{
     IrqNumber, IrqRegistrationError,
 };
 use kbase::{LockCell, MutexCell};
-use klog::debug;
 
 use super::{
     controller::{BoundIrq, Gicv3Controller},
@@ -95,8 +94,6 @@ impl InterruptsService for GicV3InterruptsService {
                 controller.handlers.remove(&irq);
             });
         };
-
-        debug!("IRQ {irq:?} bound!");
 
         Ok(IrqBound::new(cleanup))
     }

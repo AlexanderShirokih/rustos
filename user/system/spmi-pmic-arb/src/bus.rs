@@ -14,9 +14,9 @@ use syscall::{Rights, SIGNALED, WakeCount, kind};
 
 use crate::windows::Windows;
 
-const SIGNAL_RIGHTS: Rights = Rights::from_bits_truncate(
-    Rights::READ.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
-);
+const SIGNAL_RIGHTS: Rights = Rights::READ
+    .union(Rights::DUPLICATE)
+    .union(Rights::TRANSFER);
 
 pub(crate) struct Bus {
     pub(crate) arbiter: Option<Arbiter<Windows>>,

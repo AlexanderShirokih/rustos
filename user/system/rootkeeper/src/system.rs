@@ -22,20 +22,19 @@ use ipc::{
     wire::{Cap, MESSAGE_INLINE_MAX},
 };
 use kernel_objects::{
-    Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, RingProducer,
-    Session, Signal, kind,
+    Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, Signal,
+    kind,
 };
-use log_abi::{JOURNAL_SLOT_PAYLOAD, JournalError, LogBuffer, Subscription, journal, log};
-use log_relay::{JOURNAL_REGION_BYTES, Journal};
+use log_abi::{JournalError, LogBuffer, LogRing, journal, log};
 use managed_component::{Children, Departure, GrantError, Held, Outcome, Purpose, Status};
-use runtime::{MemoryAccess, Mutex, PortTransport, Termination, Timeout};
+use runtime::{Mutex, PortTransport, Termination, Timeout};
 use syscall::{Handle, ProcessName, Rights, SyscallError};
 use userland::{DecodedProgram, ProgramView};
 use userland_image::{ExportIndex, IndexedExport, PlanComponent};
 
 use crate::{
     component::{Component, ImporterRequirement, Origin, Record},
-    relay::{LogSources, Relay},
+    relay::LogSources,
 };
 
 const LOG_TAG: &str = "rootkeeper";
@@ -160,10 +159,7 @@ enum Holder {
 
 struct JournalReader {
     incarnation: u64,
-    session: u64,
-    journal: Journal,
-    _region: MemoryRegion,
-    _signal: Signal,
+    _ring: LogRing<MemoryRegion, Signal>,
 }
 
 struct ImporterBinding {
@@ -239,7 +235,6 @@ pub struct RootSystem<'a> {
     next_search: u64,
     limits: SearchLimits,
     features: Vec<Feature>,
-    journal: Journal,
     journal_readers: Vec<JournalReader>,
     resource: Resource,
 }
@@ -250,14 +245,6 @@ impl Termination for Stopped {
     }
 }
 
-impl Drop for JournalReader {
-    fn drop(&mut self) {
-        // Кольцо отображает регион через копию корня, и закрытие корня сняло бы отображение
-        // под кольцом, которое ещё пишет relay.
-        self.journal.unsubscribe(self.session);
-    }
-}
-
 impl<'a> RootSystem<'a> {
     pub(crate) fn new(
         image: &'a SystemImage,
@@ -265,7 +252,7 @@ impl<'a> RootSystem<'a> {
         boot: PlanComponent<'a>,
         manifest: ComponentManifest<'a>,
         index: ExportIndex<'a>,
-        relay: Relay,
+        log_sources: LogSources,
         limits: SearchLimits,
     ) -> Result<Self, BudgetFailure> {
         let resource = Resource::self_resource().map_err(|_| BudgetFailure::Root)?;
@@ -292,7 +279,7 @@ impl<'a> RootSystem<'a> {
                 restarts: 0,
             }],
             logs: Vec::new(),
-            log_sources: relay.sources,
+            log_sources,
             index,
             hardware,
             system_info,
@@ -306,7 +293,6 @@ impl<'a> RootSystem<'a> {
             next_search: 0,
             limits,
             features: Vec::new(),
-            journal: relay.journal,
             journal_readers: Vec::new(),
             resource,
         })
@@ -1067,8 +1053,7 @@ impl<'a> RootSystem<'a> {
             *closed = true;
         }
 
-        // Уход сессии снимает её подписку, конец incarnation - подписку и её учёт.
-        self.journal.unsubscribe(badge);
+        // Конец incarnation закрывает исходные handle её подписки.
         self.journal_readers
             .retain(|reader| reader.incarnation != badge);
     }
@@ -1157,26 +1142,24 @@ impl<'a> RootSystem<'a> {
             .is_some_and(|record| record.origin == Origin::Plan)
     }
 
-    fn grant_ring(
+    fn grant_log(
         &mut self,
         incarnation: u64,
-        region: &MemoryRegion,
-        signal: &Signal,
-    ) -> Result<Subscription<MemoryRegion, Signal>, GrantError> {
-        // Потребителю `WRITE` нужен для `tail` кольца и сброса сигнала.
-        let rights = Rights::READ | Rights::WRITE | Rights::TRANSFER;
-        Ok(Subscription {
+        ring: &LogRing<MemoryRegion, Signal>,
+    ) -> Result<LogRing<MemoryRegion, Signal>, GrantError> {
+        Ok(LogRing {
             region: self.children.grant(
                 incarnation,
                 JOURNAL_REGION_GRANT,
-                region.borrow(),
-                rights,
+                ring.region.borrow(),
+                Rights::READ | Rights::TRANSFER,
             )?,
+            // Подписчику `WRITE` нужен для сброса сигнала перед ожиданием.
             signal: self.children.grant(
                 incarnation,
                 JOURNAL_SIGNAL_GRANT,
-                signal.borrow(),
-                rights,
+                ring.signal.borrow(),
+                Rights::READ | Rights::WRITE | Rights::TRANSFER,
             )?,
         })
     }
@@ -1420,9 +1403,8 @@ impl journal::Service<Delivery> for RootSystem<'_> {
     fn subscribe(
         &mut self,
         frame: &Delivery,
-    ) -> impl IntoWireValue<Delivery, Read = Result<Subscription, JournalError>> {
-        let session = frame.badge;
-        let Some(Holder::Journal(incarnation)) = self.children.caller(session) else {
+    ) -> impl IntoWireValue<Delivery, Read = Result<LogRing, JournalError>> {
+        let Some(Holder::Journal(incarnation)) = self.children.caller(frame.badge) else {
             return Err(JournalError::Refused);
         };
         if self
@@ -1436,40 +1418,22 @@ impl journal::Service<Delivery> for RootSystem<'_> {
             .try_reserve(1)
             .map_err(|_| JournalError::Refused)?;
 
-        let region = self
-            .resource
-            .create_virtual(JOURNAL_REGION_BYTES, MemoryAccess::RW)
+        let ring = bootstrap::Client::new(PortTransport::new(self.kernel))
+            .acquire_log()
             .map_err(|_| JournalError::Refused)?;
-        let signal = Signal::create().map_err(|_| JournalError::Refused)?;
-        // Закрытие корня отзывает производные копии. Кольцо получает свои копии, и уход сессии,
-        // снимающий кольцо, не отзывает выданное подписчику.
-        let ring_rights = Rights::READ | Rights::WRITE;
-        let ring_region = region
-            .duplicate(ring_rights, None)
-            .map_err(|_| JournalError::Refused)?;
-        let ring_signal = signal
-            .duplicate(ring_rights, None)
-            .map_err(|_| JournalError::Refused)?;
-        let ring = RingProducer::new(ring_region, JOURNAL_SLOT_PAYLOAD, ring_signal)
-            .ok_or(JournalError::Refused)?;
-        self.journal.subscribe(session, ring)?;
-
-        let granted = self.grant_ring(incarnation, &region, &signal);
-        // Учёт хранит корни, и выданное подписчику действует до конца incarnation. Повторная
-        // выдача по тем же ключам отдала бы прежний регион, поэтому incarnation, дошедшая до
-        // выдачи, подписку израсходовала.
+        let ring = LogRing {
+            region: MemoryRegion::from(ring.region),
+            signal: Signal::from(ring.signal),
+        };
+        let granted = self.grant_log(incarnation, &ring);
+        // Закрытие исходного handle отзывает выданные копии, поэтому учёт держит его до конца
+        // incarnation. Повторная выдача по тем же ключам отдала бы прежние копии, и incarnation,
+        // дошедшая до выдачи, подписку израсходовала.
         self.journal_readers.push(JournalReader {
             incarnation,
-            session,
-            journal: self.journal.clone(),
-            _region: region,
-            _signal: signal,
+            _ring: ring,
         });
-        granted
-            .inspect_err(|_| {
-                self.journal.unsubscribe(session);
-            })
-            .map_err(|_| JournalError::Refused)
+        granted.map_err(|_| JournalError::Refused)
     }
 }
 

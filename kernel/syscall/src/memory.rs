@@ -312,7 +312,7 @@ pub(crate) fn sys_memory_map(
     if !grant.allows(access_mask_for(flags)) {
         return Err(SyscallError::InvalidArgument);
     }
-    if region.size_bytes() != size.get() {
+    if region.size_bytes() != size {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -490,7 +490,7 @@ pub(crate) fn sys_memory_region_inspect(frame: &mut dyn SyscallFrame) {
     let result = (|| -> Result<(u64, u64), SyscallError> {
         let id = parse_handle_id(frame.arg(0))?;
         let region = lookup_memory(id, Rights::READ)?;
-        let size = region.size_bytes() as u64;
+        let size = region.size_bytes().get() as u64;
         let base_pa = region.physical_base().map_or(0, |pa| pa.as_usize() as u64);
         let secondary = base_pa
             | (region.profile().raw() << 5)

@@ -192,13 +192,14 @@ fn sync_handler(frame: &mut ExceptionFrame) {
     if originates_from_el0(frame.spsr) {
         let process_name = capability::current_process_name();
         klog::error!(
-            "EL0 exception in '{}': {}, ESR={:#010x} ELR={:#018x} FAR={:#018x} SP_EL0={:#018x}",
+            "EL0 exception in '{}': {}, ESR={:#010x} ELR={:#018x} FAR={:#018x} SP_EL0={:#018x} LR={:#018x}",
             process_name.as_ref().map_or("?", |name| name.as_str()),
             frame.esr.exception_class().description(),
             frame.esr.raw(),
             frame.elr,
             frame.far,
             frame.sp_el0,
+            frame.regs[30],
         );
         capability::process_exit(USER_EXCEPTION_EXIT_CODE);
     }

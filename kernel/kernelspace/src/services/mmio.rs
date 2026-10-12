@@ -7,7 +7,7 @@ use drivers_common::services::mmio::{
 use kbase::{LockCell, MutexCell};
 use memory::{
     AccessMask, MemFlags, MemoryRegion, PAGE_SIZE,
-    mem_flags::{AccessMode, Owners, UncachedPermission},
+    mem_flags::{AccessMode, CachedPermission, Executable, Owners, UncachedPermission},
     memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
     range_allocator::RangeAllocator,
@@ -33,6 +33,38 @@ impl MmioServiceImpl {
             va_allocator: Arc::new(MutexCell::new(RangeAllocator::new(arena_base, arena_end))),
         }
     }
+
+    pub(crate) fn map_cached(
+        &self,
+        region: &MemoryRegion,
+    ) -> Result<PageAlignedVirtualAddress, MmioMapError> {
+        let size = region.size_bytes();
+        let address = self.allocate_va(size)?;
+        let flags = MemFlags::Cached(Owners::kernel(CachedPermission {
+            access: AccessMode::Writable,
+            executable: Executable::NotAllowed,
+        }));
+
+        if let Err(err) = region.install(self.memory_mapper, address, flags) {
+            self.free_va(address, size);
+            return Err(MmioMapError(format!("Mapping error: {err}")));
+        }
+
+        Ok(address)
+    }
+
+    fn allocate_va(&self, size: NonZeroUsize) -> Result<PageAlignedVirtualAddress, MmioMapError> {
+        self.va_allocator
+            .with_lock(|alloc| alloc.allocate(size, ()))
+            .map(|range| range.base())
+            .map_err(|err| MmioMapError(format!("VA arena: {err}")))
+    }
+
+    fn free_va(&self, address: PageAlignedVirtualAddress, size: NonZeroUsize) {
+        let _ = self
+            .va_allocator
+            .with_lock(|alloc| alloc.free(address, size));
+    }
 }
 
 impl MmioService for MmioServiceImpl {
@@ -53,11 +85,7 @@ impl MmioService for MmioServiceImpl {
             .and_then(|pages| pages.checked_mul(PAGE_SIZE))
             .ok_or_else(|| MmioMapError("Mmio region size overflows when rounded up".into()))?;
 
-        let source_address = self
-            .va_allocator
-            .with_lock(|alloc| alloc.allocate(size, ()))
-            .map_err(|err| MmioMapError(format!("VA arena: {err}")))?
-            .base();
+        let source_address = self.allocate_va(size)?;
 
         let region = Arc::new(MemoryRegion::create_physical_device(
             target_address,
@@ -70,9 +98,7 @@ impl MmioService for MmioServiceImpl {
             source_address,
             MemFlags::Device(permissions),
         ) {
-            let _ = self
-                .va_allocator
-                .with_lock(|alloc| alloc.free(source_address, size));
+            self.free_va(source_address, size);
             return Err(MmioMapError(format!("Mapping error: {err}")));
         }
 

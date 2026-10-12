@@ -116,7 +116,7 @@ pub enum SliceProfile {
 
 pub struct MemoryRegion {
     backing: MemoryBacking,
-    size_bytes: usize,
+    size_bytes: NonZeroUsize,
     access_mask: AccessMask,
     refund: Option<Arc<dyn BudgetRefund>>,
 }
@@ -140,7 +140,7 @@ impl MemoryRegion {
                 return Err(RegionCreateError::OutOfMemory);
             }
         }
-        Ok(Self::from_frames(fa, frames, false, access))
+        Ok(Self::from_frames(fa, frames, pages, false, access))
     }
 
     /// Выделяет `pages` смежных фреймов из `fa` одним участком и оборачивает их в
@@ -156,16 +156,17 @@ impl MemoryRegion {
             .allocate_frames(pages)
             .ok_or(RegionCreateError::OutOfMemory)?;
         frames.extend((0..pages.get()).map(|index| first.add(index)));
-        Ok(Self::from_frames(fa, frames, true, access))
+        Ok(Self::from_frames(fa, frames, pages, true, access))
     }
 
     fn from_frames(
         fa: &'static (dyn FrameAllocator + Send + Sync),
         frames: Vec<Frame>,
+        pages: NonZeroUsize,
         contiguous: bool,
         access: AccessMask,
     ) -> Self {
-        let size_bytes = frames.len() * PAGE_SIZE;
+        let size_bytes = pages.saturating_mul(crate::PAGE_SIZE);
         Self {
             backing: MemoryBacking::Virtual {
                 owner: Arc::new(VirtualBacking {
@@ -214,7 +215,7 @@ impl MemoryRegion {
     ) -> Self {
         Self {
             backing: MemoryBacking::Physical { pa_base, profile },
-            size_bytes: size.get(),
+            size_bytes: size,
             access_mask: access,
             refund: None,
         }
@@ -240,7 +241,7 @@ impl MemoryRegion {
         let end = offset_bytes
             .checked_add(size.get())
             .ok_or(RegionSliceError::OutOfBounds)?;
-        if end > self.size_bytes {
+        if end > self.size_bytes.get() {
             return Err(RegionSliceError::OutOfBounds);
         }
         let profile = match (profile, self.profile()) {
@@ -265,7 +266,7 @@ impl MemoryRegion {
                     owner: Arc::clone(owner),
                     first: first + offset_bytes / PAGE_SIZE,
                 },
-                size_bytes: size.get(),
+                size_bytes: size,
                 access_mask: access,
                 refund: None,
             }),
@@ -283,7 +284,7 @@ impl MemoryRegion {
         self
     }
 
-    pub fn size_bytes(&self) -> usize {
+    pub fn size_bytes(&self) -> NonZeroUsize {
         self.size_bytes
     }
 
@@ -306,9 +307,9 @@ impl MemoryRegion {
                 },
             ) => contains_range(
                 origin.as_usize(),
-                self.size_bytes,
+                self.size_bytes.get(),
                 nested.as_usize(),
-                sub.size_bytes,
+                sub.size_bytes.get(),
             ),
             (
                 MemoryBacking::Virtual {
@@ -323,9 +324,9 @@ impl MemoryRegion {
                 Arc::ptr_eq(origin, nested)
                     && contains_range(
                         origin_first * PAGE_SIZE,
-                        self.size_bytes,
+                        self.size_bytes.get(),
                         nested_first * PAGE_SIZE,
-                        sub.size_bytes,
+                        sub.size_bytes.get(),
                     )
             }
             _ => false,
@@ -380,7 +381,7 @@ impl MemoryRegion {
                         mapper.zero_owned_frame(frame.page_address());
                     }
                 }
-                let pages = self.size_bytes / PAGE_SIZE;
+                let pages = self.size_bytes.get() / PAGE_SIZE;
                 let frames = owner
                     .frames
                     .get(*first..*first + pages)
@@ -403,7 +404,7 @@ impl MemoryRegion {
                 Ok(())
             }
             MemoryBacking::Physical { pa_base, .. } => {
-                mapper.map_exact(va, *pa_base, self.size_bytes, flags)
+                mapper.map_exact(va, *pa_base, self.size_bytes.get(), flags)
             }
         }
     }
@@ -414,9 +415,7 @@ impl MemoryRegion {
         mapper: &dyn MemoryMapper,
         va: PageAlignedVirtualAddress,
     ) -> Result<(), MemoryUnmappingError> {
-        let size = NonZeroUsize::new(self.size_bytes)
-            .and_then(page_round_up)
-            .ok_or(MemoryUnmappingError::MisalignedRange)?;
+        let size = page_round_up(self.size_bytes).ok_or(MemoryUnmappingError::MisalignedRange)?;
         mapper.unmap(va, size.get())
     }
 }

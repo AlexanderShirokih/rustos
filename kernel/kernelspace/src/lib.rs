@@ -27,6 +27,7 @@ pub mod irq_bridge;
 pub mod irq_control_adapter;
 pub mod kernel_context;
 pub mod kmain;
+mod log_ring;
 pub mod power;
 pub mod sched_bridge;
 pub mod scheduler_bootstrap;

@@ -26,6 +26,12 @@ ipc::protocol! {
         /// Выдаёт вызывателю сессию [`system_info`]. Капа сессии разрешает отправку, перенос и
         /// дублирование и не разрешает приём. `Err` - ненулевой код ошибки выдачи.
         call fn acquire_system_info() -> own Result<ipc::wire::Session<system_info::Protocol>, u32>;
+
+        /// Выдаёт вызывателю лог ядра: регион кольца с правами `READ`, `DUPLICATE` и `TRANSFER` и
+        /// новый сигнал с правами `READ`, `WRITE`, `DUPLICATE` и `TRANSFER`. Ядро поднимает
+        /// сигнал после каждой строки [`log`](self::log), пока у сигнала есть handle. `Err` -
+        /// ядро не ведёт кольцо либо не выдало capability.
+        call fn acquire_log() -> own Result<log_abi::LogRing, u32>;
     }
 }
 
@@ -38,6 +44,7 @@ mod tests {
         wire::{Cap, Session},
     };
     use ipc_test::{MockHandle, MockResources};
+    use log_abi::LogRing;
     use syscall::{ObjectKind, kind};
 
     use super::bootstrap;
@@ -88,6 +95,16 @@ mod tests {
                 0x66
             )))
         }
+
+        fn acquire_log(
+            &mut self,
+            _frame: &MockResources,
+        ) -> impl IntoWireValue<MockResources, Read = Result<LogRing, u32>> {
+            Ok::<_, u32>(LogRing {
+                region: cap::<kind::MemoryRegion>(0x77),
+                signal: cap::<kind::Signal>(0x78),
+            })
+        }
     }
 
     #[test]
@@ -109,7 +126,7 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let mut sink = Sink::default();
-                for _ in 0..3 {
+                for _ in 0..4 {
                     server_end
                         .serve(|frame| bootstrap::dispatch(&mut sink, frame))
                         .expect("dispatch ok");
@@ -123,6 +140,13 @@ mod tests {
             assert_eq!(
                 client.acquire_system_info().map(Session::into_handle),
                 Ok(cap(0x66))
+            );
+            assert_eq!(
+                client.acquire_log(),
+                Ok(LogRing {
+                    region: cap(0x77),
+                    signal: cap(0x78),
+                })
             );
         });
     }

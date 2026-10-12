@@ -1,13 +1,15 @@
-//! Подписка на кольцо журнала и показ его строк в окне. Поток подписки читает кольцо пачками и
+//! Подписка на лог ядра и показ его записей в окне. Поток подписки читает кольцо пачками и
 //! передаёт пачку окну. Следующая пачка читается после того, как окно применило предыдущую.
-//! Непрочитанные строки остаются в кольце, и отставание окна отмечает разрыв кольца.
+//! Непрочитанные записи остаются в кольце, и отставание окна отмечает разрыв кольца. Пустое
+//! кольцо ожидается со сроком `KERNEL_LINE_LATENCY`, и строка ядра, которая сигнала не
+//! поднимает, появляется не позже этого срока.
 
 use std::sync::mpsc;
 
 use component_startup::Import;
 use ipc::wire::IpcError;
-use kernel_objects::{MemoryRegion, RingConsumer, SessionTransport, Signal};
-use log_abi::{JOURNAL_SLOT_PAYLOAD, JournalAssembler, journal};
+use kernel_objects::{LogConsumer, MemoryRegion, SessionTransport, Signal};
+use log_abi::{Level, LogRing, journal};
 use slint::{Model, VecModel};
 use syscall::Timeout;
 
@@ -18,9 +20,11 @@ use crate::{
 
 const BATCH_ENTRIES_MAX: usize = 64;
 
+const KERNEL_LINE_LATENCY: Timeout = Timeout::from_millis(500);
+
 pub(crate) struct Follower {
     _session: journal::Client<SessionTransport>,
-    ring: RingConsumer,
+    consumer: LogConsumer,
 }
 
 struct Batch {
@@ -28,89 +32,33 @@ struct Batch {
     stopped: bool,
 }
 
-struct BatchReader<'r> {
-    ring: &'r RingConsumer,
-    assembler: JournalAssembler,
-    frame: [u8; JOURNAL_SLOT_PAYLOAD],
-}
-
-impl<'r> BatchReader<'r> {
-    fn new(ring: &'r RingConsumer) -> Self {
-        Self {
-            ring,
-            assembler: JournalAssembler::new(),
-            frame: [0; JOURNAL_SLOT_PAYLOAD],
-        }
-    }
-
-    fn next(&mut self, view: &mut JournalView) -> Batch {
-        let mut lines = Vec::new();
-        let mut wait = Timeout::INFINITE;
-
-        while lines.len() < BATCH_ENTRIES_MAX {
-            match self.ring.pop(&mut self.frame, wait) {
-                Ok(len) => {
-                    let entry = self
-                        .frame
-                        .get(..len)
-                        .and_then(|frame| self.assembler.push(frame));
-                    if let Some(entry) = entry {
-                        lines.push(view.push(entry));
-                    }
-                }
-                Err(IpcError::Timeout) => break,
-                Err(error) => {
-                    let reason = format!("journal ring stopped: {error:?}");
-                    println!("{reason}");
-                    lines.push(view.push_failure(&reason));
-                    return Batch {
-                        lines,
-                        stopped: true,
-                    };
-                }
-            }
-
-            // Первый кадр пачки ждёт без срока, остальные забираются из кольца без ожидания.
-            wait = Timeout::POLL;
-        }
-
-        Batch {
-            lines,
-            stopped: false,
-        }
-    }
-}
-
 pub(crate) fn subscribe(journal: &Import<journal::Protocol>) -> Result<Follower, String> {
     let session = journal
         .open()
         .map_err(|error| format!("journal unavailable: {error}"))?
         .client();
-    let subscription = session
+    let ring = session
         .subscribe()
         .map_err(|error| format!("journal subscription refused: {error:?}"))?;
-    let ring = RingConsumer::new(
-        MemoryRegion::from(subscription.region),
-        JOURNAL_SLOT_PAYLOAD,
-        Signal::from(subscription.signal),
-    )
-    .ok_or("journal ring is not mappable")?;
+    let consumer = LogConsumer::new(LogRing {
+        region: MemoryRegion::from(ring.region),
+        signal: Signal::from(ring.signal),
+    })
+    .map_err(|error| format!("log region is not mappable: {error:?}"))?;
 
     Ok(Follower {
         _session: session,
-        ring,
+        consumer,
     })
 }
 
 pub(crate) fn follow(
-    follower: &Follower,
+    mut follower: Follower,
     mut view: JournalView,
     window: &slint::Weak<ui::Journal>,
 ) {
-    let mut reader = BatchReader::new(&follower.ring);
-
     loop {
-        let batch = reader.next(&mut view);
+        let batch = next_batch(&mut follower.consumer, &mut view);
         if !apply(window, batch.lines) || batch.stopped {
             return;
         }
@@ -123,6 +71,35 @@ pub(crate) fn show(rows: &VecModel<ui::Row>, lines: Vec<Pushed>) {
             rows.remove(0);
         }
         rows.extend(pushed.lines.into_iter().map(row));
+    }
+}
+
+fn next_batch(consumer: &mut LogConsumer, view: &mut JournalView) -> Batch {
+    let mut lines = Vec::new();
+
+    while lines.len() < BATCH_ENTRIES_MAX {
+        match consumer.try_next() {
+            Some(entry) => lines.push(view.push(entry)),
+            None if !lines.is_empty() => break,
+            None => match consumer.wait(KERNEL_LINE_LATENCY) {
+                // Строка ядра сигнала не поднимает, и по истечении срока кольцо проверяется заново.
+                Ok(()) | Err(IpcError::Timeout) => {}
+                Err(error) => {
+                    let reason = format!("log ring stopped: {error:?}");
+                    println!("{reason}");
+                    lines.push(view.push_failure(&reason));
+                    return Batch {
+                        lines,
+                        stopped: true,
+                    };
+                }
+            },
+        }
+    }
+
+    Batch {
+        lines,
+        stopped: false,
     }
 }
 
@@ -145,7 +122,17 @@ fn row(line: VisualLine) -> ui::Row {
             LineKind::Gap => ui::RowKind::Gap,
             LineKind::Failure => ui::RowKind::Failure,
         },
+        level: match line.level {
+            Level::Fatal => ui::RowLevel::Fatal,
+            Level::Error => ui::RowLevel::Error,
+            Level::Warn => ui::RowLevel::Warn,
+            Level::Info => ui::RowLevel::Info,
+            Level::Debug => ui::RowLevel::Debug,
+        },
+        kernel: line.kernel,
+        time: line.time.into(),
         source: line.source.into(),
         text: line.text.into(),
+        wrapped: line.wrapped,
     }
 }

@@ -14,13 +14,14 @@ use platform_abi::{DescriptionRegion, DeviceId, MmioWindow, PlatformError, platf
 use runtime::{Mutex, log_fmt};
 use syscall::{MemoryAccess, Rights, SyscallError};
 
-const RESOURCE_RIGHTS: Rights = Rights::from_bits_truncate(
-    Rights::READ.bits() | Rights::WRITE.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
-);
+const RESOURCE_RIGHTS: Rights = Rights::READ
+    .union(Rights::WRITE)
+    .union(Rights::DUPLICATE)
+    .union(Rights::TRANSFER);
 
-const DESCRIPTION_RIGHTS: Rights = Rights::from_bits_truncate(
-    Rights::READ.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
-);
+const DESCRIPTION_RIGHTS: Rights = Rights::READ
+    .union(Rights::DUPLICATE)
+    .union(Rights::TRANSFER);
 
 pub(crate) struct SessionRecord {
     badge: u64,

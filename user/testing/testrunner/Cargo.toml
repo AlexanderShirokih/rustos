@@ -112,6 +112,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "fault-fixture"
+path = "src/fault_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "idle-export-fixture"
 path = "src/idle_export_fixture.rs"
 test = false

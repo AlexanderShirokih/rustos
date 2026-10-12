@@ -21,6 +21,7 @@ ipc = { workspace = true }
 capability = { workspace = true }
 memory = { workspace = true }
 klog = { workspace = true }
+log-abi = { workspace = true }
 scheduler = { workspace = true }
 syscall = { workspace = true }
 syscall-kernel = { workspace = true }

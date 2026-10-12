@@ -21,9 +21,10 @@ const COMPATIBLE: &str = "virtio,mmio";
 const REGISTER_BYTES: u64 = 4;
 const CONFIG_OFFSET: u64 = 0x100;
 
-const LINE_RIGHTS: Rights = Rights::from_bits_truncate(
-    Rights::READ.bits() | Rights::WRITE.bits() | Rights::DUPLICATE.bits() | Rights::TRANSFER.bits(),
-);
+const LINE_RIGHTS: Rights = Rights::READ
+    .union(Rights::WRITE)
+    .union(Rights::DUPLICATE)
+    .union(Rights::TRANSFER);
 
 pub(crate) struct Bus {
     transports: Vec<Transport>,

@@ -1,12 +1,12 @@
 //! E2E relay логирования: лог-порт с сессиями по значкам вместо bootstrap-капы
 //! и граница полномочий выданной лог-сессии.
 //!
-//! Строки relay сценария копятся в его `Journal`. Сток под журналом делает
-//! встречный двусторонний вызов ядра. Вызов перезаписывает значок в IPC-буфере
-//! потока, и источник строки журнала проверяет, что relay снял значок до
-//! пересылки.
+//! Строки relay сценария копит сток `Recording` над стоком сценария. Сток
+//! сценария делает встречный двусторонний вызов ядра. Вызов перезаписывает значок
+//! в IPC-буфере потока, и источник записанной строки проверяет, что relay снял
+//! значок до пересылки.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{
     num::NonZeroU64,
     sync::atomic::{AtomicBool, Ordering::SeqCst},
@@ -16,9 +16,7 @@ use bootstrap_abi::bootstrap;
 use ipc::wire::{Header, IpcError, MessageBuf};
 use kernel_objects::{Port, Session};
 use log_abi::{LOG_MESSAGE_MAX, LOG_SOURCE_MAX, LogBuffer, log};
-use log_relay::{
-    Journal, JournalLine, JournalSink, KernelLogSink, LogRelayThread, LogSink, SourceNames,
-};
+use log_relay::{KernelLogSink, LogRelayThread, LogSink, SourceNames};
 use rootkeeper::relay::LogSessions;
 use runtime::{PortTransport, Timeout, port_send};
 use spin::Mutex;
@@ -98,7 +96,20 @@ const SYNC_BADGE_BASE: NonZeroU64 = NonZeroU64::new(0x0300_0000).expect("badge i
 
 struct Relay {
     thread: LogRelayThread,
-    journal: Journal,
+    lines: Lines,
+}
+
+type Lines = Arc<Mutex<Vec<RelayLine>>>;
+
+#[derive(Clone)]
+struct RelayLine {
+    source: String,
+    text: String,
+}
+
+struct Recording<S> {
+    lines: Lines,
+    next: S,
 }
 
 static SHARED: Mutex<Option<Relay>> = Mutex::new(None);
@@ -116,9 +127,25 @@ impl Relay {
         names: impl SourceNames + 'static,
         sink: impl LogSink + Send + 'static,
     ) -> kernel_objects::Result<Self> {
-        let journal = Journal::new();
-        let thread = LogRelayThread::start(names, JournalSink::new(journal.clone(), sink))?;
-        Ok(Self { thread, journal })
+        let lines = Lines::default();
+        let recording = Recording {
+            lines: Arc::clone(&lines),
+            next: sink,
+        };
+        let thread = LogRelayThread::start(names, recording)?;
+        Ok(Self { thread, lines })
+    }
+}
+
+impl<S: LogSink> LogSink for Recording<S> {
+    fn write(&mut self, source: &str, message: &str) -> Result<(), IpcError> {
+        let written = self.next.write(source, message);
+        // Тесты отказа стока считают и отвергнутые строки.
+        self.lines.lock().push(RelayLine {
+            source: String::from(source),
+            text: String::from(message),
+        });
+        written
     }
 }
 
@@ -134,18 +161,15 @@ impl LogSessions for ScenarioLogSessions {
     }
 }
 
-pub(crate) fn shared_journal() -> Journal {
-    with_shared(|relay| relay.journal.clone())
-}
-
 fn with_shared<T>(body: impl FnOnce(&Relay) -> T) -> T {
     let mut shared = SHARED.lock();
     let relay = shared.get_or_insert_with(|| {
-        Relay::start(
-            SharedSourceNames,
-            KernelLogSink::new(crate::bootstrap_handle()),
-        )
-        .expect("shared log relay starts")
+        let sink = KernelLogSink::new(crate::bootstrap_handle());
+        Relay {
+            thread: LogRelayThread::start(SharedSourceNames, sink)
+                .expect("shared log relay starts"),
+            lines: Lines::default(),
+        }
     });
     body(relay)
 }
@@ -180,12 +204,10 @@ impl LogSink for ScenarioSink {
     }
 }
 
-pub(crate) fn start_component_relay(names: impl SourceNames + 'static) -> Journal {
+pub(crate) fn start_component_relay(names: impl SourceNames + 'static) {
     SINK_REFUSES.store(false, SeqCst);
     let relay = Relay::start(names, ScenarioSink).expect("component log relay starts");
-    let journal = relay.journal.clone();
     *ACTIVE.lock() = Some(relay);
-    journal
 }
 
 pub(crate) fn await_component_sources(names: &[&str]) -> Vec<String> {
@@ -221,7 +243,7 @@ pub(crate) fn await_component_lines_with_prefix(
     .collect()
 }
 
-fn await_records(complete: impl Fn(&[JournalLine]) -> bool) -> Vec<JournalLine> {
+fn await_records(complete: impl Fn(&[RelayLine]) -> bool) -> Vec<RelayLine> {
     let idle = Port::create().expect("port create");
     let mut waited = Timeout::POLL;
     loop {
@@ -234,11 +256,11 @@ fn await_records(complete: impl Fn(&[JournalLine]) -> bool) -> Vec<JournalLine> 
     }
 }
 
-fn scenario_lines() -> Vec<JournalLine> {
+fn scenario_lines() -> Vec<RelayLine> {
     ACTIVE
         .lock()
         .as_ref()
-        .map(|relay| relay.journal.lines())
+        .map(|relay| relay.lines.lock().clone())
         .unwrap_or_default()
 }
 
@@ -273,7 +295,7 @@ fn with_relay(body: impl FnOnce(&dyn Fn(NonZeroU64) -> Port)) {
         .expect("test log relay stops");
 }
 
-fn wait_for_records(count: usize) -> Vec<JournalLine> {
+fn wait_for_records(count: usize) -> Vec<RelayLine> {
     let mut records = await_records(|records| {
         records
             .iter()

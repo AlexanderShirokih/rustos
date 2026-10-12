@@ -7,12 +7,16 @@
 
 use managed_component::Outcome;
 
-use crate::{log_relay::CXX_EXIT_BADGE, selftest_run::Stand};
+use crate::{
+    log_relay::CXX_EXIT_BADGE,
+    selftest_run::{PROCESS_TIMEOUT, Stand},
+};
 
 const FIXTURE: Stand = Stand {
     entry: "/cxx-exit/exec",
     name: "cxx-exit",
     badge: CXX_EXIT_BADGE,
+    timeout: PROCESS_TIMEOUT,
 };
 
 const LINES: [&str; 10] = [

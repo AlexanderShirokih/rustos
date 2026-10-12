@@ -50,6 +50,12 @@ impl Rights {
         Self(bits & Self::ALL_BITS)
     }
 
+    /// Набор из битов `self` и `other`.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }

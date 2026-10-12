@@ -89,6 +89,7 @@ pub struct PhysicalFrames {
 
 pub struct KernelContext {
     services: BootServices,
+    kernel_arena: Arc<MmioServiceImpl>,
     driver_registry: Mutex<RuntimeDriverRegistry>,
     address_space_factory: &'static (dyn AddressSpaceFactory + Send + Sync),
     frame_count: &'static (dyn FrameCount + Send + Sync),
@@ -111,14 +112,16 @@ impl KernelContext {
         syscall_bridge::install_address_space_factory(address_space_factory);
         syscall_bridge::install_frame_allocator(frames.allocator);
 
-        let mmio_service: Arc<dyn MmioService> = Arc::new(MmioServiceImpl::new(
+        let kernel_arena = Arc::new(MmioServiceImpl::new(
             memory_mapper,
             mmio_arena.base,
             mmio_arena.size,
         ));
+        let mmio_service: Arc<dyn MmioService> = kernel_arena.clone();
 
         Self {
             services: BootServices::with_mmio(mmio_service),
+            kernel_arena,
             driver_registry: Mutex::new(RuntimeDriverRegistry::new()),
             address_space_factory,
             frame_count: frames.count,
@@ -126,6 +129,10 @@ impl KernelContext {
             device_regions,
             dtb,
         }
+    }
+
+    pub(crate) fn kernel_arena(&self) -> &MmioServiceImpl {
+        &self.kernel_arena
     }
 
     /// Фабрика user-AS, переданная в `new`.

@@ -38,13 +38,6 @@ impl RingProducer {
         RingEnd::over(region, slot_payload, data).map(Self)
     }
 
-    /// Число кадров, которые поместятся в кольцо сейчас. Не превышает ёмкости кольца при любом
-    /// содержимом региона.
-    #[must_use]
-    pub fn free_slots(&self) -> usize {
-        self.0.ring.free_slots()
-    }
-
     /// Кладёт кадр в кольцо. `Full` - в кольце нет свободного слота, `TooLarge` - кадр длиннее
     /// слота.
     pub fn push(&self, frame: &[u8]) -> Result<(), RingError> {

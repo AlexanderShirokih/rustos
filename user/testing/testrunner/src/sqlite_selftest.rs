@@ -8,6 +8,7 @@
 use filesystem_abi::namespace;
 use ipc::Protocol as _;
 use managed_component::Outcome;
+use runtime::Timeout;
 
 use crate::{
     filesystem::root_view, log_relay::SQLITE_SELFTEST_BADGE, parent::Answer, selftest_run::Stand,
@@ -17,6 +18,7 @@ const STAND: Stand = Stand {
     entry: "/sqlite-selftest/exec",
     name: "sqlite-selftest",
     badge: SQLITE_SELFTEST_BADGE,
+    timeout: Timeout::from_secs(60),
 };
 
 const NAMESPACE_REQUIREMENT: &str = "namespace";

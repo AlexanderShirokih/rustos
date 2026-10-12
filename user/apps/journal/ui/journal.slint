@@ -1,4 +1,5 @@
 import "@dejavu/DejaVuSansMono.ttf";
+import { Palette } from "palette.slint";
 
 export enum RowKind {
     line,
@@ -6,14 +7,27 @@ export enum RowKind {
     failure,
 }
 
+export enum RowLevel {
+    fatal,
+    error,
+    warn,
+    info,
+    debug,
+}
+
 export struct Row {
     kind: RowKind,
+    level: RowLevel,
+    kernel: bool,
+    time: string,
     source: string,
     text: string,
+    wrapped: bool,
 }
 
 export component Journal inherits Window {
     in property <[Row]> rows;
+    in property <int> source-column;
     in property <int> text-column;
     out property <int> columns: max(1, floor((root.width - 2 * root.margin) / root.advance));
 
@@ -23,7 +37,7 @@ export component Journal inherits Window {
 
     default-font-family: "DejaVu Sans Mono";
     default-font-size: 12px;
-    background: #101418;
+    background: Palette.background;
 
     // Шаг сетки - ширина ста символов. Литерал из обратных апострофов встраивает их глиф,
     // которого нет среди встроенных глифов ASCII, для сообщений паники Rust.
@@ -49,19 +63,34 @@ export component Journal inherits Window {
             Text {
                 x: 0;
                 y: 0;
-                width: root.text-column * root.advance;
+                width: root.source-column * root.advance;
                 height: parent.height;
-                text: row.source;
-                color: #7d8a99;
+                text: row.time;
+                color: Palette.time;
             }
 
             Text {
-                x: root.text-column * root.advance;
+                x: root.source-column * root.advance;
+                y: 0;
+                width: (root.text-column - root.source-column) * root.advance;
+                height: parent.height;
+                text: row.source;
+                color: row.kernel ? Palette.kernel-source : Palette.source;
+            }
+
+            Text {
+                x: row.wrapped ? 0 : root.text-column * root.advance;
                 y: 0;
                 width: parent.width - self.x;
                 height: parent.height;
                 text: row.text;
-                color: row.kind == RowKind.gap ? #e0b45a : row.kind == RowKind.failure ? #ef6f6c : #d7dde5;
+                color: row.kind == RowKind.gap ? Palette.gap
+                    : row.kind == RowKind.failure ? Palette.failure
+                    : row.level == RowLevel.fatal ? Palette.fatal
+                    : row.level == RowLevel.error ? Palette.error
+                    : row.level == RowLevel.warn ? Palette.warn
+                    : row.level == RowLevel.debug ? Palette.debug
+                    : Palette.text;
             }
         }
     }

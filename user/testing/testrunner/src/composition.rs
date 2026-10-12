@@ -18,7 +18,7 @@ use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
 use platform_abi::{CONTROLLER_KEY, Node};
 use rootkeeper::{
-    BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::Relay, turn,
+    BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::LogSources, turn,
 };
 use runtime::{JoinHandle, Mutex, MutexGuard, PortTransport, Timeout, spawn_owned};
 use spin::Once;
@@ -102,7 +102,7 @@ impl Composition {
     pub(crate) fn start(
         plan: BootPlan<'static>,
         index: ExportIndex<'static>,
-        relay: Relay,
+        sources: LogSources,
         limits: SearchLimits,
     ) -> Self {
         await_budget(&plan);
@@ -112,7 +112,7 @@ impl Composition {
             plan,
             index,
             crate::bootstrap_handle(),
-            relay,
+            sources,
             limits,
         )
         .expect("composition started");

@@ -1,17 +1,4 @@
-/// Уровень важности сообщения.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum Level {
-    /// Критическая ошибка, требующая остановки системы.
-    Fatal,
-    /// Ошибка, не требующая остановки.
-    Error,
-    /// Предупреждение.
-    Warn,
-    /// Информационное сообщение.
-    Info,
-    /// Отладочное сообщение.
-    Debug,
-}
+pub use log_abi::Level;
 
 pub(crate) fn prefix(level: Level) -> &'static str {
     match level {

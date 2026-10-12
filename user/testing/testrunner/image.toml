@@ -72,6 +72,11 @@ path = "/journal-subscriber-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "fault-fixture"
+path = "/fault-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "idle-export-fixture"
 path = "/idle-export-fixture"
 
