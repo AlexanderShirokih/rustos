@@ -8,17 +8,17 @@ use component_abi::{RequirementDeclaration, SessionError};
 use fdt_test::Token;
 use ipc::{CallError, Protocol};
 use kernel_objects::{Error, Session, SessionTransport, Signal};
+use mmio::Registers;
 use platform_abi::{Description, DeviceId};
 use runtime::Timeout;
 use spmi_abi::{DeviceError, SpmiError, Trigger, spmi, spmi_device};
 use spmi_pmic_arb::{
-    Arbiter, ArbiterNode, Interrupt, Peripheral, Refusal, Registers, SkipReason, Skipped, Span,
-    Window,
+    Arbiter, ArbiterNode, Interrupt, Peripheral, Refusal, SkipReason, Skipped, Span, Window,
 };
 use syscall::{SIGNALED, SyscallError};
 
 use crate::{
-    composition::{Importer, compatibles, controller_provider, pause, request},
+    composition::{Importer, compatibles, controller_provider, device, pause, request},
     register_model::RegisterFile,
     rootkeeper_system::{
         POLL_ATTEMPTS, POLL_INTERVAL, await_revoked, finish, platform_describes, with_description,
@@ -328,7 +328,7 @@ impl Model {
     }
 }
 
-impl Registers for &Model {
+impl Registers<Window> for &Model {
     fn size(&self, window: Window) -> usize {
         match window {
             Window::Core => 0x1000,
@@ -350,7 +350,7 @@ impl Registers for &Model {
 fn peripherals(tree: &[Token<'_>]) -> Vec<Result<Peripheral, Skipped>> {
     let blob = fdt_test::build(tree);
     let description = Description::new(&blob, 0).expect("tree parses");
-    let arbiter = DeviceId::new(ARBITER).expect("absolute path");
+    let arbiter = device(ARBITER);
     let node = ArbiterNode::parse(&description, &arbiter).expect("arbiter node parses");
     node.peripherals(&description, &arbiter)
 }
@@ -790,12 +790,11 @@ pub(crate) fn open(
     bus: &spmi::Client<SessionTransport>,
     path: &str,
 ) -> Result<spmi_device::Client<SessionTransport>, CallError<SpmiError>> {
-    bus.open(DeviceId::new(path).expect("absolute path"))
-        .map(|session| {
-            Session::<spmi_device::Protocol>::from_session(session)
-                .client()
-                .with_wait(SPMI_REPLY_TIMEOUT)
-        })
+    bus.open(device(path)).map(|session| {
+        Session::<spmi_device::Protocol>::from_session(session)
+            .client()
+            .with_wait(SPMI_REPLY_TIMEOUT)
+    })
 }
 
 #[test_harness::test]
@@ -804,7 +803,7 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
         test_harness::skip!("{} is not described", PMIC_ARBITER);
     }
 
-    let clock = DeviceId::new(PMIC_CLOCK).expect("absolute path");
+    let clock = device(PMIC_CLOCK);
     let controller = with_description(|description| controller_compatibles(description, &clock));
 
     let composition = with_drivers();

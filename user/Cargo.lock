@@ -590,6 +590,7 @@ dependencies = [
  "clocks-abi",
  "component-startup",
  "kernel-objects",
+ "mmio",
  "platform-abi",
  "program-entry",
  "runtime",
@@ -2928,6 +2929,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmio"
+version = "0.1.0"
+dependencies = [
+ "kernel-objects",
+]
+
+[[package]]
 name = "mounts"
 version = "0.1.0"
 dependencies = [
@@ -3684,6 +3692,7 @@ dependencies = [
  "component-startup",
  "ipc",
  "kernel-objects",
+ "mmio",
  "pins-abi",
  "platform-abi",
  "program-entry",
@@ -4592,6 +4601,7 @@ dependencies = [
  "component-startup",
  "ipc",
  "kernel-objects",
+ "mmio",
  "platform-abi",
  "program-entry",
  "runtime",
@@ -4834,6 +4844,7 @@ dependencies = [
  "log-abi",
  "log-relay",
  "managed-component",
+ "mmio",
  "pinctrl-msm",
  "pinctrl-spmi-gpio",
  "pins-abi",

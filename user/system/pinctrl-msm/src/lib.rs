@@ -10,6 +10,6 @@ mod sdm660;
 mod settings;
 mod tlmm;
 
-pub use registers::{PinGroup, Registers, Tile};
+pub use registers::{PinGroup, Tile};
 pub use sdm660::SDM660;
 pub use tlmm::{Plan, Refusal, Tlmm};

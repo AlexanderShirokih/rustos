@@ -3,14 +3,12 @@
 use clk_qcom::Gcc;
 use clocks_abi::{ClocksError, clocks};
 use component_startup::{SessionEvent, SessionPort};
-use kernel_objects::Delivery;
+use kernel_objects::{Delivery, MmioMapping};
 use platform_abi::{Description, DeviceClaims, DeviceId};
-
-use crate::window::Window;
 
 pub(crate) struct Controller<'d> {
     pub(crate) description: &'d Description<'d>,
-    pub(crate) gcc: Gcc<Window>,
+    pub(crate) gcc: Gcc<MmioMapping>,
     pub(crate) claims: DeviceClaims,
 }
 

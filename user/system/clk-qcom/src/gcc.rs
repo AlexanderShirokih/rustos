@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 
 use clocks_abi::ClocksError;
+use mmio::Registers;
 use platform_abi::{Description, DeviceClaims, DeviceId};
 
 use crate::{
@@ -30,19 +31,6 @@ const HW_CLK_CTRL: u32 = 1 << 20;
 const BRANCH_POLLS: usize = 20_000;
 const UPDATE_POLLS: usize = 50_000;
 
-/// Регистры окна контроллера. Смещение в [`load`](Registers::load) и
-/// [`store`](Registers::store) выровнено по регистру и лежит внутри окна.
-pub trait Registers {
-    /// Размер окна в байтах.
-    fn size(&self) -> usize;
-
-    /// Читает регистр по смещению `offset`.
-    fn load(&self, offset: usize) -> u32;
-
-    /// Записывает регистр по смещению `offset`.
-    fn store(&self, offset: usize, value: u32);
-}
-
 /// Контроллер GCC: регистры его окна и таблица тактов SoC.
 pub struct Gcc<R> {
     registers: R,
@@ -57,14 +45,14 @@ pub enum Refusal {
     Window,
 }
 
-impl<R: Registers> Gcc<R> {
+impl<R: Registers<()>> Gcc<R> {
     /// Контроллер узла `id` над регистрами `registers` с таблицей тактов `clocks`.
     ///
     /// Отказы:
     /// - [`Refusal::Window`] - окно меньше регистров тактов таблицы.
     pub fn new(registers: R, clocks: &'static [Clock], id: DeviceId) -> Result<Self, Refusal> {
         let last = clocks.iter().map(last_register).max().unwrap_or_default();
-        if registers.size() < last + REGISTER_BYTES {
+        if registers.size(()) < last + REGISTER_BYTES {
             return Err(Refusal::Window);
         }
 
@@ -190,17 +178,17 @@ impl<R: Registers> Gcc<R> {
     }
 
     fn update(&self, offset: usize, mask: u32, value: u32) {
-        let old = self.registers.load(offset);
+        let old = self.registers.load((), offset);
         let new = old & !mask | value & mask;
         if new != old {
-            self.registers.store(offset, new);
+            self.registers.store((), offset, new);
         }
     }
 
     fn wait(&self, offset: usize, polls: usize, done: impl Fn(u32) -> bool) -> bool {
         // Опросы покрывают ожидание Linux - 200 мкс ветви (`clk_branch_wait`) и 500 мкс
         // `UPDATE` (`update_config`), если чтение регистра длится не меньше 10 нс.
-        (0..polls).any(|_| done(self.registers.load(offset)))
+        (0..polls).any(|_| done(self.registers.load((), offset)))
     }
 }
 

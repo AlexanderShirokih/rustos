@@ -10,13 +10,13 @@ use ipc::CallError;
 use kernel_objects::{Session, Signal};
 use pinctrl_spmi_gpio::{Gpio, Registers, line, plan};
 use pins_abi::{Claims, PinsError, device_pins, pins};
-use platform_abi::{Description, DeviceId};
+use platform_abi::Description;
 use runtime::Timeout;
 use spmi_abi::DeviceError;
 use syscall::SIGNALED;
 
 use crate::{
-    composition::{controller_provider, pause, request},
+    composition::{controller_provider, device, pause, request},
     pins::{PINS_IMPORTS, PINS_REPLY_TIMEOUT, PINS_REQUIREMENT, controller_compatibles},
     register_model::{Access, RegisterFile},
     rootkeeper_system::{
@@ -215,9 +215,9 @@ const fn address(block: u8, register: u16) -> usize {
     (block as usize) << 8 | register as usize
 }
 
-fn open(blob: &[u8], model: &Model, device: &str) -> Result<(), PinsError> {
+fn open(blob: &[u8], model: &Model, path: &str) -> Result<(), PinsError> {
     let description = Description::new(blob, 0).expect("tree parses");
-    let device = DeviceId::new(device).expect("absolute path");
+    let device = device(path);
     let plan = plan(&description, &device, &Claims::new())?;
     let mut gpio = Gpio::new(model);
     for controller in plan.controllers() {
@@ -341,8 +341,8 @@ fn a_set_of_another_controller_is_skipped() {
 
 fn record(blob: &[u8], node: &str) -> Result<(), PinsError> {
     let description = Description::new(blob, 0).expect("tree parses");
-    let session = DeviceId::new("/keys").expect("absolute path");
-    let node = DeviceId::new(node).expect("absolute path");
+    let session = device("/keys");
+    let node = device(node);
     line(&description, &session, &node, "gpios", 0).map(drop)
 }
 
@@ -359,9 +359,9 @@ fn a_line_outside_the_session_or_the_controller_is_refused() {
 fn a_line_becomes_an_input_and_reads_its_level_through_the_polarity() {
     let blob = fdt_test::build(TREE);
     let description = Description::new(&blob, 0).expect("tree parses");
-    let session = DeviceId::new("/keys").expect("absolute path");
-    let up = DeviceId::new("/keys/up").expect("absolute path");
-    let down = DeviceId::new("/keys/down").expect("absolute path");
+    let session = device("/keys");
+    let up = device("/keys/up");
+    let down = device("/keys/down");
     let model = Model::new();
     model.pin(0xC6, SUBTYPE_GPIO_4CH);
     model.pin(0xC9, SUBTYPE_GPIO_4CH);
@@ -430,24 +430,16 @@ fn the_board_volume_up_line_reads_released_and_its_signal_ends_with_the_session(
             .with_wait(PINS_REPLY_TIMEOUT);
 
     let keys = client
-        .open(DeviceId::new(BOARD_KEYS).expect("absolute path"))
+        .open(device(BOARD_KEYS))
         .map(|session| {
             Session::<device_pins::Protocol>::from_session(session)
                 .client()
                 .with_wait(PINS_REPLY_TIMEOUT)
         })
         .expect("gpio-keys session");
-    let line = keys.input(
-        DeviceId::new(BOARD_VOLUME_UP).expect("absolute path"),
-        "gpios",
-        0,
-    );
+    let line = keys.input(device(BOARD_VOLUME_UP), "gpios", 0);
     let active = line.as_ref().map(|line| keys.active(*line));
-    let outside = keys.input(
-        DeviceId::new(BOARD_OUTSIDE).expect("absolute path"),
-        "id-gpios",
-        0,
-    );
+    let outside = keys.input(device(BOARD_OUTSIDE), "id-gpios", 0);
     let signal = line
         .as_ref()
         .ok()
@@ -459,14 +451,12 @@ fn the_board_volume_up_line_reads_released_and_its_signal_ends_with_the_session(
     let revoked = signal
         .as_ref()
         .is_some_and(|signal| await_revoked(|| signal.wait(SIGNALED, Timeout::from_millis(0))));
-    let reopened = (0..POLL_ATTEMPTS).any(|_| {
-        match client.open(DeviceId::new(BOARD_KEYS).expect("absolute path")) {
-            Err(CallError::Remote(PinsError::Busy)) => {
-                pause(POLL_INTERVAL);
-                false
-            }
-            opened => opened.is_ok(),
+    let reopened = (0..POLL_ATTEMPTS).any(|_| match client.open(device(BOARD_KEYS)) {
+        Err(CallError::Remote(PinsError::Busy)) => {
+            pause(POLL_INTERVAL);
+            false
         }
+        opened => opened.is_ok(),
     });
 
     test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));

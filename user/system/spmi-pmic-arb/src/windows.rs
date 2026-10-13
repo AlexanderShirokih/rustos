@@ -1,8 +1,9 @@
 //! Окна регистров арбитра, отображённые в процесс шины.
 
 use kernel_objects::{MmioMapping, SessionTransport};
+use mmio::MappedWindows;
 use platform_abi::{DeviceId, WindowRefusal, platform};
-use spmi_pmic_arb::{ArbiterNode, Registers, Window};
+use spmi_pmic_arb::{ArbiterNode, Window};
 
 pub(crate) struct Windows {
     core: MmioMapping,
@@ -28,8 +29,10 @@ impl Windows {
             config: region(Window::Config)?,
         })
     }
+}
 
-    fn region(&self, window: Window) -> &MmioMapping {
+impl MappedWindows<Window> for Windows {
+    fn mapping(&self, window: Window) -> &MmioMapping {
         match window {
             Window::Core => &self.core,
             Window::Channels => &self.channels,
@@ -37,19 +40,5 @@ impl Windows {
             Window::Interrupts => &self.interrupts,
             Window::Config => &self.config,
         }
-    }
-}
-
-impl Registers for Windows {
-    fn size(&self, window: Window) -> usize {
-        self.region(window).size()
-    }
-
-    fn load(&self, window: Window, offset: usize) -> u32 {
-        self.region(window).mmio().read::<u32>(offset)
-    }
-
-    fn store(&self, window: Window, offset: usize, value: u32) {
-        self.region(window).mmio().write::<u32>(offset, value);
     }
 }

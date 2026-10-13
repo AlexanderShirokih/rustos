@@ -3,16 +3,17 @@
 
 use alloc::{string::String, vec::Vec};
 
-use clk_qcom::{Branch, Clock, Enable, Frequency, Gcc, Generator, Registers};
+use clk_qcom::{Branch, Clock, Enable, Frequency, Gcc, Generator};
 use clocks_abi::{ClocksError, clocks};
 use component_abi::{RequirementDeclaration, SessionError};
 use fdt_test::Token;
 use ipc::{CallError, Protocol};
+use mmio::Registers;
 use platform_abi::{Description, DeviceClaims, DeviceId};
 use runtime::Timeout;
 
 use crate::{
-    composition::{Import, compatibles, controller_provider, request},
+    composition::{Import, compatibles, controller_provider, device, request},
     register_model::{Access, RegisterFile},
     rootkeeper_system::{finish, platform_describes, with_description, with_drivers},
 };
@@ -126,12 +127,12 @@ struct Controller<'a> {
     claims: DeviceClaims,
 }
 
-impl Registers for Model<'_> {
-    fn size(&self) -> usize {
+impl Registers<()> for Model<'_> {
+    fn size(&self, (): ()) -> usize {
         WINDOW_SIZE
     }
 
-    fn load(&self, offset: usize) -> u32 {
+    fn load(&self, (): (), offset: usize) -> u32 {
         // Ожидание отказа опрашивает застрявший регистр тысячи раз, эти чтения журнал не пишет.
         if self.stuck == Some(offset) {
             return self.registers.get(WINDOW, offset);
@@ -139,7 +140,7 @@ impl Registers for Model<'_> {
         self.registers.load(WINDOW, offset)
     }
 
-    fn store(&self, offset: usize, value: u32) {
+    fn store(&self, (): (), offset: usize, value: u32) {
         self.registers.store(WINDOW, offset, value);
         if self.stuck == Some(offset) {
             return;
@@ -168,7 +169,7 @@ impl<'a> Controller<'a> {
             registers.set(WINDOW, halt, CLK_OFF);
         }
         let description = Description::new(blob, 0).expect("tree parses");
-        let id = DeviceId::new(CONTROLLER).expect("absolute path");
+        let id = device(CONTROLLER);
         let model = Model { registers, stuck };
         let gcc = Gcc::new(model, CLOCKS, id).expect("model controller");
 
@@ -179,14 +180,14 @@ impl<'a> Controller<'a> {
         }
     }
 
-    fn enable(&mut self, badge: u64, device: &str) -> Result<(), ClocksError> {
-        let device = DeviceId::new(device).expect("absolute path");
+    fn enable(&mut self, badge: u64, path: &str) -> Result<(), ClocksError> {
+        let device = device(path);
         self.gcc
             .enable(&self.description, &mut self.claims, badge, &device)
     }
 
     fn set_rate(&self, badge: u64, name: &str, hz: u64) -> Result<(), ClocksError> {
-        let device = DeviceId::new(QUP1_HOST).expect("absolute path");
+        let device = device(QUP1_HOST);
         self.gcc
             .set_rate(&self.description, &self.claims, badge, &device, name, hz)
     }
@@ -367,12 +368,7 @@ fn a_generator_that_keeps_update_times_out_and_keeps_the_node() {
     let set = controller.set_rate(1, "core", XO_HZ);
 
     test_harness::check_eq!(set, Err(ClocksError::Timeout));
-    test_harness::check_eq!(
-        controller
-            .claims
-            .holder(&DeviceId::new(QUP1_HOST).expect("absolute path")),
-        Some(1)
-    );
+    test_harness::check_eq!(controller.claims.holder(&device(QUP1_HOST)), Some(1));
 }
 
 #[test_harness::test]
@@ -422,7 +418,7 @@ fn the_board_controller_enables_the_dma_clock_and_refuses_qup_and_console() {
             .client()
             .with_wait(CLOCKS_REPLY_TIMEOUT);
 
-    let enable = |path| client.enable(DeviceId::new(path).expect("absolute path"));
+    let enable = |path| client.enable(device(path));
     let dma = enable(BOARD_DMA);
     let qup = enable(BOARD_QUP1);
     let console = enable(BOARD_CONSOLE);

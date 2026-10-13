@@ -22,6 +22,7 @@ doctest = false
 
 [dependencies]
 kernel-objects = { workspace = true }
+mmio = { workspace = true }
 component-startup = { workspace = true }
 ipc = { workspace = true }
 pins-abi = { workspace = true }

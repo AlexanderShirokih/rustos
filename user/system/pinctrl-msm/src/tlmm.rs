@@ -2,11 +2,12 @@
 
 use alloc::vec::Vec;
 
+use mmio::Registers;
 use pins_abi::{Claims, Pin, PinsError, check_state, default_states, pin_names, pin_number, sets};
 use platform_abi::{Description, DeviceId};
 
 use crate::{
-    registers::{PinGroup, Registers, Tile},
+    registers::{PinGroup, Tile},
     settings::{self, GPIO_FUNCTION_NUMBER, Setting},
 };
 
@@ -53,7 +54,7 @@ pub struct Plan {
     pins: Vec<Pin>,
 }
 
-impl<R: Registers> Tlmm<R> {
+impl<R: Registers<Tile>> Tlmm<R> {
     /// Контроллер узла `id` описания `description` над регистрами `registers` с таблицей
     /// выводов `groups`. Контроллер закрывает выводы из `gpio-reserved-ranges` узла.
     ///

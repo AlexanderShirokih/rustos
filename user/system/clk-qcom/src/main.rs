@@ -8,4 +8,3 @@ extern crate alloc;
 
 mod entry;
 mod sessions;
-mod window;

@@ -313,6 +313,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmio"
+version = "0.1.0"
+dependencies = [
+ "kernel-objects",
+]
+
+[[package]]
 name = "pins-abi"
 version = "0.1.0"
 dependencies = [

@@ -6,13 +6,14 @@ use alloc::{string::String, vec::Vec};
 use component_abi::{RequirementDeclaration, SessionError};
 use fdt_test::Token;
 use ipc::{CallError, Protocol};
-use pinctrl_msm::{PinGroup, Registers, Tile, Tlmm};
+use mmio::Registers;
+use pinctrl_msm::{PinGroup, Tile, Tlmm};
 use pins_abi::{Claims, PinsError, pins};
-use platform_abi::{Description, DeviceId};
+use platform_abi::Description;
 use runtime::Timeout;
 
 use crate::{
-    composition::{Import, compatibles, controller_provider, request},
+    composition::{Import, compatibles, controller_provider, device, request},
     register_model::{Access, RegisterFile},
     rootkeeper_system::{finish, platform_describes, with_description, with_drivers},
 };
@@ -220,7 +221,7 @@ struct Controller<'a> {
     claims: Claims,
 }
 
-impl Registers for Windows<'_> {
+impl Registers<Tile> for Windows<'_> {
     fn size(&self, _tile: Tile) -> usize {
         WINDOW_SIZE
     }
@@ -247,7 +248,7 @@ impl Windows<'_> {
 impl<'a> Controller<'a> {
     fn new(blob: &'a [u8], registers: &'a RegisterFile) -> Self {
         let description = Description::new(blob, 0).expect("tree parses");
-        let id = DeviceId::new(CONTROLLER).expect("absolute path");
+        let id = device(CONTROLLER);
         let node = description.node(&id).expect("controller node");
         let window = |tile: Tile| usize::from(tile.resource(&node).expect("named window"));
         let windows = Windows {
@@ -265,8 +266,8 @@ impl<'a> Controller<'a> {
         }
     }
 
-    fn open(&mut self, badge: u64, device: &str) -> Result<(), PinsError> {
-        let device = DeviceId::new(device).expect("absolute path");
+    fn open(&mut self, badge: u64, path: &str) -> Result<(), PinsError> {
+        let device = device(path);
         let plan = self.tlmm.plan(&self.description, &device, &self.claims)?;
         self.tlmm.apply(&plan);
         plan.claim(&mut self.claims, badge);
@@ -473,12 +474,8 @@ fn the_board_controller_refuses_sdc_groups_and_nodes_without_state() {
             .client()
             .with_wait(PINS_REPLY_TIMEOUT);
 
-    let sdc = client
-        .open(DeviceId::new(BOARD_SDC_HOST).expect("absolute path"))
-        .map(drop);
-    let no_state = client
-        .open(DeviceId::new(BOARD_NO_STATE).expect("absolute path"))
-        .map(drop);
+    let sdc = client.open(device(BOARD_SDC_HOST)).map(drop);
+    let no_state = client.open(device(BOARD_NO_STATE)).map(drop);
 
     test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));
     test_harness::check_eq!(sdc, Err(CallError::Remote(PinsError::Unsupported)));

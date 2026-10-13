@@ -95,6 +95,7 @@ input-abi = { path = "../lib/input-abi" }
 io = { path = "../lib/io" }
 ipc = { path = "../lib/ipc" }
 kernel-objects = { path = "../lib/kernel-objects" }
+mmio = { path = "../lib/mmio" }
 log-abi = { path = "../lib/log-abi" }
 pins-abi = { path = "../lib/pins-abi" }
 platform-abi = { path = "../lib/platform-abi" }

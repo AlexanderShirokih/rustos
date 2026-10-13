@@ -10,6 +10,6 @@ mod records;
 mod sdm660;
 mod table;
 
-pub use gcc::{Gcc, Refusal, Registers};
+pub use gcc::{Gcc, Refusal};
 pub use sdm660::SDM660;
 pub use table::{Branch, Clock, Enable, Frequency, Generator};

@@ -233,6 +233,7 @@ bench = false
 
 [dependencies]
 kernel-objects = { workspace = true }
+mmio = { workspace = true }
 bootstrap-abi = { workspace = true }
 clk-qcom = { path = "../../system/clk-qcom" }
 clocks-abi = { workspace = true }

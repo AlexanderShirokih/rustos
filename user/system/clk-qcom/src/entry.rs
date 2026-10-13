@@ -6,14 +6,11 @@ use clocks_abi::clocks;
 use component_startup::{
     SessionPort, StartupError, component_manifest, serve_export, whole_export,
 };
-use kernel_objects::SessionTransport;
+use kernel_objects::{MmioMapping, SessionTransport};
 use platform_abi::{Description, DeviceClaims, MappedDescription, platform};
 use runtime::{log_fmt, log_line, spawn_bound};
 
-use crate::{
-    sessions::{Controller, serve},
-    window::Window,
-};
+use crate::sessions::{Controller, serve};
 
 const COMPATIBLE: &str = "qcom,gcc-sdm660";
 const WINDOW_RESOURCE: u16 = 0;
@@ -87,7 +84,7 @@ fn run(requirements: ClocksStartup) -> Result<(), Stopped> {
 fn take(
     platform: &platform::Client<SessionTransport>,
     description: &Description<'_>,
-) -> Option<Gcc<Window>> {
+) -> Option<Gcc<MmioMapping>> {
     let Some(id) = description
         .compatible_devices(COMPATIBLE)
         .next()
@@ -102,7 +99,7 @@ fn take(
         .inspect_err(|error| log_fmt(format_args!("{} window refused: {error:?}", id.as_str())))
         .ok()?;
 
-    Gcc::new(Window(window), SDM660, id.clone())
+    Gcc::new(window, SDM660, id.clone())
         .inspect_err(|error| log_fmt(format_args!("{} refused: {error:?}", id.as_str())))
         .ok()
 }

@@ -1,4 +1,4 @@
-//! Доступ к 32-битным регистрам плиток TLMM и таблица выводов SoC.
+//! Плитки регистров TLMM и таблица выводов SoC.
 
 use platform_abi::Node;
 
@@ -23,20 +23,6 @@ pub struct PinGroup {
     pub tile: Tile,
     /// Функции вывода с номерами 1..=9.
     pub functions: [&'static str; 9],
-}
-
-/// Регистры плиток контроллера. Реализация задаёт размер окна плитки и доступ к его 32-битным
-/// регистрам. Смещение в [`load`](Registers::load) и [`store`](Registers::store) выровнено по
-/// регистру и лежит внутри окна.
-pub trait Registers {
-    /// Размер окна плитки `tile` в байтах.
-    fn size(&self, tile: Tile) -> usize;
-
-    /// Читает регистр плитки `tile` по смещению `offset`.
-    fn load(&self, tile: Tile, offset: usize) -> u32;
-
-    /// Записывает регистр плитки `tile` по смещению `offset`.
-    fn store(&self, tile: Tile, offset: usize, value: u32);
 }
 
 impl Tile {

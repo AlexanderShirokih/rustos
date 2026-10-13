@@ -13,6 +13,7 @@ members = [
     "lib/io",
     "lib/ipc",
     "lib/kernel-objects",
+    "lib/mmio",
     "lib/log-abi",
     "lib/platform-abi",
     "lib/program-entry",
@@ -111,6 +112,7 @@ filesystem = { path = "lib/filesystem" }
 filesystem-abi = { path = "lib/filesystem-abi" }
 filesystem-client = { path = "lib/filesystem-client" }
 kernel-objects = { path = "lib/kernel-objects" }
+mmio = { path = "lib/mmio" }
 memory = { path = "kernel/memory" }
 hal-common = { path = "kernel/hal-common" }
 hal-aarch64-asid = { path = "kernel/hal-aarch64-asid" }

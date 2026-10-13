@@ -21,9 +21,7 @@ use kernel_objects::{
 use log_abi::{LogBuffer, log};
 use log_relay::SourceNames as _;
 use managed_component::Status;
-use platform_abi::{
-    Description, DescriptionRegion, DeviceId, MappedDescription, PlatformError, platform,
-};
+use platform_abi::{Description, DescriptionRegion, MappedDescription, PlatformError, platform};
 use rootkeeper::{
     BootFailure, RecordState, SEARCH_LIMITS, SearchLimits, Stopped,
     relay::{ComponentNames, LogSessions as _, LogSources, log_badge},
@@ -36,8 +34,8 @@ use userland_image::{ComponentSpec, ExportIndex, PlanDecodeError};
 
 use crate::{
     composition::{
-        BOOT_PLAN_ENTRY, Composition, Importer, Mounted, ROUTER_NAME, admin, drained, encoded,
-        image, pause, request, view,
+        BOOT_PLAN_ENTRY, Composition, Importer, Mounted, ROUTER_NAME, admin, device, drained,
+        encoded, image, pause, request, view,
     },
     filesystem::{IMAGE_FILE, LEAK_ROUNDS, connect, open},
     journal_fixture_protocol::{
@@ -480,20 +478,16 @@ pub(crate) fn platform_session(
 
 fn line(
     session: &platform::Client<SessionTransport>,
-    device: &str,
+    path: &str,
 ) -> Result<IrqLine, CallError<PlatformError>> {
-    session
-        .irq(DeviceId::new(device).expect("absolute path"), 0)
-        .map(IrqLine::from)
+    session.irq(device(path), 0).map(IrqLine::from)
 }
 
 fn window(
     session: &platform::Client<SessionTransport>,
-    device: &str,
+    path: &str,
 ) -> Result<MmioWindow, CallError<PlatformError>> {
-    session
-        .mmio(DeviceId::new(device).expect("absolute path"), 0)
-        .map(MmioWindow::from)
+    session.mmio(device(path), 0).map(MmioWindow::from)
 }
 
 fn description(

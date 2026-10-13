@@ -6,7 +6,9 @@ use core::cell::{Cell, RefCell};
 use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES};
 use driver_simplefb::{Framebuffer, Refusal, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 use fdt_test::Token;
-use platform_abi::{Description, DeviceId};
+use platform_abi::Description;
+
+use crate::composition::device;
 
 const UNTOUCHED_SCREEN_BYTE: u8 = 0xAA;
 
@@ -136,7 +138,7 @@ fn framebuffer(path: &str) -> Result<Framebuffer, Refusal> {
 fn framebuffer_of(tree: &[Token<'_>], path: &str) -> Result<Framebuffer, Refusal> {
     let blob = fdt_test::build(tree);
     let description = Description::new(&blob, 0).expect("tree parses");
-    let device = DeviceId::new(path).expect("absolute path");
+    let device = device(path);
     Framebuffer::open(&description, &device)
 }
 
@@ -151,7 +153,7 @@ fn single(format: &str, width: u32, height: u32, stride: u32) -> Framebuffer {
         Token::End,
     ]);
     let description = Description::new(&blob, 0).expect("tree parses");
-    let device = DeviceId::new("/single@0").expect("absolute path");
+    let device = device("/single@0");
     Framebuffer::open(&description, &device).expect("format accepted")
 }
 

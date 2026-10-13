@@ -16,7 +16,7 @@ use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace}
 use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
-use platform_abi::{CONTROLLER_KEY, Node};
+use platform_abi::{CONTROLLER_KEY, DeviceId, Node};
 use rootkeeper::{
     BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::LogSources, turn,
 };
@@ -373,6 +373,10 @@ pub(crate) fn compatibles<'a>(controllers: impl IntoIterator<Item = Node<'a>>) -
         }
     }
     compatibles
+}
+
+pub(crate) fn device(path: &str) -> DeviceId {
+    DeviceId::new(path).expect("absolute path")
 }
 
 pub(crate) fn drained(enumeration: &Session<startup_contract::Protocol>) -> Vec<Found> {

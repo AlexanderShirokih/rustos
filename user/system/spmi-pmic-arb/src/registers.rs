@@ -1,4 +1,4 @@
-//! Доступ к 32-битным регистрам окон арбитра.
+//! Окна регистров арбитра.
 
 /// Окно регистров арбитра, по имени записи в `reg-names` его узла.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,20 +13,6 @@ pub enum Window {
     Interrupts,
     /// Владельцы каналов.
     Config,
-}
-
-/// Регистры окон арбитра. Реализация задаёт размер окна и доступ к его 32-битным регистрам.
-/// Смещение в [`load`](Registers::load) и [`store`](Registers::store) выровнено по регистру и
-/// лежит внутри окна.
-pub trait Registers {
-    /// Размер окна `window` в байтах.
-    fn size(&self, window: Window) -> usize;
-
-    /// Читает регистр окна `window` по смещению `offset`.
-    fn load(&self, window: Window, offset: usize) -> u32;
-
-    /// Записывает регистр окна `window` по смещению `offset`.
-    fn store(&self, window: Window, offset: usize, value: u32);
 }
 
 impl Window {

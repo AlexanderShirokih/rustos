@@ -1,11 +1,9 @@
 use alloc::vec::Vec;
 
+use mmio::Registers;
 use spmi_abi::{DeviceError, Trigger};
 
-use crate::{
-    peripheral::Interrupt,
-    registers::{Registers, Window},
-};
+use crate::{peripheral::Interrupt, registers::Window};
 
 const VERSION: usize = 0x0;
 const VERSION_2: u32 = 0x2001_0000;
@@ -101,7 +99,7 @@ struct Channel {
     owner: u8,
 }
 
-impl<R: Registers> Arbiter<R> {
+impl<R: Registers<Window>> Arbiter<R> {
     /// Читает версию арбитра и таблицы каналов и владельцев. Число каналов задаёт размер окна
     /// `core`, не больше 512.
     ///
@@ -447,7 +445,7 @@ const fn polarity(trigger: Trigger) -> u64 {
     }
 }
 
-fn checked_load<R: Registers>(registers: &R, window: Window, offset: usize) -> Option<u32> {
+fn checked_load<R: Registers<Window>>(registers: &R, window: Window, offset: usize) -> Option<u32> {
     inside(registers.size(window), offset).then(|| registers.load(window, offset))
 }
 

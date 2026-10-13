@@ -1,7 +1,8 @@
 //! Окна плиток TLMM, отображённые в процесс контроллера.
 
 use kernel_objects::{MmioMapping, SessionTransport};
-use pinctrl_msm::{Registers, Tile};
+use mmio::MappedWindows;
+use pinctrl_msm::Tile;
 use platform_abi::{DeviceId, Node, WindowRefusal, platform};
 
 pub(crate) struct Windows {
@@ -33,26 +34,14 @@ impl Windows {
             south: region(Tile::South)?,
         })
     }
+}
 
-    fn region(&self, tile: Tile) -> &MmioMapping {
+impl MappedWindows<Tile> for Windows {
+    fn mapping(&self, tile: Tile) -> &MmioMapping {
         match tile {
             Tile::North => &self.north,
             Tile::Center => &self.center,
             Tile::South => &self.south,
         }
-    }
-}
-
-impl Registers for Windows {
-    fn size(&self, tile: Tile) -> usize {
-        self.region(tile).size()
-    }
-
-    fn load(&self, tile: Tile, offset: usize) -> u32 {
-        self.region(tile).mmio().read::<u32>(offset)
-    }
-
-    fn store(&self, tile: Tile, offset: usize, value: u32) {
-        self.region(tile).mmio().write::<u32>(offset, value);
     }
 }
