@@ -56,6 +56,7 @@ mod futex;
 mod gpio_keys;
 mod heap;
 mod heap_bench;
+mod i2c;
 mod input_hub;
 mod ipc_buffer;
 mod ipc_raw;

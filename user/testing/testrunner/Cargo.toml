@@ -250,6 +250,8 @@ filesystem = { workspace = true }
 filesystem-abi = { workspace = true }
 filesystem-client = { workspace = true }
 filesystem-server = { workspace = true }
+i2c-abi = { workspace = true }
+i2c-qup = { path = "../../system/i2c-qup" }
 input-abi = { workspace = true }
 io = { workspace = true }
 ipc = { workspace = true }

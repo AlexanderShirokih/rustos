@@ -37,6 +37,7 @@ members = [
     "lib/filesystem",
     "lib/filesystem-abi",
     "lib/filesystem-client",
+    "lib/i2c-abi",
     "lib/pins-abi",
     "lib/spmi-abi",
     "lib/userland",
@@ -134,6 +135,7 @@ userland-image = { path = "lib/userland-image" }
 rtc-abi = { path = "lib/rtc-abi" }
 clocks-abi = { path = "lib/clocks-abi" }
 pins-abi = { path = "lib/pins-abi" }
+i2c-abi = { path = "lib/i2c-abi" }
 spmi-abi = { path = "lib/spmi-abi" }
 virtio-mmio-abi = { path = "lib/virtio-mmio-abi" }
 process = { path = "kernel/process" }

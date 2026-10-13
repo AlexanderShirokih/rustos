@@ -22,6 +22,7 @@ members = [
     "system/driver-virtio-input",
     "system/filesystem-imagefs",
     "system/filesystem-ramfs",
+    "system/i2c-qup",
     "system/input-hub",
     "system/mounts",
     "system/pinctrl-msm",
@@ -101,6 +102,7 @@ pins-abi = { path = "../lib/pins-abi" }
 platform-abi = { path = "../lib/platform-abi" }
 program-entry = { path = "../lib/program-entry" }
 rtc-abi = { path = "../lib/rtc-abi" }
+i2c-abi = { path = "../lib/i2c-abi" }
 spmi-abi = { path = "../lib/spmi-abi" }
 syscall = { path = "../lib/syscall" }
 syscall-user = { path = "../lib/syscall-user" }

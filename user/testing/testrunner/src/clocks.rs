@@ -105,7 +105,7 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
 
 const BOARD_CONTROLLER: &str = "/soc@0/clock-controller@100000";
 const BOARD_DMA: &str = "/soc@0/dma-controller@c144000";
-const BOARD_QUP1: &str = "/soc@0/i2c@c175000";
+const BOARD_DISABLED_QUP: &str = "/soc@0/i2c@c176000";
 const BOARD_CONSOLE: &str = "/soc@0/serial@c170000";
 
 const CLOCKS_REQUIREMENT: &str = "clocks";
@@ -400,7 +400,7 @@ fn controller_compatibles(description: &Description<'_>, path: &str) -> Vec<Stri
 }
 
 #[test_harness::test]
-fn the_board_controller_enables_the_dma_clock_and_refuses_qup_and_console() {
+fn the_board_controller_enables_the_dma_clock_and_refuses_a_disabled_qup_and_console() {
     if !platform_describes(BOARD_CONTROLLER) {
         test_harness::skip!("{} is not described", BOARD_CONTROLLER);
     }
@@ -420,7 +420,7 @@ fn the_board_controller_enables_the_dma_clock_and_refuses_qup_and_console() {
 
     let enable = |path| client.enable(device(path));
     let dma = enable(BOARD_DMA);
-    let qup = enable(BOARD_QUP1);
+    let qup = enable(BOARD_DISABLED_QUP);
     let console = enable(BOARD_CONSOLE);
 
     test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));

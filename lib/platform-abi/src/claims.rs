@@ -32,6 +32,14 @@ impl DeviceClaims {
         self.holders.values().any(|holder| *holder == badge)
     }
 
+    /// Узлы, которые занимает сессия со значком `badge`.
+    pub fn devices(&self, badge: u64) -> impl Iterator<Item = &DeviceId> + '_ {
+        self.holders
+            .iter()
+            .filter(move |(_, holder)| **holder == badge)
+            .map(|(device, _)| device)
+    }
+
     /// Занимает узел `device` сессией со значком `badge`.
     pub fn claim(&mut self, badge: u64, device: DeviceId) {
         self.holders.insert(device, badge);

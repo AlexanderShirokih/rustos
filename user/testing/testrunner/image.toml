@@ -228,6 +228,10 @@ package = "pinctrl-spmi-gpio"
 path = "/pinctrl-spmi-gpio"
 
 [[programs]]
+package = "i2c-qup"
+path = "/i2c-qup"
+
+[[programs]]
 package = "platform"
 path = "/platform"
 

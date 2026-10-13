@@ -2169,6 +2169,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "i2c-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "platform-abi",
+]
+
+[[package]]
+name = "i2c-qup"
+version = "0.1.0"
+dependencies = [
+ "clocks-abi",
+ "component-startup",
+ "i2c-abi",
+ "ipc",
+ "kernel-objects",
+ "mmio",
+ "pins-abi",
+ "platform-abi",
+ "program-entry",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4837,6 +4863,8 @@ dependencies = [
  "filesystem-abi",
  "filesystem-client",
  "filesystem-server",
+ "i2c-abi",
+ "i2c-qup",
  "input-abi",
  "io",
  "ipc",
