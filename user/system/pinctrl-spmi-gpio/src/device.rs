@@ -2,12 +2,12 @@
 
 use component_startup::{AnyOf, Providers};
 use ipc::CallError;
-use kernel_objects::{Session, SessionTransport, Signal};
+use kernel_objects::{Session, SessionTransport};
 use pinctrl_spmi_gpio::{ControllerNode, Registers};
 use pins_abi::PinsError;
 use platform_abi::{CONTROLLER_KEY, Description};
 use runtime::Timeout;
-use spmi_abi::{DeviceError, Trigger, spmi, spmi_device};
+use spmi_abi::{DeviceError, Trigger, spmi, spmi_device, spmi_interrupt};
 
 const BUS_CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
 
@@ -54,21 +54,18 @@ impl Device {
         })
     }
 
-    pub(crate) fn irq(&self, block: u8) -> Result<Signal, PinsError> {
-        self.device
+    pub(crate) fn irq(
+        &self,
+        block: u8,
+    ) -> Result<spmi_interrupt::Client<SessionTransport>, PinsError> {
+        let interrupt = self
+            .device
             .block_irq(block, PIN_INTERRUPT_BIT, Trigger::Both)
-            .map(Signal::from)
-            .map_err(irq_refused)
-    }
+            .map_err(irq_refused)?;
 
-    pub(crate) fn ack(&self, block: u8) -> Result<(), PinsError> {
-        self.device
-            .block_ack(block, PIN_INTERRUPT_BIT)
-            .map_err(irq_refused)
-    }
-
-    pub(crate) fn release(&self, block: u8) {
-        let _ = self.device.block_release(block, PIN_INTERRUPT_BIT);
+        Ok(Session::<spmi_interrupt::Protocol>::from_session(interrupt)
+            .client()
+            .with_wait(BUS_CALL_TIMEOUT))
     }
 }
 
@@ -90,10 +87,11 @@ fn remote(error: CallError<DeviceError>) -> DeviceError {
     }
 }
 
-fn irq_refused(error: CallError<DeviceError>) -> PinsError {
+pub(crate) fn irq_refused(error: CallError<DeviceError>) -> PinsError {
     match remote(error) {
         DeviceError::Denied => PinsError::Denied,
         DeviceError::Unavailable => PinsError::NoSpace,
+        DeviceError::Busy => PinsError::Busy,
         _ => PinsError::Failed,
     }
 }

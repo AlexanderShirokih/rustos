@@ -157,5 +157,12 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
     }
 
     log_fmt(format_args!("{} devices", devices.len()));
-    Some((Bus { arbiter, devices }, line))
+    Some((
+        Bus {
+            arbiter,
+            devices,
+            departed_interrupts: Vec::new(),
+        },
+        line,
+    ))
 }

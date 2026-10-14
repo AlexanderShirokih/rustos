@@ -11,7 +11,7 @@ use kernel_objects::{Error, Session, SessionTransport, Signal};
 use mmio::Registers;
 use platform_abi::{Description, DeviceId};
 use runtime::Timeout;
-use spmi_abi::{DeviceError, SpmiError, Trigger, spmi, spmi_device};
+use spmi_abi::{DeviceError, SpmiError, Trigger, spmi, spmi_device, spmi_interrupt};
 use spmi_pmic_arb::{
     Arbiter, ArbiterNode, Interrupt, Peripheral, Refusal, SkipReason, Skipped, Span, Window,
 };
@@ -797,6 +797,17 @@ pub(crate) fn open(
     })
 }
 
+fn irq(
+    device: &spmi_device::Client<SessionTransport>,
+    resource: u16,
+) -> Result<spmi_interrupt::Client<SessionTransport>, CallError<DeviceError>> {
+    device.irq(resource).map(|session| {
+        Session::<spmi_interrupt::Protocol>::from_session(session)
+            .client()
+            .with_wait(SPMI_REPLY_TIMEOUT)
+    })
+}
+
 #[test_harness::test]
 fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
     if !platform_describes(PMIC_ARBITER) {
@@ -822,29 +833,38 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
     let outside = open(&bus, OUTSIDE_THE_BUS).map(drop);
     let past_blocks = clock.write(RTC_PAST_BLOCKS, 1, 0);
 
-    let alarm = clock.irq(0).map(Signal::from);
+    let interrupt = irq(&clock, 0).expect("alarm interrupt session");
+    let alarm = Signal::from(interrupt.signal().expect("alarm signal"));
     let set = clock
         .update(ALARM_CONTROL, ALARM_ENABLE, 0)
         .and_then(|()| clock.write(ALARM_WRITE, 4, second + ALARM_AHEAD))
         .and_then(|()| clock.update(ALARM_CONTROL, ALARM_ENABLE, ALARM_ENABLE));
-    let raised = alarm
-        .as_ref()
-        .is_ok_and(|alarm| set.is_ok() && alarm.wait(SIGNALED, ALARM_WAIT).is_ok());
+    let raised = set.is_ok() && alarm.wait(SIGNALED, ALARM_WAIT).is_ok();
 
     let cleared = clock
         .update(ALARM_CONTROL, ALARM_ENABLE, 0)
         .and_then(|()| clock.update(ALARM_CONTROL_2, ALARM_CLEAR, 0));
-    let acknowledged = clock.ack(0);
-    let lowered = alarm
+    let acknowledged = interrupt.ack();
+    let lowered = alarm.wait(SIGNALED, Timeout::from_millis(0));
+    let repeated = irq(&clock, 0).map(drop);
+
+    drop(interrupt);
+
+    let revoked_alone = await_revoked(|| alarm.wait(SIGNALED, Timeout::from_millis(0)));
+    let read_after = clock.read(RTC_READ, 4).map(drop);
+    let renewed = irq(&clock, 0);
+    let renewed_alarm = renewed
         .as_ref()
-        .map(|alarm| alarm.wait(SIGNALED, Timeout::from_millis(0)))
-        .ok();
+        .ok()
+        .and_then(|interrupt| interrupt.signal().ok())
+        .map(Signal::from);
 
     drop(clock);
 
-    let revoked = alarm
+    let revoked = renewed_alarm
         .as_ref()
-        .is_ok_and(|alarm| await_revoked(|| alarm.wait(SIGNALED, Timeout::from_millis(0))));
+        .is_some_and(|alarm| await_revoked(|| alarm.wait(SIGNALED, Timeout::from_millis(0))));
+    let departed = renewed.as_ref().ok().map(spmi_interrupt::Client::ack);
 
     let reopened = (0..POLL_ATTEMPTS).any(|_| match open(&bus, PMIC_CLOCK) {
         Err(CallError::Remote(SpmiError::Busy)) => {
@@ -859,13 +879,20 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
     test_harness::check_eq!(busy, Err(CallError::Remote(SpmiError::Busy)));
     test_harness::check_eq!(outside, Err(CallError::Remote(SpmiError::NoDevice)));
     test_harness::check_eq!(past_blocks, Err(CallError::Remote(DeviceError::OutOfRange)));
-    test_harness::check!(alarm.is_ok());
     test_harness::check_eq!(set, Ok(()));
     test_harness::check!(raised);
     test_harness::check_eq!(cleared, Ok(()));
     test_harness::check_eq!(acknowledged, Ok(()));
-    test_harness::check_eq!(lowered, Some(Err(Error::Syscall(SyscallError::Timeout))));
+    test_harness::check_eq!(lowered, Err(Error::Syscall(SyscallError::Timeout)));
+    test_harness::check_eq!(repeated, Err(CallError::Remote(DeviceError::Busy)));
+    test_harness::check!(revoked_alone);
+    test_harness::check_eq!(read_after, Ok(()));
+    test_harness::check!(renewed.is_ok());
     test_harness::check!(revoked);
+    test_harness::check_eq!(
+        departed,
+        Some(Err(CallError::Remote(DeviceError::Unavailable)))
+    );
     test_harness::check!(reopened);
 
     finish(composition);

@@ -18,7 +18,7 @@ use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, Platform
 use runtime::{
     FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_bound, spawn_owned,
 };
-use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
+use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device, spmi_interrupt};
 use syscall::SIGNALED;
 
 use crate::key::{DEBOUNCE_DEFAULT_US, Generation, Key, Transition, transition, usage};
@@ -68,6 +68,7 @@ struct Button {
     device: spmi_device::Client<SessionTransport>,
     inject: input_inject::Client<SessionTransport>,
     number: DeviceNumber,
+    interrupt: spmi_interrupt::Client<SessionTransport>,
     signal: Signal,
     status: u16,
     status_bit: u8,
@@ -253,7 +254,11 @@ impl Button {
         let configured = device.read(register(DBC_CTL), 1)?;
         let window = generation.debounce_window(u8::try_from(configured).unwrap_or_default());
 
-        let signal = Signal::from(device.irq(KEY_INTERRUPT)?);
+        let interrupt =
+            Session::<spmi_interrupt::Protocol>::from_session(device.irq(KEY_INTERRUPT)?)
+                .client()
+                .with_wait(CALL_TIMEOUT);
+        let signal = Signal::from(interrupt.signal()?);
 
         let mut keys = KeyList::new();
         keys.push(usage).map_err(|_| Failure::Descriptor)?;
@@ -267,6 +272,7 @@ impl Button {
             device,
             inject,
             number,
+            interrupt,
             signal,
             status: register(RT_STS),
             status_bit: key.status_bit,
@@ -295,7 +301,7 @@ impl Button {
                 }
             }
 
-            if let Err(error) = self.device.ack(KEY_INTERRUPT) {
+            if let Err(error) = self.interrupt.ack() {
                 stop(&Failure::Device(error));
             }
         }

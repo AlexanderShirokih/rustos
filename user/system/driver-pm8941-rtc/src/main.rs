@@ -22,7 +22,7 @@ use kernel_objects::{Port, Session, SessionTransport, Signal};
 use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
 use rtc_abi::rtc;
 use runtime::{FAILED_EXIT_CODE, Mutex, Timeout, exit, log_fmt, spawn_bound};
-use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device};
+use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device, spmi_interrupt};
 use syscall::SIGNALED;
 
 const COMPATIBLE: &str = "qcom,pm8941-rtc";
@@ -65,7 +65,12 @@ struct Shared {
 struct Clock {
     _bus: spmi::Client<SessionTransport>,
     device: spmi_device::Client<SessionTransport>,
-    alarm: Mutex<Option<Signal>>,
+    alarm: Mutex<Option<Alarm>>,
+}
+
+struct Alarm {
+    interrupt: spmi_interrupt::Client<SessionTransport>,
+    signal: Signal,
 }
 
 #[derive(Debug)]
@@ -198,12 +203,12 @@ impl Clock {
     }
 
     fn alarm(&self) -> Result<u64, Failure> {
-        let mut alarm = self.alarm.lock();
-        let signal = match alarm.take() {
-            Some(signal) => signal,
-            None => Signal::from(self.device.irq(ALARM_INTERRUPT)?),
+        let mut slot = self.alarm.lock();
+        let alarm = match slot.take() {
+            Some(alarm) => alarm,
+            None => self.interrupt()?,
         };
-        let signal = alarm.insert(signal);
+        let alarm = slot.insert(alarm);
 
         let target = (self.count()? + ALARM_SECONDS) & u64::from(u32::MAX);
         self.device.update(ALARM_CONTROL, ALARM_ENABLE, 0)?;
@@ -211,15 +216,26 @@ impl Clock {
         self.device
             .update(ALARM_CONTROL, ALARM_ENABLE, ALARM_ENABLE)?;
 
-        signal
+        alarm
+            .signal
             .wait(SIGNALED, ALARM_BUDGET)
             .map_err(|_| Failure::Silent)?;
 
         self.device.update(ALARM_CONTROL, ALARM_ENABLE, 0)?;
         self.device.update(ALARM_CONTROL_2, ALARM_CLEAR, 0)?;
-        self.device.ack(ALARM_INTERRUPT)?;
+        alarm.interrupt.ack()?;
 
         self.count()
+    }
+
+    fn interrupt(&self) -> Result<Alarm, Failure> {
+        let interrupt =
+            Session::<spmi_interrupt::Protocol>::from_session(self.device.irq(ALARM_INTERRUPT)?)
+                .client()
+                .with_wait(BUS_CALL_TIMEOUT);
+        let signal = Signal::from(interrupt.signal()?);
+
+        Ok(Alarm { interrupt, signal })
     }
 }
 

@@ -27,11 +27,6 @@ impl DeviceClaims {
         self.holders.contains_key(device)
     }
 
-    /// Возвращает `true`, если сессия со значком `badge` занимает хотя бы один узел.
-    pub fn holds_session(&self, badge: u64) -> bool {
-        self.holders.values().any(|holder| *holder == badge)
-    }
-
     /// Узлы, которые занимает сессия со значком `badge`.
     pub fn devices(&self, badge: u64) -> impl Iterator<Item = &DeviceId> + '_ {
         self.holders

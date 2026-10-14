@@ -13,15 +13,21 @@ use fdt_test::Token;
 use i2c_abi::{I2cError, TransferError, i2c, i2c_device};
 use i2c_qup::{Bus, Failure, Line, Operation, Resources};
 use ipc::{CallError, Protocol};
-use kernel_objects::Session;
+use kernel_objects::{Session, SessionTransport, Signal};
 use mmio::Registers;
+use pins_abi::{PinsError, device_pins, pins};
 use platform_abi::{Description, DeviceId};
 use runtime::Timeout;
+use syscall::SIGNALED;
 
 use crate::{
-    composition::{Import, compatibles, controller_provider, request},
+    composition::{Import, compatibles, controller_provider, pause, request},
+    pins::{PINS_REPLY_TIMEOUT, PINS_REQUIREMENT},
     register_model::{Access, RegisterFile},
-    rootkeeper_system::{finish, platform_describes, with_description, with_drivers},
+    rootkeeper_system::{
+        POLL_ATTEMPTS, POLL_INTERVAL, await_revoked, finish, platform_describes, with_description,
+        with_drivers,
+    },
 };
 
 const WINDOW: usize = 0;
@@ -113,18 +119,30 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
     };
 };
 
-const BOARD_TOUCHSCREEN: &str = "/soc@0/i2c@c175000/touchscreen@62";
+const BOARD_TOUCHSCREEN: &str = "/soc@0/i2c@c175000/touchscreen@1";
 const NT36672A_PARAMETERS: u8 = 0x78;
 const NT36672A_PARAMETERS_LENGTH: u16 = 15;
 const NT36672A_CHIP_ID: usize = 0x0e;
+const NT36672A_IRQ_TYPE: usize = 0x0b;
+const NT36672A_RESET_DELAY: Timeout = Timeout::from_millis(100);
+const RESET_LINE: &str = "reset";
+
+const NT36672A_IRQ_TYPE_TRIGGERS: [u32; 4] = [1, 2, 8, 4];
+const TOUCH_TIMEOUT: Timeout = Timeout::from_secs(10);
 
 const I2C_REQUIREMENT: &str = "i2c";
 const I2C_REPLY_TIMEOUT: Timeout = Timeout::from_secs(5);
 
-const I2C_IMPORTS: &[Import] = &[Import {
-    declaration: RequirementDeclaration::all(I2C_REQUIREMENT, i2c::Protocol::ID),
-    namespace_root: None,
-}];
+const BOARD_IMPORTS: &[Import] = &[
+    Import {
+        declaration: RequirementDeclaration::all(I2C_REQUIREMENT, i2c::Protocol::ID),
+        namespace_root: None,
+    },
+    Import {
+        declaration: RequirementDeclaration::all(PINS_REQUIREMENT, pins::Protocol::ID),
+        namespace_root: None,
+    },
+];
 
 #[derive(Clone)]
 enum Reply {
@@ -566,18 +584,47 @@ fn controller_compatibles(description: &Description<'_>, path: &str) -> Vec<Stri
 }
 
 #[test_harness::test]
-fn the_board_touchscreen_answers_its_parameters_or_no_ack() {
+fn the_board_touchscreen_out_of_reset_answers_its_parameters_and_lends_its_interrupt() {
     if !platform_describes(BOARD_TOUCHSCREEN) {
         test_harness::skip!("{} is not described", BOARD_TOUCHSCREEN);
     }
 
-    let controller =
-        with_description(|description| controller_compatibles(description, BOARD_TOUCHSCREEN));
+    let (controller, pins_controller, trigger) = with_description(|description| {
+        let touchscreen = id(BOARD_TOUCHSCREEN);
+        (
+            controller_compatibles(description, BOARD_TOUCHSCREEN),
+            crate::pins::controller_compatibles(description, BOARD_TOUCHSCREEN),
+            pins_abi::interrupt(description, &touchscreen, &touchscreen, 0)
+                .and_then(|record| record.cells.get(1).copied()),
+        )
+    });
 
     let composition = with_drivers();
-    let importer = composition.importer(I2C_IMPORTS);
+    let importer = composition.importer(BOARD_IMPORTS);
     let unfiltered =
         request::<i2c::Protocol>(importer.handle(), I2C_REQUIREMENT, I2C_REPLY_TIMEOUT).map(drop);
+
+    let pins = controller_provider::<pins::Protocol>(
+        importer.handle(),
+        PINS_REQUIREMENT,
+        &pins_controller,
+    )
+    .client()
+    .with_wait(PINS_REPLY_TIMEOUT);
+    let reset = pins
+        .open(id(BOARD_TOUCHSCREEN))
+        .map(|session| {
+            Session::<device_pins::Protocol>::from_session(session)
+                .client()
+                .with_wait(PINS_REPLY_TIMEOUT)
+        })
+        .expect("touchscreen pins session");
+    let line = reset
+        .output(id(BOARD_TOUCHSCREEN), RESET_LINE, 0, false)
+        .expect("reset line");
+    let reset_irq = reset.irq(line).map(drop);
+    let released = reset.active(line);
+    pause(NT36672A_RESET_DELAY);
 
     let bus = controller_provider::<i2c::Protocol>(importer.handle(), I2C_REQUIREMENT, &controller)
         .client()
@@ -595,16 +642,7 @@ fn the_board_touchscreen_answers_its_parameters_or_no_ack() {
                 .write_read(&[NT36672A_PARAMETERS], NT36672A_PARAMETERS_LENGTH)
                 .map(|buf| buf.0);
             match &read {
-                Ok(parameters) => {
-                    test_harness::check_eq!(
-                        parameters.len(),
-                        usize::from(NT36672A_PARAMETERS_LENGTH)
-                    );
-                    test_harness::report!(
-                        "touchscreen chip id {:#04x}",
-                        parameters.get(NT36672A_CHIP_ID).copied().unwrap_or(0)
-                    );
-                }
+                Ok(parameters) => check_touchscreen_parameters(parameters, trigger),
                 Err(CallError::Remote(TransferError::NoAck)) => {
                     test_harness::report!("touchscreen answered no ack");
                 }
@@ -614,5 +652,80 @@ fn the_board_touchscreen_answers_its_parameters_or_no_ack() {
         Err(error) => test_harness::check_eq!(Some(error), None),
     }
 
+    let interrupt = reset.interrupt(id(BOARD_TOUCHSCREEN), 0);
+    let signal = interrupt
+        .as_ref()
+        .ok()
+        .and_then(|interrupt| reset.irq(*interrupt).ok())
+        .map(Signal::from);
+    if let Some(signal) = &signal {
+        match signal.wait(SIGNALED, TOUCH_TIMEOUT) {
+            Ok(_) => {
+                test_harness::report!("touchscreen interrupt fired");
+            }
+            Err(error) => {
+                test_harness::report!("touchscreen interrupt quiet: {error:?}");
+            }
+        }
+    }
+    let acked = interrupt.as_ref().map(|interrupt| reset.ack(*interrupt));
+
+    let asserted = reset.set(line, true).and_then(|()| reset.active(line));
+    drop(reset);
+
+    let revoked = signal
+        .as_ref()
+        .is_some_and(|signal| await_revoked(|| signal.wait(SIGNALED, Timeout::from_millis(0))));
+    let reissued = reissued_interrupt(&pins);
+
+    test_harness::check_eq!(reset_irq, Err(CallError::Remote(PinsError::NotIssued)));
+    test_harness::check!(interrupt.is_ok());
+    test_harness::check!(signal.is_some());
+    test_harness::check!(trigger.is_some());
+    test_harness::check_eq!(acked, Ok(Ok(())));
+    test_harness::check_eq!(released, Ok(false));
+    test_harness::check_eq!(asserted, Ok(true));
+    test_harness::check!(revoked);
+    test_harness::check_eq!(reissued, Some(Ok(())));
+
     finish(composition);
+}
+
+fn check_touchscreen_parameters(parameters: &[u8], trigger: Option<u32>) {
+    test_harness::check_eq!(parameters.len(), usize::from(NT36672A_PARAMETERS_LENGTH));
+    test_harness::report!(
+        "touchscreen chip id {:#04x}",
+        parameters.get(NT36672A_CHIP_ID).copied().unwrap_or(0)
+    );
+    // Параметр - индекс условия `IRQ_TYPE_*` в таблице `nvt_ts_irq_type` Linux 6.16.
+    test_harness::check_eq!(
+        parameters
+            .get(NT36672A_IRQ_TYPE)
+            .and_then(|index| NT36672A_IRQ_TYPE_TRIGGERS.get(usize::from(*index)))
+            .copied(),
+        trigger
+    );
+}
+
+fn reissued_interrupt(
+    pins: &pins::Client<SessionTransport>,
+) -> Option<Result<(), CallError<PinsError>>> {
+    let session = (0..POLL_ATTEMPTS)
+        .find_map(|_| match pins.open(id(BOARD_TOUCHSCREEN)) {
+            Err(CallError::Remote(PinsError::Busy)) => {
+                pause(POLL_INTERVAL);
+                None
+            }
+            opened => Some(opened),
+        })?
+        .ok()?;
+    let reopened = Session::<device_pins::Protocol>::from_session(session)
+        .client()
+        .with_wait(PINS_REPLY_TIMEOUT);
+    Some(
+        reopened
+            .interrupt(id(BOARD_TOUCHSCREEN), 0)
+            .and_then(|interrupt| reopened.irq(interrupt))
+            .map(drop),
+    )
 }

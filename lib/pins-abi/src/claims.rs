@@ -37,11 +37,6 @@ impl Claims {
         pins.iter().any(|pin| self.pins.contains_key(pin))
     }
 
-    /// Возвращает `true`, если сессия со значком `badge` занимает узел.
-    pub fn holds_session(&self, badge: u64) -> bool {
-        self.devices.holds_session(badge)
-    }
-
     /// Занимает узел `device` и выводы `pins` сессией со значком `badge`.
     pub fn claim(&mut self, badge: u64, device: DeviceId, pins: Vec<Pin>) {
         self.devices.claim(badge, device);

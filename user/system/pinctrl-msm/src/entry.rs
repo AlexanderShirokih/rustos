@@ -4,13 +4,14 @@ use core::fmt;
 use component_startup::{
     SessionPort, StartupError, component_manifest, serve_export, whole_export,
 };
-use kernel_objects::SessionTransport;
+use kernel_objects::{IrqLine, SessionTransport};
 use pinctrl_msm::{SDM660, Tlmm};
-use pins_abi::{Claims, pins};
+use pins_abi::{Claims, Lines, pins};
 use platform_abi::{Description, MappedDescription, platform};
-use runtime::{log_fmt, log_line, spawn_bound};
+use runtime::{Mutex, Timeout, log_fmt, log_line, spawn_bound};
 
 use crate::{
+    hardware::Hardware,
     sessions::{Controller, serve},
     windows::Windows,
 };
@@ -31,8 +32,9 @@ enum Stopped {
     Description,
     Controller,
     ServicePort,
-    ServiceThread,
+    ServiceThreads,
     ServicePortClosed,
+    SummaryLine,
 }
 
 impl fmt::Display for Stopped {
@@ -42,8 +44,9 @@ impl fmt::Display for Stopped {
             Self::Description => formatter.write_str("platform description refused"),
             Self::Controller => formatter.write_str("controller refused"),
             Self::ServicePort => formatter.write_str("service port refused"),
-            Self::ServiceThread => formatter.write_str("service thread refused"),
+            Self::ServiceThreads => formatter.write_str("service threads refused"),
             Self::ServicePortClosed => formatter.write_str("service port closed"),
+            Self::SummaryLine => formatter.write_str("summary line lost"),
         }
     }
 }
@@ -62,30 +65,51 @@ fn run(requirements: PinsStartup) -> Result<(), Stopped> {
         .and_then(|region| MappedDescription::new(region).ok())
         .ok_or(Stopped::Description)?;
     let description = mapped.description().map_err(|_| Stopped::Description)?;
-    let tlmm = take(&platform, &description).ok_or(Stopped::Controller)?;
+    let (tlmm, line) = take(&platform, &description).ok_or(Stopped::Controller)?;
     let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
+
+    let hardware = Arc::new(Mutex::new(Hardware::new(tlmm)));
     let sessions = Arc::new(sessions);
+
+    let delivered = Arc::clone(&hardware);
+    let interrupts = spawn_bound(move || deliver(&line, &delivered));
 
     let exporter = requirements.parent;
     let port = Arc::clone(&sessions);
     let export = spawn_bound(move || serve_export::<pins::Protocol>(exporter, whole_export(&port)));
-    if export.is_err() {
-        return Err(Stopped::ServiceThread);
+
+    if interrupts.is_err() || export.is_err() {
+        return Err(Stopped::ServiceThreads);
     }
 
     let mut controller = Controller {
         description: &description,
-        tlmm,
+        hardware: &hardware,
         claims: Claims::new(),
+        lines: Lines::new(),
     };
     serve(&mut controller, &sessions);
     Err(Stopped::ServicePortClosed)
 }
 
+fn deliver(line: &IrqLine, hardware: &Mutex<Hardware>) -> Stopped {
+    let mut reported = false;
+    while line.wait(Timeout::INFINITE).is_ok() {
+        if !hardware.lock().deliver() && !reported {
+            log_line("summary interrupt without a fired pin");
+            reported = true;
+        }
+        if line.ack().is_err() {
+            break;
+        }
+    }
+    Stopped::SummaryLine
+}
+
 fn take(
     platform: &platform::Client<SessionTransport>,
     description: &Description<'_>,
-) -> Option<Tlmm<Windows>> {
+) -> Option<(Tlmm<Windows>, IrqLine)> {
     let Some(id) = description
         .compatible_devices(COMPATIBLE)
         .next()
@@ -100,7 +124,13 @@ fn take(
         .inspect_err(|error| log_fmt(format_args!("{} windows refused: {error:?}", id.as_str())))
         .ok()?;
 
-    Tlmm::new(windows, SDM660, description, id.clone())
+    let tlmm = Tlmm::new(windows, SDM660, description, id.clone())
         .inspect_err(|error| log_fmt(format_args!("{} refused: {error:?}", id.as_str())))
-        .ok()
+        .ok()?;
+    let line = platform
+        .irq(id.clone(), 0)
+        .inspect_err(|error| log_fmt(format_args!("{} line refused: {error:?}", id.as_str())))
+        .ok()?;
+
+    Some((tlmm, IrqLine::from(line)))
 }

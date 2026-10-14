@@ -26,7 +26,7 @@ use runtime::{
 use syscall::{SIGNALED, SyscallError, WaitItem};
 
 const COMPATIBLE: &str = "gpio-keys";
-const LINE_PROPERTY: &str = "gpios";
+const UNNAMED_LINE: &str = "";
 
 #[derive(Debug)]
 pub(crate) enum Stopped {
@@ -256,7 +256,7 @@ impl Buttons {
 
 impl Line {
     fn bind(device: &device_pins::Client<SessionTransport>, key: &Key) -> Result<Self, Failure> {
-        let number = device.input(key.node.clone(), LINE_PROPERTY, 0)?;
+        let number = device.input(key.node.clone(), UNNAMED_LINE, 0)?;
         let signal = Signal::from(device.irq(number)?);
 
         Ok(Self {

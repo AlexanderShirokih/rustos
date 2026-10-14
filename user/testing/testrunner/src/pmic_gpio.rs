@@ -343,16 +343,15 @@ fn record(blob: &[u8], node: &str) -> Result<(), PinsError> {
     let description = Description::new(blob, 0).expect("tree parses");
     let session = device("/keys");
     let node = device(node);
-    line(&description, &session, &node, "gpios", 0).map(drop)
+    line(&description, &session, &node, "", 0).map(drop)
 }
 
 #[test_harness::test]
-fn a_line_outside_the_session_or_the_controller_is_refused() {
+fn a_line_with_unknown_flags_or_of_another_controller_is_unsupported() {
     let blob = fdt_test::build(TREE);
 
     test_harness::check_eq!(record(&blob, "/keys/odd"), Err(PinsError::Unsupported));
     test_harness::check_eq!(record(&blob, "/keys/tlmm"), Err(PinsError::Unsupported));
-    test_harness::check_eq!(record(&blob, "/key"), Err(PinsError::NoDevice));
 }
 
 #[test_harness::test]
@@ -368,8 +367,8 @@ fn a_line_becomes_an_input_and_reads_its_level_through_the_polarity() {
     model.set(0xC6, MODE, 0x10);
     let mut gpio = Gpio::new(&model);
 
-    let low = line(&description, &session, &up, "gpios", 0).expect("active-low line");
-    let high = line(&description, &session, &down, "gpios", 0).expect("active-high line");
+    let low = line(&description, &session, &up, "", 0).expect("active-low line");
+    let high = line(&description, &session, &down, "", 0).expect("active-high line");
     let blocks = [low.block, high.block];
     let input = gpio.input(low.block);
     let mode = model.get(0xC6, MODE);
@@ -437,9 +436,11 @@ fn the_board_volume_up_line_reads_released_and_its_signal_ends_with_the_session(
                 .with_wait(PINS_REPLY_TIMEOUT)
         })
         .expect("gpio-keys session");
-    let line = keys.input(device(BOARD_VOLUME_UP), "gpios", 0);
+    let line = keys.input(device(BOARD_VOLUME_UP), "", 0);
     let active = line.as_ref().map(|line| keys.active(*line));
-    let outside = keys.input(device(BOARD_OUTSIDE), "id-gpios", 0);
+    let output = keys.output(device(BOARD_VOLUME_UP), "", 0, false);
+    let outside = keys.input(device(BOARD_OUTSIDE), "id", 0);
+    let interrupt = keys.interrupt(device(BOARD_VOLUME_UP), 0);
     let signal = line
         .as_ref()
         .ok()
@@ -462,7 +463,9 @@ fn the_board_volume_up_line_reads_released_and_its_signal_ends_with_the_session(
     test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));
     test_harness::check!(line.is_ok());
     test_harness::check_eq!(active, Ok(Ok(false)));
+    test_harness::check_eq!(output, Err(CallError::Remote(PinsError::Unsupported)));
     test_harness::check_eq!(outside, Err(CallError::Remote(PinsError::NoDevice)));
+    test_harness::check_eq!(interrupt, Err(CallError::Remote(PinsError::NoDevice)));
     test_harness::check!(signal.is_some());
     test_harness::check!(revoked);
     test_harness::check!(reopened);

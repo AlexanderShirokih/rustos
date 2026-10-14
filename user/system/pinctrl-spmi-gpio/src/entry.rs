@@ -1,10 +1,10 @@
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
 use component_startup::{
     SessionPort, StartupError, component_manifest, serve_export, whole_export,
 };
-use pins_abi::{Claims, pins};
+use pins_abi::{Claims, Lines, pins};
 use platform_abi::{MappedDescription, platform};
 use runtime::{Mutex, spawn_bound};
 use spmi_abi::spmi;
@@ -72,7 +72,7 @@ fn run(requirements: PinsStartup) -> Result<(), Stopped> {
         spmi: &requirements.spmi,
         gpios: Vec::new(),
         claims: Claims::new(),
-        sessions: BTreeMap::new(),
+        lines: Lines::new(),
     });
     serve(&driver, &sessions);
     Err(Stopped::ServicePortClosed)

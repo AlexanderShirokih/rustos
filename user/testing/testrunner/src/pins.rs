@@ -1,5 +1,5 @@
-//! Применение состояния `default` контроллером TLMM `pinctrl-msm` на модели регистров и
-//! клиент `Pins` контроллера платы.
+//! Применение состояния `default`, линии и их прерывания контроллера TLMM `pinctrl-msm` на
+//! модели регистров и клиент `Pins` контроллера платы.
 
 use alloc::{string::String, vec::Vec};
 
@@ -7,7 +7,7 @@ use component_abi::{RequirementDeclaration, SessionError};
 use fdt_test::Token;
 use ipc::{CallError, Protocol};
 use mmio::Registers;
-use pinctrl_msm::{PinGroup, Tile, Tlmm};
+use pinctrl_msm::{Line, PinGroup, Tile, Tlmm};
 use pins_abi::{Claims, PinsError, pins};
 use platform_abi::Description;
 use runtime::Timeout;
@@ -26,12 +26,22 @@ const WINDOW_SIZE: usize = 0x40_0000;
 
 const PIN_STRIDE: usize = 0x1000;
 const IO: usize = 0x4;
+const INTR_CFG: usize = 0x8;
+const INTR_STATUS: usize = 0xc;
 
+const PULL_UP: u32 = 3;
 const FUNCTION_SHIFT: u32 = 2;
 const DRIVE_SHIFT: u32 = 6;
 const OE: u32 = 1 << 9;
 const IO_IN: u32 = 1 << 0;
 const IO_OUT: u32 = 1 << 1;
+
+const INTR_ENABLE: u32 = 1 << 0;
+const INTR_POLARITY: u32 = 1 << 1;
+const DETECTION_SHIFT: u32 = 2;
+const RAW_STATUS_EN: u32 = 1 << 4;
+const TARGET_APPS: u32 = 3 << 5;
+const INTR_LATCHED: u32 = 1 << 0;
 
 const I2C_HOST: &str = "/soc@0/i2c@a000";
 const SPI_HOST: &str = "/soc@0/spi@b000";
@@ -47,6 +57,7 @@ const UNNAMED_STATE_HOST: &str = "/soc@0/i2c@17000";
 const GPIO_HOST: &str = "/soc@0/led@18000";
 const CONTAINER_HOST: &str = "/soc@0/spi@19000";
 const CONTAINER_PROPERTY_HOST: &str = "/soc@0/spi@1a000";
+const PANEL: &str = "/soc@0/panel@1b000";
 
 const GROUPS: &[PinGroup] = &[
     group(Tile::South, ["", "uart", "", "", "", "", "", "", ""]),
@@ -63,6 +74,9 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
             compatible = "test,pinctrl";
             "reg-names" = "north", "south", "center";
             "gpio-reserved-ranges" = <8 4>;
+            #gpio-cells = <2>;
+            #interrupt-cells = <2>;
+            phandle = <30>;
             i2c1-default {
                 pins = "gpio2", "gpio3";
                 function = "i2c";
@@ -132,6 +146,9 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
         };
         gpio@c000 {
             compatible = "qcom,pm660-gpio";
+            #gpio-cells = <2>;
+            #interrupt-cells = <2>;
+            phandle = <31>;
             foreign-pins {
                 pins = "gpio1";
                 function = "normal";
@@ -192,6 +209,15 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
         spi@1a000 {
             "pinctrl-names" = "default";
             "pinctrl-0" = <14>;
+        };
+        panel@1b000 {
+            reset-gpios = <30 5 1>;
+            enable-gpios = <30 2 0>;
+            foreign-gpios = <31 1 0>;
+            odd-gpios = <30 5 2>;
+            protected-gpios = <30 9 0>;
+            beyond-gpios = <30 40 0>;
+            interrupts-extended = <30 5 1 30 5 2 30 5 3 30 5 4 30 5 8 30 5 0 30 9 1 30 40 1 31 1 1>;
         };
     };
 };
@@ -277,6 +303,17 @@ impl<'a> Controller<'a> {
     fn release(&mut self, badge: u64) {
         self.claims.release(badge);
     }
+
+    fn line(&self, name: &str) -> Result<Line, PinsError> {
+        let panel = device(PANEL);
+        self.tlmm.line(&self.description, &panel, &panel, name, 0)
+    }
+
+    fn interrupt(&self, index: u8) -> Result<Line, PinsError> {
+        let panel = device(PANEL);
+        self.tlmm
+            .interrupt(&self.description, &panel, &panel, index)
+    }
 }
 
 const fn group(tile: Tile, functions: [&'static str; 9]) -> PinGroup {
@@ -291,6 +328,14 @@ const fn io(pin: usize) -> usize {
     pin * PIN_STRIDE + IO
 }
 
+const fn intr_cfg(pin: usize) -> usize {
+    pin * PIN_STRIDE + INTR_CFG
+}
+
+const fn intr_status(pin: usize) -> usize {
+    pin * PIN_STRIDE + INTR_STATUS
+}
+
 fn stores(accesses: &[Access]) -> Vec<(usize, usize)> {
     accesses
         .iter()
@@ -299,6 +344,31 @@ fn stores(accesses: &[Access]) -> Vec<(usize, usize)> {
             Access::Load { .. } => None,
         })
         .collect()
+}
+
+fn armed(pin: usize, trigger: u32) -> Vec<Access> {
+    let cfg = TARGET_APPS | RAW_STATUS_EN | trigger;
+    Vec::from([
+        Access::Load {
+            window: SOUTH_WINDOW,
+            offset: intr_cfg(pin),
+        },
+        Access::Store {
+            window: SOUTH_WINDOW,
+            offset: intr_cfg(pin),
+            value: cfg,
+        },
+        Access::Store {
+            window: SOUTH_WINDOW,
+            offset: intr_status(pin),
+            value: 0,
+        },
+        Access::Store {
+            window: SOUTH_WINDOW,
+            offset: intr_cfg(pin),
+            value: cfg | INTR_ENABLE,
+        },
+    ])
 }
 
 #[test_harness::test]
@@ -448,6 +518,276 @@ fn a_driven_pin_holds_its_input_level_before_it_becomes_gpio() {
             },
         ]
     );
+}
+
+#[test_harness::test]
+fn an_output_writes_its_level_before_one_ctl_write_with_gpio_and_output_enable() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    registers.set(
+        SOUTH_WINDOW,
+        ctl(5),
+        1 << FUNCTION_SHIFT | 7 << DRIVE_SHIFT | PULL_UP,
+    );
+    let controller = Controller::new(&blob, &registers);
+
+    let line = controller.line("reset").expect("active-low line");
+    controller.tlmm.output(&line, false);
+
+    test_harness::check_eq!(
+        registers.take_accesses(),
+        [
+            Access::Load {
+                window: SOUTH_WINDOW,
+                offset: io(5),
+            },
+            Access::Store {
+                window: SOUTH_WINDOW,
+                offset: io(5),
+                value: IO_OUT,
+            },
+            Access::Load {
+                window: SOUTH_WINDOW,
+                offset: ctl(5),
+            },
+            Access::Store {
+                window: SOUTH_WINDOW,
+                offset: ctl(5),
+                value: OE | 7 << DRIVE_SHIFT | PULL_UP,
+            },
+        ]
+    );
+}
+
+#[test_harness::test]
+fn an_input_leaves_another_function_for_gpio_and_keeps_its_pull_and_drive() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    registers.set(
+        SOUTH_WINDOW,
+        ctl(2),
+        OE | 3 << FUNCTION_SHIFT | 7 << DRIVE_SHIFT | PULL_UP,
+    );
+    let controller = Controller::new(&blob, &registers);
+
+    let line = controller.line("enable").expect("active-high line");
+    controller.tlmm.input(&line);
+
+    test_harness::check_eq!(stores(&registers.take_accesses()), [(SOUTH_WINDOW, ctl(2))]);
+    test_harness::check_eq!(
+        registers.get(SOUTH_WINDOW, ctl(2)),
+        7 << DRIVE_SHIFT | PULL_UP
+    );
+}
+
+#[test_harness::test]
+fn an_active_low_line_reads_and_drives_its_level_inverted() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    let controller = Controller::new(&blob, &registers);
+    let line = controller.line("reset").expect("active-low line");
+
+    registers.set(SOUTH_WINDOW, io(5), IO_IN);
+    let high = controller.tlmm.active(&line);
+    registers.set(SOUTH_WINDOW, io(5), 0);
+    let low = controller.tlmm.active(&line);
+    controller.tlmm.set(&line, true);
+    let asserted = registers.get(SOUTH_WINDOW, io(5));
+    controller.tlmm.set(&line, false);
+    let released = registers.get(SOUTH_WINDOW, io(5));
+
+    test_harness::check_eq!([high, low], [false, true]);
+    test_harness::check_eq!([asserted, released], [0, IO_OUT]);
+}
+
+#[test_harness::test]
+fn a_refused_line_reads_and_writes_no_register() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    let controller = Controller::new(&blob, &registers);
+    let outside = controller.tlmm.line(
+        &controller.description,
+        &device(PANEL),
+        &device(I2C_HOST),
+        "",
+        0,
+    );
+
+    let refusals =
+        ["foreign", "odd", "protected", "beyond"].map(|name| controller.line(name).map(drop));
+
+    test_harness::check_eq!(outside.map(drop), Err(PinsError::NoDevice));
+    test_harness::check_eq!(
+        refusals,
+        [
+            Err(PinsError::Unsupported),
+            Err(PinsError::Unsupported),
+            Err(PinsError::Denied),
+            Err(PinsError::Unsupported),
+        ]
+    );
+    test_harness::check_eq!(registers.take_accesses(), []);
+}
+
+#[test_harness::test]
+fn an_enabled_interrupt_takes_its_trigger_target_and_raw_status_then_clears_its_latch() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    let controller = Controller::new(&blob, &registers);
+    let rising = 1 << DETECTION_SHIFT | INTR_POLARITY;
+    let falling = 2 << DETECTION_SHIFT | INTR_POLARITY;
+    let both = 3 << DETECTION_SHIFT | INTR_POLARITY;
+
+    let triggers = [rising, falling, both, INTR_POLARITY, 0];
+
+    let configured: Vec<_> = (0..5)
+        .map(|index| {
+            registers.set(SOUTH_WINDOW, intr_cfg(5), INTR_ENABLE | both);
+            let line = controller.interrupt(index).expect("interrupt line");
+            controller.tlmm.enable_irq(&line);
+            registers.take_accesses()
+        })
+        .collect();
+    let input = controller.line("enable").expect("input line");
+    controller.tlmm.enable_irq(&input);
+    let input_accesses = registers.take_accesses();
+
+    test_harness::check_eq!(
+        configured,
+        triggers.map(|trigger| armed(5, trigger)).to_vec()
+    );
+    test_harness::check_eq!(input_accesses, armed(2, both));
+}
+
+#[test_harness::test]
+fn a_held_edge_keeps_raw_status_after_its_latch_and_a_held_level_drops_it_first() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    let controller = Controller::new(&blob, &registers);
+    let edge = controller.interrupt(0).expect("rising line");
+    let level = controller.interrupt(3).expect("high line");
+    let rising = TARGET_APPS | RAW_STATUS_EN | 1 << DETECTION_SHIFT | INTR_POLARITY;
+    let high = TARGET_APPS | RAW_STATUS_EN | INTR_POLARITY;
+
+    registers.set(SOUTH_WINDOW, intr_cfg(5), rising | INTR_ENABLE);
+    controller.tlmm.hold_irq(&edge);
+    let edge_accesses = registers.take_accesses();
+    registers.set(SOUTH_WINDOW, intr_cfg(5), high | INTR_ENABLE);
+    controller.tlmm.hold_irq(&level);
+    let level_accesses = registers.take_accesses();
+
+    test_harness::check_eq!(
+        edge_accesses,
+        [
+            Access::Store {
+                window: SOUTH_WINDOW,
+                offset: intr_status(5),
+                value: 0,
+            },
+            Access::Load {
+                window: SOUTH_WINDOW,
+                offset: intr_cfg(5),
+            },
+            Access::Store {
+                window: SOUTH_WINDOW,
+                offset: intr_cfg(5),
+                value: rising,
+            },
+        ]
+    );
+    test_harness::check_eq!(
+        level_accesses,
+        [
+            Access::Load {
+                window: SOUTH_WINDOW,
+                offset: intr_cfg(5),
+            },
+            Access::Store {
+                window: SOUTH_WINDOW,
+                offset: intr_cfg(5),
+                value: high & !RAW_STATUS_EN,
+            },
+            Access::Store {
+                window: SOUTH_WINDOW,
+                offset: intr_status(5),
+                value: 0,
+            },
+        ]
+    );
+}
+
+#[test_harness::test]
+fn an_ack_enables_a_held_level_and_leaves_its_latch() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    let controller = Controller::new(&blob, &registers);
+    let level = controller.interrupt(3).expect("high line");
+    registers.set(SOUTH_WINDOW, intr_cfg(5), TARGET_APPS | INTR_POLARITY);
+
+    controller.tlmm.ack_irq(&level);
+
+    test_harness::check_eq!(
+        stores(&registers.take_accesses()),
+        [(SOUTH_WINDOW, intr_cfg(5))]
+    );
+    test_harness::check_eq!(
+        registers.get(SOUTH_WINDOW, intr_cfg(5)),
+        TARGET_APPS | RAW_STATUS_EN | INTR_POLARITY | INTR_ENABLE
+    );
+}
+
+#[test_harness::test]
+fn a_pin_fires_only_while_latched_with_its_interrupt_enabled() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    let controller = Controller::new(&blob, &registers);
+    let edge = controller.interrupt(0).expect("rising line");
+    registers.set(SOUTH_WINDOW, intr_status(5), INTR_LATCHED);
+
+    registers.set(SOUTH_WINDOW, intr_cfg(5), RAW_STATUS_EN);
+    let held = controller.tlmm.irq_fired(&edge);
+    let held_accesses = registers.take_accesses();
+    registers.set(SOUTH_WINDOW, intr_cfg(5), RAW_STATUS_EN | INTR_ENABLE);
+    let enabled = controller.tlmm.irq_fired(&edge);
+    registers.set(SOUTH_WINDOW, intr_status(5), 0);
+    let unlatched = controller.tlmm.irq_fired(&edge);
+
+    test_harness::check_eq!([held, enabled, unlatched], [false, true, false]);
+    test_harness::check_eq!(
+        held_accesses,
+        [Access::Load {
+            window: SOUTH_WINDOW,
+            offset: intr_cfg(5),
+        }]
+    );
+}
+
+#[test_harness::test]
+fn a_refused_interrupt_record_reads_and_writes_no_register() {
+    let blob = fdt_test::build(TREE);
+    let registers = RegisterFile::new();
+    let controller = Controller::new(&blob, &registers);
+    let outside = controller.tlmm.interrupt(
+        &controller.description,
+        &device(PANEL),
+        &device(I2C_HOST),
+        0,
+    );
+
+    let refusals = [5, 6, 7, 8, 9].map(|index| controller.interrupt(index).map(drop));
+
+    test_harness::check_eq!(outside.map(drop), Err(PinsError::NoDevice));
+    test_harness::check_eq!(
+        refusals,
+        [
+            Err(PinsError::Unsupported),
+            Err(PinsError::Denied),
+            Err(PinsError::Unsupported),
+            Err(PinsError::Unsupported),
+            Err(PinsError::NoDevice),
+        ]
+    );
+    test_harness::check_eq!(registers.take_accesses(), []);
 }
 
 pub(crate) fn controller_compatibles(description: &Description<'_>, path: &str) -> Vec<String> {

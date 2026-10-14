@@ -1,9 +1,12 @@
-//! Применение состояния `default` узла к выводам контроллера TLMM.
+//! Применение состояния `default` узла, линии выводов контроллера TLMM и их прерывания.
 
 use alloc::vec::Vec;
 
 use mmio::Registers;
-use pins_abi::{Claims, Pin, PinsError, check_state, default_states, pin_names, pin_number, sets};
+use pins_abi::{
+    Claims, GPIO_ACTIVE_LOW, Pin, PinsError, check_state, default_states, pin_names, pin_number,
+    sets,
+};
 use platform_abi::{Description, DeviceId};
 
 use crate::{
@@ -14,6 +17,8 @@ use crate::{
 const PIN_STRIDE: usize = 0x1000;
 const CTL: usize = 0x0;
 const IO: usize = 0x4;
+const INTR_CFG: usize = 0x8;
+const INTR_STATUS: usize = 0xc;
 
 const PULL_SHIFT: u32 = 0;
 const PULL_MASK: u32 = 0x3;
@@ -25,6 +30,17 @@ const OE: u32 = 1 << 9;
 
 const IO_IN: u32 = 1 << 0;
 const IO_OUT: u32 = 1 << 1;
+
+const INTR_ENABLE: u32 = 1 << 0;
+const INTR_POLARITY: u32 = 1 << 1;
+const DETECTION_SHIFT: u32 = 2;
+const DETECTION_MASK: u32 = 0x3;
+const RAW_STATUS_EN: u32 = 1 << 4;
+const TARGET_SHIFT: u32 = 5;
+const TARGET_MASK: u32 = 0x7;
+const TARGET_APPS: u32 = 3;
+
+const INTR_LATCHED: u32 = 1 << 0;
 
 const RESERVED_RANGES: &str = "gpio-reserved-ranges";
 
@@ -52,6 +68,25 @@ pub struct Plan {
     device: DeviceId,
     settings: Vec<Setting>,
     pins: Vec<Pin>,
+}
+
+/// Линия записи `gpios` либо `interrupts-extended` под контроллером TLMM.
+#[derive(Clone)]
+pub struct Line {
+    /// Вывод линии.
+    pub pin: Pin,
+    tile: Tile,
+    active_low: bool,
+    trigger: Trigger,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    Rising,
+    Falling,
+    Both,
+    High,
+    Low,
 }
 
 impl<R: Registers<Tile>> Tlmm<R> {
@@ -195,6 +230,181 @@ impl<R: Registers<Tile>> Tlmm<R> {
         }
     }
 
+    /// Линия `index` с именем `name` узла `node` для сессии узла `session`. Ячейки
+    /// записи - номер вывода от 0 и флаги. Прерывание линии срабатывает при подъёме и спаде
+    /// уровня. Регистры не читаются и не пишутся.
+    ///
+    /// Отказы в порядке проверки:
+    /// - [`PinsError::NoDevice`] - `node` не узел сессии и не его потомок либо в описании нет
+    ///   записи линии;
+    /// - [`PinsError::Unsupported`] - запись называет другой контроллер, число ячеек кроме двух
+    ///   либо флаги кроме `GPIO_ACTIVE_LOW`;
+    /// - [`PinsError::Denied`] - вывод закрыт;
+    /// - [`PinsError::Unsupported`] - вывод вне таблицы.
+    pub fn line(
+        &self,
+        description: &Description<'_>,
+        session: &DeviceId,
+        node: &DeviceId,
+        name: &str,
+        index: u8,
+    ) -> Result<Line, PinsError> {
+        let record =
+            pins_abi::line(description, session, node, name, index).ok_or(PinsError::NoDevice)?;
+        let [pin, flags] = record.cells[..] else {
+            return Err(PinsError::Unsupported);
+        };
+        if record.controller != self.id || flags & !GPIO_ACTIVE_LOW != 0 {
+            return Err(PinsError::Unsupported);
+        }
+
+        self.pin_line(pin, flags & GPIO_ACTIVE_LOW != 0, Trigger::Both)
+    }
+
+    /// Линия записи `index` свойства `interrupts-extended` узла `node` для сессии узла
+    /// `session`. Ячейки записи - номер вывода от 0 и условие срабатывания `IRQ_TYPE_*`.
+    /// Регистры не читаются и не пишутся.
+    ///
+    /// Отказы в порядке проверки:
+    /// - [`PinsError::NoDevice`] - `node` не узел сессии и не его потомок либо в описании нет
+    ///   записи;
+    /// - [`PinsError::Unsupported`] - запись называет другой контроллер, число ячеек кроме двух
+    ///   либо условие кроме подъёма, спада, обоих фронтов, высокого и низкого уровня;
+    /// - [`PinsError::Denied`] - вывод закрыт;
+    /// - [`PinsError::Unsupported`] - вывод вне таблицы.
+    pub fn interrupt(
+        &self,
+        description: &Description<'_>,
+        session: &DeviceId,
+        node: &DeviceId,
+        index: u8,
+    ) -> Result<Line, PinsError> {
+        let record =
+            pins_abi::interrupt(description, session, node, index).ok_or(PinsError::NoDevice)?;
+        let [pin, trigger] = record.cells[..] else {
+            return Err(PinsError::Unsupported);
+        };
+        if record.controller != self.id {
+            return Err(PinsError::Unsupported);
+        }
+        let trigger = Trigger::from_cell(trigger).ok_or(PinsError::Unsupported)?;
+
+        self.pin_line(pin, false, trigger)
+    }
+
+    /// Переводит вывод линии в функцию `gpio` и снимает разрешение выхода одной записью `CTL`.
+    pub fn input(&self, line: &Line) {
+        let ctl = self.load(line, CTL);
+        self.store(line, CTL, gpio_function(ctl) & !OE);
+    }
+
+    /// Записывает в `IO` выходной уровень `active` линии, затем одной записью `CTL` переводит
+    /// вывод в функцию `gpio` с разрешением выхода.
+    pub fn output(&self, line: &Line, active: bool) {
+        self.set(line, active);
+        let ctl = self.load(line, CTL);
+        self.store(line, CTL, gpio_function(ctl) | OE);
+    }
+
+    /// Возвращает `true`, если входной уровень вывода линии - её активный уровень.
+    pub fn active(&self, line: &Line) -> bool {
+        (self.load(line, IO) & IO_IN != 0) != line.active_low
+    }
+
+    /// Выставляет в `IO` высокий выходной уровень вывода линии, если `active` не совпадает с
+    /// флагом `GPIO_ACTIVE_LOW` записи, и низкий уровень иначе.
+    pub fn set(&self, line: &Line, active: bool) {
+        let io = self.load(line, IO);
+        let io = if active == line.active_low {
+            io & !IO_OUT
+        } else {
+            io | IO_OUT
+        };
+        self.store(line, IO, io);
+    }
+
+    /// Настраивает прерывание вывода линии по её условию срабатывания с получателем -
+    /// процессором приложений, снимает его защёлку и затем разрешает прерывание.
+    pub fn enable_irq(&self, line: &Line) {
+        let cfg = self.load(line, INTR_CFG);
+        let fields = INTR_ENABLE
+            | INTR_POLARITY
+            | DETECTION_MASK << DETECTION_SHIFT
+            | TARGET_MASK << TARGET_SHIFT;
+        let cfg = cfg & !fields | TARGET_APPS << TARGET_SHIFT | RAW_STATUS_EN | line.trigger.cfg();
+
+        self.store(line, INTR_CFG, cfg);
+        self.store(line, INTR_STATUS, 0);
+        self.store(line, INTR_CFG, cfg | INTR_ENABLE);
+    }
+
+    /// Возвращает `true`, если прерывание вывода линии разрешено и защёлкнуто. Защёлку
+    /// читает только у разрешённого прерывания.
+    pub fn irq_fired(&self, line: &Line) -> bool {
+        self.load(line, INTR_CFG) & INTR_ENABLE != 0
+            && self.load(line, INTR_STATUS) & INTR_LATCHED != 0
+    }
+
+    /// Снимает защёлку сработавшего прерывания вывода линии и запрещает его до
+    /// [`Tlmm::ack_irq`]. Фронт после снятия защёлки срабатывает после подтверждения, уровень
+    /// до подтверждения не защёлкивается.
+    pub fn hold_irq(&self, line: &Line) {
+        if line.trigger.is_level() {
+            self.disable_irq(line);
+            self.store(line, INTR_STATUS, 0);
+        } else {
+            self.store(line, INTR_STATUS, 0);
+            self.disable_irq(line);
+        }
+    }
+
+    /// Снова разрешает прерывание вывода линии и защёлкивание уровня, сохраняя защёлку.
+    pub fn ack_irq(&self, line: &Line) {
+        let cfg = self.load(line, INTR_CFG);
+        self.store(line, INTR_CFG, cfg | RAW_STATUS_EN | INTR_ENABLE);
+    }
+
+    /// Запрещает прерывание вывода линии. У прерывания по уровню также запрещает защёлкивание
+    /// уровня.
+    pub fn disable_irq(&self, line: &Line) {
+        let mut cfg = self.load(line, INTR_CFG) & !INTR_ENABLE;
+        if line.trigger.is_level() {
+            cfg &= !RAW_STATUS_EN;
+        }
+        self.store(line, INTR_CFG, cfg);
+    }
+
+    fn pin_line(&self, pin: u32, active_low: bool, trigger: Trigger) -> Result<Line, PinsError> {
+        let pin = u16::try_from(pin).map_err(|_| PinsError::Unsupported)?;
+        if self.is_reserved(pin) {
+            return Err(PinsError::Denied);
+        }
+        let group = self
+            .groups
+            .get(usize::from(pin))
+            .ok_or(PinsError::Unsupported)?;
+
+        Ok(Line {
+            pin: Pin {
+                controller: self.id.clone(),
+                number: pin,
+            },
+            tile: group.tile,
+            active_low,
+            trigger,
+        })
+    }
+
+    fn load(&self, line: &Line, register: usize) -> u32 {
+        let base = usize::from(line.pin.number) * PIN_STRIDE;
+        self.registers.load(line.tile, base + register)
+    }
+
+    fn store(&self, line: &Line, register: usize, value: u32) {
+        let base = usize::from(line.pin.number) * PIN_STRIDE;
+        self.registers.store(line.tile, base + register, value);
+    }
+
     fn is_reserved(&self, pin: u16) -> bool {
         let pin = u32::from(pin);
         self.reserved
@@ -208,6 +418,42 @@ impl Plan {
     pub fn claim(self, claims: &mut Claims, badge: u64) {
         claims.claim(badge, self.device, self.pins);
     }
+}
+
+impl Trigger {
+    const fn from_cell(cell: u32) -> Option<Self> {
+        match cell {
+            1 => Some(Self::Rising),
+            2 => Some(Self::Falling),
+            3 => Some(Self::Both),
+            4 => Some(Self::High),
+            8 => Some(Self::Low),
+            _ => None,
+        }
+    }
+
+    const fn cfg(self) -> u32 {
+        match self {
+            Self::Rising => 1 << DETECTION_SHIFT | INTR_POLARITY,
+            Self::Falling => 2 << DETECTION_SHIFT | INTR_POLARITY,
+            Self::Both => 3 << DETECTION_SHIFT | INTR_POLARITY,
+            Self::High => INTR_POLARITY,
+            Self::Low => 0,
+        }
+    }
+
+    const fn is_level(self) -> bool {
+        matches!(self, Self::High | Self::Low)
+    }
+}
+
+fn gpio_function(ctl: u32) -> u32 {
+    with_field(
+        ctl,
+        FUNCTION_SHIFT,
+        FUNCTION_MASK,
+        Some(GPIO_FUNCTION_NUMBER),
+    )
 }
 
 fn with_field(register: u32, shift: u32, mask: u32, value: Option<u32>) -> u32 {

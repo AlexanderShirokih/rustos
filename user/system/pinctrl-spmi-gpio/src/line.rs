@@ -1,11 +1,9 @@
 //! Линия записи `gpios` под контроллером GPIO PMIC.
 
-use pins_abi::{Pin, PinsError};
+use pins_abi::{GPIO_ACTIVE_LOW, Pin, PinsError};
 use platform_abi::{Description, DeviceId};
 
 use crate::controller::ControllerNode;
-
-const ACTIVE_LOW: u32 = 1 << 0;
 
 /// Линия-вход: вывод контроллера и полярность записи.
 #[derive(Clone, PartialEq, Eq)]
@@ -35,7 +33,7 @@ impl Line {
     }
 }
 
-/// Линия записи `index` свойства `property` узла `node` для сессии узла `session`. Ячейки
+/// Линия `index` с именем `name` узла `node` для сессии узла `session`. Ячейки
 /// записи - номер вывода от 1 и флаги.
 ///
 /// Отказы:
@@ -47,19 +45,11 @@ pub fn line(
     description: &Description<'_>,
     session: &DeviceId,
     node: &DeviceId,
-    property: &str,
+    name: &str,
     index: u8,
 ) -> Result<Line, PinsError> {
-    let inside = node == session
-        || node
-            .as_str()
-            .strip_prefix(session.as_str())
-            .is_some_and(|rest| rest.starts_with('/'));
-    if !inside {
-        return Err(PinsError::NoDevice);
-    }
-
-    let record = pins_abi::line(description, node, property, index).ok_or(PinsError::NoDevice)?;
+    let record =
+        pins_abi::line(description, session, node, name, index).ok_or(PinsError::NoDevice)?;
     let controller =
         ControllerNode::parse(description, &record.controller).ok_or(PinsError::Unsupported)?;
 
@@ -69,13 +59,13 @@ pub fn line(
     let pin = u16::try_from(pin).map_err(|_| PinsError::Unsupported)?;
     let block = controller
         .block(pin)
-        .filter(|_| flags & !ACTIVE_LOW == 0)
+        .filter(|_| flags & !GPIO_ACTIVE_LOW == 0)
         .ok_or(PinsError::Unsupported)?;
 
     Ok(Line {
         controller,
         pin,
         block,
-        active_low: flags & ACTIVE_LOW != 0,
+        active_low: flags & GPIO_ACTIVE_LOW != 0,
     })
 }
