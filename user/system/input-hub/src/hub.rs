@@ -6,7 +6,9 @@
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, BTreeSet},
+    rc::Rc,
 };
+use core::cell::RefCell;
 
 use component_startup::{MintedSession, SessionError, SessionPort};
 use input_abi::{
@@ -16,7 +18,7 @@ use input_abi::{
 };
 use ipc::IntoWireValue;
 use kernel_objects::{Delivery, IssuedHandle, Port, kind};
-use runtime::{Instant, Mutex};
+use runtime::Instant;
 
 use crate::queue::{QUEUE_RECORDS_MAX, Queue};
 
@@ -28,16 +30,7 @@ type Debt = IssuedHandle<kind::Reply>;
 type Raw = [u8; RECORD_SIZE];
 type Devices = BTreeMap<DeviceNumber, Box<Device>>;
 
-static HUB: Mutex<Hub> = Mutex::new(Hub {
-    devices: BTreeMap::new(),
-    sessions: BTreeMap::new(),
-    holding: None,
-    next_device: Some(DeviceNumber::FIRST),
-    next_app: Some(FocusNumber::FIRST),
-    start_records_max: 1,
-});
-
-struct Hub {
+pub(crate) struct Hub {
     devices: Devices,
     sessions: BTreeMap<u64, Session>,
     holding: Option<Holding>,
@@ -69,15 +62,31 @@ struct App {
     session: Session,
 }
 
-pub(crate) struct Source;
+pub(crate) struct Source {
+    pub(crate) hub: Rc<RefCell<Hub>>,
+}
 
-pub(crate) struct Consumer;
+pub(crate) struct Consumer {
+    pub(crate) hub: Rc<RefCell<Hub>>,
+}
 
 pub(crate) struct Holder {
+    pub(crate) hub: Rc<RefCell<Hub>>,
     pub(crate) consumers: &'static SessionPort,
 }
 
 impl Hub {
+    pub(crate) const fn new() -> Self {
+        Self {
+            devices: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            holding: None,
+            next_device: Some(DeviceNumber::FIRST),
+            next_app: Some(FocusNumber::FIRST),
+            start_records_max: 1,
+        }
+    }
+
     fn broadcast(&mut self, device: DeviceNumber, records: &[Raw]) {
         let Self {
             devices,
@@ -262,6 +271,44 @@ impl Holding {
     }
 }
 
+impl Source {
+    pub(crate) fn gone(&self, badge: u64) {
+        let mut hub = self.hub.borrow_mut();
+        while let Some(number) = hub
+            .devices
+            .iter()
+            .find(|(_, device)| device.owner == badge)
+            .map(|(&number, _)| number)
+        {
+            hub.remove(number);
+        }
+    }
+}
+
+impl Consumer {
+    pub(crate) fn gone(&self, badge: u64) {
+        let mut hub = self.hub.borrow_mut();
+        if hub.sessions.remove(&badge).is_none()
+            && let Some(holding) = &mut hub.holding
+        {
+            holding.close(badge);
+        }
+    }
+}
+
+impl Holder {
+    pub(crate) fn gone(&self, badge: u64) {
+        let mut hub = self.hub.borrow_mut();
+        if hub
+            .holding
+            .as_ref()
+            .is_some_and(|holding| holding.badge == badge)
+        {
+            hub.holding = None;
+        }
+    }
+}
+
 impl input_inject::Service<Delivery> for Source {
     fn declare(
         &mut self,
@@ -271,7 +318,7 @@ impl input_inject::Service<Delivery> for Source {
         let layout = descriptor.layout()?;
         let snapshot_max = layout.snapshot_records_max();
 
-        let mut hub = HUB.lock();
+        let mut hub = self.hub.borrow_mut();
         let start_records_max = hub.start_records_max + 1 + snapshot_max;
         if start_records_max > START_RECORDS_LIMIT {
             return Err(DeclareError::NoSpace);
@@ -298,7 +345,7 @@ impl input_inject::Service<Delivery> for Source {
         records: &[u8],
     ) -> Result<(), UpdateError> {
         let now = Instant::now().as_nanos();
-        let mut hub = HUB.lock();
+        let mut hub = self.hub.borrow_mut();
         let owned = hub
             .devices
             .get_mut(&device)
@@ -314,7 +361,7 @@ impl input_inject::Service<Delivery> for Source {
 
 impl input::Service<Delivery> for Consumer {
     fn next(&mut self, frame: &Delivery, reply: input::next::Reply<Debt>) {
-        let mut hub = HUB.lock();
+        let mut hub = self.hub.borrow_mut();
         // Без сессии долг разрушается, и вызыватель получает `PeerClosed`.
         let Some(session) = hub.session_mut(frame.badge) else {
             return;
@@ -335,7 +382,7 @@ impl input::Service<Delivery> for Consumer {
         frame: &Delivery,
         device: DeviceNumber,
     ) -> Result<DeviceLayout, DescribeError> {
-        let hub = HUB.lock();
+        let hub = self.hub.borrow();
         if !hub.shows(frame.badge, device) {
             return Err(DescribeError::UnknownDevice);
         }
@@ -352,7 +399,7 @@ impl input_focus::Service<Delivery> for Holder {
         &mut self,
         frame: &Delivery,
     ) -> impl IntoWireValue<Delivery, Read = Result<FocusSession, FocusError>> {
-        let mut hub = HUB.lock();
+        let mut hub = self.hub.borrow_mut();
         let total = hub.sessions_len();
         let Hub {
             devices,
@@ -388,7 +435,7 @@ impl input_focus::Service<Delivery> for Holder {
     }
 
     fn focus(&mut self, frame: &Delivery, session: Option<FocusNumber>) -> Result<(), FocusError> {
-        let mut hub = HUB.lock();
+        let mut hub = self.hub.borrow_mut();
         let Hub {
             devices, holding, ..
         } = &mut *hub;
@@ -405,7 +452,7 @@ impl input_focus::Service<Delivery> for Holder {
     }
 
     fn reserve(&mut self, frame: &Delivery, device: DeviceNumber) -> Result<(), FocusError> {
-        let mut hub = HUB.lock();
+        let mut hub = self.hub.borrow_mut();
         let Hub {
             devices, holding, ..
         } = &mut *hub;
@@ -424,8 +471,8 @@ pub(crate) fn open_source(export: &SessionPort) -> Result<Port, SessionError> {
     Ok(port)
 }
 
-pub(crate) fn open_input(export: &SessionPort) -> Result<Port, SessionError> {
-    let mut hub = HUB.lock();
+pub(crate) fn open_input(hub: &RefCell<Hub>, export: &SessionPort) -> Result<Port, SessionError> {
+    let mut hub = hub.borrow_mut();
     if hub.sessions_len() >= INPUT_SESSIONS_MAX {
         return Err(SessionError::NoSpace);
     }
@@ -436,38 +483,6 @@ pub(crate) fn open_input(export: &SessionPort) -> Result<Port, SessionError> {
     hub.sessions.insert(badge.get(), session);
 
     Ok(port)
-}
-
-pub(crate) fn source_gone(badge: u64) {
-    let mut hub = HUB.lock();
-    while let Some(number) = hub
-        .devices
-        .iter()
-        .find(|(_, device)| device.owner == badge)
-        .map(|(&number, _)| number)
-    {
-        hub.remove(number);
-    }
-}
-
-pub(crate) fn input_gone(badge: u64) {
-    let mut hub = HUB.lock();
-    if hub.sessions.remove(&badge).is_none()
-        && let Some(holding) = &mut hub.holding
-    {
-        holding.close(badge);
-    }
-}
-
-pub(crate) fn holder_gone(badge: u64) {
-    let mut hub = HUB.lock();
-    if hub
-        .holding
-        .as_ref()
-        .is_some_and(|holding| holding.badge == badge)
-    {
-        hub.holding = None;
-    }
 }
 
 fn claim(holding: &mut Option<Holding>, badge: u64) -> Result<&mut Holding, FocusError> {

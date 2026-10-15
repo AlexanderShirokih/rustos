@@ -42,6 +42,7 @@ members = [
     "../lib/application-window",
     "../lib/component-startup",
     "../lib/components",
+    "../lib/executor",
     "../lib/filesystem-server",
     "../lib/log-relay",
     "../lib/managed-component",
@@ -70,6 +71,7 @@ slint-build = { version = "=1.18.1", features = ["sdf-fonts"] }
 c-library = { path = "../lib/c-library" }
 component-startup = { path = "../lib/component-startup" }
 components = { path = "../lib/components" }
+executor = { path = "../lib/executor" }
 filesystem-server = { path = "../lib/filesystem-server" }
 log-relay = { path = "../lib/log-relay" }
 managed-component = { path = "../lib/managed-component" }

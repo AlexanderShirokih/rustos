@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `Reply: WaitableKind` is not satisfied
+ --> tests/compile_fail/wait_item_rejects_reply.rs:7:27
+  |
+7 |     let _ = WaitItem::new(reply, 1);
+  |             ------------- ^^^^^ the trait `WaitableKind` is not implemented for `Reply`
+  |             |
+  |             required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `WaitableKind`:
+            IrqLine
+            Port
+            Process
+            Signal
+            syscall::kind::Thread
+note: required by a bound in `WaitItem::new`
+ --> src/handle.rs
+  |
+  |     pub const fn new<K: WaitableKind>(handle: Handle<K>, mask: u32) -> Self {
+  |                         ^^^^^^^^^^^^ required by this bound in `WaitItem::new`

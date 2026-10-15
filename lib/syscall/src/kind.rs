@@ -56,4 +56,6 @@ impl WaitableKind for Process {}
 
 impl WaitableKind for Thread {}
 
+impl WaitableKind for Port {}
+
 impl WaitableKind for IrqLine {}

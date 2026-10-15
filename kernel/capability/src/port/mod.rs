@@ -42,7 +42,10 @@ use super::{
     rev_node::RevocationHook,
     runtime::{KernelRuntime, ParkState},
     target::{HolderTicket, OperationHold},
-    wait::{CancelTarget, ParkWaker, deadline_after, park_until_deadline, remaining_until},
+    wait::{
+        CancelTarget, ParkWaker, Waitable, Waker, deadline_after, park_until_deadline,
+        remaining_until,
+    },
 };
 
 /// Объект синхронного обмена сообщениями. Отправитель и получатель встречаются на нём рандеву,
@@ -52,6 +55,8 @@ use super::{
 /// правом [`Rights::READ`], отправитель встаёт в очередь. Когда таких держателей не остаётся,
 /// отправка отвергается кодом [`IpcError::PeerClosed`], а очередь снимается - её стороны
 /// будятся тем же кодом.
+///
+/// Порт ожидаем как [`Waitable`] по биту [`syscall::READABLE`].
 ///
 /// [`IpcError`] здесь и ниже - ошибки операций над объектами ядра из этого крейта. Слой
 /// контрактов `ipc` держит собственный одноимённый wire-тип.
@@ -121,8 +126,8 @@ pub(crate) struct ParkCtx {
 
 impl ParkCtx {
     pub(crate) fn for_current(runtime: &Arc<dyn KernelRuntime>) -> Self {
-        // Вызов идёт вне queue-лока, потому что `current_wait_token` берёт scheduler-лок, а
-        // обратное ребро занято терминацией потока (`PortCancel`).
+        // `current_wait_token` берёт scheduler-лок, а под локом порта он запрещён так же, как
+        // пробуждения сторон. Поэтому вызов идёт вне лока порта.
         let token = runtime.current_wait_token();
         Self {
             waker: Arc::new(ParkWaker::new(runtime.clone(), token)),
@@ -163,6 +168,40 @@ pub(crate) enum RecvAction {
     Failed(IpcError),
 }
 
+enum SenderPlacement {
+    Matched(ReceiverWaiter),
+    Queued(ParkCtx),
+    Failed(IpcError),
+}
+
+impl SenderPlacement {
+    fn into_send(self, sender: &ThreadTransport) -> SendAction {
+        match self {
+            Self::Matched(receiver) => deliver_send(sender, &receiver),
+            Self::Queued(ctx) => SendAction::Park {
+                waker: ctx.waker,
+                outcome: ctx.outcome,
+            },
+            Self::Failed(e) => SendAction::Failed(e),
+        }
+    }
+
+    fn into_call(self, caller: &ThreadTransport, runtime: &Arc<dyn KernelRuntime>) -> CallAction {
+        match self {
+            // Вызывающая сторона паркуется до reply и на синхронном матче, и `Reply` ссылается
+            // на её park-ctx.
+            Self::Matched(receiver) => {
+                deliver_call(caller, &receiver, ParkCtx::for_current(runtime))
+            }
+            Self::Queued(ctx) => CallAction::Park {
+                waker: ctx.waker,
+                outcome: ctx.outcome,
+            },
+            Self::Failed(e) => CallAction::Failed(e),
+        }
+    }
+}
+
 impl Port {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -183,7 +222,7 @@ impl Port {
         if !rights.contains(Rights::READ) {
             return None;
         }
-        self.inner.with_lock(PortState::add_receiver);
+        self.with_state(|state, _| state.add_receiver());
         Some(self.make_ticket(true, None, HOLDER_COUNTED))
     }
 
@@ -213,14 +252,11 @@ impl Port {
     }
 
     fn activate_holder(&self, holder: &PortHolder) -> Result<(), IpcError> {
-        let (result, wakes) = self.inner.with_lock(|state| {
-            let mut wakes = Vec::new();
+        self.with_state(|state, wakes| {
             // Значок учитывается до получателя, поэтому его отказ оставляет множество получателей
             // нетронутым.
-            if let Some(badge) = holder.badge
-                && let Err(e) = state.register_badge(badge.get())
-            {
-                return (Err(e), wakes);
+            if let Some(badge) = holder.badge {
+                state.register_badge(badge.get())?;
             }
             if holder.receiver {
                 state.add_receiver();
@@ -238,19 +274,15 @@ impl Port {
                 )
                 .is_err()
             {
-                holder.uncount(state, &mut wakes);
-                return (Err(IpcError::Revoked), wakes);
+                holder.uncount(state, wakes);
+                return Err(IpcError::Revoked);
             }
-            (Ok(()), wakes)
-        });
-        for wake in wakes {
-            wake.wake();
-        }
-        result
+            Ok(())
+        })
     }
 
     fn reacquire_holder(self: &Arc<Self>, holder: &PortHolder) -> Option<Arc<dyn HolderTicket>> {
-        let counted = self.inner.with_lock(|state| {
+        let counted = self.with_state(|state, _| {
             // Снятый учёт вторым токеном не оживает. `release` помечает билет снятым до захвата
             // лока, поэтому HOLDER_COUNTED под локом означает живого держателя.
             if holder.state.load(Ordering::Acquire) != HOLDER_COUNTED {
@@ -271,51 +303,19 @@ impl Port {
     }
 
     fn release_holder(&self, holder: &PortHolder) {
-        let wakes = self.inner.with_lock(|state| {
-            let mut wakes = Vec::new();
-            holder.uncount(state, &mut wakes);
-            wakes
-        });
-        for wake in wakes {
-            wake.wake();
-        }
+        self.with_state(|state, wakes| holder.uncount(state, wakes));
     }
 
     pub(crate) fn send(
         &self,
         sender: &ThreadTransport,
         runtime: &Arc<dyn KernelRuntime>,
+        deadline_ns: Option<u64>,
         hold: Option<OperationHold>,
     ) -> SendAction {
-        let action = loop {
-            match self.inner.with_lock(PortState::take_receiver) {
-                Err(e) => break SendAction::Failed(e),
-                Ok(Some(receiver)) => break deliver_send(sender, &receiver),
-                Ok(None) => {}
-            }
-
-            // Матч и постановка в очередь - разные захваты queue-лока, поэтому между ними берётся
-            // wait-token. Изменившееся в это окно состояние отвергает постановку, и цикл повторяет
-            // матч.
-            let ctx = ParkCtx::for_current(runtime);
-            let waiter = Waiter {
-                kind: SendKind::Send,
-                transport: sender.clone(),
-                waker: ctx.waker.clone(),
-                outcome: ctx.outcome.clone(),
-                reply_slot: ReplySlot::new(),
-            };
-            if self
-                .inner
-                .with_lock(|state| state.try_push_sender(waiter))
-                .is_ok()
-            {
-                break SendAction::Park {
-                    waker: ctx.waker,
-                    outcome: ctx.outcome,
-                };
-            }
-        };
+        let action = self
+            .place_sender(SendKind::Send, sender, runtime, deadline_ns)
+            .into_send(sender);
         // Уход значка застаёт кадр доставленным либо waiter в очереди.
         drop(hold);
         action
@@ -324,34 +324,13 @@ impl Port {
     pub(crate) fn call(
         &self,
         caller: &ThreadTransport,
-        ctx: ParkCtx,
+        runtime: &Arc<dyn KernelRuntime>,
+        deadline_ns: Option<u64>,
         hold: Option<OperationHold>,
     ) -> CallAction {
-        let action = loop {
-            match self.inner.with_lock(PortState::take_receiver) {
-                Err(e) => break CallAction::Failed(e),
-                Ok(Some(receiver)) => break deliver_call(caller, &receiver, ctx),
-                Ok(None) => {}
-            }
-
-            let waiter = Waiter {
-                kind: SendKind::Call,
-                transport: caller.clone(),
-                waker: ctx.waker.clone(),
-                outcome: ctx.outcome.clone(),
-                reply_slot: ReplySlot::new(),
-            };
-            if self
-                .inner
-                .with_lock(|state| state.try_push_sender(waiter))
-                .is_ok()
-            {
-                break CallAction::Park {
-                    waker: ctx.waker,
-                    outcome: ctx.outcome,
-                };
-            }
-        };
+        let action = self
+            .place_sender(SendKind::Call, caller, runtime, deadline_ns)
+            .into_call(caller, runtime);
         drop(hold);
         action
     }
@@ -360,12 +339,16 @@ impl Port {
         &self,
         receiver: &ThreadTransport,
         runtime: &Arc<dyn KernelRuntime>,
+        deadline_ns: Option<u64>,
         hold: Option<OperationHold>,
     ) -> RecvAction {
         let action = loop {
-            match self.inner.with_lock(PortState::pick_for_receiver) {
+            match self.with_state(|state, _| state.pick_for_receiver()) {
                 RecvPick::DepartedBadge(badge) => break RecvAction::SenderGone { badge },
                 RecvPick::Sender(sender) => break deliver_recv(sender, receiver),
+                RecvPick::Nothing if remaining_until(runtime, deadline_ns) == Some(0) => {
+                    break RecvAction::Failed(IpcError::Timeout);
+                }
                 RecvPick::Nothing => {}
             }
 
@@ -379,8 +362,7 @@ impl Port {
                 reply_slot: reply_slot.clone(),
             };
             if self
-                .inner
-                .with_lock(|state| state.try_push_receiver(waiter))
+                .with_state(|state, _| state.try_push_receiver(waiter))
                 .is_ok()
             {
                 break RecvAction::Park {
@@ -399,26 +381,89 @@ impl Port {
     /// [`IpcError::PeerClosed`]. Очередь порта остаётся пустой, учёт держателей не трогается.
     /// Пробуждение идёт вне лока порта. Вызывается и по `Drop` порта.
     pub fn cancel_all(&self) {
-        let wakes = self.inner.with_lock(|state| {
-            let mut wakes = Vec::new();
-            state.break_all(&mut wakes);
-            wakes
-        });
-        for wake in wakes {
-            wake.wake();
-        }
+        self.with_state(PortState::break_all);
     }
 
     pub(crate) fn remove_waiter(&self, waker: &Arc<ParkWaker>) -> bool {
         // Waiter не освобождается под локом порта, потому что его транспорт держит
         // capability-таблицу.
-        let removed = self.inner.with_lock(|state| state.take_by_waker(waker));
+        let removed = self.with_state(|state, _| state.take_by_waker(waker));
         removed.is_some()
     }
 
     #[cfg(test)]
     pub(crate) fn queue_is_empty(&self) -> bool {
-        self.inner.with_lock(|state| state.queue_is_empty())
+        self.with_state(|state, _| state.queue_is_empty())
+    }
+
+    fn place_sender(
+        &self,
+        kind: SendKind,
+        sender: &ThreadTransport,
+        runtime: &Arc<dyn KernelRuntime>,
+        deadline_ns: Option<u64>,
+    ) -> SenderPlacement {
+        loop {
+            match self.with_state(|state, _| state.take_receiver()) {
+                Err(e) => return SenderPlacement::Failed(e),
+                Ok(Some(receiver)) => return SenderPlacement::Matched(receiver),
+                Ok(None) if remaining_until(runtime, deadline_ns) == Some(0) => {
+                    return SenderPlacement::Failed(IpcError::Timeout);
+                }
+                Ok(None) => {}
+            }
+
+            // Матч и постановка в очередь - разные захваты queue-лока, поэтому между ними берётся
+            // wait-token. Изменившееся в это окно состояние отвергает постановку, и цикл повторяет
+            // матч.
+            let ctx = ParkCtx::for_current(runtime);
+            let waiter = Waiter {
+                kind,
+                transport: sender.clone(),
+                waker: ctx.waker.clone(),
+                outcome: ctx.outcome.clone(),
+                reply_slot: ReplySlot::new(),
+            };
+            if self
+                .with_state(|state, _| state.try_push_sender(waiter))
+                .is_ok()
+            {
+                return SenderPlacement::Queued(ctx);
+            }
+        }
+    }
+
+    fn with_state<T>(&self, f: impl FnOnce(&mut PortState, &mut Vec<PendingWake>) -> T) -> T {
+        let (out, wakes) = self.inner.with_lock(|state| {
+            let mut wakes = Vec::new();
+            let before = state.readable();
+            let out = f(state, &mut wakes);
+            let raised = state.readable() & !before;
+
+            if raised != 0 {
+                state.take_readable_waiters(raised, &mut wakes);
+            }
+            (out, wakes)
+        });
+        for wake in wakes {
+            wake.wake();
+        }
+        out
+    }
+}
+
+impl Waitable for Port {
+    fn peek(&self) -> u32 {
+        self.with_state(|state, _| state.readable())
+    }
+
+    fn register_waiter(&self, mask: u32, waker: Arc<dyn Waker>) {
+        self.with_state(|state, wakes| state.push_readable_waiter(mask, waker, wakes));
+    }
+
+    fn remove_waiter(&self, waker: &Arc<dyn Waker>) -> bool {
+        let removed = self.with_state(|state, _| state.remove_readable_waiter(waker));
+        removed.is_some()
     }
 }
 
@@ -537,7 +582,7 @@ pub fn port_send(
     hold: Option<OperationHold>,
 ) -> Result<(), IpcError> {
     let deadline_ns = deadline_after(runtime, timeout_ns);
-    match port.send(sender, runtime, hold) {
+    match port.send(sender, runtime, deadline_ns, hold) {
         SendAction::Done => Ok(()),
         SendAction::Failed(e) => Err(e),
         SendAction::Park { waker, outcome } => {
@@ -560,9 +605,7 @@ pub fn port_call(
     hold: Option<OperationHold>,
 ) -> Result<(), IpcError> {
     let deadline_ns = deadline_after(runtime, timeout_ns);
-    // вызывающая сторона всегда паркуется до reply - предсоздаём park-ctx, чтобы
-    // Reply мог на него ссылаться даже на синхронном матче.
-    match port.call(caller, ParkCtx::for_current(runtime), hold) {
+    match port.call(caller, runtime, deadline_ns, hold) {
         CallAction::Failed(e) => Err(e),
         CallAction::Park { waker, outcome } => {
             arm_port_cancel(port, runtime, &waker, &outcome, None);
@@ -628,7 +671,7 @@ pub fn port_recv(
     deadline_ns: Option<u64>,
     hold: Option<OperationHold>,
 ) -> Result<Option<Arc<Reply>>, IpcError> {
-    match port.recv(receiver, runtime, hold) {
+    match port.recv(receiver, runtime, deadline_ns, hold) {
         RecvAction::Done { reply } => Ok(reply),
         RecvAction::Failed(e) => Err(e),
         RecvAction::SenderGone { badge } => Err(publish_departed_badge(receiver, badge)),
@@ -712,7 +755,7 @@ mod tests {
 
     use kbase::MutexCell;
     use memory::{MemFlags, testing::PageMapper, virtual_address::VirtualAddress};
-    use syscall::encode_tag;
+    use syscall::{READABLE, encode_tag};
 
     use super::{
         super::{
@@ -721,6 +764,7 @@ mod tests {
             rev_node::revoke_subtree,
             runtime::{KernelRuntime, WaitToken},
             target::CapabilityTarget,
+            wait::MockWaker,
         },
         *,
     };
@@ -859,7 +903,7 @@ mod tests {
     fn recv_with_no_sender_parks_as_receiver() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let action = ep.recv(&transport(BASE_B), &rt, None);
+        let action = ep.recv(&transport(BASE_B), &rt, None, None);
         assert!(matches!(action, RecvAction::Park { .. }));
         assert!(!ep.queue_is_empty());
     }
@@ -871,7 +915,7 @@ mod tests {
         let _receiver = receiver_capability(&ep);
 
         // Получатель паркуется.
-        let recv_action = ep.recv(&transport(BASE_B), &rt, None);
+        let recv_action = ep.recv(&transport(BASE_B), &rt, None, None);
         let RecvAction::Park {
             outcome: recv_outcome,
             reply_slot: recv_reply_slot,
@@ -883,7 +927,7 @@ mod tests {
         assert!(recv_outcome.get().is_none());
 
         // Отправитель встречает получателя: матч, доставка, queue пуст.
-        let send_action = ep.send(&transport(BASE_A), &rt, None);
+        let send_action = ep.send(&transport(BASE_A), &rt, None, None);
         assert!(matches!(send_action, SendAction::Done));
         assert_eq!(recv_outcome.get(), Some(RendezvousOutcome::Delivered));
         assert!(ep.queue_is_empty());
@@ -896,7 +940,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
-        let action = ep.send(&transport(BASE_A), &rt, None);
+        let action = ep.send(&transport(BASE_A), &rt, None, None);
         assert!(matches!(action, SendAction::Park { .. }));
         assert!(!ep.queue_is_empty());
     }
@@ -906,7 +950,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
-        let send_action = ep.send(&transport(BASE_A), &rt, None);
+        let send_action = ep.send(&transport(BASE_A), &rt, None, None);
         let SendAction::Park {
             outcome: send_outcome,
             ..
@@ -915,7 +959,7 @@ mod tests {
             panic!("send must park");
         };
 
-        let recv_action = ep.recv(&transport(BASE_B), &rt, None);
+        let recv_action = ep.recv(&transport(BASE_B), &rt, None, None);
         assert!(matches!(recv_action, RecvAction::Done { reply: None }));
         assert_eq!(send_outcome.get(), Some(RendezvousOutcome::Delivered));
         assert!(ep.queue_is_empty());
@@ -927,14 +971,13 @@ mod tests {
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
         // вызывающая сторона паркуется (call всегда паркуется).
-        let ctx = ParkCtx::for_current(&rt);
-        let outcome = ctx.outcome.clone();
-        let call_action = ep.call(&transport(BASE_A), ctx, None);
-        assert!(matches!(call_action, CallAction::Park { .. }));
+        let CallAction::Park { outcome, .. } = ep.call(&transport(BASE_A), &rt, None, None) else {
+            panic!("call must park");
+        };
 
         // Получатель смэтчил call -> получает Reply, вызывающая сторона остаётся
         // заблокированным (outcome ещё pending).
-        let recv_action = ep.recv(&transport(BASE_B), &rt, None);
+        let recv_action = ep.recv(&transport(BASE_B), &rt, None, None);
         let RecvAction::Done { reply: Some(reply) } = recv_action else {
             panic!("recv must return a reply for call");
         };
@@ -952,7 +995,7 @@ mod tests {
     fn cancel_all_wakes_waiters_peer_gone() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let action = ep.recv(&transport(BASE_B), &rt, None);
+        let action = ep.recv(&transport(BASE_B), &rt, None, None);
         let RecvAction::Park { outcome, .. } = action else {
             panic!("recv must park");
         };
@@ -965,7 +1008,7 @@ mod tests {
     fn drop_port_cancels_parked_waiter() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let action = ep.recv(&transport(BASE_B), &rt, None);
+        let action = ep.recv(&transport(BASE_B), &rt, None, None);
         let RecvAction::Park { outcome, .. } = action else {
             panic!("recv must park");
         };
@@ -977,7 +1020,8 @@ mod tests {
     fn port_cancel_removes_waiter_on_termination() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &rt, None, None)
+        else {
             panic!("recv must park");
         };
         assert!(!ep.queue_is_empty());
@@ -1003,7 +1047,8 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
-        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &rt, None, None)
+        else {
             panic!("recv must park");
         };
         let receiver = ep
@@ -1043,14 +1088,15 @@ mod tests {
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
         // вызывающая сторона паркуется (call всегда паркуется до reply).
-        let ctx = ParkCtx::for_current(&rt);
-        let (waker, outcome) = (ctx.waker.clone(), ctx.outcome.clone());
-        let call_action = ep.call(&transport(BASE_A), ctx, None);
-        assert!(matches!(call_action, CallAction::Park { .. }));
+        let CallAction::Park { waker, outcome } = ep.call(&transport(BASE_A), &rt, None, None)
+        else {
+            panic!("call must park");
+        };
 
         // Получатель забрал запрос -> вызывающая сторона в фазе 2 (AWAITING_REPLY). Его Waiter уже
         // не в очереди, поэтому remove_waiter в cancel - no-op.
-        let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None, None)
+        else {
             panic!("recv must return a reply for call");
         };
         assert_eq!(outcome.raw(), OutcomeSlot::AWAITING_REPLY);
@@ -1084,15 +1130,18 @@ mod tests {
             waker: receiver_waker,
             outcome: receiver_outcome,
             reply_slot,
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("recv must park with a reply slot");
         };
 
-        let caller_ctx = ParkCtx::for_current(&rt);
-        let (caller_waker, caller_outcome) = (caller_ctx.waker.clone(), caller_ctx.outcome.clone());
-        let call_action = ep.call(&transport(BASE_A), caller_ctx, None);
-        assert!(matches!(call_action, CallAction::Park { .. }));
+        let CallAction::Park {
+            waker: caller_waker,
+            outcome: caller_outcome,
+        } = ep.call(&transport(BASE_A), &rt, None, None)
+        else {
+            panic!("call must park");
+        };
         assert_eq!(caller_outcome.raw(), OutcomeSlot::AWAITING_REPLY);
 
         // Терминация получателя между матчем и изъятием reply: Waiter уже снят
@@ -1123,7 +1172,7 @@ mod tests {
     fn remove_waiter_is_arbiter_and_idempotent() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
-        let RecvAction::Park { waker, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Park { waker, .. } = ep.recv(&transport(BASE_B), &rt, None, None) else {
             panic!("recv must park");
         };
         assert!(!ep.queue_is_empty());
@@ -1168,7 +1217,7 @@ mod tests {
         let RecvAction::Park {
             outcome: recv_outcome,
             ..
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("recv must park");
         };
@@ -1235,7 +1284,8 @@ mod tests {
         let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
-        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &dyn_rt, None)
+        let RecvAction::Park { waker, outcome, .. } =
+            ep.recv(&transport(BASE_B), &dyn_rt, None, None)
         else {
             panic!("recv must park");
         };
@@ -1244,7 +1294,7 @@ mod tests {
         let (matcher, matcher_rt) = (ep.clone(), dyn_rt.clone());
         rt.set_first_park_hook(Box::new(move || {
             assert!(matches!(
-                matcher.send(&transport(BASE_A), &matcher_rt, None),
+                matcher.send(&transport(BASE_A), &matcher_rt, None, None),
                 SendAction::Done
             ));
         }));
@@ -1262,14 +1312,15 @@ mod tests {
         let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
-        let SendAction::Park { waker, outcome } = ep.send(&transport(BASE_A), &dyn_rt, None) else {
+        let SendAction::Park { waker, outcome } = ep.send(&transport(BASE_A), &dyn_rt, None, None)
+        else {
             panic!("send must park");
         };
 
         let (matcher, matcher_rt) = (ep.clone(), dyn_rt.clone());
         rt.set_first_park_hook(Box::new(move || {
             assert!(matches!(
-                matcher.recv(&transport(BASE_B), &matcher_rt, None),
+                matcher.recv(&transport(BASE_B), &matcher_rt, None, None),
                 RecvAction::Done { reply: None }
             ));
         }));
@@ -1287,18 +1338,16 @@ mod tests {
         let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
-        let ctx = ParkCtx::for_current(&dyn_rt);
-        let (waker, outcome) = (ctx.waker.clone(), ctx.outcome.clone());
-        assert!(matches!(
-            ep.call(&transport(BASE_A), ctx, None),
-            CallAction::Park { .. }
-        ));
+        let CallAction::Park { waker, outcome } = ep.call(&transport(BASE_A), &dyn_rt, None, None)
+        else {
+            panic!("call must park");
+        };
 
         // Разрешение приходит следующей парковкой. Сервер забирает запрос и отвечает.
         let (server, server_rt) = (ep.clone(), dyn_rt.clone());
         rt.set_first_park_hook(Box::new(move || {
             let RecvAction::Done { reply: Some(reply) } =
-                server.recv(&transport(BASE_B), &server_rt, None)
+                server.recv(&transport(BASE_B), &server_rt, None, None)
             else {
                 panic!("recv must return a reply for call");
             };
@@ -1317,7 +1366,8 @@ mod tests {
         let rt = DeadlineRuntime::arc(500);
         let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
         let ep = Port::new();
-        let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &dyn_rt, None)
+        let RecvAction::Park { waker, outcome, .. } =
+            ep.recv(&transport(BASE_B), &dyn_rt, None, None)
         else {
             panic!("recv must park");
         };
@@ -1336,12 +1386,13 @@ mod tests {
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
         // вызывающая сторона паркуется (call всегда паркуется до reply).
-        let ctx = ParkCtx::for_current(&rt);
-        let (waker, outcome) = (ctx.waker.clone(), ctx.outcome.clone());
-        let call_action = ep.call(&transport(BASE_A), ctx, None);
-        assert!(matches!(call_action, CallAction::Park { .. }));
+        let CallAction::Park { waker, outcome } = ep.call(&transport(BASE_A), &rt, None, None)
+        else {
+            panic!("call must park");
+        };
 
-        let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None, None)
+        else {
             panic!("recv must return a reply for call");
         };
         assert_eq!(outcome.raw(), OutcomeSlot::AWAITING_REPLY);
@@ -1359,11 +1410,11 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
 
-        let sent = ep.send(&transport(BASE_A), &rt, None);
+        let sent = ep.send(&transport(BASE_A), &rt, None, None);
         assert!(matches!(sent, SendAction::Failed(IpcError::PeerClosed)));
         assert!(ep.queue_is_empty());
 
-        let called = ep.call(&transport(BASE_A), ParkCtx::for_current(&rt), None);
+        let called = ep.call(&transport(BASE_A), &rt, None, None);
         assert!(matches!(called, CallAction::Failed(IpcError::PeerClosed)));
         assert!(ep.queue_is_empty());
     }
@@ -1373,7 +1424,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let receiver = receiver_capability(&ep);
-        let SendAction::Park { outcome, .. } = ep.send(&transport(BASE_A), &rt, None) else {
+        let SendAction::Park { outcome, .. } = ep.send(&transport(BASE_A), &rt, None, None) else {
             panic!("send must park");
         };
 
@@ -1388,7 +1439,7 @@ mod tests {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let receiver = receiver_capability(&ep);
-        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, None, None) else {
             panic!("recv must park");
         };
 
@@ -1410,11 +1461,11 @@ mod tests {
         // В момент ухода нет получателя - событие ждёт очередного recv.
         drop(client);
 
-        let picked = ep.recv(&transport(BASE_B), &rt, None);
+        let picked = ep.recv(&transport(BASE_B), &rt, None, None);
         assert!(matches!(picked, RecvAction::SenderGone { badge } if badge == BADGE_A));
         // Событие одноразовое.
         assert!(matches!(
-            ep.recv(&transport(BASE_B), &rt, None),
+            ep.recv(&transport(BASE_B), &rt, None, None),
             RecvAction::Park { .. }
         ));
     }
@@ -1425,12 +1476,13 @@ mod tests {
         let ep = Port::new();
         let root = root_capability(&ep);
         let client = badged_capability(&root, BADGE_A);
-        let RecvAction::Park { outcome: first, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Park { outcome: first, .. } = ep.recv(&transport(BASE_B), &rt, None, None)
+        else {
             panic!("first recv must park");
         };
         let RecvAction::Park {
             outcome: second, ..
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("second recv must park");
         };
@@ -1459,7 +1511,7 @@ mod tests {
         let leaving = badged_capability(&root, BADGE_B);
         let SendAction::Park {
             outcome: sender, ..
-        } = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, None)
+        } = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, None, None)
         else {
             panic!("send must park");
         };
@@ -1467,13 +1519,13 @@ mod tests {
         drop(leaving);
 
         // Событие идёт впереди очереди отправителей, начатый кадр не тронут.
-        let picked = ep.recv(&transport(BASE_B), &rt, None);
+        let picked = ep.recv(&transport(BASE_B), &rt, None, None);
         assert!(matches!(picked, RecvAction::SenderGone { badge } if badge == BADGE_B));
         assert!(sender.get().is_none());
 
         // Кадр забирает следующий recv.
         assert!(matches!(
-            ep.recv(&transport(BASE_B), &rt, None),
+            ep.recv(&transport(BASE_B), &rt, None, None),
             RecvAction::Done { reply: None }
         ));
         assert_eq!(sender.get(), Some(RendezvousOutcome::Delivered));
@@ -1488,7 +1540,7 @@ mod tests {
         let client = badged_capability(&root, BADGE_A);
         let SendAction::Park {
             outcome: sender, ..
-        } = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, None)
+        } = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, None, None)
         else {
             panic!("send must park");
         };
@@ -1498,7 +1550,7 @@ mod tests {
 
         assert_eq!(sender.get(), Some(RendezvousOutcome::PeerGone));
         assert!(ep.queue_is_empty());
-        let picked = ep.recv(&transport(BASE_B), &rt, None);
+        let picked = ep.recv(&transport(BASE_B), &rt, None, None);
         assert!(matches!(picked, RecvAction::SenderGone { badge } if badge == BADGE_A));
     }
 
@@ -1513,7 +1565,7 @@ mod tests {
         let _revived = badged_capability(&root, BADGE_A);
 
         assert!(matches!(
-            ep.recv(&transport(BASE_B), &rt, None),
+            ep.recv(&transport(BASE_B), &rt, None, None),
             RecvAction::Park { .. }
         ));
     }
@@ -1528,7 +1580,7 @@ mod tests {
         // при припаркованном получателе.
         drop(badged_capability(&root, BADGE_A));
         let revived = badged_capability(&root, BADGE_A);
-        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, None, None) else {
             panic!("recv must park");
         };
         drop(revived);
@@ -1536,7 +1588,7 @@ mod tests {
 
         // Непрочтённых событий не осталось - следующий recv паркуется.
         assert!(matches!(
-            ep.recv(&transport(BASE_B), &rt, None),
+            ep.recv(&transport(BASE_B), &rt, None, None),
             RecvAction::Park { .. }
         ));
         // Значение остаётся переиспользуемым.
@@ -1573,7 +1625,7 @@ mod tests {
         accumulate_departed_badges(&root, DEPARTED_BADGE_LIMIT as u64);
 
         assert!(matches!(
-            ep.recv(&transport(BASE_B), &rt, None),
+            ep.recv(&transport(BASE_B), &rt, None, None),
             RecvAction::SenderGone { .. }
         ));
         let _fresh = badged_capability(&root, EXTRA_BADGE);
@@ -1606,7 +1658,7 @@ mod tests {
         let second = badged_capability(&root, BADGE_A);
 
         drop(first);
-        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, None, None) else {
             panic!("half-empty badge set raises no event");
         };
 
@@ -1641,13 +1693,13 @@ mod tests {
 
         // Перенос переместил значение - множество получателей не изменилось.
         assert!(matches!(
-            ep.send(&transport(BASE_A), &rt, None),
+            ep.send(&transport(BASE_A), &rt, None, None),
             SendAction::Park { .. }
         ));
 
         drop(destination);
         assert!(matches!(
-            ep.send(&transport(BASE_A), &rt, None),
+            ep.send(&transport(BASE_A), &rt, None, None),
             SendAction::Failed(IpcError::PeerClosed)
         ));
     }
@@ -1684,14 +1736,14 @@ mod tests {
             .expect("remove the root capability")
             .release();
         assert!(matches!(
-            ep.send(&transport(BASE_A), &rt, None),
+            ep.send(&transport(BASE_A), &rt, None, None),
             SendAction::Failed(IpcError::PeerClosed)
         ));
 
         // Дроп после отзыва учёта второй раз не снимает.
         drop(recipient);
         assert!(matches!(
-            ep.send(&transport(BASE_A), &rt, None),
+            ep.send(&transport(BASE_A), &rt, None, None),
             SendAction::Failed(IpcError::PeerClosed)
         ));
     }
@@ -1717,13 +1769,13 @@ mod tests {
             .expect("remove the receiver capability")
             .release();
         assert!(matches!(
-            ep.send(&transport(BASE_A), &rt, None),
+            ep.send(&transport(BASE_A), &rt, None, None),
             SendAction::Park { .. }
         ));
 
         drop(access);
         assert!(matches!(
-            ep.send(&transport(BASE_A), &rt, None),
+            ep.send(&transport(BASE_A), &rt, None, None),
             SendAction::Failed(IpcError::PeerClosed)
         ));
     }
@@ -1736,7 +1788,7 @@ mod tests {
         let _receiver = receiver_capability(&ep);
         let SendAction::Park {
             outcome: sender, ..
-        } = ep.send(&transport(BASE_A), &rt, None)
+        } = ep.send(&transport(BASE_A), &rt, None, None)
         else {
             panic!("send must park");
         };
@@ -1766,7 +1818,7 @@ mod tests {
 
         let SendAction::Park {
             outcome: sender, ..
-        } = ep.send(&transport(BASE_A), &rt, None)
+        } = ep.send(&transport(BASE_A), &rt, None, None)
         else {
             panic!("send must park");
         };
@@ -1784,7 +1836,7 @@ mod tests {
         let sender = badged_capability(&root, BADGE_A);
         let RecvAction::Park {
             outcome: receiver, ..
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("recv must park");
         };
@@ -1816,7 +1868,7 @@ mod tests {
 
         assert!(receiver.hold_for_operation().is_none());
         assert!(matches!(
-            ep.send(&transport(BASE_A), &rt, None),
+            ep.send(&transport(BASE_A), &rt, None, None),
             SendAction::Failed(IpcError::PeerClosed)
         ));
     }
@@ -1831,7 +1883,7 @@ mod tests {
         let hold = receiver.hold_for_operation();
         drop(receiver);
 
-        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, hold) else {
+        let RecvAction::Park { outcome, .. } = ep.recv(&transport(BASE_B), &rt, None, hold) else {
             panic!("recv must park");
         };
 
@@ -1848,7 +1900,7 @@ mod tests {
         let client = badged_capability(&root, BADGE_A);
         let RecvAction::Park {
             outcome: server, ..
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("recv must park");
         };
@@ -1857,13 +1909,13 @@ mod tests {
         let hold = client.hold_for_operation();
         drop(client);
 
-        let sent = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, hold);
+        let sent = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, None, hold);
 
         // Сервер получает кадр, а событие об уходе - следующим.
         assert!(matches!(sent, SendAction::Done));
         assert_eq!(server.get(), Some(RendezvousOutcome::Delivered));
         assert!(
-            matches!(ep.recv(&transport(BASE_B), &rt, None), RecvAction::SenderGone { badge } if badge == BADGE_A)
+            matches!(ep.recv(&transport(BASE_B), &rt, None, None), RecvAction::SenderGone { badge } if badge == BADGE_A)
         );
     }
 
@@ -1880,7 +1932,7 @@ mod tests {
         // Нет получателя, поэтому кадр встаёт в очередь, и уход значка снимает его оттуда.
         let SendAction::Park {
             outcome: sender, ..
-        } = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, hold)
+        } = ep.send(&transport(BASE_A).with_badge(BADGE_A), &rt, None, hold)
         else {
             panic!("send must park");
         };
@@ -1888,10 +1940,10 @@ mod tests {
 
         // Событие об уходе достаётся серверу, за ним нет кадра снесённой сессии.
         assert!(
-            matches!(ep.recv(&transport(BASE_B), &rt, None), RecvAction::SenderGone { badge } if badge == BADGE_A)
+            matches!(ep.recv(&transport(BASE_B), &rt, None, None), RecvAction::SenderGone { badge } if badge == BADGE_A)
         );
         assert!(matches!(
-            ep.recv(&transport(BASE_B), &rt, None),
+            ep.recv(&transport(BASE_B), &rt, None, None),
             RecvAction::Park { .. }
         ));
     }
@@ -1906,7 +1958,7 @@ mod tests {
             outcome: server,
             reply_slot,
             ..
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("recv must park");
         };
@@ -1914,11 +1966,7 @@ mod tests {
         let hold = client.hold_for_operation();
         drop(client);
 
-        let called = ep.call(
-            &transport(BASE_A).with_badge(BADGE_A),
-            ParkCtx::for_current(&rt),
-            hold,
-        );
+        let called = ep.call(&transport(BASE_A).with_badge(BADGE_A), &rt, None, hold);
 
         assert!(matches!(called, CallAction::Park { .. }));
         assert_eq!(server.get(), Some(RendezvousOutcome::Delivered));
@@ -1988,13 +2036,13 @@ mod tests {
         let RecvAction::Park {
             outcome: recv_outcome,
             ..
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("recv must park");
         };
         let (sender, sender_table) = transport_with_signal(BASE_A, Rights::READ);
 
-        let action = ep.send(&sender, &rt, None);
+        let action = ep.send(&sender, &rt, None, None);
 
         assert!(matches!(action, SendAction::Failed(IpcError::AccessDenied)));
         assert_eq!(
@@ -2013,13 +2061,13 @@ mod tests {
             outcome: recv_outcome,
             reply_slot,
             ..
-        } = ep.recv(&transport(BASE_B), &rt, None)
+        } = ep.recv(&transport(BASE_B), &rt, None, None)
         else {
             panic!("recv must park");
         };
         let (caller, caller_table) = transport_with_signal(BASE_A, Rights::READ);
 
-        let action = ep.call(&caller, ParkCtx::for_current(&rt), None);
+        let action = ep.call(&caller, &rt, None, None);
 
         assert!(matches!(action, CallAction::Failed(IpcError::AccessDenied)));
         assert_eq!(
@@ -2039,12 +2087,12 @@ mod tests {
         let SendAction::Park {
             outcome: send_outcome,
             ..
-        } = ep.send(&sender, &rt, None)
+        } = ep.send(&sender, &rt, None, None)
         else {
             panic!("send must park");
         };
 
-        let action = ep.recv(&transport(BASE_B), &rt, None);
+        let action = ep.recv(&transport(BASE_B), &rt, None, None);
 
         assert!(matches!(action, RecvAction::Failed(IpcError::ShouldWait)));
         assert_eq!(
@@ -2080,13 +2128,15 @@ mod tests {
             VirtualAddress::new(BASE_A),
             Arc::new(MutexCell::new(HandleTable::with_capacity(0))),
         );
-        let ctx = ParkCtx::for_current(&rt);
-        let caller_outcome = ctx.outcome.clone();
-        assert!(matches!(
-            ep.call(&caller, ctx, None),
-            CallAction::Park { .. }
-        ));
-        let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None) else {
+        let CallAction::Park {
+            outcome: caller_outcome,
+            ..
+        } = ep.call(&caller, &rt, None, None)
+        else {
+            panic!("call must park");
+        };
+        let RecvAction::Done { reply: Some(reply) } = ep.recv(&transport(BASE_B), &rt, None, None)
+        else {
             panic!("recv must return a reply for call");
         };
         let (server, server_table) = transport_with_signal(BASE_B, Rights::READ | Rights::TRANSFER);
@@ -2097,5 +2147,178 @@ mod tests {
             Some(RendezvousOutcome::TransferFailed(IpcError::OutOfHandles))
         );
         assert_eq!(server_table.with_lock(|t| t.live_count()), 1);
+    }
+
+    fn observe_readable(port: &Port) -> Arc<MockWaker> {
+        let observer = MockWaker::new();
+        Waitable::register_waiter(port, READABLE, observer.clone());
+        observer
+    }
+
+    #[test]
+    fn readable_follows_queued_senders_and_unread_departures() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let root = root_capability(&ep);
+        assert_eq!(ep.peek(), 0);
+
+        let RecvAction::Park { waker, .. } = ep.recv(&transport(BASE_B), &rt, None, None) else {
+            panic!("recv must park");
+        };
+        assert_eq!(ep.peek(), 0);
+        assert!(ep.remove_waiter(&waker));
+
+        assert!(matches!(
+            ep.send(&transport(BASE_A), &rt, None, None),
+            SendAction::Park { .. }
+        ));
+        assert_eq!(ep.peek(), READABLE);
+        assert!(matches!(
+            ep.recv(&transport(BASE_B), &rt, None, None),
+            RecvAction::Done { reply: None }
+        ));
+        assert_eq!(ep.peek(), 0);
+
+        drop(badged_capability(&root, BADGE_A));
+        assert_eq!(ep.peek(), READABLE);
+        assert!(matches!(
+            ep.recv(&transport(BASE_B), &rt, None, None),
+            RecvAction::SenderGone { badge: BADGE_A }
+        ));
+        assert_eq!(ep.peek(), 0);
+    }
+
+    #[test]
+    fn raising_readable_wakes_its_observers() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let root = root_capability(&ep);
+
+        let observer = observe_readable(&ep);
+        assert!(!observer.was_woken());
+        assert!(matches!(
+            ep.send(&transport(BASE_A), &rt, None, None),
+            SendAction::Park { .. }
+        ));
+        assert!(observer.was_woken());
+        assert_eq!(observer.observed(), READABLE);
+
+        assert!(matches!(
+            ep.recv(&transport(BASE_B), &rt, None, None),
+            RecvAction::Done { reply: None }
+        ));
+        let observer = observe_readable(&ep);
+        drop(badged_capability(&root, BADGE_A));
+        assert!(observer.was_woken());
+        assert_eq!(observer.observed(), READABLE);
+    }
+
+    #[test]
+    fn an_observer_of_a_raised_readable_is_woken_at_registration() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        assert!(matches!(
+            ep.send(&transport(BASE_A), &rt, None, None),
+            SendAction::Park { .. }
+        ));
+
+        let observer = observe_readable(&ep);
+
+        assert!(observer.was_woken());
+        let observer: Arc<dyn Waker> = observer;
+        assert!(!Waitable::remove_waiter(&*ep, &observer));
+    }
+
+    #[test]
+    fn a_removed_readable_observer_stays_asleep() {
+        let rt = StubRuntime::arc();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let observer = observe_readable(&ep);
+        let registered: Arc<dyn Waker> = observer.clone();
+
+        assert!(Waitable::remove_waiter(&*ep, &registered));
+        assert!(matches!(
+            ep.send(&transport(BASE_A), &rt, None, None),
+            SendAction::Park { .. }
+        ));
+
+        assert!(!observer.was_woken());
+        assert!(!Waitable::remove_waiter(&*ep, &registered));
+    }
+
+    #[test]
+    fn polling_send_and_call_leave_readable_observers_asleep() {
+        let rt = DeadlineRuntime::arc(1_000);
+        let runtime: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+
+        let send_observer = observe_readable(&ep);
+        assert_eq!(
+            port_send(&ep, &transport(BASE_A), &runtime, Some(0), None),
+            Err(IpcError::Timeout)
+        );
+        let call_observer = observe_readable(&ep);
+        assert_eq!(
+            port_call(&ep, &transport(BASE_A), &runtime, Some(0), None),
+            Err(IpcError::Timeout)
+        );
+
+        assert!(!send_observer.was_woken());
+        assert!(!call_observer.was_woken());
+        assert!(rt.parks().is_empty());
+    }
+
+    #[test]
+    fn race_sender_departure_and_observer_registration_keep_readable_observed() {
+        use std::{
+            sync::{Arc as StdArc, Barrier},
+            thread,
+        };
+
+        for _ in 0..128 {
+            let ep = Port::new();
+            let _receiver = receiver_capability(&ep);
+            let observer = MockWaker::new();
+            let barrier = StdArc::new(Barrier::new(4));
+
+            let (staying_port, staying_barrier) = (ep.clone(), barrier.clone());
+            let staying = thread::spawn(move || {
+                let rt = StubRuntime::arc();
+                let sender = transport(BASE_A);
+                staying_barrier.wait();
+                let action = staying_port.send(&sender, &rt, None, None);
+                assert!(matches!(action, SendAction::Park { .. }));
+            });
+
+            let (leaving_port, leaving_barrier) = (ep.clone(), barrier.clone());
+            let leaving = thread::spawn(move || {
+                let rt = StubRuntime::arc();
+                let sender = transport(BASE_B);
+                leaving_barrier.wait();
+                let SendAction::Park { waker, .. } = leaving_port.send(&sender, &rt, None, None)
+                else {
+                    panic!("send must park");
+                };
+                assert!(leaving_port.remove_waiter(&waker));
+            });
+
+            let (observed_port, observing_barrier) = (ep.clone(), barrier.clone());
+            let registered: Arc<dyn Waker> = observer.clone();
+            let observing = thread::spawn(move || {
+                observing_barrier.wait();
+                Waitable::register_waiter(&*observed_port, READABLE, registered);
+            });
+
+            barrier.wait();
+            staying.join().expect("staying sender joins");
+            leaving.join().expect("leaving sender joins");
+            observing.join().expect("observer joins");
+
+            assert_eq!(ep.peek(), READABLE);
+            assert!(observer.was_woken());
+        }
     }
 }

@@ -1,15 +1,16 @@
 //! E2E приёма порта сессий экспорта [`SessionEvents`] из EL0: отброшенный кадр и уход значка
-//! не прерывают приём, а capability порта без права приёма его заканчивает.
+//! не прерывают приём, опрос пустого порта не ждёт, а capability порта без права приёма
+//! заканчивает приём.
 
 use core::{
     num::NonZeroU64,
     sync::atomic::{AtomicI64, Ordering::SeqCst},
 };
 
-use component_startup::{SessionEvent, SessionEvents};
-use kernel_objects::Port;
+use component_startup::{Polled, SessionEvent, SessionEvents};
+use kernel_objects::{Port, wait_any};
 use runtime::{Timeout, port_send, spawn_owned};
-use syscall::{Rights, SyscallError};
+use syscall::{READABLE, Rights, SyscallError, WaitItem};
 
 use crate::{fixture::JOIN_TIMEOUT, ipc_raw, resource_exhaustion::exhaust_handle_table};
 
@@ -101,4 +102,38 @@ fn session_events_end_without_receive_right() {
         .expect("mint capability without READ");
 
     test_harness::check!(SessionEvents::new(&unreadable).recv().is_none());
+}
+
+#[test_harness::test]
+fn session_events_poll_an_empty_port() {
+    let port = Port::create().expect("port create");
+    let _client = session(&port, FIRST_BADGE);
+
+    test_harness::check!(matches!(
+        SessionEvents::new(&port).try_recv(),
+        Polled::Empty
+    ));
+}
+
+#[test_harness::test]
+fn session_events_poll_a_waiting_frame() {
+    let port = Port::create().expect("port create");
+    let first = session(&port, FIRST_BADGE);
+    DELIVERED_SEND.store(i64::MIN, SeqCst);
+
+    let sender = spawn_owned(move || {
+        DELIVERED_SEND.store(send(&first, &[]), SeqCst);
+        0
+    })
+    .expect("spawn sender");
+    let items = [WaitItem::new(port.as_raw(), READABLE)];
+    test_harness::check!(matches!(wait_any(&items, SEND_TIMEOUT), Ok(0)));
+
+    let mut events = SessionEvents::new(&port);
+    test_harness::check!(matches!(
+        events.try_recv(),
+        Polled::Event(SessionEvent::Frame(frame)) if frame.resources.badge == FIRST_BADGE.get()
+    ));
+    sender.join(JOIN_TIMEOUT).expect("sender joins");
+    test_harness::check_eq!(DELIVERED_SEND.load(SeqCst), 0);
 }

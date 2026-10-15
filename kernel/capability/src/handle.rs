@@ -95,7 +95,8 @@ impl Capability {
         let holder = target.counted_holder_ticket(rights);
         if let Some(ticket) = &holder {
             let hook: Weak<dyn HolderTicket> = Arc::downgrade(ticket);
-            node.register_hook(hook);
+            let registered = node.register_hook(hook);
+            debug_assert!(registered.is_ok(), "fresh root node is not revoked");
         }
         Self {
             target,
@@ -144,11 +145,10 @@ impl Capability {
         let Some(ticket) = ticket else {
             return Ok(None);
         };
-        // Revoke неучтённого билета учёт не трогает и потоков не будит: синхронный
-        // отзыв на уже отозванном узле безопасен под локами вызывающего. Отзыв в
-        // окне до активации её отвергает.
+        // Уже отозванный узел отвергает регистрацию. Отзыв в окне между регистрацией и
+        // активацией отвергает активацию.
         let hook: Weak<dyn HolderTicket> = Arc::downgrade(&ticket);
-        node.register_hook(hook);
+        node.register_hook(hook)?;
         ticket.activate()?;
         Ok(Some(ticket))
     }

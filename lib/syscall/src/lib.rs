@@ -46,7 +46,7 @@ pub use process_name::ProcessName;
 pub use profile::{InvalidMemoryProfile, MemoryProfile};
 pub use resource::MAX_RESOURCE_DEPTH;
 pub use rights::Rights;
-pub use signal::{SIGNALED, WakeCount};
+pub use signal::{READABLE, SIGNALED, WakeCount};
 pub use spawn_abi::{
     MAX_PROCESS_NAME_LEN, MAX_SEGMENTS_PER_IMG, SEGMENT_ABI_VERSION, USER_IMAGE_DESC_SIZE,
     USER_SEGMENT_SIZE, UserImageDescAbi, UserSegmentAbi, decode_image_desc, decode_segment,

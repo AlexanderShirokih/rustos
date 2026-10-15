@@ -39,8 +39,8 @@ impl Drop for OperationHold {
 /// применяются к этому объекту.
 ///
 /// Клон варианта делит объект с оригиналом. Вариант задаёт и набор применимых операций. Ожидание
-/// сигналов доступно на `Signal`, `Process`, `Thread` и `IrqLine`. `Port` и `Process` ведут учёт
-/// держателей.
+/// сигналов доступно на вариантах, у которых есть источник [`Waitable`]. `Port` и `Process` ведут
+/// учёт держателей.
 #[derive(Clone)]
 pub enum CapabilityTarget {
     Signal(Arc<Signal>),
@@ -100,11 +100,8 @@ impl CapabilityTarget {
             Self::Process(p) => Some(p.termination_signal() as Arc<dyn Waitable>),
             Self::Thread(t) => Some(t.termination_signal() as Arc<dyn Waitable>),
             Self::IrqLine(l) => Some(l.event_signal() as Arc<dyn Waitable>),
-            Self::Memory(_)
-            | Self::Resource(_)
-            | Self::Port(_)
-            | Self::Reply(_)
-            | Self::IrqControl(_) => None,
+            Self::Port(p) => Some(p.clone() as Arc<dyn Waitable>),
+            Self::Memory(_) | Self::Resource(_) | Self::Reply(_) | Self::IrqControl(_) => None,
         }
     }
 
@@ -251,7 +248,8 @@ mod tests {
 
     #[test]
     fn as_waitable_none_for_non_waitable_objects() {
-        assert!(CapabilityTarget::Port(Port::new()).as_waitable().is_none());
+        let resource = Resource::new(memory::AccessMask::RW, 1);
+        assert!(CapabilityTarget::Resource(resource).as_waitable().is_none());
     }
 
     #[test]

@@ -67,15 +67,16 @@ pub fn signal_set(
 /// Ждёт пока на capability target, к которому относится `handle_id`, не поднимется
 /// хотя бы один бит из `signals`. Возвращает наблюдённые биты в пересечении с `signals`.
 ///
-/// Требует [`Rights::READ`]. Ожидание применимо к `Signal`, `Process`, `Thread` и `IrqLine`,
-/// прочие виды объекта отвергаются с `WrongType`.
+/// Требует [`Rights::READ`]. Ожидание применимо к объектам с источником [`Waitable`], прочие
+/// виды объекта отвергаются с `WrongType`.
 ///
 /// Значения `timeout_ns`:
 ///  - `None` - ждать бессрочно,
 ///  - `Some(0)` - опрос без парковки, пустой опрос отвечает `Timeout`,
 ///  - прочее - относительный дедлайн.
 ///
-/// Handle, закрытый либо переданный до прихода сигнала, снимает ожидание кодом `Canceled`.
+/// Handle, закрытый, переданный либо отозванный до прихода сигнала, снимает ожидание кодом
+/// `Canceled`.
 pub fn signal_wait_one(
     handle_id: HandleId,
     signals: u32,
@@ -136,15 +137,19 @@ impl SignalWaitCancel {
     fn arm(self: &Arc<Self>, items: &[(HandleId, u32)]) -> Result<(), IpcError> {
         // Пробуждение scheduler под handle-table локом запрещено.
         let cancel: Arc<dyn CancelTarget> = self.clone();
+        let hook: Weak<dyn RevocationHook> = Arc::<Self>::downgrade(self);
         self.state.with_lock(|state| {
             if state.canceled {
                 return Err(IpcError::Canceled);
             }
             self.table.with_lock(|tbl| {
                 for (registered, &handle) in self.handles.iter().enumerate() {
-                    // Handle прошёл снимок источников, а к взведению исчез:
-                    // закрыт или передан параллельно, и исход ожидания - `Canceled`.
-                    if tbl.register_cancel(handle, cancel.clone()).is_err() {
+                    // Handle прошёл снимок источников, а к взведению исчез: закрыт, передан
+                    // или отозван параллельно, и исход ожидания - `Canceled`.
+                    let armed = tbl
+                        .register_revocation_hook(handle, hook.clone())
+                        .and_then(|()| tbl.register_cancel(handle, cancel.clone()));
+                    if armed.is_err() {
                         for &done in self.handles.iter().take(registered) {
                             tbl.unregister_cancel(done, cancel.as_ref());
                         }
@@ -198,6 +203,12 @@ impl CancelTarget for SignalWaitCancel {
     }
 }
 
+impl RevocationHook for SignalWaitCancel {
+    fn revoke(&self) {
+        CancelTarget::cancel(self);
+    }
+}
+
 struct ArmedWait {
     cancel: Arc<SignalWaitCancel>,
 }
@@ -235,7 +246,7 @@ impl Drop for ArmedWait {
 
 /// Ждёт пока хотя бы на одном из `items` не поднимется бит из его
 /// маски. Дубликаты `HandleId` допустимы. Семантика `timeout_ns` и требования к хендлам - как у
-/// [`signal_wait_one`]. `Canceled` - один из handle закрыт или передан до сигнала.
+/// [`signal_wait_one`]. `Canceled` - один из handle закрыт, передан или отозван до сигнала.
 ///
 /// Пустой `items` отвергается с `BadHandle`, набор длиннее `u32::MAX` - с `MessageTooBig`.
 /// Опрос до парковки идёт по порядку `items`, и среди готовых сразу побеждает первый по счёту.
@@ -321,9 +332,9 @@ fn peek_ready(sources: &[Arc<dyn Waitable>], items: &[(HandleId, u32)]) -> Optio
 /// Прав на handle не требует.
 ///
 /// Закрытие отзывает поддерево деривации капы. Производные от неё хендлы в чужих таблицах
-/// перестают быть валидными и отвечают [`IpcError::Revoked`]. Ожидания, зарегистрированные на
-/// этом слоте, снимаются с `Canceled`. Слот уходит в свободный список и при следующей выдаче
-/// получает новое поколение.
+/// перестают быть валидными и отвечают [`IpcError::Revoked`]. Ожидания на этом слоте и на
+/// отозванных производных снимаются с `Canceled`. Слот уходит в свободный список и при
+/// следующей выдаче получает новое поколение.
 pub fn handle_close(handle_id: HandleId) -> Result<(), IpcError> {
     current_table()?
         .with_lock(|tbl| tbl.remove(handle_id))?
@@ -417,7 +428,8 @@ pub fn irq_mint(
     let hook: Weak<dyn RevocationHook> = Arc::<IrqLine>::downgrade(&line);
     let handle = Capability::new_with_default_rights(line);
     // Хук регистрируется до вставки корня в таблицу, пока корень недоступен другим потокам.
-    handle.node().register_hook(hook);
+    let registered = handle.node().register_hook(hook);
+    debug_assert!(registered.is_ok(), "fresh root node is not revoked");
     table
         .with_lock(|tbl| tbl.insert(handle))
         .map_err(RejectedInsert::release)
@@ -792,6 +804,34 @@ mod tests {
     }
 
     #[test]
+    fn signal_wait_on_derived_handle_ends_when_ancestor_closed() {
+        let _guard = test_lock();
+        let (table, root, signal) =
+            install_signal_handle(Rights::READ | Rights::WRITE | Rights::DUPLICATE);
+        let derived = table
+            .with_lock(|tbl| tbl.duplicate(root, Rights::READ, 0))
+            .unwrap();
+        let parks = Arc::new(AtomicU32::new(0));
+        let (table_for_hook, parks_for_hook) = (table.clone(), parks.clone());
+        let hook: BlockHook = Box::new(move || {
+            if parks_for_hook.fetch_add(1, Ordering::AcqRel) == 0 {
+                table_for_hook
+                    .with_lock(|tbl| tbl.remove(root).unwrap())
+                    .release();
+            } else {
+                signal.signal(SIGNALED, 0);
+            }
+        });
+        mock().configure(Some(table), Some(hook));
+
+        let err = signal_wait_one(derived, SIGNALED, None).unwrap_err();
+        assert_eq!(err, IpcError::Canceled);
+        assert_eq!(parks.load(Ordering::Acquire), 1);
+
+        mock().reset();
+    }
+
+    #[test]
     fn signal_wait_runtime_cancel_detaches_owned_wait() {
         let _guard = test_lock();
         let (table, id, signal) = install_signal_handle(Rights::READ);
@@ -824,6 +864,31 @@ mod tests {
             runtime.current_wait_token(),
         ));
         let items = [(id, SIGNALED)];
+        let armed = ArmedWait::new(table, &items, sources, waker);
+        let result = armed.arm(&items);
+
+        assert!(matches!(result, Err(IpcError::Canceled)));
+
+        mock().reset();
+    }
+
+    #[test]
+    fn arming_a_wait_on_a_revoked_handle_is_canceled() {
+        let _guard = test_lock();
+        let (table, root, signal) = install_signal_handle(Rights::READ | Rights::DUPLICATE);
+        let derived = table
+            .with_lock(|tbl| tbl.duplicate(root, Rights::READ, 0))
+            .unwrap();
+        mock().configure(Some(table.clone()), None);
+        table.with_lock(|tbl| tbl.remove(root).unwrap()).release();
+
+        let sources: Vec<Arc<dyn Waitable>> = alloc::vec![signal];
+        let runtime = runtime();
+        let waker = Arc::new(ParkWaker::new(
+            runtime.clone(),
+            runtime.current_wait_token(),
+        ));
+        let items = [(derived, SIGNALED)];
         let armed = ArmedWait::new(table, &items, sources, waker);
         let result = armed.arm(&items);
 
@@ -1037,13 +1102,12 @@ mod tests {
 
     #[test]
     fn signal_wait_one_on_non_waitable_object_is_wrong_type() {
-        // Port не ожидаем: as_waitable -> None -> WrongType (без блокировки).
         let _guard = test_lock();
         let table = Arc::new(MutexCell::new(HandleTable::new()));
         let id = table
             .with_lock(|tbl| {
                 tbl.insert(Capability::new(
-                    CapabilityTarget::Port(crate::Port::new()),
+                    CapabilityTarget::Resource(crate::Resource::new(memory::AccessMask::RW, 1)),
                     Rights::READ,
                 ))
             })

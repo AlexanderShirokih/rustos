@@ -45,6 +45,7 @@ mod cxx_exit;
 mod cxx_selftest;
 mod display;
 mod display_fixture_protocol;
+mod executor;
 mod failing_filesystem;
 mod filesystem;
 mod filesystem_bench;

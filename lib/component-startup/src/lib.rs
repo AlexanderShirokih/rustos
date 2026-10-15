@@ -29,7 +29,7 @@ pub use component_abi::{
 pub use declare::start_parent;
 pub use declare::{Requirements, StartupError, StartupFailure};
 pub use export::{
-    ExportStopped, MintedSession, SessionEvent, SessionEvents, SessionPort, serve_export,
+    ExportStopped, MintedSession, Polled, SessionEvent, SessionEvents, SessionPort, serve_export,
     whole_export,
 };
 pub use import::Import;

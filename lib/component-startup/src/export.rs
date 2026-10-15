@@ -31,7 +31,7 @@ pub struct MintedSession {
 #[derive(Debug)]
 pub struct ExportStopped(CallError<AcceptError>);
 
-/// Событие порта сессий экспорта из [`SessionEvents::recv`].
+/// Событие порта сессий экспорта из [`SessionEvents`].
 pub enum SessionEvent<'b> {
     /// Кадр сессии со значком отправителя. Разрушение кадра без `dispatch` отменяет ответ, и
     /// вызыватель получает отказ.
@@ -40,7 +40,18 @@ pub enum SessionEvent<'b> {
     Gone(u64),
 }
 
-/// Бессрочный приём порта сессий экспорта в собственный буфер кадра.
+/// Результат опроса [`SessionEvents::try_recv`].
+pub enum Polled<'b> {
+    /// Кадр сессии либо уход значка.
+    Event(SessionEvent<'b>),
+    /// На порту нет ни кадра, ни ухода значка.
+    Empty,
+    /// Приём через эту capability порта закончен.
+    Closed,
+}
+
+/// Приём порта сессий экспорта в собственный буфер кадра: бессрочный [`Self::recv`] либо
+/// опрос [`Self::try_recv`].
 ///
 /// Кадр, отброшенный ядром из-за нехватки места под его capability, пропускается.
 pub struct SessionEvents<'p> {
@@ -80,7 +91,7 @@ impl SessionPort {
         Ok(MintedSession { badge, port })
     }
 
-    /// Бессрочный приём кадров порта, как [`SessionEvents::new`].
+    /// Приём кадров порта, как [`SessionEvents::new`].
     #[must_use]
     pub const fn events(&self) -> SessionEvents<'_> {
         SessionEvents::new(&self.port)
@@ -102,23 +113,39 @@ impl<'p> SessionEvents<'p> {
         }
     }
 
-    /// Возвращает следующий кадр сессии либо уход значка. `None` означает, что кадров порта
-    /// больше не будет.
+    /// Ждёт следующий кадр сессии либо уход значка. `None` означает, что приём через эту
+    /// capability порта закончен.
     pub fn recv(&mut self) -> Option<SessionEvent<'_>> {
+        match self.receive(Timeout::INFINITE) {
+            Polled::Event(event) => Some(event),
+            Polled::Empty | Polled::Closed => None,
+        }
+    }
+
+    /// Выдаёт кадр сессии либо уход значка, если они уже есть на порту, не ожидая их.
+    pub fn try_recv(&mut self) -> Polled<'_> {
+        self.receive(Timeout::POLL)
+    }
+
+    fn receive(&mut self, wait: Timeout) -> Polled<'_> {
         let transport = PortTransport::new(self.port.borrow());
 
         // Из цикла выходят длина и ресурсы кадра, поэтому заём буфера не переходит на следующий
         // приём.
         let (len, resources) = loop {
-            match transport.recv(&mut self.bytes, Timeout::INFINITE) {
+            match transport.recv(&mut self.bytes, wait) {
                 Ok(frame) => break (frame.bytes.len(), frame.resources),
-                Err(RecvError::SenderGone(badge)) => return Some(SessionEvent::Gone(badge)),
+                Err(RecvError::SenderGone(badge)) => {
+                    return Polled::Event(SessionEvent::Gone(badge));
+                }
+                // Бессрочный приём после пробуждения без кадра ждёт снова.
+                Err(RecvError::Timeout) if wait != Timeout::INFINITE => return Polled::Empty,
                 Err(RecvError::Discarded | RecvError::Timeout) => {}
-                Err(RecvError::Closed) => return None,
+                Err(RecvError::Closed) => return Polled::Closed,
             }
         };
 
-        Some(SessionEvent::Frame(Incoming {
+        Polled::Event(SessionEvent::Frame(Incoming {
             bytes: self.bytes.get(..len).unwrap_or_default(),
             resources,
         }))

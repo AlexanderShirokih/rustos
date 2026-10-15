@@ -239,6 +239,7 @@ clk-qcom = { path = "../../system/clk-qcom" }
 clocks-abi = { workspace = true }
 component-abi = { workspace = true }
 component-startup = { workspace = true }
+executor = { workspace = true }
 display-abi = { workspace = true }
 driver-gpio-keys = { path = "../../system/driver-gpio-keys" }
 driver-pm8941-pwrkey = { path = "../../system/driver-pm8941-pwrkey" }

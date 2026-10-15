@@ -128,7 +128,7 @@ impl<K: ObjectKind> fmt::Debug for Handle<K> {
 /// assert_eq!(items.len(), 2);
 /// ```
 ///
-/// Порт ядро в этой операции не принимает.
+/// Ожидаемые виды объектов - реализации [`WaitableKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct WaitItem {

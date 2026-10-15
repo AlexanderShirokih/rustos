@@ -1196,6 +1196,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "executor"
+version = "0.1.0"
+dependencies = [
+ "kernel-objects",
+ "spin",
+ "syscall",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2481,6 +2490,7 @@ name = "input-hub"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "input-abi",
  "ipc",
  "kernel-objects",
@@ -4857,6 +4867,7 @@ dependencies = [
  "driver-pm8941-pwrkey",
  "driver-simplefb",
  "driver-virtio-input",
+ "executor",
  "fdt",
  "fdt-test",
  "filesystem",

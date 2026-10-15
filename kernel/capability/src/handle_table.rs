@@ -398,9 +398,7 @@ impl HandleTable {
         id: HandleId,
         hook: alloc::sync::Weak<dyn RevocationHook>,
     ) -> Result<(), IpcError> {
-        let handle = self.lookup(id)?;
-        handle.node().register_hook(hook);
-        Ok(())
+        self.lookup(id)?.node().register_hook(hook)
     }
 
     /// Снимает cancel-target по identity.

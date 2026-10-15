@@ -8,6 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use kbase::{LockCell, MutexCell};
 
+use super::errors::IpcError;
+
 /// Обработчик снятия побочного эффекта капы, вызываемый каскадом при отзыве.
 pub trait RevocationHook: Send + Sync {
     /// Снимает побочный эффект капы. Отзыв доходит до каждого узла поддерева, а повторный отзыв
@@ -53,17 +55,15 @@ impl RevNode {
         if inserted { Some(child) } else { None }
     }
 
-    pub(crate) fn register_hook(&self, hook: Weak<dyn RevocationHook>) {
+    pub(crate) fn register_hook(&self, hook: Weak<dyn RevocationHook>) -> Result<(), IpcError> {
         self.hooks.with_lock(|h| {
             if self.revoked.load(Ordering::SeqCst) {
-                if let Some(live) = hook.upgrade() {
-                    live.revoke();
-                }
-                return;
+                return Err(IpcError::Revoked);
             }
             h.retain(|w| w.strong_count() > 0);
             h.push(hook);
-        });
+            Ok(())
+        })
     }
 
     pub(crate) fn is_alive(self: &Arc<Self>) -> bool {
@@ -182,9 +182,15 @@ mod tests {
         let h_child = CountingHook::new();
         let h_grandchild = CountingHook::new();
         let h_sibling = CountingHook::new();
-        child.register_hook(Arc::downgrade(&h_child) as Weak<dyn RevocationHook>);
-        grandchild.register_hook(Arc::downgrade(&h_grandchild) as Weak<dyn RevocationHook>);
-        sibling.register_hook(Arc::downgrade(&h_sibling) as Weak<dyn RevocationHook>);
+        child
+            .register_hook(Arc::downgrade(&h_child) as Weak<dyn RevocationHook>)
+            .unwrap();
+        grandchild
+            .register_hook(Arc::downgrade(&h_grandchild) as Weak<dyn RevocationHook>)
+            .unwrap();
+        sibling
+            .register_hook(Arc::downgrade(&h_sibling) as Weak<dyn RevocationHook>)
+            .unwrap();
 
         revoke_subtree(&child);
 
@@ -197,7 +203,8 @@ mod tests {
     fn revoke_subtree_skips_dropped_hooks() {
         let root = RevNode::new_root();
         let hook = CountingHook::new();
-        root.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
+        root.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>)
+            .unwrap();
         drop(hook);
 
         revoke_subtree(&root);
@@ -208,7 +215,9 @@ mod tests {
         let root = RevNode::new_root();
         let child = RevNode::new_child(&root).unwrap();
         let hook = CountingHook::new();
-        child.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
+        child
+            .register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>)
+            .unwrap();
 
         revoke_subtree(&root);
         assert_eq!(hook.count(), 1);
@@ -226,7 +235,8 @@ mod tests {
 
         let live = RevNode::new_child(&root).unwrap();
         let hook = CountingHook::new();
-        live.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
+        live.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>)
+            .unwrap();
 
         revoke_subtree(&root);
         assert_eq!(hook.count(), 1);
@@ -238,11 +248,13 @@ mod tests {
 
         for _ in 0..10 {
             let h = CountingHook::new();
-            root.register_hook(Arc::downgrade(&h) as Weak<dyn RevocationHook>);
+            root.register_hook(Arc::downgrade(&h) as Weak<dyn RevocationHook>)
+                .unwrap();
         }
 
         let live = CountingHook::new();
-        root.register_hook(Arc::downgrade(&live) as Weak<dyn RevocationHook>);
+        root.register_hook(Arc::downgrade(&live) as Weak<dyn RevocationHook>)
+            .unwrap();
         revoke_subtree(&root);
         assert_eq!(live.count(), 1);
     }
@@ -255,12 +267,15 @@ mod tests {
     }
 
     #[test]
-    fn register_hook_after_revoke_fires_immediately() {
+    fn register_hook_after_revoke_is_rejected() {
         let root = RevNode::new_root();
         revoke_subtree(&root);
         let hook = CountingHook::new();
-        root.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>);
-        assert_eq!(hook.count(), 1);
+        assert_eq!(
+            root.register_hook(Arc::downgrade(&hook) as Weak<dyn RevocationHook>),
+            Err(IpcError::Revoked)
+        );
+        assert_eq!(hook.count(), 0);
     }
 
     #[test]

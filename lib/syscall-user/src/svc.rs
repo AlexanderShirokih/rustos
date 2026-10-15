@@ -224,8 +224,8 @@ use crate::IssuedHandle;
 /// Ждёт сигналы `signals` на capability target `handle`.
 ///
 /// [`Timeout::POLL`] делает вызов неблокирующим опросом. Требует `Rights::READ`, а нулевая
-/// маска даёт `InvalidArgument`. Закрытие либо передача `handle` до сигнала снимает ожидание
-/// кодом `Canceled`.
+/// маска даёт `InvalidArgument`. Закрытие, передача либо отзыв `handle` до сигнала снимает
+/// ожидание кодом `Canceled`.
 /// Возврат: observed-маска (>=0) либо `-(SyscallError)`.
 pub fn signal_wait_one<K: WaitableKind>(handle: Handle<K>, signals: u32, timeout: Timeout) -> i64 {
     // SAFETY: svc-immediate содержит номер операции (ESR.ISS). Аргументы лежат в x0..x2: handle,

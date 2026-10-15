@@ -12,19 +12,22 @@
 //! - (b) call/reply round-trip;
 //! - (c) перенос Signal-хендла через port и проверка идентичности
 //!   объекта на стороне получателя (сигнал, поднятый до переноса, виден);
-//! - (d) порядок "получатель пришёл первым" и "отправитель пришёл первым".
+//! - (d) порядок "получатель пришёл первым" и "отправитель пришёл первым";
+//! - (g) ожидание готовности приёма порта через `wait_any`.
 
 use core::{
     num::NonZeroU32,
     sync::atomic::{AtomicI64, AtomicU64, Ordering::SeqCst},
 };
 
-use kernel_objects::{Error, Port, kind};
+use kernel_objects::{Error, Port, Signal, kind, wait_any};
 use runtime::{
     JoinHandle, Timeout, handle_duplicate, ipc_buffer_addr, port_call, port_recv, port_send,
     signal_create, signal_set, signal_wait_one, spawn, spawn_owned,
 };
-use syscall::{Handle, SIGNALED, SyscallError, WakeCount, decode_tag, encode_tag};
+use syscall::{
+    Handle, READABLE, SIGNALED, SyscallError, WaitItem, WakeCount, decode_tag, encode_tag,
+};
 
 const JOIN_TIMEOUT: Timeout = Timeout::from_secs(5);
 
@@ -391,4 +394,86 @@ fn call_finite_timeout_no_server_should_wait() {
 
 fn assert_timeout(result: kernel_objects::Result<()>) {
     test_harness::check!(matches!(result, Err(Error::Syscall(SyscallError::Timeout))));
+}
+
+// --- (g) Порт ждут через `wait_any`, а кадр готового порта принимают опросом. ---------------
+
+const PROBE: &[u8] = b"probe";
+
+const READY_TIMEOUT: Timeout = Timeout::from_secs(5);
+const SENDER_TIMEOUT: Timeout = Timeout::from_millis(200);
+const IDLE_TIMEOUT: Timeout = Timeout::from_millis(50);
+
+fn send_probe(wait: Timeout) {
+    crate::ipc_raw::write_frame(PROBE, &[]);
+    WORKER_RESULT.store(port_send(ep_handle(), wait), SeqCst);
+}
+
+extern "C" fn probe_sender(_arg: usize) -> u32 {
+    send_probe(READY_TIMEOUT);
+    0
+}
+
+extern "C" fn expiring_sender(_arg: usize) -> u32 {
+    send_probe(SENDER_TIMEOUT);
+    0
+}
+
+extern "C" fn polling_sender(_arg: usize) -> u32 {
+    send_probe(Timeout::POLL);
+    0
+}
+
+#[test_harness::test]
+fn waiting_port_and_signal_wakes_on_a_sender() {
+    let ep = Port::create().expect("port create");
+    let signal = Signal::create().expect("signal create");
+    EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
+
+    let worker = spawn_worker(probe_sender);
+    let items = [
+        WaitItem::new(signal.as_raw(), SIGNALED),
+        WaitItem::new(ep.as_raw(), READABLE),
+    ];
+    test_harness::check!(matches!(wait_any(&items, READY_TIMEOUT), Ok(1)));
+
+    let mut buf = [0u8; 8];
+    let received = ep.recv_bytes(&mut buf, Timeout::POLL);
+    test_harness::check!(matches!(received, Ok((len, None)) if buf.get(..len) == Some(PROBE)));
+
+    join(worker);
+    test_harness::check_eq!(WORKER_RESULT.load(SeqCst), 0);
+}
+
+#[test_harness::test]
+fn waiting_port_times_out_after_its_sender_expires() {
+    let ep = Port::create().expect("port create");
+    EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
+
+    let worker = spawn_worker(expiring_sender);
+    let items = [WaitItem::new(ep.as_raw(), READABLE)];
+    test_harness::check!(matches!(wait_any(&items, READY_TIMEOUT), Ok(0)));
+
+    join(worker);
+    test_harness::check_eq!(
+        WORKER_RESULT.load(SeqCst),
+        SyscallError::Timeout.as_return_value()
+    );
+    assert_timeout(wait_any(&items, IDLE_TIMEOUT).map(|_| ()));
+}
+
+#[test_harness::test]
+fn waiting_port_times_out_while_a_client_polls_send() {
+    let ep = Port::create().expect("port create");
+    EP_RAW.store(u64::from(ep.as_raw().raw()), SeqCst);
+
+    let worker = spawn_worker(polling_sender);
+    let items = [WaitItem::new(ep.as_raw(), READABLE)];
+    assert_timeout(wait_any(&items, IDLE_TIMEOUT).map(|_| ()));
+
+    join(worker);
+    test_harness::check_eq!(
+        WORKER_RESULT.load(SeqCst),
+        SyscallError::Timeout.as_return_value()
+    );
 }

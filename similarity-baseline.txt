@@ -1,6 +1,5 @@
 kernel/capability/src/port/mod.rs|function port_call|kernel/capability/src/port/mod.rs|function port_send
 kernel/capability/src/port/mod.rs|function resolve_call|kernel/capability/src/port/mod.rs|function resolve_send_recv
-kernel/capability/src/port/mod.rs|method recv|kernel/capability/src/port/mod.rs|method send
 kernel/capability/src/target.rs|method badged_holder_ticket|kernel/capability/src/target.rs|method holder_ticket
 kernel/capability/src/target.rs|method counted_holder_ticket|kernel/capability/src/target.rs|method holder_ticket
 kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree

@@ -26,8 +26,8 @@ pub enum SyscallOp {
     ///  - `arg1=signals` (нижние 32 бита, нулевая маска - `InvalidArgument`),
     ///  - `arg2=timeout_ns` (`timeout_ns == 0` - non-blocking poll).
     ///
-    /// Требует `Rights::READ`. Объект без ожидаемого источника - `WrongType`. Закрытие
-    /// либо передача handle до сигнала снимает ожидание кодом `Canceled`.
+    /// Требует `Rights::READ`. Объект без ожидаемого источника - `WrongType`. Закрытие,
+    /// передача либо отзыв handle до сигнала снимает ожидание кодом `Canceled`.
     /// Возврат: observed-маска (пересечение поднятых битов с `signals`).
     SignalWaitOne = 0x11,
 

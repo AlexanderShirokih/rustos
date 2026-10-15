@@ -18,6 +18,7 @@ bench = false
 [dependencies]
 kernel-objects = { workspace = true }
 component-startup = { workspace = true }
+executor = { workspace = true }
 input-abi = { workspace = true }
 ipc = { workspace = true }
 program-entry = { workspace = true }

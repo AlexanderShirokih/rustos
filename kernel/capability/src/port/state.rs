@@ -1,4 +1,4 @@
-//! Состояние порта под его локом складывается из очереди ждущих сторон и учёта держателей.
+//! Состояние порта, которое меняется только под его локом.
 //!
 //! Очередь держит либо отправителей, либо получателей - но никогда оба
 //! одновременно. Учёт значков и получателей меняется только под тем же локом,
@@ -8,6 +8,8 @@
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
+use syscall::READABLE;
+
 use super::{
     outcome::{OutcomeSlot, RendezvousOutcome, SendKind},
     transport::ThreadTransport,
@@ -16,7 +18,7 @@ use crate::{
     errors::IpcError,
     handle_table::HandleTable,
     reply::ReplySlot,
-    wait::{CancelTarget, ParkWaker},
+    wait::{CancelTarget, ParkWaker, Waker},
 };
 
 pub(super) struct Waiter<K> {
@@ -41,6 +43,11 @@ struct BadgeRecord {
     holders: u32,
 }
 
+struct ReadableWaiter {
+    mask: u32,
+    waker: Arc<dyn Waker>,
+}
+
 pub(super) enum QueuedWaiter {
     Sender(SenderWaiter),
     Receiver(ReceiverWaiter),
@@ -58,6 +65,10 @@ impl QueuedWaiter {
 pub(super) enum PendingWake {
     Delivered(ReceiverWaiter),
     Broken(QueuedWaiter),
+    Readable {
+        waker: Arc<dyn Waker>,
+        observed: u32,
+    },
 }
 
 impl PendingWake {
@@ -65,6 +76,7 @@ impl PendingWake {
         match self {
             Self::Delivered(waiter) => waiter.waker.signal_match(),
             Self::Broken(waiter) => waiter.waker().cancel(),
+            Self::Readable { waker, observed } => waker.wake(observed),
         }
     }
 }
@@ -82,6 +94,7 @@ pub(super) struct PortState {
     receivers: usize,
     badges: Vec<BadgeRecord>,
     departed: usize,
+    readable_waiters: Vec<ReadableWaiter>,
 }
 
 impl PortState {
@@ -91,7 +104,57 @@ impl PortState {
             receivers: 0,
             badges: Vec::new(),
             departed: 0,
+            readable_waiters: Vec::new(),
         }
+    }
+
+    pub(super) fn readable(&self) -> u32 {
+        let ready = matches!(self.queue, Queue::Senders(_)) || self.departed > 0;
+        if ready { READABLE } else { 0 }
+    }
+
+    pub(super) fn push_readable_waiter(
+        &mut self,
+        mask: u32,
+        observer: Arc<dyn Waker>,
+        wakes: &mut Vec<PendingWake>,
+    ) {
+        let level = self.readable();
+
+        if mask & level != 0 {
+            wakes.push(PendingWake::Readable {
+                waker: observer,
+                observed: level,
+            });
+            return;
+        }
+        self.readable_waiters.push(ReadableWaiter {
+            mask,
+            waker: observer,
+        });
+    }
+
+    pub(super) fn take_readable_waiters(&mut self, raised: u32, wakes: &mut Vec<PendingWake>) {
+        let woken = self
+            .readable_waiters
+            .extract_if(.., |entry| entry.mask & raised != 0);
+        for entry in woken {
+            wakes.push(PendingWake::Readable {
+                waker: entry.waker,
+                observed: raised,
+            });
+        }
+    }
+
+    pub(super) fn remove_readable_waiter(
+        &mut self,
+        waker: &Arc<dyn Waker>,
+    ) -> Option<Arc<dyn Waker>> {
+        let position = self
+            .readable_waiters
+            .iter()
+            .position(|entry| Arc::ptr_eq(&entry.waker, waker))?;
+        Some(self.readable_waiters.swap_remove(position).waker)
     }
 
     pub(super) fn add_receiver(&mut self) {
