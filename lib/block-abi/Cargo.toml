@@ -1,0 +1,13 @@
+[package]
+license.workspace = true
+name = "block-abi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ipc = { workspace = true }
+syscall = { workspace = true }
+
+[lints]
+workspace = true

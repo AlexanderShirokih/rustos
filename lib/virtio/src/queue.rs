@@ -29,8 +29,6 @@ const RING_OFFSET: usize = 4;
 const USED_ELEMENT_BYTES: usize = 8;
 const DESCRIPTOR_FLAG_NEXT: u16 = 1;
 const DESCRIPTOR_FLAG_WRITE: u16 = 2;
-const CHAIN_DESCRIPTORS: u16 = 2;
-const OFFER_DESCRIPTORS: u16 = 1;
 
 static ZERO_AREA: [u8; QUEUE_AREA_BYTES] = [0; QUEUE_AREA_BYTES];
 
@@ -50,9 +48,9 @@ pub struct Token(u16);
 /// Цепочка, которую устройство вернуло в использованных элементах.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Completion {
-    /// Голова цепочки, полученная от [`SplitQueue::submit`] или [`SplitQueue::offer`].
+    /// Голова цепочки, полученная от [`SplitQueue::submit`].
     pub token: Token,
-    /// Число байт, записанных устройством в записываемый буфер цепочки.
+    /// Число байт, записанных устройством в записываемые буферы цепочки.
     pub written: u32,
 }
 
@@ -70,6 +68,8 @@ pub enum QueueError<E> {
     Misaligned(u64),
     /// Свободных дескрипторов меньше длины цепочки.
     Full,
+    /// Цепочка не содержит ни одного буфера.
+    EmptyChain,
     /// Устройство вернуло номер, не выданный как голова цепочки.
     UnknownHead(u32),
     /// Обращение выходит за границу региона очереди.
@@ -143,37 +143,50 @@ impl SplitQueue {
         self.size
     }
 
-    /// Отправляет цепочку "`request`, затем `response`" и уведомляет устройство.
+    /// Отправляет цепочку из буферов `readable`, которые устройство читает, и следующих за ними
+    /// буферов `writable`, которые оно пишет, и уведомляет устройство.
     ///
-    /// Устройство читает `request` и пишет в `response`. Отказ уведомления не отменяет
-    /// опубликованную цепочку. Её буферы остаются занятыми до завершения команды или
-    /// сброса устройства.
+    /// Буферы идут в цепочке в переданном порядке. Отказ уведомления не отменяет опубликованную
+    /// цепочку. Её буферы остаются занятыми до завершения команды или сброса устройства.
+    ///
+    /// Отказы, при которых очередь не меняется:
+    /// - `EmptyChain` - в цепочке нет буферов;
+    /// - `Full` - свободных дескрипторов меньше числа буферов.
     pub fn submit<R: Registers, M: DeviceMemory>(
         &mut self,
         transport: &mut Transport<R>,
         memory: &mut M,
-        request: Buffer,
-        response: Buffer,
+        readable: &[Buffer],
+        writable: &[Buffer],
     ) -> Result<Token, QueueError<R::Error>> {
-        let chain = self.descriptors.reserve(CHAIN_DESCRIPTORS)?;
-        let (head, tail) = (chain.head, chain.tail);
-        write_descriptor(memory, head, request, DESCRIPTOR_FLAG_NEXT, tail)?;
-        write_descriptor(memory, tail, response, DESCRIPTOR_FLAG_WRITE, 0)?;
-        self.publish(transport, memory, chain)
-    }
+        let buffers = readable.iter().map(|buffer| (*buffer, 0)).chain(
+            writable
+                .iter()
+                .map(|buffer| (*buffer, DESCRIPTOR_FLAG_WRITE)),
+        );
+        let length = readable.len().saturating_add(writable.len());
+        if length == 0 {
+            return Err(QueueError::EmptyChain);
+        }
+        let length = u16::try_from(length).map_err(|_| QueueError::Full)?;
 
-    /// Публикует `buffer`, который устройство только пишет, и уведомляет устройство.
-    ///
-    /// Отказ уведомления не отменяет опубликованный буфер. Он остаётся занятым до
-    /// завершения или сброса устройства.
-    pub fn offer<R: Registers, M: DeviceMemory>(
-        &mut self,
-        transport: &mut Transport<R>,
-        memory: &mut M,
-        buffer: Buffer,
-    ) -> Result<Token, QueueError<R::Error>> {
-        let chain = self.descriptors.reserve(OFFER_DESCRIPTORS)?;
-        write_descriptor(memory, chain.head, buffer, DESCRIPTOR_FLAG_WRITE, 0)?;
+        let chain = self.descriptors.reserve(length)?;
+        let mut descriptor = chain.head;
+        for (buffer, flags) in buffers {
+            if descriptor == chain.tail {
+                write_descriptor(memory, descriptor, buffer, flags, 0)?;
+                break;
+            }
+            let next = self.descriptors.link(descriptor)?;
+            write_descriptor(
+                memory,
+                descriptor,
+                buffer,
+                flags | DESCRIPTOR_FLAG_NEXT,
+                next,
+            )?;
+            descriptor = next;
+        }
         self.publish(transport, memory, chain)
     }
 
@@ -409,8 +422,8 @@ mod tests {
         let mut memory = FakeMemory::new(QUEUE_REGION_BYTES, &log);
         let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
 
-        let failed = queue.submit(&mut transport, &mut memory, REQUEST, RESPONSE);
-        let occupied = queue.submit(&mut transport, &mut memory, REQUEST, RESPONSE);
+        let failed = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
+        let occupied = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
         publish_first_used(&mut memory, 0, RESPONSE.length);
         let completion = queue.take_used(&mut transport, &mut memory).unwrap();
 
@@ -442,7 +455,7 @@ mod tests {
         log.clear();
 
         queue
-            .submit(&mut transport, &mut memory, REQUEST, RESPONSE)
+            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
             .unwrap();
 
         let events = log.events();
@@ -468,59 +481,55 @@ mod tests {
     }
 
     #[test]
-    fn offer_publishes_like_submit_with_one_writable_descriptor() {
-        let Fixture {
-            log,
-            mut transport,
-            mut memory,
-        } = fixture(2);
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 3, 2).unwrap();
-        log.clear();
-
-        queue.offer(&mut transport, &mut memory, RESPONSE).unwrap();
-
-        assert_eq!(
-            log.events(),
-            [
-                Event::MemoryWrite(
-                    DESCRIPTORS_OFFSET,
-                    vec![0, 0x20, 0, 0, 0, 0, 0, 0, 0x98, 1, 0, 0, 2, 0, 0, 0]
-                ),
-                Event::MemoryWrite(AVAILABLE_OFFSET + RING_OFFSET, vec![0, 0]),
-                Event::Barrier,
-                Event::MemoryWrite(AVAILABLE_OFFSET + 2, vec![1, 0]),
-                Event::Barrier,
-                Event::Write(register::QUEUE_NOTIFY, 3),
-            ]
-        );
-    }
-
-    #[test]
-    fn returned_buffer_and_command_free_all_their_descriptors() {
+    fn a_virtio_block_read_chains_one_readable_and_two_writable_descriptors() {
         let Fixture {
             mut transport,
             mut memory,
             ..
         } = fixture(4);
         let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 4).unwrap();
-        let command = queue
-            .submit(&mut transport, &mut memory, REQUEST, RESPONSE)
+        let status = Buffer {
+            address: 0x3000,
+            length: 1,
+        };
+
+        let token = queue
+            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE, status])
             .unwrap();
-        let buffer = queue.offer(&mut transport, &mut memory, RESPONSE).unwrap();
-        publish_used(
-            &mut memory,
-            &[(u32::from(buffer.0), 8), (u32::from(command.0), 408)],
-        );
-        for _ in 0..2 {
-            queue.take_used(&mut transport, &mut memory).unwrap();
-        }
+        let chained: Vec<_> = (0..3)
+            .map(|descriptor| {
+                memory
+                    .get(DESCRIPTORS_OFFSET + DESCRIPTOR_BYTES * descriptor + 12, 4)
+                    .to_vec()
+            })
+            .collect();
+        publish_first_used(&mut memory, u32::from(token.0), 1);
+        queue.take_used(&mut transport, &mut memory).unwrap();
+        let refilled = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE, status]);
+        let last = queue.submit(&mut transport, &mut memory, &[status], &[]);
+        let overflow = queue.submit(&mut transport, &mut memory, &[status], &[]);
 
-        for _ in 0..4 {
-            queue.offer(&mut transport, &mut memory, RESPONSE).unwrap();
-        }
-        let overflow = queue.offer(&mut transport, &mut memory, RESPONSE);
-
+        assert_eq!(chained, [[1, 0, 1, 0], [3, 0, 2, 0], [2, 0, 0, 0]]);
+        assert!(refilled.is_ok());
+        assert!(last.is_ok());
         assert_eq!(overflow, Err(QueueError::Full));
+    }
+
+    #[test]
+    fn an_empty_chain_is_refused_without_touching_the_queue() {
+        let Fixture {
+            log,
+            mut transport,
+            mut memory,
+        } = fixture(2);
+        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
+        log.clear();
+
+        let result = queue.submit(&mut transport, &mut memory, &[], &[]);
+
+        assert_eq!(result, Err(QueueError::EmptyChain));
+        assert!(log.events().is_empty());
+        assert_eq!(memory.get(AVAILABLE_OFFSET + 2, 2), [0, 0]);
     }
 
     #[test]
@@ -534,12 +543,12 @@ mod tests {
             let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
             for _ in 0..submitted {
                 queue
-                    .submit(&mut transport, &mut memory, REQUEST, RESPONSE)
+                    .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
                     .unwrap();
             }
             log.clear();
 
-            let result = queue.submit(&mut transport, &mut memory, REQUEST, RESPONSE);
+            let result = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
 
             assert_eq!(result, Err(QueueError::Full));
             assert!(log.events().is_empty());
@@ -556,7 +565,7 @@ mod tests {
         } = fixture(2);
         let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
         let token = queue
-            .submit(&mut transport, &mut memory, REQUEST, RESPONSE)
+            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
             .unwrap();
         publish_first_used(&mut memory, u32::from(token.0), 408);
         log.clear();
@@ -564,7 +573,7 @@ mod tests {
         let completion = queue.take_used(&mut transport, &mut memory).unwrap();
         let read_order = log.events();
         let again = queue.take_used(&mut transport, &mut memory).unwrap();
-        let resubmitted = queue.submit(&mut transport, &mut memory, REQUEST, RESPONSE);
+        let resubmitted = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
 
         assert_eq!(
             completion,
@@ -594,7 +603,7 @@ mod tests {
         } = fixture(4);
         let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 4).unwrap();
         queue
-            .submit(&mut transport, &mut memory, REQUEST, RESPONSE)
+            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
             .unwrap();
         publish_first_used(&mut memory, 1, 0);
 

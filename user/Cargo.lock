@@ -352,6 +352,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
+
+[[package]]
 name = "block2"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1035,6 +1043,23 @@ dependencies = [
  "runtime",
  "syscall",
  "userland-build",
+]
+
+[[package]]
+name = "driver-virtio-blk"
+version = "0.1.0"
+dependencies = [
+ "block-abi",
+ "component-startup",
+ "ipc",
+ "kernel-objects",
+ "program-entry",
+ "runtime",
+ "syscall",
+ "userland-build",
+ "virtio",
+ "virtio-driver",
+ "virtio-mmio-abi",
 ]
 
 [[package]]
@@ -4857,6 +4882,7 @@ dependencies = [
 name = "testrunner"
 version = "0.1.0"
 dependencies = [
+ "block-abi",
  "bootstrap-abi",
  "clk-qcom",
  "clocks-abi",
@@ -4866,6 +4892,7 @@ dependencies = [
  "driver-gpio-keys",
  "driver-pm8941-pwrkey",
  "driver-simplefb",
+ "driver-virtio-blk",
  "driver-virtio-input",
  "executor",
  "fdt",

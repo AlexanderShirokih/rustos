@@ -11,7 +11,9 @@ use virtio::{
         Command, DisplayInfo, EDID_RESPONSE_BYTES, FEATURE_EDID, Format, GpuError, ImageSize, Rect,
     },
 };
-use virtio_driver::{DmaRegion, SlotFailure, SlotRegisters, open_slot};
+use virtio_driver::{
+    CompletionFailure, DmaRegion, SlotFailure, SlotRegisters, await_completion, open_slot,
+};
 use virtio_mmio_abi::{SlotError, VirtioMmioError, virtio_mmio};
 
 const SLOT_CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
@@ -44,7 +46,7 @@ pub(crate) enum CommandFailure {
     Slot(SlotFailure),
     Queue(QueueError<SlotFailure>),
     Gpu(GpuError),
-    Line(kernel_objects::Error),
+    Completion(CompletionFailure),
     Memory,
     NotReady,
     UnexpectedCompletion,
@@ -82,6 +84,12 @@ impl From<SlotFailure> for CommandFailure {
 impl From<QueueError<SlotFailure>> for CommandFailure {
     fn from(error: QueueError<SlotFailure>) -> Self {
         Self::Queue(error)
+    }
+}
+
+impl From<CompletionFailure> for CommandFailure {
+    fn from(failure: CompletionFailure) -> Self {
+        Self::Completion(failure)
     }
 }
 
@@ -369,18 +377,19 @@ impl Device {
             .write(0, request.get(..length).ok_or(CommandFailure::Memory)?)?;
         self.commands.write(RESPONSE_OFFSET, &[0; RESPONSE_BYTES])?;
         let base = self.commands.physical_address();
+        let request = Buffer {
+            address: base,
+            length: u32::try_from(length).map_err(|_| CommandFailure::Memory)?,
+        };
+        let response = Buffer {
+            address: base + RESPONSE_OFFSET as u64,
+            length: u32::try_from(command.response_bytes()).map_err(|_| CommandFailure::Memory)?,
+        };
         let token = queue.submit(
             &mut self.transport,
             &mut self.queue_memory,
-            Buffer {
-                address: base,
-                length: u32::try_from(length).map_err(|_| CommandFailure::Memory)?,
-            },
-            Buffer {
-                address: base + RESPONSE_OFFSET as u64,
-                length: u32::try_from(command.response_bytes())
-                    .map_err(|_| CommandFailure::Memory)?,
-            },
+            &[request],
+            &[response],
         )?;
         let completion = self.await_completion()?;
         if completion.token != token {
@@ -395,20 +404,14 @@ impl Device {
     }
 
     fn await_completion(&mut self) -> Result<Completion, CommandFailure> {
-        loop {
-            let queue = self.queue.as_mut().ok_or(CommandFailure::NotReady)?;
-            if let Some(completion) =
-                queue.take_used(&mut self.transport, &mut self.queue_memory)?
-            {
-                return Ok(completion);
-            }
-            self.line
-                .wait(COMPLETION_TIMEOUT)
-                .map_err(CommandFailure::Line)?;
-            let causes = self.transport.interrupt_status()?;
-            self.transport.acknowledge_interrupt(causes)?;
-            self.line.ack().map_err(CommandFailure::Line)?;
-        }
+        let queue = self.queue.as_mut().ok_or(CommandFailure::NotReady)?;
+        Ok(await_completion(
+            queue,
+            &mut self.transport,
+            &mut self.queue_memory,
+            &self.line,
+            COMPLETION_TIMEOUT,
+        )?)
     }
 }
 

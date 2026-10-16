@@ -42,6 +42,8 @@ pub(crate) mod status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum DeviceType {
+    /// Блочное устройство.
+    Block = 2,
     /// Устройство GPU.
     Gpu = 16,
     /// Устройство ввода.

@@ -14,6 +14,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-abi"
+version = "0.1.0"
+dependencies = [
+ "ipc",
+ "syscall",
+]
+
+[[package]]
 name = "bootstrap-abi"
 version = "0.1.0"
 dependencies = [

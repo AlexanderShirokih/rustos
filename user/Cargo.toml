@@ -18,6 +18,7 @@ members = [
     "system/driver-pm8941-pwrkey",
     "system/driver-pm8941-rtc",
     "system/driver-simplefb",
+    "system/driver-virtio-blk",
     "system/driver-virtio-gpu",
     "system/driver-virtio-input",
     "system/filesystem-imagefs",
@@ -88,6 +89,7 @@ bootstrap-abi = { path = "../lib/bootstrap-abi" }
 clocks-abi = { path = "../lib/clocks-abi" }
 component-abi = { path = "../lib/component-abi" }
 device-resolver = { path = "../lib/device-resolver" }
+block-abi = { path = "../lib/block-abi" }
 display-abi = { path = "../lib/display-abi" }
 fdt = { path = "../lib/fdt" }
 fdt-test = { path = "../lib/fdt-test" }

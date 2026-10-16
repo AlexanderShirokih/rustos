@@ -115,6 +115,7 @@ mod thread_pointer;
 mod thread_stack;
 mod thread_stack_protocol;
 mod thread_yield;
+mod virtio_block;
 mod virtio_input;
 mod virtio_mmio;
 mod vm;

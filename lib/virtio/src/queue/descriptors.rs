@@ -97,7 +97,7 @@ impl Descriptors {
         Ok(descriptor)
     }
 
-    fn link<E>(&self, descriptor: u16) -> Result<u16, QueueError<E>> {
+    pub(super) fn link<E>(&self, descriptor: u16) -> Result<u16, QueueError<E>> {
         let next = self.next.get(usize::from(descriptor)).copied();
         next.ok_or(QueueError::UnknownHead(descriptor.into()))
     }

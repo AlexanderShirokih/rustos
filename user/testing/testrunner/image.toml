@@ -206,6 +206,10 @@ package = "driver-virtio-gpu"
 path = "/driver-virtio-gpu"
 
 [[programs]]
+package = "driver-virtio-blk"
+path = "/driver-virtio-blk"
+
+[[programs]]
 package = "virtio-mmio"
 path = "/virtio-mmio"
 

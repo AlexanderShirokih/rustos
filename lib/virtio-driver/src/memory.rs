@@ -1,8 +1,8 @@
 //! Непрерывный регион памяти, доступный устройству.
 
-use kernel_objects::{MappedPages, Mapping, Resource};
+use kernel_objects::{MappedPages, Mapping, MemoryRegion, Resource};
 use runtime::{MemoryAccess, UserMemFlags};
-use syscall::PAGE_SIZE;
+use syscall::{PAGE_SIZE, Rights};
 use virtio::{DeviceMemory, OutOfRange};
 
 const HALF_WORD: usize = 2;
@@ -23,6 +23,14 @@ impl DmaRegion {
         let address = region.inspect()?.base;
         let mapping = Mapping::new(region, size, UserMemFlags::ReadWrite)?;
         Ok(Self { mapping, address })
+    }
+
+    /// Выдаёт производную capability региона с правами `rights`.
+    ///
+    /// Корень региона и его отображение остаются у `DmaRegion`. Разрушение `DmaRegion` отзывает
+    /// выданную capability и её производные.
+    pub fn share(&self, rights: Rights) -> Result<MemoryRegion, kernel_objects::Error> {
+        self.mapping.region().duplicate(rights, None)
     }
 
     /// Копирует `len` байт с `source_offset` отображения `source` в регион со смещения `offset`.

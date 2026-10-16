@@ -248,7 +248,7 @@ impl Input {
             length: u32::try_from(EVENT_BYTES).map_err(|_| Failure::EventBuffer)?,
         };
         self.queue
-            .offer(&mut self.transport, &mut self.queue_memory, buffer)
+            .submit(&mut self.transport, &mut self.queue_memory, &[], &[buffer])
             .map_err(Failure::Queue)
     }
 }
