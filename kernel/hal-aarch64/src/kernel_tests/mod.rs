@@ -11,4 +11,5 @@ mod page_flags;
 mod probe_va;
 mod smp;
 mod syscall;
+mod thread_table;
 mod unmap;

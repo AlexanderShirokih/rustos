@@ -130,7 +130,7 @@ fn spin_while(mut hold: impl FnMut() -> bool) {
     }
 }
 
-fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
+pub(super) fn wait_until(mut ready: impl FnMut() -> bool) -> bool {
     let scheduler = syscall_bridge::scheduler().expect("scheduler installed");
     for _ in 0..WAIT_STEPS {
         if ready() {

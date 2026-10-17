@@ -40,7 +40,10 @@ const QUANTUM_NS: u64 = 500_000;
 #[cfg(not(feature = "short-quantum"))]
 const QUANTUM_NS: u64 = scheduler::DEFAULT_QUANTUM_NS;
 
-const SCHED_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 64).with_quantum_ns(QUANTUM_NS);
+const MAX_THREADS: usize = 256;
+
+const SCHED_CONFIG: SchedulerConfig =
+    SchedulerConfig::new(32, MAX_THREADS).with_quantum_ns(QUANTUM_NS);
 
 pub(super) struct BootHandoff {
     pub dtb_phys: usize,
