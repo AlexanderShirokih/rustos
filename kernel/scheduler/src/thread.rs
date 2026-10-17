@@ -145,11 +145,13 @@ impl<A: ArchContext> Thread<A> {
 
     /// Прикрепляет backing IPC-буфера к потоку. Вызывается один раз при создании user-потока.
     pub fn set_ipc_buffer(&mut self, slot: IpcBufferSlot) {
+        self.arch.set_ipc_buffer(Some(slot.user_va().as_virtual()));
         self.ipc_buffer = Some(slot);
     }
 
     /// Изымает backing IPC-буфера при терминации.
     pub fn take_ipc_buffer(&mut self) -> Option<IpcBufferSlot> {
+        self.arch.set_ipc_buffer(None);
         self.ipc_buffer.take()
     }
 

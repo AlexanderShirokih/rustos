@@ -1,8 +1,8 @@
 //! E2E проверка per-thread IPC-буфера из EL0:
 //! - main-поток получает адрес буфера через `ipc_buffer_ptr()`, пишет паттерн
 //!   в `data`/`tag`/`caps` и читает обратно (round-trip);
-//! - sibling-поток в том же процессе получает свой адрес через raw-syscall
-//!   `ipc_buffer_addr()` - адреса двух потоков должны различаться.
+//! - `ipc_buffer_ptr()` каждого потока совпадает с адресом из syscall
+//!   `ipc_buffer_addr()`, а адреса двух потоков одного процесса различаются.
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -40,10 +40,11 @@ fn ipc_buffer_roundtrip() {
 }
 
 extern "C" fn sibling_worker(_arg: usize) -> u32 {
-    // Raw-syscall, не кэширующий accessor: кэш в `runtime` процесс-глобальный,
-    // а буфер per-thread - для второго потока нужен свой VA напрямую.
     let ret = ipc_buffer_addr();
     let va = u64::try_from(ret).unwrap_or(0);
+    if ipc_buffer_ptr().map(|ptr| ptr as u64) != Some(va) {
+        return 3;
+    }
 
     // Round-trip по собственному буферу, чтобы убедиться, что VA рабочий.
     if va != 0 {
@@ -66,6 +67,7 @@ fn ipc_buffer_per_thread_distinct() {
     let main_ret = ipc_buffer_addr();
     test_harness::check!(main_ret > 0);
     let main_va = u64::try_from(main_ret).expect("positive va fits u64");
+    test_harness::check_eq!(ipc_buffer_ptr().map(|ptr| ptr as u64), Some(main_va));
 
     let thread = spawn(sibling_worker, 0).expect("spawn sibling worker");
     thread

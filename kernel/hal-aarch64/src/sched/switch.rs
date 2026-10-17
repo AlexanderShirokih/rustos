@@ -41,6 +41,8 @@ pub(crate) unsafe extern "C" fn context_switch(
         "msr nzcv, x9",
         "ldr x9, [x1, #{daif}]",
         "msr daif, x9",
+        "ldr x9, [x1, #{ipc_buffer_va}]",
+        "msr tpidrro_el0, x9",
         "ldp d8,  d9,  [x1, #{d8}]",
         "ldp d10, d11, [x1, #({d8} + 16)]",
         "ldp d12, d13, [x1, #({d8} + 32)]",
@@ -52,6 +54,7 @@ pub(crate) unsafe extern "C" fn context_switch(
         nzcv = const offset_of!(Aarch64Context, nzcv),
         daif = const offset_of!(Aarch64Context, daif),
         d8 = const offset_of!(Aarch64Context, d8_d15),
+        ipc_buffer_va = const offset_of!(Aarch64Context, ipc_buffer_va),
     )
 }
 
@@ -70,6 +73,8 @@ pub(crate) unsafe extern "C" fn context_start(_next: *const Aarch64Context) -> !
         "msr nzcv, x9",
         "ldr x9, [x0, #{daif}]",
         "msr daif, x9",
+        "ldr x9, [x0, #{ipc_buffer_va}]",
+        "msr tpidrro_el0, x9",
         "ldp d8,  d9,  [x0, #{d8}]",
         "ldp d10, d11, [x0, #({d8} + 16)]",
         "ldp d12, d13, [x0, #({d8} + 32)]",
@@ -81,5 +86,6 @@ pub(crate) unsafe extern "C" fn context_start(_next: *const Aarch64Context) -> !
         nzcv = const offset_of!(Aarch64Context, nzcv),
         daif = const offset_of!(Aarch64Context, daif),
         d8 = const offset_of!(Aarch64Context, d8_d15),
+        ipc_buffer_va = const offset_of!(Aarch64Context, ipc_buffer_va),
     )
 }

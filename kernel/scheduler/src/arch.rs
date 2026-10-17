@@ -3,7 +3,7 @@
 use alloc::boxed::Box;
 use core::{marker::PhantomData, mem::size_of, ptr::NonNull};
 
-use memory::memory_mapper::AddressSpaceHandle;
+use memory::{memory_mapper::AddressSpaceHandle, virtual_address::VirtualAddress};
 
 use crate::UserEntry;
 
@@ -197,6 +197,10 @@ pub trait ArchContext: Sized + Send + 'static {
     /// Переключает трансляцию адресов на `next`. `None` - kernel-only режим.
     /// Гарантирует, что после возврата трансляции предыдущего AS не видны.
     fn switch_address_space(_next: Option<AddressSpaceHandle>) {}
+
+    /// Задаёт адрес IPC-буфера, видимый потоку в user-режиме. `None` снимает адрес. Новое
+    /// значение действует со следующего переключения на поток.
+    fn set_ipc_buffer(&mut self, _va: Option<VirtualAddress>) {}
 }
 
 /// Платформенный слой не принял per-CPU состояние планировщика.

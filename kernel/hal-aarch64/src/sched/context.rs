@@ -1,7 +1,10 @@
 use core::ptr::NonNull;
 
 use kbase::{CriticalSection as _, DaifCriticalSection};
-use memory::{memory_mapper::AddressSpaceHandle, physical_address::PhysicalAddress};
+use memory::{
+    memory_mapper::AddressSpaceHandle, physical_address::PhysicalAddress,
+    virtual_address::VirtualAddress,
+};
 use scheduler::{ArchContext, UserEntry};
 
 use super::{
@@ -33,6 +36,7 @@ pub(crate) struct Aarch64Context {
     pub nzcv: u64,
     pub daif: u64,
     pub d8_d15: [u64; 8],
+    pub ipc_buffer_va: u64,
 }
 
 impl ArchContext for Aarch64Context {
@@ -51,6 +55,7 @@ impl ArchContext for Aarch64Context {
             nzcv: 0,
             daif: 0,
             d8_d15: [0; 8],
+            ipc_buffer_va: 0,
         };
         context.x19_x28[0] = GpReg::from_u64(arg as usize as u64);
         context.x19_x28[1] = GpReg::from_u64(entry as usize as u64);
@@ -115,11 +120,16 @@ impl ArchContext for Aarch64Context {
             nzcv: 0,
             daif: 0,
             d8_d15: [0; 8],
+            ipc_buffer_va: 0,
         };
         ctx.x19_x28[0] = GpReg::from_u64(entry.arg.0);
         ctx.x19_x28[1] = GpReg::from_u64(entry.user_pc.as_usize() as u64);
         ctx.x19_x28[2] = GpReg::from_u64(entry.user_sp.as_usize() as u64);
         ctx
+    }
+
+    fn set_ipc_buffer(&mut self, va: Option<VirtualAddress>) {
+        self.ipc_buffer_va = va.map_or(0, |va| va.as_usize() as u64);
     }
 }
 
