@@ -43,6 +43,7 @@ use crate::{
         memory_mapper::{
             Aarch64MemoryMapper, AddressSpaceKind, FrameTableAlloc, UNMAP_PENDING_FRAMES,
         },
+        memory_setup::linear_map,
     },
 };
 
@@ -89,6 +90,12 @@ fn pa(addr: usize) -> PageAlignedAddress {
 
 fn runtime_frame_allocator() -> &'static RuntimeFrameAllocator {
     syscall_bridge::frame_allocator().expect("frame allocator must be installed")
+}
+
+fn user_kind() -> AddressSpaceKind {
+    AddressSpaceKind::User {
+        linear_map: linear_map().expect("linear map must be captured"),
+    }
 }
 
 /// `map -> unmap -> query_leaf_raw` должен показать, что leaf-PTE обнулены.
@@ -267,12 +274,7 @@ fn build_capped_mapper() -> (
         alloc::boxed::Box::new(CappedAllocator::new(real_fa, isize::MAX)),
     );
     let mapper: &'static CappedMapper<'static> = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        Aarch64MemoryMapper::new_with_offset(
-            capped,
-            root_ptr,
-            HIGHER_HALF_BASE,
-            AddressSpaceKind::User,
-        ),
+        Aarch64MemoryMapper::new_with_offset(capped, root_ptr, HIGHER_HALF_BASE, user_kind()),
     ));
     (mapper, capped, root_frame)
 }
@@ -492,12 +494,8 @@ fn mapper_map_partial_oom_rollback() {
     let capped: &'static CappedAllocator<'static> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(CappedAllocator::new(real_fa, 5)));
 
-    let mapper: CappedMapper<'static> = Aarch64MemoryMapper::new_with_offset(
-        capped,
-        root_ptr,
-        HIGHER_HALF_BASE,
-        AddressSpaceKind::User,
-    );
+    let mapper: CappedMapper<'static> =
+        Aarch64MemoryMapper::new_with_offset(capped, root_ptr, HIGHER_HALF_BASE, user_kind());
 
     let base = va(PROBE_BASE + 0x40_0000);
     let pages = 4;

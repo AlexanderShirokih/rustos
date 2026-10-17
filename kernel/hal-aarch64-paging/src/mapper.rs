@@ -18,6 +18,9 @@ use crate::{
     virtual_address::VirtualAddressExt,
 };
 
+const OUTPUT_ADDRESS_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+const DESC_TYPE_MASK: u64 = 0b11;
+
 /// Физический адрес, который можно замапить на виртуальный.
 pub trait MapLeaf<const SHIFT: u8>: Copy {
     fn map_into<A: TableAlloc>(
@@ -217,7 +220,7 @@ impl<A: TableAlloc> PageMapper<A> {
 
 /// Извлекает физический адрес таблицы из дескриптора.
 pub fn extract_table_pa(raw: u64) -> PageAlignedAddress {
-    PageAlignedAddress::new_unchecked(PhysicalAddress::new((raw & 0x0000_FFFF_FFFF_F000) as usize))
+    PageAlignedAddress::new_unchecked(PhysicalAddress::new((raw & OUTPUT_ADDRESS_MASK) as usize))
 }
 
 /// Ошибка маппинга.
@@ -244,6 +247,36 @@ pub enum WalkError {
     Decode(DecodeError),
 }
 
+/// Отображение виртуального адреса leaf-записью дерева таблиц.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Translation {
+    /// Физический адрес с учётом смещения внутри страницы или блока.
+    pub pa: PhysicalAddress,
+    /// Атрибуты leaf-записи страницы L3 либо блока L1 или L2.
+    pub flags: Aarch64MemFlags,
+}
+
+impl Translation {
+    fn of_leaf<L: Level>(raw: u64, va: VirtualAddress) -> Self {
+        let span_mask = (1usize << L::SHIFT) - 1;
+        let base = (raw & OUTPUT_ADDRESS_MASK) as usize & !span_mask;
+        Self {
+            pa: PhysicalAddress::new(base | (va.as_usize() & span_mask)),
+            flags: Aarch64MemFlags::from_bits(raw & !(OUTPUT_ADDRESS_MASK | DESC_TYPE_MASK)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Leaf {
+    BlockL1(Entry<L1, Block>),
+    BlockL2(Entry<L2, Block>),
+    Page {
+        table: *mut PageTable<L3>,
+        idx: usize,
+    },
+}
+
 impl<A: TableAlloc> PageMapper<A> {
     /// Проходит таблицы L0->L1->L2->L3 и возвращает указатель на L3-таблицу
     /// и индекс внутри неё для leaf-записи (Page) `virt`.
@@ -254,57 +287,110 @@ impl<A: TableAlloc> PageMapper<A> {
         &self,
         virt: PageAlignedVirtualAddress,
     ) -> Result<(*mut PageTable<L3>, usize), WalkError> {
+        match self.find_leaf(virt.as_virtual())? {
+            Leaf::Page { table, idx } => Ok((table, idx)),
+            Leaf::BlockL1(_) | Leaf::BlockL2(_) => Err(WalkError::HitBlock),
+        }
+    }
+
+    /// Находит leaf-запись для `virt` и возвращает физический адрес с её атрибутами.
+    /// Функция поддерживает страницы L3 и блоки L1/L2 и возвращает `NotMapped`, если
+    /// отображение отсутствует.
+    pub fn translate(&self, virt: VirtualAddress) -> Result<Translation, WalkError> {
+        Ok(Self::translation_of(self.find_leaf(virt)?, virt))
+    }
+
+    pub(crate) fn visit_leaves(
+        &self,
+        base: VirtualAddress,
+        visitor: &mut impl FnMut(PageAlignedVirtualAddress, u8, u64),
+    ) {
+        // SAFETY: root и дочерние таблицы действительны по контракту `Self::new`;
+        // заимствование `self` на чтение исключает их изменение через mapper.
+        unsafe {
+            L0::visit_subtree(
+                self.root,
+                &self.alloc,
+                base.as_usize() & HIGH_HALF_MASK,
+                visitor,
+            );
+        };
+    }
+
+    fn translation_of(leaf: Leaf, virt: VirtualAddress) -> Translation {
+        match leaf {
+            Leaf::Page { table, idx } => {
+                // SAFETY: `find_leaf` вернул валидную таблицу L3 и индекс её Page-записи.
+                let raw = unsafe { (*table).get_raw(idx) };
+                Translation::of_leaf::<L3>(raw, virt)
+            }
+            Leaf::BlockL1(entry) => Translation::of_leaf::<L1>(entry.raw(), virt),
+            Leaf::BlockL2(entry) => Translation::of_leaf::<L2>(entry.raw(), virt),
+        }
+    }
+
+    fn find_leaf(&self, virt: VirtualAddress) -> Result<Leaf, WalkError> {
         let target_va = virt.as_usize();
 
-        let l0 = self.root;
         // SAFETY: root инициализирован в `Self::new`.
-        let raw_l0 = unsafe { (*l0).get_raw(virt.index::<L0>()) };
+        let raw_l0 = unsafe { (*self.root).get_raw(virt.index::<L0>()) };
         let l1 = match decode::<L0>(raw_l0).map_err(WalkError::Decode)? {
-            AnyEntry::Invalid(_) => return Err(WalkError::NotMapped),
             AnyEntry::Table(te) => {
-                let pa = extract_table_pa(te.raw());
                 // SAFETY: `te` извлечён из валидного Table-дескриптора уровня L0,
                 // `alloc.table_ptr` транслирует PA->VA согласно своему контракту.
-                unsafe { self.alloc.table_ptr::<L1>(pa, target_va) }
+                unsafe {
+                    self.alloc
+                        .table_ptr::<L1>(extract_table_pa(te.raw()), target_va)
+                }
             }
-            // L0 не поддерживает Block; Page тут возможен только при сломанном
-            // дескрипторе. В любом случае - это не Table, идти ниже некуда.
-            AnyEntry::Block(_) | AnyEntry::Page(_) => return Err(WalkError::HitBlock),
+            // L0 не поддерживает Block, а декодер не возвращает Page.
+            AnyEntry::Invalid(_) | AnyEntry::Block(_) | AnyEntry::Page(_) => {
+                return Err(WalkError::NotMapped);
+            }
         };
 
         // SAFETY: l1 получен через alloc.table_ptr из валидного Table-дескриптора.
         let raw_l1 = unsafe { (*l1).get_raw(virt.index::<L1>()) };
         let l2 = match decode::<L1>(raw_l1).map_err(WalkError::Decode)? {
-            // Invalid - pte отсутствует; Page (на L1 не должен встречаться, но
-            // если встретился - корявый дескриптор) - нечего ремаппить.
-            AnyEntry::Invalid(_) | AnyEntry::Page(_) => return Err(WalkError::NotMapped),
             AnyEntry::Table(te) => {
-                let pa = extract_table_pa(te.raw());
                 // SAFETY: см. выше.
-                unsafe { self.alloc.table_ptr::<L2>(pa, target_va) }
+                unsafe {
+                    self.alloc
+                        .table_ptr::<L2>(extract_table_pa(te.raw()), target_va)
+                }
             }
-            AnyEntry::Block(_) => return Err(WalkError::HitBlock),
+            AnyEntry::Block(block) => {
+                return Ok(Leaf::BlockL1(block));
+            }
+            AnyEntry::Invalid(_) | AnyEntry::Page(_) => {
+                return Err(WalkError::NotMapped);
+            }
         };
 
         // SAFETY: l2 получен через alloc.table_ptr из валидного Table-дескриптора.
         let raw_l2 = unsafe { (*l2).get_raw(virt.index::<L2>()) };
-        let l3 = match decode::<L2>(raw_l2).map_err(WalkError::Decode)? {
-            // См. комментарий выше для L1.
-            AnyEntry::Invalid(_) | AnyEntry::Page(_) => return Err(WalkError::NotMapped),
+        let table = match decode::<L2>(raw_l2).map_err(WalkError::Decode)? {
             AnyEntry::Table(te) => {
-                let pa = extract_table_pa(te.raw());
                 // SAFETY: см. выше.
-                unsafe { self.alloc.table_ptr::<L3>(pa, target_va) }
+                unsafe {
+                    self.alloc
+                        .table_ptr::<L3>(extract_table_pa(te.raw()), target_va)
+                }
             }
-            AnyEntry::Block(_) => return Err(WalkError::HitBlock),
+            AnyEntry::Block(block) => {
+                return Ok(Leaf::BlockL2(block));
+            }
+            AnyEntry::Invalid(_) | AnyEntry::Page(_) => {
+                return Err(WalkError::NotMapped);
+            }
         };
 
         let idx = virt.index::<L3>();
-        // SAFETY: l3 получен через alloc.table_ptr из валидного Table-дескриптора.
-        let raw_l3 = unsafe { (*l3).get_raw(idx) };
+        // SAFETY: table получен через alloc.table_ptr из валидного Table-дескриптора.
+        let raw_l3 = unsafe { (*table).get_raw(idx) };
         // L3 содержит только Page (desc-type 0b11) либо Invalid (0b00).
-        if raw_l3 & 0b11 == 0b11 {
-            Ok((l3, idx))
+        if raw_l3 & DESC_TYPE_MASK == 0b11 {
+            Ok(Leaf::Page { table, idx })
         } else {
             Err(WalkError::NotMapped)
         }
@@ -332,7 +418,7 @@ pub unsafe fn update_l3_flags(
 ) -> Result<(), WalkError> {
     // SAFETY: см. контракт.
     let raw = unsafe { (*table).get_raw(idx) };
-    if raw & 0b11 != 0b11 {
+    if raw & DESC_TYPE_MASK != 0b11 {
         return Err(WalkError::NotMapped);
     }
     // Раскладка page-дескриптора (ARMv8-A, 4К granule): `[1:0]` desc-type (у Page
@@ -348,16 +434,24 @@ pub unsafe fn update_l3_flags(
     Ok(())
 }
 
-/// Колбэки для путей `unmap_range` и `free_all`.
-pub trait UnmapVisitor {
-    /// Снимаемая leaf-запись по `va` уровня `leaf_shift`
-    /// (`L3::SHIFT`/`L2::SHIFT`/`L1::SHIFT`). `raw` - старое значение PTE.
+/// Колбэки обхода таблиц. Порядок вызовов определяется операцией обхода.
+pub trait TableVisitor {
+    /// Leaf-запись по `va` уровня `leaf_shift` (`L3::SHIFT`/`L2::SHIFT`/`L1::SHIFT`).
+    /// `raw` - значение PTE.
     /// В `unmap_range` вызов предшествует обнулению записи, а записи, снятые раньше, уже
     /// обнулены. `free_all` записей не обнуляет.
     fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, raw: u64);
-    /// Опустевшая дочерняя таблица. В `unmap_range` ссылающаяся на неё запись родителя
-    /// уже обнулена.
-    fn on_free_table(&mut self, pa: PageAlignedAddress);
+    /// Дочерняя таблица после обхода её содержимого. В `unmap_range` таблица пуста,
+    /// а ссылающаяся на неё запись родителя уже обнулена.
+    fn on_table(&mut self, pa: PageAlignedAddress);
+}
+
+impl<F: FnMut(PageAlignedVirtualAddress, u8, u64)> TableVisitor for F {
+    fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, raw: u64) {
+        self(va, leaf_shift, raw);
+    }
+
+    fn on_table(&mut self, _pa: PageAlignedAddress) {}
 }
 
 /// Ошибки `unmap_range`.
@@ -374,7 +468,7 @@ pub enum UnmapError {
 const HIGH_HALF_MASK: usize = 0xFFFF_0000_0000_0000;
 
 /// Снимает leaf-записи в `[va, va + size)`. Опустевшие L1/L2/L3
-/// возвращаются через `visitor.on_free_table`. Block-leaf снимается
+/// возвращаются через `visitor.on_table`. Block-leaf снимается
 /// только целиком. Partial -> [`UnmapError::UnsupportedPartialBlock`].
 ///
 /// Отказ на середине диапазона не отменяет уже обработанные leaf-записи этого вызова. Они
@@ -396,7 +490,7 @@ pub unsafe fn unmap_range<A, V>(
 ) -> Result<(), UnmapError>
 where
     A: TableAlloc,
-    V: UnmapVisitor + ?Sized,
+    V: TableVisitor + ?Sized,
 {
     if size == 0 {
         return Ok(());
@@ -408,23 +502,24 @@ where
     Ok(())
 }
 
-/// Полный обход дерева для Drop AS: `on_leaf` на каждый leaf, `on_free_table`
-/// на каждую L1/L2/L3. Root в callback не идёт - решение про него принимает caller.
-/// Invalid и corrupt-дескрипторы пропускаются.
+/// Обходит дерево таблиц перед уничтожением адресного пространства.
+/// Обход вызывает `visitor.on_leaf` для каждого листа и `visitor.on_table` для каждой
+/// дочерней таблицы L1/L2/L3 после обхода её содержимого. Вызывающий код отдельно решает,
+/// нужно ли освобождать корень. Обход пропускает пустые и повреждённые дескрипторы.
 ///
 /// # Safety
 /// см. [`unmap_range`]. AS не активен ни на одном CPU.
 pub unsafe fn free_all<A, V>(root: *mut PageTable<L0>, alloc: &A, high_half: bool, visitor: &mut V)
 where
     A: TableAlloc,
-    V: UnmapVisitor + ?Sized,
+    V: TableVisitor + ?Sized,
 {
     let canonical_top = if high_half { HIGH_HALF_MASK } else { 0 };
     // SAFETY: см. контракт.
-    unsafe { L0::free_subtree(root, alloc, canonical_top, visitor) };
+    unsafe { L0::visit_subtree(root, alloc, canonical_top, visitor) };
 }
 
-trait UnmapWalk: Level + Sized {
+trait TableWalk: Level + Sized {
     // SAFETY: см. [`unmap_range`].
     unsafe fn unmap_subtree<A, V>(
         table: *mut PageTable<Self>,
@@ -436,137 +531,71 @@ trait UnmapWalk: Level + Sized {
     ) -> Result<bool, UnmapError>
     where
         A: TableAlloc,
-        V: UnmapVisitor + ?Sized;
+        V: TableVisitor + ?Sized;
 
-    // SAFETY: см. [`free_all`].
-    unsafe fn free_subtree<A, V>(
+    // SAFETY: таблицы действительны и защищены от конкурентного изменения. Посетитель
+    // может освободить leaf в `on_leaf` и дочернюю таблицу в `on_table`, если AS не активен.
+    unsafe fn visit_subtree<A, V>(
         table: *mut PageTable<Self>,
         alloc: &A,
         table_va_base: usize,
         visitor: &mut V,
     ) where
         A: TableAlloc,
-        V: UnmapVisitor + ?Sized;
+        V: TableVisitor + ?Sized;
 }
 
-impl UnmapWalk for L0 {
-    unsafe fn unmap_subtree<A, V>(
-        table: *mut PageTable<L0>,
-        alloc: &A,
-        table_va_base: usize,
-        range_start: usize,
-        range_last: usize,
-        visitor: &mut V,
-    ) -> Result<bool, UnmapError>
-    where
-        A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
-    {
-        // SAFETY: контракт прокидывается из caller.
-        unsafe {
-            descend_unmap::<L0, L1, A, V>(
-                table,
-                alloc,
-                table_va_base,
-                range_start,
-                range_last,
-                visitor,
-            )
+macro_rules! impl_table_walk {
+    ($level:ty, $child:ty) => {
+        impl TableWalk for $level {
+            unsafe fn unmap_subtree<A, V>(
+                table: *mut PageTable<$level>,
+                alloc: &A,
+                table_va_base: usize,
+                range_start: usize,
+                range_last: usize,
+                visitor: &mut V,
+            ) -> Result<bool, UnmapError>
+            where
+                A: TableAlloc,
+                V: TableVisitor + ?Sized,
+            {
+                // SAFETY: контракт прокидывается из caller.
+                unsafe {
+                    descend_unmap::<$level, $child, A, V>(
+                        table,
+                        alloc,
+                        table_va_base,
+                        range_start,
+                        range_last,
+                        visitor,
+                    )
+                }
+            }
+
+            unsafe fn visit_subtree<A, V>(
+                table: *mut PageTable<$level>,
+                alloc: &A,
+                table_va_base: usize,
+                visitor: &mut V,
+            ) where
+                A: TableAlloc,
+                V: TableVisitor + ?Sized,
+            {
+                // SAFETY: см. caller.
+                unsafe {
+                    descend_visit::<$level, $child, A, V>(table, alloc, table_va_base, visitor)
+                }
+            }
         }
-    }
-    unsafe fn free_subtree<A, V>(
-        table: *mut PageTable<L0>,
-        alloc: &A,
-        table_va_base: usize,
-        visitor: &mut V,
-    ) where
-        A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
-    {
-        // SAFETY: см. caller.
-        unsafe { descend_free::<L0, L1, A, V>(table, alloc, table_va_base, visitor) }
-    }
+    };
 }
 
-impl UnmapWalk for L1 {
-    unsafe fn unmap_subtree<A, V>(
-        table: *mut PageTable<L1>,
-        alloc: &A,
-        table_va_base: usize,
-        range_start: usize,
-        range_last: usize,
-        visitor: &mut V,
-    ) -> Result<bool, UnmapError>
-    where
-        A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
-    {
-        // SAFETY: см. caller.
-        unsafe {
-            descend_unmap::<L1, L2, A, V>(
-                table,
-                alloc,
-                table_va_base,
-                range_start,
-                range_last,
-                visitor,
-            )
-        }
-    }
-    unsafe fn free_subtree<A, V>(
-        table: *mut PageTable<L1>,
-        alloc: &A,
-        table_va_base: usize,
-        visitor: &mut V,
-    ) where
-        A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
-    {
-        // SAFETY: см. caller.
-        unsafe { descend_free::<L1, L2, A, V>(table, alloc, table_va_base, visitor) }
-    }
-}
+impl_table_walk!(L0, L1);
+impl_table_walk!(L1, L2);
+impl_table_walk!(L2, L3);
 
-impl UnmapWalk for L2 {
-    unsafe fn unmap_subtree<A, V>(
-        table: *mut PageTable<L2>,
-        alloc: &A,
-        table_va_base: usize,
-        range_start: usize,
-        range_last: usize,
-        visitor: &mut V,
-    ) -> Result<bool, UnmapError>
-    where
-        A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
-    {
-        // SAFETY: см. caller.
-        unsafe {
-            descend_unmap::<L2, L3, A, V>(
-                table,
-                alloc,
-                table_va_base,
-                range_start,
-                range_last,
-                visitor,
-            )
-        }
-    }
-    unsafe fn free_subtree<A, V>(
-        table: *mut PageTable<L2>,
-        alloc: &A,
-        table_va_base: usize,
-        visitor: &mut V,
-    ) where
-        A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
-    {
-        // SAFETY: см. caller.
-        unsafe { descend_free::<L2, L3, A, V>(table, alloc, table_va_base, visitor) }
-    }
-}
-
-impl UnmapWalk for L3 {
+impl TableWalk for L3 {
     unsafe fn unmap_subtree<A, V>(
         table: *mut PageTable<L3>,
         _alloc: &A,
@@ -577,7 +606,7 @@ impl UnmapWalk for L3 {
     ) -> Result<bool, UnmapError>
     where
         A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
+        V: TableVisitor + ?Sized,
     {
         let (first, last) = idx_range::<L3>(range_start, range_last);
         for idx in first..last {
@@ -585,7 +614,7 @@ impl UnmapWalk for L3 {
             // SAFETY: idx in [0, 512), table валиден (caller-lock).
             let raw = unsafe { (*table).get_raw(idx) };
             // L3: только Page (0b11) или Invalid (0b00); Block невозможен.
-            match raw & 0b11 {
+            match raw & DESC_TYPE_MASK {
                 0b00 => return Err(UnmapError::NotMapped),
                 0b11 => {
                     visitor.on_leaf(entry_va, L3::SHIFT, raw);
@@ -599,19 +628,19 @@ impl UnmapWalk for L3 {
         Ok(unsafe { table_is_empty::<L3>(table) })
     }
 
-    unsafe fn free_subtree<A, V>(
+    unsafe fn visit_subtree<A, V>(
         table: *mut PageTable<L3>,
         _alloc: &A,
         table_va_base: usize,
         visitor: &mut V,
     ) where
         A: TableAlloc,
-        V: UnmapVisitor + ?Sized,
+        V: TableVisitor + ?Sized,
     {
         for idx in 0..512 {
             // SAFETY: caller-lock.
             let raw = unsafe { (*table).get_raw(idx) };
-            if raw & 0b11 == 0b11 {
+            if raw & DESC_TYPE_MASK == 0b11 {
                 visitor.on_leaf(
                     leaf_va(entry_va_at::<L3>(table_va_base, idx)),
                     L3::SHIFT,
@@ -633,9 +662,9 @@ unsafe fn descend_unmap<Parent, Child, A, V>(
 ) -> Result<bool, UnmapError>
 where
     Parent: Level + CanTable + DecodeBlock,
-    Child: UnmapWalk,
+    Child: TableWalk,
     A: TableAlloc,
-    V: UnmapVisitor + ?Sized,
+    V: TableVisitor + ?Sized,
 {
     let entry_size = 1usize << Parent::SHIFT;
     let (first, last) = idx_range::<Parent>(range_start, range_last);
@@ -667,7 +696,7 @@ where
                 if now_empty {
                     // SAFETY: caller-lock.
                     unsafe { (*table).set(idx, Entry::<Parent, Invalid>::invalid()) };
-                    visitor.on_free_table(child_pa);
+                    visitor.on_table(child_pa);
                 }
             }
             // L0/L1/L2 не имеют Page; corrupt дескриптор - сообщаем Decode.
@@ -678,17 +707,17 @@ where
     Ok(unsafe { table_is_empty::<Parent>(table) })
 }
 
-// SAFETY: см. [`free_all`].
-unsafe fn descend_free<Parent, Child, A, V>(
+// SAFETY: см. `TableWalk::visit_subtree`.
+unsafe fn descend_visit<Parent, Child, A, V>(
     table: *mut PageTable<Parent>,
     alloc: &A,
     table_va_base: usize,
     visitor: &mut V,
 ) where
     Parent: Level + CanTable + DecodeBlock,
-    Child: UnmapWalk,
+    Child: TableWalk,
     A: TableAlloc,
-    V: UnmapVisitor + ?Sized,
+    V: TableVisitor + ?Sized,
 {
     for idx in 0..512 {
         let entry_va = entry_va_at::<Parent>(table_va_base, idx);
@@ -705,8 +734,8 @@ unsafe fn descend_free<Parent, Child, A, V>(
                 // SAFETY: child_pa из валидного Table-дескриптора Parent.
                 let child = unsafe { alloc.table_ptr::<Child>(child_pa, entry_va) };
                 // SAFETY: см. caller.
-                unsafe { Child::free_subtree(child, alloc, entry_va, visitor) };
-                visitor.on_free_table(child_pa);
+                unsafe { Child::visit_subtree(child, alloc, entry_va, visitor) };
+                visitor.on_table(child_pa);
             }
         }
     }

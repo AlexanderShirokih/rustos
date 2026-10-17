@@ -2,16 +2,7 @@ kernel/capability/src/port/mod.rs|function port_call|kernel/capability/src/port/
 kernel/capability/src/port/mod.rs|function resolve_call|kernel/capability/src/port/mod.rs|function resolve_send_recv
 kernel/capability/src/target.rs|method badged_holder_ticket|kernel/capability/src/target.rs|method holder_ticket
 kernel/capability/src/target.rs|method counted_holder_ticket|kernel/capability/src/target.rs|method holder_ticket
-kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree
-kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree
-kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree
-kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree
-kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree
-kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method free_subtree
 kernel/hal-aarch64-paging/src/mapper.rs|method map_into|kernel/hal-aarch64-paging/src/mapper.rs|method map_into
-kernel/hal-aarch64-paging/src/mapper.rs|method unmap_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method unmap_subtree
-kernel/hal-aarch64-paging/src/mapper.rs|method unmap_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method unmap_subtree
-kernel/hal-aarch64-paging/src/mapper.rs|method unmap_subtree|kernel/hal-aarch64-paging/src/mapper.rs|method unmap_subtree
 kernel/hal-aarch64/src/memory/regs/dcache.rs|method clean_range_to_coherency|kernel/hal-aarch64/src/memory/regs/dcache.rs|method invalidate_range_to_coherency
 kernel/memory/src/mem_flags.rs|method kernel_rw|kernel/memory/src/mem_flags.rs|method user_rw
 kernel/memory/src/mem_flags.rs|method user_ro|kernel/memory/src/mem_flags.rs|method user_rw

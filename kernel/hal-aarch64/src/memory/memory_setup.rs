@@ -3,17 +3,28 @@
 //! Фазы: Early -> Installed -> Prepared -> Enabled.
 
 use alloc::boxed::Box;
+use core::num::NonZeroUsize;
 
-use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable, preset::Heap};
+use hal_aarch64_paging::{
+    level::L0,
+    linear_map::{LinearMap, LinearMapError},
+    mapper::PageMapper,
+    page_table::PageTable,
+    preset::Heap,
+};
 use io::Vec as StaticVec;
 use kbase::{
-    MutexCell, NoLockCell,
+    LockCell, MutexCell, NoLockCell,
     interval_set::{Interval, StaticIntervalSet},
 };
 use memory::{
     FrameBitmap,
     bump_allocator::BumpAllocator,
-    frame_allocator::{FrameAllocator, FrameCount, PhysicalFrameAllocator},
+    frame::Frame,
+    frame_allocator::{
+        FrameAllocator, FrameCount, FrameError, MAX_REGIONS, PhysicalFrameAllocator,
+        ReserveFrameError,
+    },
     kernel_vm_allocator::{HeapAllocator, HeapArena},
     memory_mapper::{AddressSpaceFactory, MemoryMapper},
     memory_range::MemoryRange,
@@ -23,7 +34,7 @@ use memory::{
 use spin::Once;
 
 use crate::{
-    consts::{KHEAP_BASE, KHEAP_MAX_SIZE},
+    consts::{KHEAP_BASE, KHEAP_MAX_SIZE, LINEAR_MAP_SIZE},
     memory::{
         address_space_factory::FrameAllocatorImpl,
         asid,
@@ -37,6 +48,8 @@ use crate::{
 
 pub(crate) type BootFrameAllocator = PhysicalFrameAllocator<NoLockCell<FrameBitmap>>;
 
+const PRE_MMU_FRAME_RUNS_MAX: usize = MAX_REGIONS + 1;
+
 type MutexPageMapper<'a, FA> = MutexCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 type NoLockPageMapper<'a, FA> = NoLockCell<PageMapper<FrameTableAlloc<'a, FA>>>;
 type NoLockAarch64MemoryMapper<'a, FA> = Aarch64MemoryMapper<'a, FA, NoLockPageMapper<'a, FA>>;
@@ -45,11 +58,18 @@ type KernelMemoryMapper =
 
 static KERNEL_MEMORY_MAPPER: Once<KernelMemoryMapper> = Once::new();
 
+static LINEAR_MAP: Once<LinearMap> = Once::new();
+
 static FRAME_ALLOCATOR: Once<FrameAllocatorImpl> = Once::new();
 
 #[cfg(feature = "kernel-tests")]
 pub(crate) fn frame_allocator() -> Option<&'static FrameAllocatorImpl> {
     FRAME_ALLOCATOR.get()
+}
+
+#[cfg(feature = "kernel-tests")]
+pub(crate) fn linear_map() -> Option<&'static LinearMap> {
+    LINEAR_MAP.get()
 }
 
 pub(crate) struct Early {
@@ -78,9 +98,14 @@ pub(crate) struct PageTableRoots {
     pub higher_ptr: *mut PageTable<L0>,
 }
 
+struct PreMmuFrames {
+    allocator: &'static BootFrameAllocator,
+    issued: NoLockCell<StaticIntervalSet<PageAlignedAddress, PRE_MMU_FRAME_RUNS_MAX>>,
+}
+
 pub(crate) struct Prepared {
     roots: PageTableRoots,
-    frame_allocator: &'static BootFrameAllocator,
+    frames: PreMmuFrames,
     all_regions: StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
     bump: Interval<PageAlignedAddress>,
 }
@@ -97,6 +122,67 @@ pub(crate) struct MemorySetup<Stage> {
     pub state: Stage,
 }
 
+impl PreMmuFrames {
+    fn new(allocator: &'static BootFrameAllocator) -> Self {
+        Self {
+            allocator,
+            issued: NoLockCell::new(StaticIntervalSet::new()),
+        }
+    }
+
+    fn issue(&self, first: Frame, count: usize) -> Option<Frame> {
+        let start = first.page_address();
+        let end = first.add(count).page_address();
+
+        if self
+            .issued
+            .with_lock(|issued| issued.add(start, end))
+            .is_none()
+        {
+            for index in 0..count {
+                let _ = self.allocator.deallocate_frame(first.add(index));
+            }
+            return None;
+        }
+
+        // SAFETY: MMU выключен, и ядро в только что выданные фреймы не писало.
+        unsafe {
+            DataCache::<EL1>::invalidate_range_to_coherency(start.as_usize(), end.as_usize());
+        }
+
+        Some(first)
+    }
+}
+
+impl FrameAllocator for PreMmuFrames {
+    fn reserve_frames_exact(
+        &self,
+        from_inclusive: Frame,
+        to_exclusive: Frame,
+    ) -> Result<Frame, ReserveFrameError> {
+        self.allocator
+            .reserve_frames_exact(from_inclusive, to_exclusive)
+    }
+
+    fn allocate_frame(&self) -> Option<Frame> {
+        let frame = self.allocator.allocate_frame()?;
+        self.issue(frame, 1)
+    }
+
+    fn allocate_frames(&self, count: NonZeroUsize) -> Option<Frame> {
+        let first = self.allocator.allocate_frames(count)?;
+        self.issue(first, count.get())
+    }
+
+    fn deallocate_frame(&self, frame: Frame) -> Result<(), FrameError> {
+        self.allocator.deallocate_frame(frame)
+    }
+
+    fn is_allocated(&self, frame: Frame) -> bool {
+        self.allocator.is_allocated(frame)
+    }
+}
+
 impl MemorySetup<Early> {
     pub(crate) fn create(layout: MemoryLayout) -> Result<MemorySetup<Early>, MemorySetupError> {
         let free_regions = layout
@@ -104,19 +190,6 @@ impl MemorySetup<Early> {
             .map_err(|()| MemorySetupError::OutOfMemory)?;
 
         // Находим самую большую свободную область
-        // Свободная RAM ещё ничего не содержит, поэтому сброс строк идёт до первой
-        // записи, чтобы оставленная загрузчиком грязная строка не вытеснилась
-        // поверх неё позднее.
-        for interval in free_regions.iter() {
-            // SAFETY: MMU ещё выключен. Свободная RAM принадлежит ядру, и ядро в неё не писало.
-            unsafe {
-                DataCache::<EL1>::invalidate_range_to_coherency(
-                    interval.start.as_usize(),
-                    interval.end.as_usize(),
-                );
-            }
-        }
-
         let largest =
             Self::get_largest_region(&free_regions).map_err(|()| MemorySetupError::OutOfMemory)?;
 
@@ -184,13 +257,15 @@ impl MemorySetup<Installed> {
             .reserve_frames_exact(bump_start.into(), bump_end.into())
             .map_err(|_| MemorySetupError::OutOfMemory)?;
 
+        let frames = PreMmuFrames::new(frame_allocator);
+
         // Выделяем страницы под корень таблиц страниц
-        let lower_root_pa = frame_allocator
+        let lower_root_pa = frames
             .allocate_frame()
             .map(|frame| frame.page_address())
             .ok_or(MemorySetupError::OutOfMemory)?;
 
-        let higher_root_pa = frame_allocator
+        let higher_root_pa = frames
             .allocate_frame()
             .map(|frame| frame.page_address())
             .ok_or(MemorySetupError::OutOfMemory)?;
@@ -242,7 +317,7 @@ impl MemorySetup<Installed> {
         Ok(MemorySetup::<Prepared> {
             state: Prepared {
                 roots,
-                frame_allocator,
+                frames,
                 all_regions,
                 bump: Interval {
                     start: bump_start,
@@ -260,13 +335,13 @@ impl MemorySetup<Prepared> {
     ) -> Result<MemorySetup<Enabled>, MemorySetupError> {
         let Prepared {
             roots,
-            frame_allocator,
+            frames,
             all_regions,
             bump,
         } = self.state;
-        Self::linear_map_impl(frame_allocator, &roots, &all_regions, higher_half_base)?;
+        Self::linear_map_impl(&frames, &roots, &all_regions, higher_half_base)?;
 
-        Self::drop_stale_cache_lines(&all_regions, bump);
+        Self::drop_stale_cache_lines(&frames, bump);
 
         // Включение Memory Management Unit (MMU)
         Mmu::<EL1>::enable(&NormalDualSpaceConfig::new(
@@ -282,20 +357,13 @@ impl MemorySetup<Prepared> {
         Ok(MemorySetup::<Enabled> {
             state: Enabled {
                 roots,
-                frame_allocator,
+                frame_allocator: frames.allocator,
             },
         })
     }
 
-    fn drop_stale_cache_lines(
-        all_regions: &StaticVec<MemoryRegion<PageAlignedAddress>, MAX_MEMORY_REGIONS>,
-        bump: Interval<PageAlignedAddress>,
-    ) {
-        // Парный открывающий проход идёт в `MemorySetup::<Early>::create`, до
-        // первой записи. Bump-арены нет среди `all_regions` под тегом
-        // [`RegionTag::Heap`], поэтому она инвалидируется отдельно.
-        // SAFETY: MMU включается после этого вызова, и записи ядра идут мимо кэша. Bump-арена
-        // принадлежит ядру, её грязные строки оставлены загрузчиком.
+    fn drop_stale_cache_lines(frames: &PreMmuFrames, bump: Interval<PageAlignedAddress>) {
+        // SAFETY: MMU ещё выключен. Строки арены сброшены до первой записи.
         unsafe {
             DataCache::<EL1>::invalidate_range_to_coherency(
                 bump.start.as_usize(),
@@ -303,18 +371,17 @@ impl MemorySetup<Prepared> {
             );
         }
 
-        for region in all_regions
-            .iter()
-            .filter(|region| region.tag == RegionTag::Heap)
-        {
-            // SAFETY: как для bump-арены выше: MMU выключен, Heap-регион принадлежит ядру.
-            unsafe {
-                DataCache::<EL1>::invalidate_range_to_coherency(
-                    region.start.as_usize(),
-                    region.end.as_usize(),
-                );
+        frames.issued.with_lock(|issued| {
+            for interval in issued.iter() {
+                // SAFETY: MMU ещё выключен. Строки фреймов сброшены при выдаче.
+                unsafe {
+                    DataCache::<EL1>::invalidate_range_to_coherency(
+                        interval.start.as_usize(),
+                        interval.end.as_usize(),
+                    );
+                }
             }
-        }
+        });
     }
 
     fn linear_map_impl<FA: FrameAllocator>(
@@ -386,7 +453,7 @@ impl MemorySetup<Enabled> {
         higher_root_pa: PageAlignedAddress,
         frame_allocator_phys: PhysicalAddress,
         higher_half_base: PageAlignedVirtualAddress,
-    ) -> MemoryManagerResult {
+    ) -> Result<MemoryManagerResult, LinearMapError> {
         let fa_virt = Self::adopt_frame_allocator(frame_allocator_phys, higher_half_base);
 
         let higher_ptr_phys =
@@ -407,6 +474,11 @@ impl MemorySetup<Enabled> {
             )
         });
 
+        // Инициализация кучи и MMIO ещё не началась, поэтому их окна пусты.
+        let linear_map: &'static LinearMap = LINEAR_MAP.try_call_once(|| {
+            kernel_mapper.capture_linear_map(higher_half_base, LINEAR_MAP_SIZE)
+        })?;
+
         let allocator = HeapAllocator::new(
             kernel_mapper as &'static (dyn MemoryMapper + Send + Sync),
             HeapArena::new(KHEAP_BASE, KHEAP_MAX_SIZE),
@@ -417,6 +489,7 @@ impl MemorySetup<Enabled> {
             crate::memory::address_space_factory::Aarch64AddressSpaceFactory::new(
                 fa_virt,
                 higher_half_base,
+                linear_map,
             ),
         );
 
@@ -424,12 +497,12 @@ impl MemorySetup<Enabled> {
         // со входа в ядро и до этой точки не снимается.
         unsafe { Mmu::<EL1>::disable_lower_half() };
 
-        MemoryManagerResult {
+        Ok(MemoryManagerResult {
             memory_mapper: kernel_mapper,
             address_space_factory,
             frame_allocator: fa_virt,
             frame_count: fa_virt,
-        }
+        })
     }
 
     fn adopt_frame_allocator(

@@ -8,7 +8,9 @@
 
 use alloc::sync::Arc;
 
-use hal_aarch64_paging::{level::L0, mapper::PageMapper, page_table::PageTable};
+use hal_aarch64_paging::{
+    level::L0, linear_map::LinearMap, mapper::PageMapper, page_table::PageTable,
+};
 use kbase::MutexCell;
 use memory::{
     FrameBitmap,
@@ -28,10 +30,12 @@ pub(crate) type UserAarch64MemoryMapper =
 pub(crate) struct Aarch64AddressSpaceFactory {
     frame_allocator: &'static FrameAllocatorImpl,
     higher_half_base: PageAlignedVirtualAddress,
+    linear_map: &'static LinearMap,
 }
 
 // SAFETY: `frame_allocator` - `&'static`-shared аллокатор, сериализующий
-// доступ к битмапам внутри `&self`-методов; фабрика не содержит изменяемых полей.
+// доступ к битмапам внутри `&self`-методов; `linear_map` неизменяем; фабрика не содержит
+// изменяемых полей.
 unsafe impl Send for Aarch64AddressSpaceFactory {}
 // SAFETY: см. `Send`.
 unsafe impl Sync for Aarch64AddressSpaceFactory {}
@@ -40,10 +44,12 @@ impl Aarch64AddressSpaceFactory {
     pub(crate) fn new(
         frame_allocator: &'static FrameAllocatorImpl,
         higher_half_base: PageAlignedVirtualAddress,
+        linear_map: &'static LinearMap,
     ) -> Self {
         Self {
             frame_allocator,
             higher_half_base,
+            linear_map,
         }
     }
 }
@@ -67,7 +73,9 @@ impl AddressSpaceFactory for Aarch64AddressSpaceFactory {
             self.frame_allocator,
             root_ptr,
             offset,
-            AddressSpaceKind::User,
+            AddressSpaceKind::User {
+                linear_map: self.linear_map,
+            },
         );
 
         Ok(Arc::new(mapper))

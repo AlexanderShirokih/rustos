@@ -1,6 +1,6 @@
 //! Расширения для виртуальных адресов.
 
-use memory::virtual_address::AlignedVirtualAddress;
+use memory::virtual_address::{AlignedVirtualAddress, VirtualAddress};
 
 use crate::level::Level;
 
@@ -11,6 +11,12 @@ pub trait VirtualAddressExt {
 }
 
 impl<const SHIFT: u8> VirtualAddressExt for AlignedVirtualAddress<SHIFT> {
+    fn index<L: Level>(self) -> usize {
+        (self.as_usize() >> L::SHIFT) & 0x1FF
+    }
+}
+
+impl VirtualAddressExt for VirtualAddress {
     fn index<L: Level>(self) -> usize {
         (self.as_usize() >> L::SHIFT) & 0x1FF
     }

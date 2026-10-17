@@ -83,6 +83,7 @@ enum PrimaryBootError {
     EmptyDtb,
     BootStackExhausted,
     UnalignedLowerRoot,
+    LinearMapSnapshot,
 }
 
 impl core::fmt::Display for PrimaryBootError {
@@ -95,6 +96,7 @@ impl core::fmt::Display for PrimaryBootError {
             PrimaryBootError::EmptyDtb => "DTB totalsize is zero",
             PrimaryBootError::BootStackExhausted => "pre-MMU phase used up the whole boot stack",
             PrimaryBootError::UnalignedLowerRoot => "identity root table PA is not 4K-aligned",
+            PrimaryBootError::LinearMapSnapshot => "the linear map does not fit its snapshot",
         };
         f.write_str(text)
     }
@@ -130,7 +132,8 @@ fn primary_boot(handoff: &BootHandoff) -> Result<core::convert::Infallible, Prim
         higher_root,
         frame_allocator_phys,
         higher_half_base,
-    );
+    )
+    .map_err(|_| PrimaryBootError::LinearMapSnapshot)?;
 
     ExceptionVectors::instance().install();
 

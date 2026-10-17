@@ -9,7 +9,7 @@ mod common;
 use common::{allocate_buffer, make_mapper};
 use hal_aarch64_paging::{
     level::{L1, L2, L3, Level},
-    mapper::{UnmapError, UnmapVisitor, free_all, unmap_range},
+    mapper::{TableVisitor, UnmapError, free_all, unmap_range},
     mem_flags::{Aarch64MemFlags, Access, Shareability},
 };
 use memory::{
@@ -33,11 +33,11 @@ struct Counter {
     tables: Vec<PageAlignedAddress>,
 }
 
-impl UnmapVisitor for Counter {
+impl TableVisitor for Counter {
     fn on_leaf(&mut self, va: PageAlignedVirtualAddress, leaf_shift: u8, _raw: u64) {
         self.leaves.push((va, leaf_shift));
     }
-    fn on_free_table(&mut self, pa: PageAlignedAddress) {
+    fn on_table(&mut self, pa: PageAlignedAddress) {
         self.tables.push(pa);
     }
 }

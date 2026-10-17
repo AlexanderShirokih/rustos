@@ -5,7 +5,7 @@ use kernel_objects::{
     Error, Mapping, MemoryRegion, MmioWindow, ReadOnlyMapping, RegionInfo, RegionKind, Resource,
     WriteCombiningMapping,
 };
-use runtime::{MemoryAccess, MemoryProfile, UserMemFlags};
+use runtime::{MemoryAccess, MemoryProfile, UserMemFlags, process_create};
 use syscall::SyscallError;
 
 use crate::filesystem::LEAK_ROUNDS;
@@ -73,6 +73,30 @@ fn a_write_combining_mapping_refuses_a_cached_region_and_returns_the_window() {
         test_harness::check_eq!(refused.error, Error::Syscall(SyscallError::InvalidArgument));
         test_harness::check!(refused.region.region.inspect().is_ok());
     }
+}
+
+// Ядро отклоняет буфер syscall в отображении устройства. Кэшируемый доступ нарушает
+// атрибуты этого отображения.
+#[test_harness::test]
+fn a_syscall_buffer_in_a_device_mapping_is_an_invalid_argument() {
+    let Ok(window) = crate::hardware_session().client().acquire_device_memory(0) else {
+        test_harness::skip!("the platform grants no device window");
+    };
+    let window = MemoryRegion::from(window);
+    let page = window
+        .slice(0, PAGE_SIZE, MemoryAccess::READ)
+        .expect("first page of the window");
+    let mapping = Mapping::new(page, PAGE_SIZE, UserMemFlags::ReadOnly).expect("map window");
+
+    let base = usize::try_from(mapping.va()).expect("positive va fits usize") as *const u8;
+    // SAFETY: маппинг разрешает чтение страницы окна на всё время жизни среза.
+    // `process_create` передаёт ядру адрес и длину. Код EL0 не читает содержимое среза.
+    let name = unsafe { core::slice::from_raw_parts(base, 8) };
+
+    test_harness::check_eq!(
+        process_create(name).map(drop),
+        Err(SyscallError::InvalidArgument)
+    );
 }
 
 #[test_harness::test]

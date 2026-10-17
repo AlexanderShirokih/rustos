@@ -13,6 +13,8 @@ use core::{
 use kbase::{LockCell, MutexCell};
 use memory::{bump_allocator::BumpAllocator, kernel_vm_allocator::HeapAllocator};
 
+use crate::memory::regs::{common::EL1, dcache::DataCache};
+
 #[global_allocator]
 pub(crate) static GLOBAL_ALLOCATOR: GlobalKernelAllocator = GlobalKernelAllocator::new();
 
@@ -96,7 +98,18 @@ unsafe impl GlobalAlloc for GlobalKernelAllocator {
             // SAFETY: фаза PHASE_BUMP гарантирует, что bump инициализирован, а
             // до включения MMU доступ к нему однопоточен.
             PHASE_BUMP => match unsafe { self.with_bump(|bump| bump.allocate(layout)) } {
-                Ok(ptr) => ptr.as_ptr(),
+                Ok(ptr) => {
+                    let start = ptr.as_ptr() as usize;
+                    // SAFETY: bump-фаза идёт до включения MMU, и адрес физический. Хвост
+                    // прошлого выделения в первой строке сброшен до его первой записи.
+                    unsafe {
+                        DataCache::<EL1>::invalidate_range_to_coherency(
+                            start,
+                            start + layout.size(),
+                        );
+                    }
+                    ptr.as_ptr()
+                }
                 Err(_) => core::ptr::null_mut(),
             },
             PHASE_FROZEN => {

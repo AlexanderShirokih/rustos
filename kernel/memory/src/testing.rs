@@ -223,7 +223,7 @@ impl PageMapper {
         let page_base = address - address % PAGE_SIZE;
         let page = pages.get(&page_base).ok_or(UserCopyError::NotMapped)?;
 
-        let allowed = match user_access(page.flags) {
+        let allowed = match user_copy_access(page.flags) {
             AccessMode::None => false,
             AccessMode::Readonly => !write,
             AccessMode::Writable => true,
@@ -481,9 +481,10 @@ fn spend(budget: &AtomicUsize) -> bool {
         .is_ok()
 }
 
-fn user_access(flags: MemFlags) -> AccessMode {
+fn user_copy_access(flags: MemFlags) -> AccessMode {
     match flags {
         MemFlags::Cached(owners) => owners.user.access,
-        MemFlags::WriteCombining(owners) | MemFlags::Device(owners) => owners.user.access,
+        // Ядро копирует байты пользователя только через кэшируемую линейную карту.
+        MemFlags::WriteCombining(_) | MemFlags::Device(_) => AccessMode::None,
     }
 }

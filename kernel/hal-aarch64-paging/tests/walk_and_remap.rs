@@ -8,14 +8,14 @@ mod common;
 use common::{allocate_buffer, allocate_dirty_buffer, make_mapper};
 use hal_aarch64_paging::{
     entry::{Entry, Page},
-    level::{L2, L3, Level, PagePa},
-    mapper::{self, WalkError},
+    level::{L1, L2, L3, Level, PagePa},
+    mapper::{self, Translation, WalkError},
     mem_flags::{Aarch64MemFlags, Access, Shareability},
 };
 use memory::{
     aligned::Aligned,
-    physical_address::{AlignedPhysicalAddress, PageAlignedAddress},
-    virtual_address::PageAlignedVirtualAddress,
+    physical_address::{AlignedPhysicalAddress, PageAlignedAddress, PhysicalAddress},
+    virtual_address::{AlignedVirtualAddress, PageAlignedVirtualAddress, VirtualAddress},
 };
 
 const PAGE_SIZE: usize = PageAlignedAddress::ALIGNMENT;
@@ -127,6 +127,37 @@ fn walk_returns_hit_block_for_l2_block() {
     // 4K-walk внутри блока должен вернуть HitBlock.
     let probe = PageAlignedVirtualAddress::from_usize(0x2000_0000 + 4 * PAGE_SIZE).unwrap();
     assert_eq!(mapper.walk_to_l3_leaf(probe), Err(WalkError::HitBlock));
+}
+
+#[test]
+fn translate_resolves_addresses_inside_blocks_with_their_flags() {
+    let buffer = allocate_buffer(8);
+    let (mut mapper, _base) = make_mapper(buffer);
+
+    let l1_va = AlignedVirtualAddress::<{ L1::SHIFT }>::from_usize(0x8000_0000).unwrap();
+    let l1_pa = AlignedPhysicalAddress::<{ L1::SHIFT }>::from_usize(0x4000_0000).unwrap();
+    mapper.map_page(l1_va, l1_pa, user_ro_flags()).unwrap();
+    mapper
+        .map_page(
+            AlignedVirtualAddress::<{ L2::SHIFT }>::from_usize(0xC000_0000).unwrap(),
+            AlignedPhysicalAddress::<{ L2::SHIFT }>::from_usize(0x8020_0000).unwrap(),
+            user_ro_flags(),
+        )
+        .unwrap();
+
+    for (va, pa) in [(0x9234_5678, 0x5234_5678), (0xC000_1234, 0x8020_1234)] {
+        assert_eq!(
+            mapper.translate(VirtualAddress::new(va)),
+            Ok(Translation {
+                pa: PhysicalAddress::new(pa),
+                flags: user_ro_flags(),
+            })
+        );
+    }
+    assert_eq!(
+        mapper.translate(VirtualAddress::new(0x4000_0000)),
+        Err(WalkError::NotMapped)
+    );
 }
 
 #[test]

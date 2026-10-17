@@ -4,13 +4,15 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use hal_aarch64_paging::{
     level::{L0, L1, L2, L3, Level},
+    linear_map::{LinearMap, LinearMapError},
     mapper::{
-        self, MapError, MapLeaf, PageMapper, UnmapError, UnmapVisitor, WalkError, extract_table_pa,
+        self, MapError, MapLeaf, PageMapper, TableVisitor, UnmapError, WalkError, extract_table_pa,
         free_all, unmap_range,
     },
     mem_flags::Aarch64MemFlags,
     page_table::PageTable,
     table_alloc::TableAlloc,
+    user_copy::{UserAccess, kernel_alias},
 };
 use kbase::LockCell;
 use memory::{
@@ -33,9 +35,6 @@ use crate::memory::{
 
 const OWNED_BY_FA_BIT: u64 = 1 << 55;
 
-const AP_USER_BIT: u64 = 1 << 6;
-const AP_RO_BIT: u64 = 1 << 7;
-
 const TLBI_BY_VA_MAX_PAGES: usize = 16;
 
 pub(crate) const UNMAP_PENDING_FRAMES: usize = 64;
@@ -46,14 +45,6 @@ const _: () = assert!(TLBI_BY_VA_MAX_PAGES + UNMAP_MAX_FREED_TABLES <= UNMAP_PEN
 enum CopyDirection<'a> {
     In(&'a mut [u8]),
     Out(&'a [u8]),
-}
-
-fn leaf_user_accessible(raw: u64) -> bool {
-    raw & AP_USER_BIT != 0
-}
-
-fn leaf_user_writable(raw: u64) -> bool {
-    raw & AP_USER_BIT != 0 && raw & AP_RO_BIT == 0
 }
 
 pub(crate) struct FrameTableAlloc<'a, FA: FrameAllocator> {
@@ -77,7 +68,7 @@ impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
     }
 
     unsafe fn unlinked_table_ptr<L: Level>(&self, pa: PageAlignedAddress) -> *mut PageTable<L> {
-        // Линейная карта покрывает всю физическую память и не зависит от того,
+        // Линейная карта покрывает каждый фрейм аллокатора и не зависит от того,
         // связана ли страница с деревом трансляции.
         (pa.as_usize() + self.vaddr_offset) as *mut PageTable<L>
     }
@@ -92,10 +83,10 @@ impl<FA: FrameAllocator> TableAlloc for FrameTableAlloc<'_, FA> {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone)]
 pub(crate) enum AddressSpaceKind {
     Kernel,
-    User,
+    User { linear_map: &'static LinearMap },
 }
 
 pub(crate) struct Aarch64MemoryMapper<'a, FA, L>
@@ -156,7 +147,7 @@ where
     }
 
     fn leaf_flags(&self, base: Aarch64MemFlags) -> Aarch64MemFlags {
-        base.ng(matches!(self.kind, AddressSpaceKind::User))
+        base.ng(matches!(self.kind, AddressSpaceKind::User { .. }))
     }
 
     fn clean_for_instruction_fetch(&self, pa: PageAlignedAddress, size: usize) {
@@ -299,7 +290,7 @@ where
             return;
         }
         match self.kind {
-            AddressSpaceKind::User => {
+            AddressSpaceKind::User { .. } => {
                 let asid = self.user_asid_after_clear();
                 if asid != 0 {
                     TranslationLookasideBuffer::<EL1>::invalidate_va_range_asid(va, pages, asid);
@@ -313,7 +304,7 @@ where
 
     fn invalidate_tlb_all(&self) {
         match self.kind {
-            AddressSpaceKind::User => {
+            AddressSpaceKind::User { .. } => {
                 let asid = self.user_asid_after_clear();
                 if asid != 0 {
                     TranslationLookasideBuffer::<EL1>::invalidate_asid_inner_shareable(asid);
@@ -349,8 +340,15 @@ where
         if len == 0 {
             return Ok(());
         }
+        // Kernel-AS не отображает страниц EL0.
+        let AddressSpaceKind::User { linear_map } = self.kind else {
+            return Err(UserCopyError::AccessDenied);
+        };
         let page_size = PageAlignedAddress::ALIGNMENT;
-        let need_writable = matches!(dir, CopyDirection::Out(_));
+        let access = match dir {
+            CopyDirection::In(_) => UserAccess::Read,
+            CopyDirection::Out(_) => UserAccess::Write,
+        };
 
         // Все мутации таблиц идут под этим же lock, поэтому конкурентный unmap
         // с копированием не пересекается.
@@ -358,37 +356,22 @@ where
             let mut copied = 0usize;
             while copied < len {
                 let va = start.as_usize() + copied;
-                let page_base = va & !(page_size - 1);
-                let in_page_off = va - page_base;
-                let take = (page_size - in_page_off).min(len - copied);
-
-                let page_va = PageAlignedVirtualAddress::from_usize(page_base)
-                    .ok_or(UserCopyError::NotMapped)?;
-
-                let (l3, idx) = mapper
-                    .walk_to_l3_leaf(page_va)
-                    .map_err(|_| UserCopyError::NotMapped)?;
-                // SAFETY: walk_to_l3_leaf вернул валидный (l3, idx) leaf-Page;
-                // mapper-lock держится этим with_lock - таблицы стабильны.
-                let raw = unsafe { (*l3).get_raw(idx) };
-
-                if !leaf_user_accessible(raw) {
-                    return Err(UserCopyError::AccessDenied);
-                }
-                if need_writable && !leaf_user_writable(raw) {
-                    return Err(UserCopyError::AccessDenied);
-                }
-
-                let pa = extract_table_pa(raw);
-                let kernel_ptr = (pa.as_usize() + self.vaddr_offset) as *mut u8;
-                // SAFETY: kernel_ptr валиден на page_size байт по линейной
-                // higher-half-карте; (in_page_off + take) <= page_size.
+                let take = (page_size - va % page_size).min(len - copied);
+                let kernel_ptr = kernel_alias(mapper, linear_map, VirtualAddress::new(va), access)?
+                    .as_usize() as *mut u8;
+                // SAFETY: `kernel_alias` подтвердил, что линейная карта содержит физическую
+                // 4К-страницу пользователя и разрешает `access`. Оба отображения используют
+                // одинаковые атрибуты кэширования. `MemorySetup` сохраняет снимок после
+                // построения таблиц kernel-AS. Ядро снимает отображения только в окне MMIO
+                // вне линейной карты.
+                // `with_lock` защищает отображение пользователя от изменения. `take`
+                // ограничивает копирование границами 4К-страницы, а `copied + take` не превышает
+                // длину `dst` либо `src`.
                 unsafe {
-                    let frame_byte = kernel_ptr.add(in_page_off);
                     match &mut dir {
                         CopyDirection::In(dst) => {
                             core::ptr::copy_nonoverlapping(
-                                frame_byte,
+                                kernel_ptr,
                                 dst.as_mut_ptr().add(copied),
                                 take,
                             );
@@ -396,7 +379,7 @@ where
                         CopyDirection::Out(src) => {
                             core::ptr::copy_nonoverlapping(
                                 src.as_ptr().add(copied),
-                                frame_byte,
+                                kernel_ptr,
                                 take,
                             );
                         }
@@ -406,6 +389,15 @@ where
             }
             Ok(())
         })
+    }
+
+    pub(crate) fn capture_linear_map(
+        &self,
+        base: PageAlignedVirtualAddress,
+        size: usize,
+    ) -> Result<LinearMap, LinearMapError> {
+        self.mapper
+            .with_lock(|kernel| LinearMap::capture(kernel, base, size))
     }
 }
 
@@ -531,7 +523,7 @@ where
     }
 }
 
-impl<'a, FA, L> UnmapVisitor for UnmapPath<'_, 'a, FA, L>
+impl<'a, FA, L> TableVisitor for UnmapPath<'_, 'a, FA, L>
 where
     FA: FrameAllocator,
     L: LockCell<PageMapper<FrameTableAlloc<'a, FA>>>,
@@ -544,7 +536,7 @@ where
             self.defer(extract_table_pa(raw));
         }
     }
-    fn on_free_table(&mut self, pa: PageAlignedAddress) {
+    fn on_table(&mut self, pa: PageAlignedAddress) {
         // Таблица освобождается после инвалидации по VA своего диапазона: `tlbi` по VA
         // без суффикса последнего уровня снимает и закэшированные дескрипторы
         // промежуточных уровней. Диапазон освобождённой таблицы пересекается со
@@ -557,7 +549,7 @@ struct DropPath<'a, FA: FrameAllocator> {
     frame_allocator: &'a FA,
 }
 
-impl<FA: FrameAllocator> UnmapVisitor for DropPath<'_, FA> {
+impl<FA: FrameAllocator> TableVisitor for DropPath<'_, FA> {
     fn on_leaf(&mut self, _va: PageAlignedVirtualAddress, _leaf_shift: u8, raw: u64) {
         if raw & OWNED_BY_FA_BIT == 0 {
             return;
@@ -567,7 +559,7 @@ impl<FA: FrameAllocator> UnmapVisitor for DropPath<'_, FA> {
             .frame_allocator
             .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
     }
-    fn on_free_table(&mut self, pa: PageAlignedAddress) {
+    fn on_table(&mut self, pa: PageAlignedAddress) {
         let _ = self
             .frame_allocator
             .deallocate_frame(Frame::containing_address(pa.as_physical_address()));
@@ -713,7 +705,7 @@ where
             AddressSpaceKind::Kernel => {
                 AddressSpaceHandle::new(self.root_pa, AddressSpaceTag::NONE)
             }
-            AddressSpaceKind::User => {
+            AddressSpaceKind::User { .. } => {
                 let (_, raw) = asid::acquire(&self.asid_tag);
                 // Пара с барьером `user_asid_after_clear`. Тег видим другим CPU до первого
                 // обхода таблиц под ним.
@@ -725,9 +717,9 @@ where
 
     fn zero_owned_frame(&self, pa: PageAlignedAddress) {
         let kernel_ptr = (pa.as_usize() + self.vaddr_offset) as *mut u8;
-        // SAFETY: kernel-side линейная карта покрывает всю физическую память,
-        // фрейм по `pa` существует и принадлежит caller (контракт
-        // `MemoryRegion::Virtual`); 4К-выравнивание гарантировано типом `pa`.
+        // SAFETY: линейная карта ядра покрывает каждый фрейм аллокатора. Аллокатор выдал
+        // фрейм по `pa` вызывающему коду (контракт `MemoryRegion::Virtual`). Тип `pa`
+        // гарантирует выравнивание по 4К-странице.
         unsafe { core::ptr::write_bytes(kernel_ptr, 0, PageAlignedAddress::ALIGNMENT) };
     }
 
@@ -791,7 +783,7 @@ where
     fn drop(&mut self) {
         // Kernel-AS использует общий root и глобальные таблицы; их при Drop
         // не освобождаем.
-        if !matches!(self.kind, AddressSpaceKind::User) {
+        if !matches!(self.kind, AddressSpaceKind::User { .. }) {
             return;
         }
         let mut visitor = DropPath {
