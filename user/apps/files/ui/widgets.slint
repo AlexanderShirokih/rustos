@@ -1,6 +1,19 @@
 import { Desktop, Entry, Line, Place } from "desktop.slint";
 import { Palette } from "palette.slint";
 
+export component Scroller inherits Flickable {
+    content-width: self.width;
+
+    public function reveal(top: length, size: length) {
+        let shown = top - self.absolute-position.y;
+        if shown < 0 {
+            self.content-y -= shown;
+        } else if shown + size > self.height {
+            self.content-y -= shown + size - self.height;
+        }
+    }
+}
+
 export component PlaceRow inherits Rectangle {
     in property <Place> place;
     in property <bool> selected;
@@ -45,6 +58,13 @@ export component EntryRow inherits Rectangle {
     in property <length> indent;
 
     callback clicked;
+    callback reveal(length, length);
+
+    init => {
+        if root.selected && root.active {
+            root.reveal(root.absolute-position.y, root.height);
+        }
+    }
 
     height: 34px;
     border-width: root.selected && root.active ? 1px : 0;
@@ -101,14 +121,20 @@ export component Column inherits Rectangle {
 
     background: root.active ? Palette.focus : transparent;
 
-    VerticalLayout {
-        alignment: start;
-        for entry in root.entries: EntryRow {
-            entry: entry;
-            selected: entry.name == root.selected;
-            active: root.active;
-            clicked => {
-                root.clicked(entry);
+    scroller := Scroller {
+        VerticalLayout {
+            width: scroller.width;
+            alignment: start;
+            for entry in root.entries: EntryRow {
+                entry: entry;
+                selected: entry.name == root.selected;
+                active: root.active;
+                clicked => {
+                    root.clicked(entry);
+                }
+                reveal(top, size) => {
+                    scroller.reveal(top, size);
+                }
             }
         }
     }

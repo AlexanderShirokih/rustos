@@ -1,7 +1,8 @@
 //! Просмотр системного журнала на экране. Программа экспортирует `Application` с именем
-//! `journal`, получает окно вызовом `show` и показывает последние записи лога ядра на всей
-//! поверхности окна по сетке моноширинного шрифта. Отказ подписки программа показывает
-//! строкой с причиной, отказ окна её завершает.
+//! `journal`, получает окно и ввод вызовом `show` и показывает последние записи лога ядра на
+//! всей поверхности окна по сетке моноширинного шрифта. Строки прокручиваются перетаскиванием,
+//! и пока показана последняя строка, журнал следит за концом. Отказ подписки программа
+//! показывает строкой с причиной, отказ окна её завершает.
 
 use core::error::Error;
 use std::{rc::Rc, thread};
@@ -11,7 +12,7 @@ use components::component_manifest;
 use follow::{follow, show, subscribe};
 use log_abi::journal;
 use slint::{ComponentHandle, ModelRc, VecModel};
-use slint_display::{ScreenPlatform, accept_window};
+use slint_display::{ScreenPlatform, Shown, accept_window};
 use view::JournalView;
 
 mod follow;
@@ -37,7 +38,8 @@ component_manifest! {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let JournalStartup { journal, parent } = components::requirements::<JournalStartup>()?;
-    let mut platform = ScreenPlatform::open(accept_window(parent)?.window)?;
+    let Shown { window, input } = accept_window(parent)?;
+    let mut platform = ScreenPlatform::open(window)?;
 
     let window = ui::Journal::new().map_err(|error| format!("ui refused: {error:?}"))?;
     let rows = Rc::new(VecModel::<ui::Row>::default());
@@ -45,6 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     window
         .show()
         .map_err(|error| format!("window refused: {error:?}"))?;
+    platform.deliver_input(input, &window);
 
     let columns = usize::try_from(window.get_columns())?;
     let mut view = JournalView::new(columns);

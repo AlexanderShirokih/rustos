@@ -34,6 +34,7 @@ export component Journal inherits Window {
     private property <length> margin: 8px;
     private property <length> advance: probe.preferred-width / 100;
     private property <length> row-height: probe.preferred-height;
+    private property <bool> following: true;
 
     default-font-family: "DejaVu Sans Mono";
     default-font-size: 12px;
@@ -47,16 +48,32 @@ export component Journal inherits Window {
             + "``````````" + "``````````" + "``````````" + "``````````" + "``````````";
     }
 
-    Rectangle {
+    public function evicted(count: int) {
+        if !root.following {
+            flick.content-y = min(0, flick.content-y + count * root.row-height);
+        }
+    }
+
+    flick := Flickable {
         x: root.margin;
         y: root.margin;
         width: root.width - 2 * root.margin;
         height: root.height - 2 * root.margin;
-        clip: true;
+        content-width: self.width;
+        content-height: max(self.height, root.rows.length * root.row-height);
+
+        changed content-y => {
+            root.following = self.content-y <= self.height - self.content-height + 1px;
+        }
+        changed content-height => {
+            if root.following {
+                self.content-y = self.height - self.content-height;
+            }
+        }
 
         for row[index] in root.rows: Rectangle {
             x: 0;
-            y: parent.height - (root.rows.length - index) * root.row-height;
+            y: flick.content-height - (root.rows.length - index) * root.row-height;
             width: parent.width;
             height: root.row-height;
 

@@ -1,6 +1,6 @@
 import { Desktop, Level } from "desktop.slint";
 import { Palette } from "palette.slint";
-import { Breadcrumb, Column, Divider, HorizontalRule, PlaceRow, Preview } from "widgets.slint";
+import { Breadcrumb, Column, Divider, HorizontalRule, PlaceRow, Preview, Scroller } from "widgets.slint";
 
 export component FilesWide inherits Rectangle {
     HorizontalLayout {
@@ -58,8 +58,16 @@ export component FilesWide inherits Rectangle {
                     }
                 }
                 Divider { }
-                Preview {
+                preview := Scroller {
                     horizontal-stretch: 1;
+                    content-height: lines.preferred-height;
+                    property <string> file: Desktop.file;
+                    changed file => {
+                        self.content-y = 0;
+                    }
+                    lines := Preview {
+                        width: preview.width;
+                    }
                 }
             }
         }

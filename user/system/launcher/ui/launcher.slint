@@ -41,12 +41,18 @@ component AppTile inherits Rectangle {
     in property <bool> chosen;
     in property <length> size;
 
+    callback touched();
     callback clicked();
 
     width: root.size;
     height: root.size + 30px;
 
-    TouchArea {
+    touch := TouchArea {
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.touched();
+            }
+        }
         clicked => {
             root.clicked();
         }
@@ -65,7 +71,7 @@ component AppTile inherits Rectangle {
             width: parent.width - 12px;
             height: parent.height - 12px;
             border-radius: self.width * 0.24;
-            background: root.tile.accent;
+            background: touch.pressed && touch.has-hover ? root.tile.accent.darker(40%) : root.tile.accent;
 
             Text {
                 text: root.tile.letter;
@@ -95,6 +101,11 @@ export component Launcher inherits Window {
     in property <string> memory;
     in property <string> uptime;
 
+    // Рамка выбора видна в режиме кнопок. Клавиша, включившая режим, только показывает рамку,
+    // поэтому `Enter` открывает плитку, лишь если нажат в режиме кнопок.
+    property <bool> keys;
+    property <bool> armed;
+
     callback next();
     callback previous();
     callback open(int);
@@ -108,22 +119,38 @@ export component Launcher inherits Window {
         }
 
         key-pressed(event) => {
-            if event.text == Key.DownArrow || event.text == Key.RightArrow {
-                root.next();
+            if event.text == Key.Return {
+                root.armed = root.keys;
+            } else if event.text == Key.DownArrow || event.text == Key.RightArrow {
+                if root.keys {
+                    root.next();
+                }
             } else if event.text == Key.UpArrow || event.text == Key.LeftArrow {
-                root.previous();
+                if root.keys {
+                    root.previous();
+                }
             } else {
                 return reject;
             }
+            root.keys = true;
             accept
         }
 
         key-released(event) => {
-            if event.text == Key.Return {
+            if event.text == Key.Return && root.armed {
+                root.armed = false;
                 root.open(root.selected);
                 return accept;
             }
             reject
+        }
+    }
+
+    TouchArea {
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.keys = false;
+            }
         }
     }
 
@@ -221,7 +248,10 @@ export component Launcher inherits Window {
                         y: Math.floor(index / parent.columns) * parent.stride;
                         size: parent.size;
                         tile: tile;
-                        chosen: index == root.selected;
+                        chosen: root.keys && index == root.selected;
+                        touched => {
+                            root.keys = false;
+                        }
                         clicked => {
                             root.open(index);
                         }

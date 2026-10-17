@@ -7,7 +7,7 @@ use component_startup::{
 use display_abi::display;
 use input_abi::input;
 use ipc::{CallError, Timeout};
-use kernel_objects::{Delivery, PortTransport, ReceivedSession, Session};
+use kernel_objects::{Delivery, IssuedHandle, PortTransport, ReceivedSession, Session, kind};
 
 /// Отказ получения окна приложения.
 #[derive(Debug)]
@@ -36,6 +36,7 @@ pub struct ApplicationSession {
 struct Application {
     shown: bool,
     shown_window: Option<ShownWindow>,
+    closed: Option<application::closed::Reply<IssuedHandle<kind::Reply>>>,
 }
 
 struct ShownWindow {
@@ -73,6 +74,18 @@ impl application::Service<Delivery> for Application {
         });
         Ok(())
     }
+
+    fn closed(
+        &mut self,
+        _frame: &Delivery,
+        reply: application::closed::Reply<IssuedHandle<kind::Reply>>,
+    ) {
+        if self.closed.is_some() {
+            let _ = reply.send(Err::<(), _>(ApplicationError::Refused));
+            return;
+        }
+        self.closed = Some(reply);
+    }
 }
 
 impl ApplicationSession {
@@ -107,6 +120,7 @@ pub fn accept_window(
     let mut application = Application {
         shown: false,
         shown_window: None,
+        closed: None,
     };
     let ShownWindow { window, input } = wait_show(&service, &mut application)?;
 

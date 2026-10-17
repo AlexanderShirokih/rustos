@@ -124,6 +124,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "application-fixture"
+path = "src/application_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "export-fixture"
 path = "src/export_fixture.rs"
 test = false
@@ -233,6 +239,8 @@ bench = false
 
 [dependencies]
 kernel-objects = { workspace = true }
+application-abi = { workspace = true }
+application-window = { workspace = true }
 mmio = { workspace = true }
 bootstrap-abi = { workspace = true }
 clk-qcom = { path = "../../system/clk-qcom" }

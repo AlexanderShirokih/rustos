@@ -1,6 +1,6 @@
 import { Desktop, Level } from "desktop.slint";
 import { Palette } from "palette.slint";
-import { EntryRow, HorizontalRule, Preview } from "widgets.slint";
+import { EntryRow, HorizontalRule, Preview, Scroller } from "widgets.slint";
 
 component MountTabs inherits HorizontalLayout {
     padding: 10px;
@@ -44,7 +44,8 @@ component MountTabs inherits HorizontalLayout {
 }
 
 component Tree inherits VerticalLayout {
-    alignment: start;
+    callback reveal(length, length);
+
     for entry in Desktop.root-entries: VerticalLayout {
         EntryRow {
             height: 30px;
@@ -54,6 +55,9 @@ component Tree inherits VerticalLayout {
             active: Desktop.level == Level.folder;
             clicked => {
                 Desktop.open-folder(entry);
+            }
+            reveal(top, size) => {
+                root.reveal(top, size);
             }
         }
         if entry.name == Desktop.folder: VerticalLayout {
@@ -66,6 +70,9 @@ component Tree inherits VerticalLayout {
                 clicked => {
                     Desktop.open-file(child);
                 }
+                reveal(top, size) => {
+                    root.reveal(top, size);
+                }
             }
         }
     }
@@ -74,13 +81,17 @@ component Tree inherits VerticalLayout {
 export component FilesNarrow inherits VerticalLayout {
     MountTabs { }
     HorizontalRule { }
-    Tree { }
-    Rectangle {
-        min-height: 0;
+    scroller := Scroller {
         vertical-stretch: 1;
-        clip: true;
-        Preview {
-            y: 0;
+        VerticalLayout {
+            width: scroller.width;
+            alignment: start;
+            Tree {
+                reveal(top, size) => {
+                    scroller.reveal(top, size);
+                }
+            }
+            Preview { }
         }
     }
 }

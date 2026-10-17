@@ -15,6 +15,9 @@ ipc::protocol! {
             own window: ipc::wire::Session<display_abi::display::Protocol>,
             own input: ipc::wire::Session<input_abi::input::Protocol>,
         ) -> Result<(), ApplicationError>;
+
+        /// Завершается `PeerClosed` с уходом приложения. Второй ждущий вызов получает `Refused`.
+        call(defer) fn closed() -> Result<(), ApplicationError>;
     }
 }
 
@@ -25,7 +28,7 @@ mod tests {
     use display_abi::display;
     use input_abi::input;
     use ipc::wire::Session;
-    use ipc_test::{MockHandle, MockResources};
+    use ipc_test::{MockHandle, MockReply, MockResources};
     use syscall::kind;
 
     use super::{ApplicationError, application};
@@ -52,6 +55,10 @@ mod tests {
             self.sessions
                 .push((window.into_handle().raw(), input.into_handle().raw()));
             Ok(())
+        }
+
+        fn closed(&mut self, _frame: &MockResources, reply: application::closed::Reply<MockReply>) {
+            drop(reply);
         }
     }
 

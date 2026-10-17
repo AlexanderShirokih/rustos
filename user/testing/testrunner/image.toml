@@ -82,6 +82,11 @@ path = "/idle-export-fixture"
 
 [[programs]]
 package = "testrunner"
+bin = "application-fixture"
+path = "/application-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "export-fixture"
 path = "/export-fixture"
 

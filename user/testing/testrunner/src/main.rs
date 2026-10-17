@@ -36,6 +36,7 @@ use syscall::{Handle, kind};
 
 mod address_space_isolation;
 mod answer_exhaustion_protocol;
+mod application;
 mod c_selftest;
 mod child_steps_protocol;
 mod clock;

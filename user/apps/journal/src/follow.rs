@@ -65,13 +65,17 @@ pub(crate) fn follow(
     }
 }
 
-pub(crate) fn show(rows: &VecModel<ui::Row>, lines: Vec<Pushed>) {
+pub(crate) fn show(rows: &VecModel<ui::Row>, lines: Vec<Pushed>) -> usize {
+    let mut removed = 0;
     for pushed in lines {
-        for _ in 0..pushed.evicted.min(rows.row_count()) {
+        let evicted = pushed.evicted.min(rows.row_count());
+        for _ in 0..evicted {
             rows.remove(0);
         }
+        removed += evicted;
         rows.extend(pushed.lines.into_iter().map(row));
     }
+    removed
 }
 
 fn next_batch(consumer: &mut LogConsumer, view: &mut JournalView) -> Batch {
@@ -107,7 +111,8 @@ fn apply(window: &slint::Weak<ui::Journal>, lines: Vec<Pushed>) -> bool {
     let (applied, wait_applied) = mpsc::sync_channel(1);
     let posted = window.upgrade_in_event_loop(move |window| {
         if let Some(rows) = window.get_rows().as_any().downcast_ref() {
-            show(rows, lines);
+            let removed = show(rows, lines);
+            window.invoke_evicted(i32::try_from(removed).unwrap_or(i32::MAX));
         }
         let _ = applied.send(());
     });

@@ -6,11 +6,12 @@
 //! у себя, а свою сессию экрана на это время закрывает. Вместе с окном приложение получает
 //! сессию ввода. Фокус ввода лаунчер переносит на видимое окно, плитки либо приложение.
 //! Удержание питания либо клавиша `Home` закрывает сессию `Application` приложения, отзывает
-//! окно закрытием корня и возвращает плитки.
+//! окно закрытием корня и возвращает плитки. Уход приложения возвращает плитки так же.
 //!
 //! Кнопки устройства получает только лаунчер. Он переводит громкость вниз и вверх в стрелки вниз и
 //! вверх, короткое нажатие питания - в `Enter`. Плитку выбирают стрелками и открывают `Enter`,
-//! касанием либо щелчком.
+//! касанием либо щелчком. Рамку выбора лаунчер показывает после клавиши навигации и скрывает
+//! после касания. Первая клавиша после касания только показывает рамку.
 
 #![feature(molecular_ext)]
 
@@ -118,6 +119,7 @@ pub(crate) enum Command {
     Power(bool),
     PowerHeld,
     PowerLost,
+    Closed(u64),
 }
 
 struct Home {
@@ -131,6 +133,7 @@ struct Home {
     view: ui::Launcher,
     selected: usize,
     shown: Option<Shown>,
+    opened: u64,
     power: Timer,
     commands: mpsc::Sender<Command>,
 }
@@ -141,6 +144,8 @@ struct Keyboard {
 }
 
 struct Shown {
+    name: &'static str,
+    opened: u64,
     _application: application::Client<SessionTransport>,
     _window: Session<display::Protocol>,
 }
@@ -178,6 +183,14 @@ impl Home {
                 Command::Previous if self.shown.is_none() => self.select_previous(),
                 Command::Open(index) if self.shown.is_none() => self.open(index)?,
                 Command::Home | Command::PowerHeld => self.home()?,
+                Command::Closed(opened)
+                    if self
+                        .shown
+                        .as_ref()
+                        .is_some_and(|shown| shown.opened == opened) =>
+                {
+                    self.closed()?;
+                }
                 Command::Reserve(device) => {
                     if let Err(error) = self.focus.reserve(device) {
                         println!("device {device} not reserved: {error:?}");
@@ -224,8 +237,12 @@ impl Home {
         };
         self.selected = index;
         self.platform.release();
-        match open(&self.screen, &self.apps, &self.focus, app.name) {
-            Ok(shown) => self.shown = Some(shown),
+        self.opened = self.opened.wrapping_add(1);
+        match open(&self.screen, &self.apps, &self.focus, app.name, self.opened) {
+            Ok((shown, watched)) => {
+                watch_closed(watched, self.opened, &self.commands);
+                self.shown = Some(shown);
+            }
             Err(error) => {
                 println!("{} not shown: {error}", app.name);
                 self.platform.attach(self.screen.open()?.client())?;
@@ -247,6 +264,13 @@ impl Home {
         self.shown = None;
         self.platform.attach(self.screen.open()?.client())?;
         Ok(())
+    }
+
+    fn closed(&mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(shown) = &self.shown {
+            println!("{} closed", shown.name);
+        }
+        self.home()
     }
 }
 
@@ -339,6 +363,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         view,
         selected: 0,
         shown: None,
+        opened: 0,
         power: Timer::default(),
         commands,
     }
@@ -396,14 +421,17 @@ fn open(
     screen: &Import<display::Protocol>,
     apps: &Providers<application::Protocol>,
     focus: &input_focus::Client<SessionTransport>,
-    name: &str,
-) -> Result<Shown, OpenError> {
+    name: &'static str,
+    opened: u64,
+) -> Result<(Shown, Session<application::Protocol>), OpenError> {
     let found = find(apps, name)?;
-    let application: application::Client<SessionTransport> = apps
-        .open(&found)
-        .map_err(OpenError::Startup)?
-        .client()
-        .with_wait(REPLY_TIMEOUT);
+    let session = apps.open(&found).map_err(OpenError::Startup)?;
+    let watched = session
+        .handle()
+        .duplicate(Rights::WRITE, None)
+        .map_err(OpenError::Kernel)?;
+    let application: application::Client<SessionTransport> =
+        session.client().with_wait(REPLY_TIMEOUT);
 
     let window = screen.open().map_err(OpenError::Startup)?;
     let derived = window
@@ -420,10 +448,32 @@ fn open(
         focus.focus(None).map_err(OpenError::Focus)?;
     }
 
-    Ok(Shown {
-        _application: application,
-        _window: window,
-    })
+    Ok((
+        Shown {
+            name,
+            opened,
+            _application: application,
+            _window: window,
+        },
+        Session::from_handle(watched),
+    ))
+}
+
+fn watch_closed(
+    watched: Session<application::Protocol>,
+    opened: u64,
+    commands: &mpsc::Sender<Command>,
+) {
+    let commands = commands.clone();
+    let started = thread::Builder::new().spawn(move || {
+        let application: application::Client<SessionTransport> =
+            watched.client().with_wait(Timeout::INFINITE);
+        let _ = application.closed();
+        let _ = send_waking_loop(&commands, Command::Closed(opened));
+    });
+    if let Err(error) = started {
+        println!("application exit not watched: {error}");
+    }
 }
 
 fn install_clock(rtc: &Providers<rtc::Protocol>) -> Result<bool, Box<dyn Error>> {

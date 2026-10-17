@@ -4899,6 +4899,8 @@ dependencies = [
 name = "testrunner"
 version = "0.1.0"
 dependencies = [
+ "application-abi",
+ "application-window",
  "block-abi",
  "bootstrap-abi",
  "clk-qcom",
