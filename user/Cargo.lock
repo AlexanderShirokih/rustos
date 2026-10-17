@@ -984,6 +984,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "driver-novatek-nvt-ts"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "i2c-abi",
+ "input-abi",
+ "ipc",
+ "kernel-objects",
+ "pins-abi",
+ "platform-abi",
+ "program-entry",
+ "runtime",
+ "syscall",
+ "userland-build",
+]
+
+[[package]]
 name = "driver-pl031"
 version = "0.1.0"
 dependencies = [
@@ -4890,6 +4907,7 @@ dependencies = [
  "component-startup",
  "display-abi",
  "driver-gpio-keys",
+ "driver-novatek-nvt-ts",
  "driver-pm8941-pwrkey",
  "driver-simplefb",
  "driver-virtio-blk",

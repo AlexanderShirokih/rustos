@@ -3,11 +3,12 @@
 use alloc::{string::String, vec::Vec};
 
 use input_abi::{
-    AxisDecl, AxisList, Binding, Command, DeviceDescriptor, KeyList, RecordsError, Usage,
+    AxisDecl, AxisList, Binding, CONTACTS_MAX, Command, ContactTable, DeviceDescriptor, KeyList,
+    RecordsError, Usage,
 };
 use virtio::{
     Registers, Transport,
-    input::{self, AbsInfo, Event, SECTION_BYTES, kind, select, sync},
+    input::{self, AbsInfo, Event, SECTION_BYTES, abs, kind, select, sync},
 };
 
 const FALLBACK_NAME: &str = "virtio-input";
@@ -41,6 +42,10 @@ pub struct Device {
     contact_axes: AxisList,
     key_states: Vec<KeyState>,
     axis_states: Vec<AxisState>,
+    contact_codes: Vec<u16>,
+    contacts: ContactTable,
+    slots: Vec<Slot>,
+    slot: usize,
     dropping: bool,
 }
 
@@ -55,6 +60,12 @@ struct AxisState {
     code: u16,
     usage: Usage,
     pending: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+struct Slot {
+    touch: Option<i32>,
+    pending_touch: Option<i32>,
 }
 
 impl<R: Registers> Config for Transport<R> {
@@ -78,9 +89,12 @@ impl Device {
     /// Строит дескриптор по конфигурации.
     ///
     /// Имя берётся из `ID_NAME` до первого нулевого байта, имя не в UTF-8 заменяется на
-    /// `virtio-input`. Оси - переведённые коды `EV_REL`, затем `EV_ABS` с диапазоном `ABS_INFO`,
-    /// в пределе модели и без повтора usage. Клавиши - переведённые коды `EV_KEY` по
-    /// возрастанию. Привязка - `Screen` при абсолютных X и Y.
+    /// `virtio-input`. Оси - переведённые коды `EV_REL`, затем `EV_ABS` с диапазоном
+    /// `ABS_INFO`, в пределе модели и без повтора usage. Устройство с [`abs::MT_SLOT`]
+    /// объявляет контакты по диапазону слотов в пределе модели, оси контакта X и Y по
+    /// [`abs::MT_POSITION_X`] и [`abs::MT_POSITION_Y`] и не объявляет абсолютных осей
+    /// устройства. Клавиши - переведённые коды `EV_KEY` по возрастанию. Привязка - `Screen`
+    /// при абсолютных X и Y устройства либо контакта.
     pub fn describe<C: Config>(config: &mut C) -> Result<Self, C::Error> {
         let mut section = [0; SECTION_BYTES];
         let length = config.section(select::ID_NAME, 0, &mut section)?;
@@ -102,18 +116,42 @@ impl Device {
                 axis_states.push(AxisState::new(kind::REL, code, usage));
             }
         }
-        for code in codes(config, kind::ABS, &mut section)? {
-            let (Some(usage), Ok(subsel)) =
-                (Usage::from_linux_abs(code.into()), u8::try_from(code))
-            else {
+        let abs_codes = codes(config, kind::ABS, &mut section)?;
+        let multitouch = abs_codes.contains(&abs::MT_SLOT);
+        let mut contacts = if multitouch { slot_count(config)? } else { 0 };
+        let mut contact_axes = AxisList::new();
+        let mut contact_usages = Vec::new();
+        let mut contact_codes = Vec::new();
+        for code in abs_codes {
+            let Ok(subsel) = u8::try_from(code) else {
                 continue;
             };
-            if !declared(&axis_states, usage)
+            let contact_usage = match code {
+                abs::MT_POSITION_X => Some(Usage::X),
+                abs::MT_POSITION_Y => Some(Usage::Y),
+                _ => None,
+            };
+            if let Some(usage) = contact_usage {
+                if contacts != 0
+                    && let Some(AbsInfo { min, max }) = config.abs_info(subsel)?
+                    && contact_axes
+                        .push(AxisDecl::absolute(usage, min, max))
+                        .is_ok()
+                {
+                    contact_usages.push(usage);
+                    contact_codes.push(code);
+                }
+            } else if !multitouch
+                && let Some(usage) = Usage::from_linux_abs(code.into())
+                && !declared(&axis_states, usage)
                 && let Some(AbsInfo { min, max }) = config.abs_info(subsel)?
                 && axes.push(AxisDecl::absolute(usage, min, max)).is_ok()
             {
                 axis_states.push(AxisState::new(kind::ABS, code, usage));
             }
+        }
+        if contact_codes.is_empty() {
+            contacts = 0;
         }
 
         let mut keys = KeyList::new();
@@ -135,7 +173,12 @@ impl Device {
                 .iter()
                 .any(|axis| axis.kind == kind::ABS && axis.usage == usage)
         };
-        let screen = absolute(Usage::X) && absolute(Usage::Y);
+        let screen = absolute(Usage::X) && absolute(Usage::Y)
+            || contact_usages.contains(&Usage::X) && contact_usages.contains(&Usage::Y);
+        let contact_table = ContactTable::new(
+            u16::try_from(contacts).unwrap_or(CONTACTS_MAX),
+            u16::try_from(contact_codes.len()).unwrap_or(u16::MAX),
+        );
         Ok(Self {
             name,
             binding: if screen {
@@ -145,9 +188,13 @@ impl Device {
             },
             keys,
             axes,
-            contact_axes: AxisList::new(),
+            contact_axes,
             key_states,
             axis_states,
+            contact_codes,
+            contacts: contact_table,
+            slots: alloc::vec![Slot::FREE; contacts],
+            slot: 0,
             dropping: false,
         })
     }
@@ -164,22 +211,28 @@ impl Device {
             self.binding,
             &self.keys,
             &self.axes,
-            0,
+            self.contact_count(),
             &self.contact_axes,
         )
     }
 
-    /// Учитывает событие и по `SYN_REPORT` возвращает непустую команду кадра.
+    /// Учитывает событие и по `SYN_REPORT` возвращает команды кадра по порядку.
     ///
     /// Кадр хранит итоговое состояние: сумму относительной оси, последнее значение абсолютной
     /// и последнее состояние клавиши. Нажатие и отпускание клавиши внутри одного кадра
     /// команды не дают. Клавиша в текущем состоянии, повтор клавиши и событие вне дескриптора
     /// отбрасываются. `SYN_DROPPED` отбрасывает кадр до следующего `SYN_REPORT` включительно,
-    /// который отпускает нажатые клавиши.
+    /// который отпускает нажатые клавиши и отменяет касания.
+    ///
+    /// Слот выбирает [`abs::MT_SLOT`] и сохраняет его до следующего `MT_SLOT`. Номер касания
+    /// не меньше нуля на свободном слоте начинает касание со значениями всех осей контакта,
+    /// когда каждое из них известно. Координата занятого слота даёт новое значение оси
+    /// контакта, номер -1 заканчивает касание. Новый номер на занятом слоте заканчивает
+    /// касание в первой команде кадра и начинает во второй.
     ///
     /// Отказы:
     /// - `Full` - команда кадра не помещается в сообщение.
-    pub fn translate(&mut self, event: Event) -> Result<Option<Command>, RecordsError> {
+    pub fn translate(&mut self, event: Event) -> Result<Vec<Command>, RecordsError> {
         match (event.kind, event.code) {
             (kind::SYN, sync::REPORT) => return self.finish_frame(),
             (kind::SYN, sync::DROPPED) => {
@@ -198,6 +251,7 @@ impl Device {
                     key.pending = Some(state);
                 }
             }
+            (kind::ABS, code) if !self.slots.is_empty() => self.contact_event(code, event.value),
             (kind @ (kind::REL | kind::ABS), code) => {
                 let axis = self
                     .axis_states
@@ -213,11 +267,35 @@ impl Device {
             }
             _ => {}
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 
-    fn finish_frame(&mut self) -> Result<Option<Command>, RecordsError> {
-        if core::mem::take(&mut self.dropping) {
+    fn contact_count(&self) -> u16 {
+        u16::try_from(self.slots.len()).unwrap_or(CONTACTS_MAX)
+    }
+
+    fn contact_event(&mut self, code: u16, value: i32) {
+        match code {
+            abs::MT_SLOT => self.slot = usize::try_from(value).unwrap_or(usize::MAX),
+            abs::MT_TRACKING_ID => {
+                if let Some(slot) = self.slots.get_mut(self.slot) {
+                    slot.pending_touch = Some(value);
+                }
+            }
+            _ => {
+                let axis = self.contact_codes.iter().position(|known| *known == code);
+                let contact = u16::try_from(self.slot).ok();
+                if let Some((contact, axis)) = contact.zip(axis.and_then(|a| u16::try_from(a).ok()))
+                {
+                    self.contacts.axis(contact, axis, value);
+                }
+            }
+        }
+    }
+
+    fn finish_frame(&mut self) -> Result<Vec<Command>, RecordsError> {
+        let dropped = core::mem::take(&mut self.dropping);
+        if dropped {
             self.clear_frame();
             for key in &mut self.key_states {
                 key.pending = Some(false);
@@ -225,11 +303,10 @@ impl Device {
         }
 
         let mut command = Command::new();
-        let mut records = 0;
+        let mut restarted = None;
         for (index, axis) in (0..).zip(&self.axis_states) {
             if let Some(value) = axis.pending {
                 command.axis(index, value)?;
-                records += 1;
             }
         }
         for (index, key) in (0..).zip(&mut self.key_states) {
@@ -242,11 +319,26 @@ impl Device {
                     command.release(index)?;
                 }
                 key.pressed = state;
-                records += 1;
             }
         }
+        if dropped {
+            self.contacts.cancel(&mut command)?;
+            for slot in &mut self.slots {
+                slot.touch = None;
+            }
+        } else {
+            for (contact, slot) in (0..).zip(&mut self.slots) {
+                slot.settle(contact, &mut self.contacts);
+            }
+            restarted = self.contacts.finish(&mut command)?;
+        }
         self.clear_frame();
-        Ok((records != 0).then_some(command))
+        let mut commands = Vec::new();
+        if !command.as_bytes().is_empty() {
+            commands.push(command);
+        }
+        commands.extend(restarted);
+        Ok(commands)
     }
 
     fn clear_frame(&mut self) {
@@ -255,6 +347,9 @@ impl Device {
         }
         for axis in &mut self.axis_states {
             axis.pending = None;
+        }
+        for slot in &mut self.slots {
+            slot.pending_touch = None;
         }
     }
 }
@@ -268,6 +363,40 @@ impl AxisState {
             pending: None,
         }
     }
+}
+
+impl Slot {
+    const FREE: Self = Self {
+        touch: None,
+        pending_touch: None,
+    };
+
+    fn settle(&mut self, contact: u16, contacts: &mut ContactTable) {
+        let Some(id) = self.pending_touch else {
+            return;
+        };
+        if id < 0 {
+            contacts.lift(contact);
+            self.touch = None;
+            return;
+        }
+        match self.touch {
+            Some(current) if current == id => contacts.touch(contact),
+            Some(_) => contacts.restart(contact),
+            None => contacts.touch(contact),
+        }
+        self.touch = Some(id);
+    }
+}
+
+fn slot_count<C: Config>(config: &mut C) -> Result<usize, C::Error> {
+    let Ok(subsel) = u8::try_from(abs::MT_SLOT) else {
+        return Ok(0);
+    };
+    let slots = config.abs_info(subsel)?.map_or(0, |AbsInfo { max, .. }| {
+        usize::try_from(max.saturating_add(1)).unwrap_or(0)
+    });
+    Ok(slots.min(usize::from(CONTACTS_MAX)))
 }
 
 fn codes<C: Config>(

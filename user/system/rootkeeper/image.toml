@@ -25,6 +25,10 @@ package = "driver-gpio-keys"
 path = "/driver-gpio-keys"
 
 [[programs]]
+package = "driver-novatek-nvt-ts"
+path = "/driver-novatek-nvt-ts"
+
+[[programs]]
 package = "driver-pm8941-pwrkey"
 bin = "driver-pm8941-pwrkey"
 path = "/driver-pm8941-pwrkey"

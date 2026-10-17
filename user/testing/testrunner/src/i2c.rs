@@ -9,6 +9,7 @@ use alloc::{
 use core::cell::{Cell, RefCell};
 
 use component_abi::{RequirementDeclaration, SessionError};
+use driver_novatek_nvt_ts::{PARAMETERS_ADDRESS, PARAMETERS_LENGTH, Parameters};
 use fdt_test::Token;
 use i2c_abi::{I2cError, TransferError, i2c, i2c_device};
 use i2c_qup::{Bus, Failure, Line, Operation, Resources};
@@ -120,8 +121,6 @@ const TREE: &[Token<'static>] = &fdt_test::tree! {
 };
 
 const BOARD_TOUCHSCREEN: &str = "/soc@0/i2c@c175000/touchscreen@1";
-const NT36672A_PARAMETERS: u8 = 0x78;
-const NT36672A_PARAMETERS_LENGTH: u16 = 15;
 const NT36672A_CHIP_ID: usize = 0x0e;
 const NT36672A_IRQ_TYPE: usize = 0x0b;
 const NT36672A_RESET_DELAY: Timeout = Timeout::from_millis(100);
@@ -504,7 +503,7 @@ fn write_read_pauses_between_the_write_and_the_repeated_start() {
 
         let read = transfer(
             bus,
-            Operation::WriteRead(&[NT36672A_PARAMETERS], NT36672A_PARAMETERS_LENGTH),
+            Operation::WriteRead(&[PARAMETERS_ADDRESS], PARAMETERS_LENGTH),
         );
 
         test_harness::check_eq!(read, Ok(parameters));
@@ -639,7 +638,7 @@ fn the_board_touchscreen_out_of_reset_answers_its_parameters_and_lends_its_inter
     match touchscreen {
         Ok(touchscreen) => {
             let read = touchscreen
-                .write_read(&[NT36672A_PARAMETERS], NT36672A_PARAMETERS_LENGTH)
+                .write_read(&[PARAMETERS_ADDRESS], PARAMETERS_LENGTH)
                 .map(|buf| buf.0);
             match &read {
                 Ok(parameters) => check_touchscreen_parameters(parameters, trigger),
@@ -692,11 +691,24 @@ fn the_board_touchscreen_out_of_reset_answers_its_parameters_and_lends_its_inter
 }
 
 fn check_touchscreen_parameters(parameters: &[u8], trigger: Option<u32>) {
-    test_harness::check_eq!(parameters.len(), usize::from(NT36672A_PARAMETERS_LENGTH));
+    test_harness::check_eq!(parameters.len(), usize::from(PARAMETERS_LENGTH));
     test_harness::report!(
         "touchscreen chip id {:#04x}",
         parameters.get(NT36672A_CHIP_ID).copied().unwrap_or(0)
     );
+    match Parameters::parse(parameters) {
+        Ok(accepted) => {
+            test_harness::report!(
+                "touchscreen size {}x{}, {} touches",
+                accepted.width(),
+                accepted.height(),
+                accepted.max_touches()
+            );
+        }
+        Err(refused) => {
+            test_harness::report!("touchscreen parameters refused: {refused:?}");
+        }
+    }
     // Параметр - индекс условия `IRQ_TYPE_*` в таблице `nvt_ts_irq_type` Linux 6.16.
     test_harness::check_eq!(
         parameters

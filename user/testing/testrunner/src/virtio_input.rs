@@ -6,12 +6,12 @@ use core::convert::Infallible;
 
 use component_abi::RequirementDeclaration;
 use driver_virtio_input::{Config, Device};
-use input_abi::{AxisDecl, Binding, DeviceLayout, KeyList, Kind, Usage, input};
+use input_abi::{AxisDecl, Binding, CONTACTS_MAX, DeviceLayout, KeyList, Kind, Usage, input};
 use ipc::{CallError, Protocol};
 use runtime::Timeout;
 use virtio::{
     DeviceType,
-    input::{AbsInfo, Event, SECTION_BYTES, kind, select, sync},
+    input::{AbsInfo, Event, SECTION_BYTES, abs, kind, select, sync},
 };
 use virtio_driver::open_slot;
 use virtio_mmio_abi::VirtioMmioError;
@@ -34,10 +34,13 @@ const AXIS_X: u16 = 0;
 const AXIS_Y: u16 = 1;
 
 const TABLET_MAX: i32 = 0x7fff;
+const QEMU_TOUCH_CONTACTS: u16 = 11;
+const TOUCH_SLOTS: i32 = 2;
+const END_TOUCH: i32 = -1;
 
 const INPUT: &str = "input";
 const DRIVER: &str = "driver-virtio-input";
-const QEMU_INPUT_DEVICES: usize = 3;
+const QEMU_INPUT_DEVICES: usize = 4;
 const DEVICE_WAIT: Timeout = Timeout::from_secs(15);
 const NO_DEVICE: CallError<VirtioMmioError> = CallError::Remote(VirtioMmioError::NoDevice);
 
@@ -46,6 +49,7 @@ struct Synthetic {
     keys: &'static [u16],
     relative: &'static [u16],
     absolute: &'static [u16],
+    slots: i32,
 }
 
 impl Config for Synthetic {
@@ -76,10 +80,12 @@ impl Config for Synthetic {
     }
 
     fn abs_info(&mut self, axis: u8) -> Result<Option<AbsInfo>, Infallible> {
-        let range = AbsInfo {
-            min: 0,
-            max: TABLET_MAX,
+        let max = if u16::from(axis) == abs::MT_SLOT {
+            self.slots - 1
+        } else {
+            TABLET_MAX
         };
+        let range = AbsInfo { min: 0, max };
         Ok(self.absolute.contains(&u16::from(axis)).then_some(range))
     }
 }
@@ -90,8 +96,47 @@ fn device(name: &'static [u8], keys: &'static [u16], absolute: &'static [u16]) -
         keys,
         relative: &[],
         absolute,
+        slots: 0,
     };
     Device::describe(config).unwrap_or_else(|never| match never {})
+}
+
+fn touchscreen(slots: i32) -> Device {
+    let config = &mut Synthetic {
+        name: b"touchscreen",
+        keys: &[],
+        relative: &[],
+        absolute: &[
+            AXIS_X,
+            AXIS_Y,
+            abs::MT_SLOT,
+            abs::MT_POSITION_X,
+            abs::MT_POSITION_Y,
+            abs::MT_TRACKING_ID,
+        ],
+        slots,
+    };
+    Device::describe(config).unwrap_or_else(|never| match never {})
+}
+
+fn slot(index: i32) -> Event {
+    event(kind::ABS, abs::MT_SLOT, index)
+}
+
+fn tracking(id: i32) -> Event {
+    event(kind::ABS, abs::MT_TRACKING_ID, id)
+}
+
+fn position(x: i32, y: i32) -> [Event; 2] {
+    [
+        event(kind::ABS, abs::MT_POSITION_X, x),
+        event(kind::ABS, abs::MT_POSITION_Y, y),
+    ]
+}
+
+fn begin(slot_index: i32, id: i32, x: i32, y: i32) -> [Event; 4] {
+    let [x, y] = position(x, y);
+    [slot(slot_index), tracking(id), x, y]
 }
 
 fn event(kind: u16, code: u16, value: i32) -> Event {
@@ -110,6 +155,12 @@ fn commands(device: &mut Device, events: &[Event]) -> Vec<Vec<u8>> {
         .flatten()
         .map(|command| command.as_bytes().to_vec())
         .collect()
+}
+
+fn frame(events: &[&[Event]]) -> Vec<Event> {
+    let mut frame = events.concat();
+    frame.push(report());
+    frame
 }
 
 #[test_harness::test]
@@ -202,6 +253,123 @@ fn a_name_outside_utf8_is_replaced() {
 }
 
 #[test_harness::test]
+fn two_touches_of_one_frame_become_one_command_and_end_together() {
+    let mut touchscreen = touchscreen(TOUCH_SLOTS);
+    let layout = touchscreen
+        .descriptor()
+        .and_then(|descriptor| descriptor.layout().ok());
+    let contact_screen = layout.as_ref().is_some_and(|layout| {
+        layout.binding() == Binding::Screen
+            && layout.device_axis(0).is_none()
+            && layout.contact_axis(0) == Some(AxisDecl::absolute(Usage::X, 0, TABLET_MAX))
+            && layout.contact_axis(1) == Some(AxisDecl::absolute(Usage::Y, 0, TABLET_MAX))
+    });
+
+    let events = [
+        frame(&[&begin(0, 10, 100, 200), &begin(1, 11, 300, 400)]),
+        frame(&[&[slot(0), tracking(END_TOUCH), slot(1), tracking(END_TOUCH)]]),
+    ]
+    .concat();
+
+    test_harness::check!(contact_screen);
+    test_harness::check_eq!(
+        commands(&mut touchscreen, &events),
+        [
+            command(|c| {
+                c.down(0)?
+                    .contact_axis(0, 0, 100)?
+                    .contact_axis(0, 1, 200)?
+                    .down(1)?
+                    .contact_axis(1, 0, 300)?
+                    .contact_axis(1, 1, 400)
+            })
+            .as_bytes()
+            .to_vec(),
+            command(|c| c.up(0)?.up(1)).as_bytes().to_vec(),
+        ]
+    );
+}
+
+#[test_harness::test]
+fn a_new_touch_on_a_busy_slot_ends_and_begins_it_in_two_commands() {
+    let mut touchscreen = touchscreen(TOUCH_SLOTS);
+
+    let [x, _] = position(150, 0);
+    let events = [
+        frame(&[&begin(0, 10, 100, 200)]),
+        frame(&[&[tracking(12), x]]),
+    ]
+    .concat();
+
+    test_harness::check_eq!(
+        commands(&mut touchscreen, &events)[1..],
+        [
+            command(|c| c.up(0)).as_bytes().to_vec(),
+            command(|c| c.down(0)?.contact_axis(0, 0, 150)?.contact_axis(0, 1, 200))
+                .as_bytes()
+                .to_vec(),
+        ]
+    );
+}
+
+#[test_harness::test]
+fn dropped_events_cancel_the_touch_and_a_slot_without_a_new_touch_stays_free() {
+    let mut touchscreen = touchscreen(TOUCH_SLOTS);
+
+    let events = [
+        frame(&[&begin(0, 10, 100, 200)]),
+        frame(&[&[event(kind::SYN, sync::DROPPED, 0)]]),
+        frame(&[&position(150, 250)]),
+    ]
+    .concat();
+
+    test_harness::check_eq!(
+        commands(&mut touchscreen, &events)[1..],
+        [command(|c| c.cancel(0)).as_bytes().to_vec()]
+    );
+}
+
+#[test_harness::test]
+fn a_touch_begins_once_every_coordinate_of_its_slot_is_known() {
+    let mut touchscreen = touchscreen(TOUCH_SLOTS);
+
+    let [x, y] = position(100, 200);
+    let events = [
+        frame(&[&[slot(0), tracking(10)]]),
+        frame(&[&[x]]),
+        frame(&[&[y]]),
+        frame(&[&[tracking(END_TOUCH)]]),
+        frame(&[&[tracking(11)]]),
+    ]
+    .concat();
+    let down = command(|c| c.down(0)?.contact_axis(0, 0, 100)?.contact_axis(0, 1, 200));
+
+    test_harness::check_eq!(
+        commands(&mut touchscreen, &events),
+        [
+            down.as_bytes().to_vec(),
+            command(|c| c.up(0)).as_bytes().to_vec(),
+            down.as_bytes().to_vec(),
+        ]
+    );
+}
+
+#[test_harness::test]
+fn slots_beyond_the_model_limit_are_not_declared_and_their_events_are_dropped() {
+    let beyond = i32::from(CONTACTS_MAX);
+    let mut touchscreen = touchscreen(beyond + 1);
+    let contacts = touchscreen
+        .descriptor()
+        .and_then(|descriptor| descriptor.layout().ok())
+        .map(|layout| layout.max_contacts());
+
+    let events = frame(&[&begin(beyond, 10, 100, 200), &[tracking(END_TOUCH)]]);
+
+    test_harness::check_eq!(contacts, Some(CONTACTS_MAX));
+    test_harness::check!(commands(&mut touchscreen, &events).is_empty());
+}
+
+#[test_harness::test]
 fn qemu_input_devices_are_added_with_their_keys_and_axes() {
     if !platform_describes(FIRST_VIRTIO) {
         test_harness::skip!("{} is not described", FIRST_VIRTIO);
@@ -250,11 +418,19 @@ fn qemu_input_devices_are_added_with_their_keys_and_axes() {
             && has_key(layout, Usage::SECONDARY)
     });
     let keyboard = layouts.iter().any(|layout| has_key(layout, Usage::ENTER));
+    let touchscreen = layouts.iter().any(|layout| {
+        layout.binding() == Binding::Screen
+            && layout.max_contacts() == QEMU_TOUCH_CONTACTS
+            && layout.device_axis(0).is_none()
+            && layout.contact_axis(0) == Some(AxisDecl::absolute(Usage::X, 0, TABLET_MAX))
+            && layout.contact_axis(1) == Some(AxisDecl::absolute(Usage::Y, 0, TABLET_MAX))
+    });
 
     test_harness::check_eq!(layouts.len(), QEMU_INPUT_DEVICES);
     test_harness::check!(tablet);
     test_harness::check!(mouse);
     test_harness::check!(keyboard);
+    test_harness::check!(touchscreen);
     // Шина должна сбросить транспорты драйвера, пока окна платформы отображены, поэтому
     // драйвер завершается до разбора композиции.
     composition.terminate(DRIVER, 0);

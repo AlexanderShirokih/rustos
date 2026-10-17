@@ -6,7 +6,8 @@ use alloc::{string::String, vec::Vec};
 use component_abi::RequirementDeclaration;
 use driver_pm8941_pwrkey::{Generation, PWRKEY, RESIN, usage};
 use input_abi::{
-    AttachError, DeviceLayout, DeviceNumber, Kind, Usage, input, input_inject, input_source,
+    AttachError, AxisDecl, AxisList, Binding, DeviceDescriptor, DeviceLayout, DeviceNumber,
+    KeyList, Kind, Usage, input, input_inject, input_source,
 };
 use ipc::{CallError, Protocol};
 use kernel_objects::Session;
@@ -41,6 +42,10 @@ const IMPORTS: &[Import] = &[
 
 const PON: &str = "qcom,pm8998-pon";
 const GPIO_KEYS: &str = "gpio-keys";
+const TOUCHSCREEN: &str = "novatek,nt36672a-ts";
+const TOUCHSCREEN_NAME: &str = "nt36672a-ts";
+const TOUCHSCREEN_CONTACTS: u16 = 10;
+const TOUCHSCREEN_SIZE: (i32, i32) = (1080, 2340);
 const PON_PULL_CTL: u16 = 0x870;
 
 const REPLY_TIMEOUT: Timeout = Timeout::from_secs(15);
@@ -51,6 +56,28 @@ fn layout(name: &str, usage: Usage) -> DeviceLayout {
     with_key_descriptor(name, usage, |descriptor| descriptor.layout())
         .expect("name fits")
         .expect("descriptor is valid")
+}
+
+fn touchscreen_layout() -> DeviceLayout {
+    let mut axes = AxisList::new();
+    for decl in [
+        AxisDecl::absolute(Usage::X, 0, TOUCHSCREEN_SIZE.0 - 1),
+        AxisDecl::absolute(Usage::Y, 0, TOUCHSCREEN_SIZE.1 - 1),
+    ] {
+        axes.push(decl).expect("axis fits");
+    }
+    let (keys, device_axes) = (KeyList::new(), AxisList::new());
+    DeviceDescriptor::new(
+        TOUCHSCREEN_NAME,
+        Binding::Screen,
+        &keys,
+        &device_axes,
+        TOUCHSCREEN_CONTACTS,
+        &axes,
+    )
+    .expect("name fits")
+    .layout()
+    .expect("descriptor is valid")
 }
 
 fn consumer(session: &Session<input::Protocol>) -> Consumer {
@@ -130,6 +157,9 @@ fn the_board_buttons_are_attached_input_sources_with_their_keys() {
     // Повторный `attach` ниже требует `Busy`, и он не должен опередить подключение хабом.
     if platform_has_compatible(GPIO_KEYS) {
         layouts.push(layout(GPIO_KEYS, Usage::VOLUME_UP));
+    }
+    if platform_has_compatible(TOUCHSCREEN) {
+        layouts.push(touchscreen_layout());
     }
 
     let composition = with_drivers();

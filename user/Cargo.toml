@@ -14,6 +14,7 @@ members = [
     "examples/hello-std",
     "system/clk-qcom",
     "system/driver-gpio-keys",
+    "system/driver-novatek-nvt-ts",
     "system/driver-pl031",
     "system/driver-pm8941-pwrkey",
     "system/driver-pm8941-rtc",

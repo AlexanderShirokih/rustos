@@ -233,7 +233,7 @@ impl Input {
 
             // Буфер короче события устройство не заполнило, и событие пропускается.
             let Ok(event) = event else { continue };
-            if let Some(command) = self.device.translate(event).map_err(Failure::Records)? {
+            for command in self.device.translate(event).map_err(Failure::Records)? {
                 inject
                     .update(id, None, command.as_bytes())
                     .map_err(Failure::Update)?;

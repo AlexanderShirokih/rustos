@@ -10,6 +10,7 @@
 //! ссылается на них индексом в списке дескриптора. Абсолютная ось хранит значение в диапазоне,
 //! относительная передаёт приращение. [`Tracker`] держит состояние устройства, применяет к нему
 //! [`Command`] целиком либо отклоняет её без последствий, строит снимок состояния и отменяет его.
+//! [`ContactTable`] собирает источнику команды касаний, которые `Tracker` принимает.
 //!
 //! Протокол [`input_inject`] принимает от источников дескрипторы устройств и их команды.
 //!
@@ -23,6 +24,7 @@
 #![cfg_attr(not(test), no_std)]
 
 mod command;
+mod contacts;
 mod descriptor;
 mod linux;
 mod number;
@@ -33,6 +35,7 @@ mod tracker;
 mod usage;
 
 pub use command::{COMMAND_RECORDS_MAX, Command};
+pub use contacts::ContactTable;
 pub use descriptor::{
     AXES_MAX, AXIS_DECL_SIZE, AxisDecl, AxisList, AxisMode, Binding, CONTACTS_MAX, DEVICE_NAME_MAX,
     DescriptorError, DeviceDescriptor, DeviceLayout, KEYS_MAX, KeyList,

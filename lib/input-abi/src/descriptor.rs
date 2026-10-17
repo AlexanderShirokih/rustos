@@ -403,6 +403,11 @@ impl DeviceLayout {
         self.contact_axes.get(index)
     }
 
+    /// Наибольшее число одновременных контактов.
+    pub fn max_contacts(&self) -> u16 {
+        self.max_contacts
+    }
+
     /// Наибольшее число записей снимка устройства вместе с записью `Frame`.
     pub fn snapshot_records_max(&self) -> usize {
         let absolute_axes = self

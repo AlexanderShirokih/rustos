@@ -53,6 +53,18 @@ pub mod sync {
     pub const DROPPED: u16 = 3;
 }
 
+/// Коды событий типа [`kind::ABS`] протокола касаний по слотам.
+pub mod abs {
+    /// Выбор слота, к которому относятся следующие события касания.
+    pub const MT_SLOT: u16 = 0x2f;
+    /// Координата X касания слота.
+    pub const MT_POSITION_X: u16 = 0x35;
+    /// Координата Y касания слота.
+    pub const MT_POSITION_Y: u16 = 0x36;
+    /// Номер касания слота, -1 - конец касания.
+    pub const MT_TRACKING_ID: u16 = 0x39;
+}
+
 /// Событие устройства.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Event {

@@ -71,6 +71,7 @@ mod memory_capability_target;
 mod memory_share;
 mod memory_stress;
 mod mismatched_kind;
+mod novatek_touchscreen;
 mod owned_handle;
 mod parent;
 mod pins;

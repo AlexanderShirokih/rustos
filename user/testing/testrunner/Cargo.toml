@@ -243,6 +243,7 @@ component-startup = { workspace = true }
 executor = { workspace = true }
 display-abi = { workspace = true }
 driver-gpio-keys = { path = "../../system/driver-gpio-keys" }
+driver-novatek-nvt-ts = { path = "../../system/driver-novatek-nvt-ts" }
 driver-pm8941-pwrkey = { path = "../../system/driver-pm8941-pwrkey" }
 driver-simplefb = { path = "../../system/driver-simplefb" }
 driver-virtio-blk = { path = "../../system/driver-virtio-blk" }
