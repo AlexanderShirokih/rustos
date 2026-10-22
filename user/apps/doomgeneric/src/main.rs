@@ -1,7 +1,7 @@
-//! Порт движка doomgeneric на экран протокола `Display` и клавиши протокола `Input`.
+//! Порт движка doomgeneric на экран протокола `Display`, клавиатуру и касания протокола `Input`.
 //!
 //! Программа экспортирует `Application` с именем `doom`, ставит файловый корень из требования
-//! `namespace`, получает окно вызовом `show`, запускает чтение клавиш требования `input` и
+//! `namespace`, получает окно и ввод вызовом `show`, запускает чтение ввода и
 //! исполняет тики движка. IWAD движка должен находиться в файловом корне по пути
 //! `/boot/doom/freedoom1.wad`. Отказ требования, окна, экрана или запуска потоков программа
 //! пишет в журнал и завершается кодом `FAILED_EXIT_CODE`. Программа завершается кодом 0, когда
@@ -14,6 +14,7 @@ extern crate alloc;
 
 mod frame;
 mod keys;
+mod paint;
 mod platform;
 mod screen;
 
@@ -96,13 +97,15 @@ fn start() -> Result<(), Failure> {
         input,
         session,
     } = accept_window(startup.parent).map_err(Failure::Window)?;
-    screen::install(Screen::open(window)?);
+    let screen = Screen::open(window)?;
+    let layout = screen.layout();
+    screen::install(screen);
     spawn_owned(move || {
         session.serve();
         runtime::exit(0)
     })
     .map_err(Failure::Application)?;
-    keys::start(input).map_err(Failure::Keys)?;
+    keys::start(input, layout).map_err(Failure::Keys)?;
     Ok(())
 }
 

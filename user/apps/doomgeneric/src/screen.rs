@@ -1,12 +1,14 @@
 //! Экран протокола `Display` для кадра движка.
 //!
 //! Кадр движка растягивается до 4:3 и выводится по центру экрана, повёрнутым на 90 градусов по
-//! часовой стрелке, если так он крупнее. Отказ вывода пишется в журнал один раз.
+//! часовой стрелке, если так он крупнее. Кнопки контроллера рисуются после
+//! кадра и выделяются по состоянию ввода. Отказ вывода пишется в журнал один раз.
 
 use alloc::{vec, vec::Vec};
 use core::fmt;
 
 use display_abi::{Area, DisplayDimension, DisplayError, SURFACE_PIXEL_BYTES, display};
+use doomgeneric::{Control, Controls, Layout, Point};
 use ipc::{CallError, wire::IpcError};
 use kernel_objects::{Mapping, MemoryRegion, Session, SessionTransport};
 use runtime::{Mutex, UserMemFlags, log_fmt};
@@ -16,9 +18,6 @@ use crate::frame::{FRAME_HEIGHT, FRAME_WIDTH};
 pub(crate) const FRAME_PIXELS: usize = FRAME_WIDTH as usize * FRAME_HEIGHT as usize;
 
 const PIXEL_BYTES: usize = SURFACE_PIXEL_BYTES as usize;
-
-const ASPECT_WIDTH: u32 = 4;
-const ASPECT_HEIGHT: u32 = 3;
 
 static SCREEN: Mutex<Option<Screen>> = Mutex::new(None);
 
@@ -33,7 +32,7 @@ pub(crate) enum ScreenError {
 pub(crate) struct Screen {
     client: display::Client<SessionTransport>,
     surface: Mapping,
-    area: Area,
+    layout: Layout,
     stride: usize,
     line_offsets: Vec<usize>,
     pixel_offsets: Vec<usize>,
@@ -61,43 +60,28 @@ impl Screen {
         let client = session.client();
         let dimension = client.dimension().map_err(ScreenError::Dimension)?;
 
-        let upright = (dimension.width / ASPECT_WIDTH).min(dimension.height / ASPECT_HEIGHT);
-        let sideways = (dimension.width / ASPECT_HEIGHT).min(dimension.height / ASPECT_WIDTH);
-        let rotated = sideways > upright;
-        let unit = upright.max(sideways);
-
-        if unit == 0 {
-            return Err(ScreenError::TooSmall(dimension));
-        }
-
+        let layout = Layout::new(dimension).ok_or(ScreenError::TooSmall(dimension))?;
+        let area = layout.frame();
         let frame_width = FRAME_WIDTH as usize;
         let frame_height = FRAME_HEIGHT as usize;
-        let (width, height, line_offsets, pixel_offsets) = if rotated {
-            let (width, height) = (ASPECT_HEIGHT * unit, ASPECT_WIDTH * unit);
+        let (width, line_offsets, pixel_offsets) = if layout.is_rotated() {
+            let (width, height) = (area.width, area.height);
             (
                 width,
-                height,
                 nearest_indices(height, frame_width).collect(),
                 nearest_indices(width, frame_height)
                     .map(|line| (frame_height - 1 - line) * frame_width)
                     .collect(),
             )
         } else {
-            let (width, height) = (ASPECT_WIDTH * unit, ASPECT_HEIGHT * unit);
+            let (width, height) = (area.width, area.height);
             (
                 width,
-                height,
                 nearest_indices(height, frame_height)
                     .map(|line| line * frame_width)
                     .collect(),
                 nearest_indices(width, frame_width).collect(),
             )
-        };
-        let area = Area {
-            x: (dimension.width - width) / 2,
-            y: (dimension.height - height) / 2,
-            width,
-            height,
         };
         let region = client
             .acquire_surface()
@@ -110,7 +94,7 @@ impl Screen {
         let mut screen = Self {
             client,
             surface,
-            area,
+            layout,
             stride,
             line_offsets,
             pixel_offsets,
@@ -132,9 +116,57 @@ impl Screen {
         Ok(screen)
     }
 
-    fn draw(&mut self, frame: &[u32]) {
-        let copied = self.copy(frame);
-        self.show(copied, self.area);
+    pub(crate) fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    fn draw(&mut self, frame: &[u32], controls: &Controls) {
+        let copied = self
+            .surface
+            .zero_at(0, self.stride * self.layout.panel().height as usize)
+            .and_then(|()| self.copy(frame))
+            .and_then(|()| self.controls(controls));
+        let panel = self.layout.panel();
+        self.show(
+            copied,
+            Area {
+                x: 0,
+                y: 0,
+                width: panel.width,
+                height: panel.height,
+            },
+        );
+    }
+
+    fn controls(&mut self, controls: &Controls) -> kernel_objects::Result<()> {
+        for button in self.layout.buttons(controls.mode, controls.weapons) {
+            if button.control == Control::Turn {
+                continue;
+            }
+            let area = self.layout.physical_area(button.area);
+            let active = button.active(&controls.held, controls.mode);
+            let knob = crate::paint::knob(button, controls.stick);
+            self.row.resize(area.width as usize * PIXEL_BYTES, 0);
+            for y in area.y..area.y + area.height {
+                self.surface.copy_out_at(
+                    y as usize * self.stride + area.x as usize * PIXEL_BYTES,
+                    &mut self.row,
+                )?;
+                for (x, pixel) in
+                    (area.x..area.x + area.width).zip(self.row.as_chunks_mut::<PIXEL_BYTES>().0)
+                {
+                    let point = self.layout.logical(Point { x, y });
+                    if let Some(color) = crate::paint::pixel(button, point, active, knob) {
+                        *pixel = color.to_le_bytes();
+                    }
+                }
+                self.surface.copy_in_at(
+                    y as usize * self.stride + area.x as usize * PIXEL_BYTES,
+                    &self.row,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn show(&mut self, written: kernel_objects::Result<()>, area: Area) {
@@ -153,8 +185,10 @@ impl Screen {
     }
 
     fn copy(&mut self, frame: &[u32]) -> kernel_objects::Result<()> {
-        let left = self.area.x as usize * PIXEL_BYTES;
-        let top = self.area.y as usize;
+        let left = self.layout.frame().x as usize * PIXEL_BYTES;
+        let top = self.layout.frame().y as usize;
+        self.row
+            .resize(self.layout.frame().width as usize * PIXEL_BYTES, 0);
         let mut filled = None;
 
         for (line, &line_offset) in self.line_offsets.iter().enumerate() {
@@ -177,9 +211,9 @@ pub(crate) fn install(screen: Screen) {
     *SCREEN.lock() = Some(screen);
 }
 
-pub(crate) fn draw(frame: &[u32]) {
+pub(crate) fn draw(frame: &[u32], controls: &Controls) {
     if let Some(screen) = SCREEN.lock().as_mut() {
-        screen.draw(frame);
+        screen.draw(frame, controls);
     }
 }
 

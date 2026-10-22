@@ -46,6 +46,7 @@ mod cxx_exit;
 mod cxx_selftest;
 mod display;
 mod display_fixture_protocol;
+mod doom_touch;
 mod executor;
 mod failing_filesystem;
 mod filesystem;

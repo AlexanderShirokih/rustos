@@ -238,6 +238,7 @@ test = false
 bench = false
 
 [dependencies]
+doomgeneric = { path = "../../apps/doomgeneric" }
 kernel-objects = { workspace = true }
 application-abi = { workspace = true }
 application-window = { workspace = true }

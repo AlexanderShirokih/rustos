@@ -9,11 +9,12 @@
 #![allow(unsafe_code, non_snake_case, non_upper_case_globals)]
 
 use core::{
-    ffi::{c_char, c_int, c_uchar},
-    slice,
+    ffi::{c_char, c_int, c_uchar, c_void},
+    ptr, slice,
     time::Duration,
 };
 
+use doomgeneric::Mode;
 use runtime::Instant;
 
 use crate::{
@@ -22,13 +23,37 @@ use crate::{
 };
 
 const NS_PER_MS: u64 = 1_000_000;
+const MOVE_SPEED_PERCENT: c_int = 70;
+const TURN_SPEED_PERCENT: c_int = 50;
 
 unsafe extern "C" {
     static mut DG_ScreenBuffer: *const u32;
+    static mut forwardmove: [c_int; 2];
+    static mut sidemove: [c_int; 2];
+    static mut angleturn: [c_int; 3];
+    static mut menuactive: c_int;
+    static mut messageToPrint: c_int;
+    static mut messageNeedsInput: c_int;
+    static mut saveStringEnter: c_int;
+    static mut currentMenu: *const c_void;
+    static mut MainDef: c_void;
 }
 
+#[allow(clippy::multiple_unsafe_ops_per_block)]
 #[unsafe(no_mangle)]
-extern "C" fn DG_Init() {}
+extern "C" fn DG_Init() {
+    // SAFETY: g_game.c определяет массивы fixed_t (int) указанных размеров.
+    // doomgeneric_Create вызывает DG_Init один раз до D_DoomMain и первого тика.
+    // Только поток движка обращается к таблицам; поток Input их не использует.
+    unsafe {
+        let forward = ptr::addr_of!(forwardmove).read();
+        let side = ptr::addr_of!(sidemove).read();
+        let turn = ptr::addr_of!(angleturn).read();
+        ptr::addr_of_mut!(forwardmove).write(forward.map(|v| v * MOVE_SPEED_PERCENT / 100));
+        ptr::addr_of_mut!(sidemove).write(side.map(|v| v * MOVE_SPEED_PERCENT / 100));
+        ptr::addr_of_mut!(angleturn).write(turn.map(|v| v * TURN_SPEED_PERCENT / 100));
+    }
+}
 
 #[unsafe(no_mangle)]
 extern "C" fn DG_DrawFrame() {
@@ -44,7 +69,9 @@ extern "C" fn DG_DrawFrame() {
     // сложен `FRAME_PIXELS`. Движок не освобождает буфер до выхода и не меняет его во время
     // вызова `DG_DrawFrame` из своего потока.
     let frame = unsafe { slice::from_raw_parts(buffer, FRAME_PIXELS) };
-    screen::draw(frame);
+    if let Some(controls) = keys::controls(mode()) {
+        screen::draw(frame, &controls);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -61,7 +88,8 @@ extern "C" fn DG_GetTicksMs() -> u32 {
 
 #[unsafe(no_mangle)]
 extern "C" fn DG_GetKey(pressed: *mut c_int, key: *mut c_uchar) -> c_int {
-    let Some(event) = keys::next() else {
+    let now = Instant::now().as_nanos() / NS_PER_MS;
+    let Some(event) = keys::next(mode(), now) else {
         return 0;
     };
     // SAFETY: `I_GetEvent` движка передаёт указатель на свою локальную переменную `pressed`.
@@ -73,3 +101,32 @@ extern "C" fn DG_GetKey(pressed: *mut c_int, key: *mut c_uchar) -> c_int {
 
 #[unsafe(no_mangle)]
 extern "C" fn DG_SetWindowTitle(_title: *const c_char) {}
+
+#[allow(clippy::multiple_unsafe_ops_per_block)]
+fn mode() -> Mode {
+    // SAFETY: флаги m_menu.c имеют C-типы int/boolean (enum с размером int).
+    // DG_GetKey и DG_DrawFrame вызываются из единственного потока движка, который
+    // изменяет меню. Поток чтения Input не обращается к переменным C.
+    // currentMenu хранит указатель menu_t. MainDef используется только как адрес
+    // непрозрачного C-объекта menu_t.
+    let (menu, message, needs_input, text, root) = unsafe {
+        (
+            menuactive,
+            messageToPrint,
+            messageNeedsInput,
+            saveStringEnter,
+            currentMenu == ptr::addr_of!(MainDef),
+        )
+    };
+    if message != 0 && needs_input != 0 {
+        Mode::Confirm
+    } else if text != 0 {
+        Mode::Text
+    } else if menu != 0 && root {
+        Mode::MainMenu
+    } else if menu != 0 {
+        Mode::Menu
+    } else {
+        Mode::Game
+    }
+}

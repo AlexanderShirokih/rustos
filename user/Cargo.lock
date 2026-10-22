@@ -4908,6 +4908,7 @@ dependencies = [
  "component-abi",
  "component-startup",
  "display-abi",
+ "doomgeneric",
  "driver-gpio-keys",
  "driver-novatek-nvt-ts",
  "driver-pm8941-pwrkey",

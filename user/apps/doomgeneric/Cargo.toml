@@ -15,6 +15,11 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[lib]
+test = false
+bench = false
+doctest = false
+
 [dependencies]
 application-abi = { workspace = true }
 application-window = { workspace = true }
