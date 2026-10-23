@@ -40,6 +40,8 @@ declare_kinds! {
     Resource,
     /// Порт IPC.
     Port,
+    /// Отложенная операция порта.
+    Pending,
     /// Право ответить на принятый кадр порта.
     Reply,
     /// Полномочие выдавать линии прерываний.
@@ -59,3 +61,5 @@ impl WaitableKind for Thread {}
 impl WaitableKind for Port {}
 
 impl WaitableKind for IrqLine {}
+
+impl WaitableKind for Pending {}

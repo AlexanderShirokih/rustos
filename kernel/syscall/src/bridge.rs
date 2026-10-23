@@ -95,6 +95,14 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             let r = super::port::sys_port_call(frame.arg(0), frame.arg(1));
             frame.set_return(encode_return(r));
         }
+        SyscallOp::PortCallAsync | SyscallOp::PortSendAsync => {
+            let r = super::port::sys_port_async(frame.arg(0), op == SyscallOp::PortCallAsync);
+            frame.set_return(encode_return(r));
+        }
+        SyscallOp::PendingTake => {
+            let r = super::port::sys_pending_take(frame.arg(0));
+            frame.set_return(encode_return(r));
+        }
         SyscallOp::PortReply => {
             let r = super::port::sys_port_reply(frame.arg(0));
             frame.set_return(encode_return(r));

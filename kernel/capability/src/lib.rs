@@ -1,7 +1,8 @@
 //! Объявляет цели, к которым процесс обращается по handle, и таблицу handle процесса.
 //!
 //! Всё, чем процесс пользуется через ядро, названо [`CapabilityTarget`]: сигнал, процесс,
-//! поток, регион памяти, ресурс, порт, ответ на вызов, контроллер и линия прерываний.
+//! поток, регион памяти, ресурс, порт, отложенная операция, ответ на вызов, контроллер
+//! и линия прерываний.
 //! Обращение к цели идёт только через [`Capability`] в [`HandleTable`] вызывающего процесса.
 //!
 //! Отсюда берутся операции над этими целями: установка handle в таблицу, дублирование и
@@ -26,6 +27,7 @@ mod ipc_buffer_xfer;
 mod irq_control;
 mod irq_line;
 mod irq_runtime;
+mod pending;
 mod port;
 mod process;
 mod reply;
@@ -50,12 +52,13 @@ pub use handle::{Capability, HandleId};
 pub use handle_table::{
     DrainedHandles, HandleReservation, HandleTable, ObjectAccess, RejectedInsert,
 };
-pub use ipc_buffer_xfer::{release_delivered, transfer_rendezvous};
+pub use ipc_buffer_xfer::{SenderCaps, release_delivered, transfer_rendezvous};
 pub use irq_control::IrqControl;
 pub use irq_line::IrqLine;
 pub use irq_runtime::{
     InterruptsControl, IrqBindToken, IrqSink, install_interrupts_control, interrupts_control,
 };
+pub use pending::Pending;
 pub use port::{
     KernelIpcBuffer, Port, PortAccess, ThreadTransport, port_call, port_recv, port_send,
 };

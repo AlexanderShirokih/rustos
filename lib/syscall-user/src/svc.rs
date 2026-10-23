@@ -801,3 +801,25 @@ pub fn thread_yield() {
     // возврат не используется.
     unsafe { svc!(SyscallOp::ThreadYield) };
 }
+
+/// Ставит вызов из IPC-буфера. Возвращает ожидаемый handle без `DUPLICATE` и `TRANSFER`.
+pub fn port_call_async(
+    handle: Handle<kind::Port>,
+) -> Result<IssuedHandle<kind::Pending>, SyscallError> {
+    // SAFETY: номер операции задан ABI; x0 содержит port-handle, кадр берётся из IPC-буфера.
+    IssuedHandle::from_syscall_return(unsafe { svc!(SyscallOp::PortCallAsync, handle) })
+}
+
+/// Ставит отправку из IPC-буфера. Capability кадра изымаются до возврата handle.
+pub fn port_send_async(
+    handle: Handle<kind::Port>,
+) -> Result<IssuedHandle<kind::Pending>, SyscallError> {
+    // SAFETY: номер операции задан ABI; x0 содержит port-handle, кадр берётся из IPC-буфера.
+    IssuedHandle::from_syscall_return(unsafe { svc!(SyscallOp::PortSendAsync, handle) })
+}
+
+/// Выдаёт исход в IPC-буфер и расходует handle. `ShouldWait` сохраняет handle для повтора.
+pub fn pending_take(handle: Handle<kind::Pending>) -> i64 {
+    // SAFETY: номер операции задан ABI; x0 содержит pending-handle, ядро пишет IPC-буфер потока.
+    unsafe { svc!(SyscallOp::PendingTake, handle) }
+}

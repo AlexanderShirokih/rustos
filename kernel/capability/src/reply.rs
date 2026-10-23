@@ -1,7 +1,7 @@
 //! `Reply` capability target: одноразовый ответный канал рандеву-`call`.
 //!
-//! Когда поток делает `call` на [`Port`](super::port::Port),
-//! ядро создаёт `Reply`, держащий идентификацию заблокированного вызывателя.
+//! `call` на [`Port`](super::port::Port) создаёт `Reply`, который удерживает
+//! транспорт и арбитр исхода вызывающей стороны.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -10,12 +10,12 @@ use kbase::{LockCell, MutexCell};
 
 use super::{
     errors::IpcError,
-    ipc_buffer_xfer::transfer_rendezvous,
+    ipc_buffer_xfer::{SenderCaps, transfer_rendezvous},
     port::{OutcomeSlot, RendezvousOutcome, ThreadTransport},
     wait::{CancelTarget, ParkWaker},
 };
 
-/// Одноразовый ответный объект на заблокированного вызывателя `call`.
+/// Одноразовый ответный объект вызывающей стороны `call`.
 pub struct Reply {
     caller: ThreadTransport,
     waker: Arc<ParkWaker>,
@@ -59,7 +59,7 @@ impl Reply {
         }
 
         // server = отправитель ответа, caller = получатель ответа.
-        match transfer_rendezvous(server, &self.caller) {
+        match transfer_rendezvous(server, &self.caller, SenderCaps::Table) {
             Ok(()) => {
                 self.outcome.set(RendezvousOutcome::Delivered);
                 self.waker.signal_match();

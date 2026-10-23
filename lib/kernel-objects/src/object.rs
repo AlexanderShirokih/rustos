@@ -17,7 +17,7 @@ pub use memory::{
     AnonymousMapping, LoadWords, MapError, MappedPages, Mapping, MemoryRegion, MmioMapping,
     MmioWindow, ReadOnlyMapping, RegionInfo, RegionKind, Resource, WriteCombiningMapping,
 };
-pub use port::{Port, Reply, ServicePort};
+pub use port::{Pending, Port, Reply, ServicePort};
 pub use process::Process;
 pub use signal::Signal;
 pub use thread::{Thread, ThreadEntry};

@@ -43,6 +43,7 @@ impl Drop for OperationHold {
 /// учёт держателей.
 #[derive(Clone)]
 pub enum CapabilityTarget {
+    Pending(Arc<crate::pending::Pending>),
     Signal(Arc<Signal>),
     Process(Arc<ProcessObject>),
     Thread(Arc<ThreadObject>),
@@ -80,6 +81,7 @@ macro_rules! impl_target_object {
 }
 
 impl_target_object! {
+    crate::pending::Pending => Pending,
     Signal => Signal,
     ProcessObject => Process,
     ThreadObject => Thread,
@@ -94,6 +96,7 @@ impl_target_object! {
 impl CapabilityTarget {
     pub(crate) fn as_waitable(&self) -> Option<Arc<dyn Waitable>> {
         match self {
+            Self::Pending(p) => Some(p.completion_signal() as Arc<dyn Waitable>),
             Self::Signal(s) => Some(s.clone() as Arc<dyn Waitable>),
             // Bound-сигнал терминации хендлом не выдаётся: `signal_set` принимает только
             // `Signal`, поэтому событие терминации из userspace не подделывается.
@@ -109,13 +112,7 @@ impl CapabilityTarget {
         match self {
             Self::Port(port) => port.holder_ticket(rights),
             Self::Process(process) => process.holder_ticket(rights),
-            Self::Signal(_)
-            | Self::Thread(_)
-            | Self::Memory(_)
-            | Self::Resource(_)
-            | Self::Reply(_)
-            | Self::IrqControl(_)
-            | Self::IrqLine(_) => None,
+            _ => None,
         }
     }
 
@@ -123,13 +120,7 @@ impl CapabilityTarget {
         match self {
             Self::Port(port) => port.counted_holder_ticket(rights),
             Self::Process(process) => process.counted_holder_ticket(rights),
-            Self::Signal(_)
-            | Self::Thread(_)
-            | Self::Memory(_)
-            | Self::Resource(_)
-            | Self::Reply(_)
-            | Self::IrqControl(_)
-            | Self::IrqLine(_) => None,
+            _ => None,
         }
     }
 
@@ -141,13 +132,7 @@ impl CapabilityTarget {
         match self {
             Self::Port(port) => port.badged_holder_ticket(rights, badge),
             Self::Process(process) => process.holder_ticket(rights),
-            Self::Signal(_)
-            | Self::Thread(_)
-            | Self::Memory(_)
-            | Self::Resource(_)
-            | Self::Reply(_)
-            | Self::IrqControl(_)
-            | Self::IrqLine(_) => None,
+            _ => None,
         }
     }
 }
@@ -209,6 +194,7 @@ impl From<Arc<IrqLine>> for CapabilityTarget {
 impl core::fmt::Debug for CapabilityTarget {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let name = match self {
+            Self::Pending(_) => "Pending",
             Self::Signal(_) => "Signal",
             Self::Process(_) => "Process",
             Self::Thread(_) => "Thread",
@@ -220,6 +206,12 @@ impl core::fmt::Debug for CapabilityTarget {
             Self::IrqLine(_) => "IrqLine",
         };
         f.debug_struct(name).finish_non_exhaustive()
+    }
+}
+
+impl From<Arc<crate::pending::Pending>> for CapabilityTarget {
+    fn from(obj: Arc<crate::pending::Pending>) -> Self {
+        Self::Pending(obj)
     }
 }
 

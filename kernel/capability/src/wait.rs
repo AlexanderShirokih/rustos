@@ -65,20 +65,37 @@ pub(super) struct ParkWaker {
     state: AtomicU32,
     observed: AtomicU32,
     winner_index: AtomicU32,
-    runtime: Arc<dyn KernelRuntime>,
-    token: WaitToken,
+    target: WakeTarget,
+}
+
+pub(super) enum WakeTarget {
+    Thread {
+        runtime: Arc<dyn KernelRuntime>,
+        token: WaitToken,
+    },
+    Object(Arc<super::signal::Signal>),
+}
+
+impl WakeTarget {
+    fn wake(&self) {
+        match self {
+            Self::Thread { runtime, token } => runtime.unblock(*token),
+            Self::Object(signal) => {
+                signal.signal(syscall::SIGNALED, 0);
+            }
+        }
+    }
 }
 
 impl ParkWaker {
     pub(super) const NO_WINNER: u32 = u32::MAX;
 
-    pub(super) fn new(runtime: Arc<dyn KernelRuntime>, token: WaitToken) -> Self {
+    pub(super) fn new(target: WakeTarget) -> Self {
         Self {
             state: AtomicU32::new(ParkState::REGISTERED),
             observed: AtomicU32::new(0),
             winner_index: AtomicU32::new(Self::NO_WINNER),
-            runtime,
-            token,
+            target,
         }
     }
 
@@ -107,7 +124,7 @@ impl ParkWaker {
             )
             .is_ok()
         {
-            self.runtime.unblock(self.token);
+            self.target.wake();
         }
     }
 
@@ -158,7 +175,7 @@ impl ParkWaker {
 impl CancelTarget for ParkWaker {
     fn cancel(&self) {
         if self.claim_cancel() {
-            self.runtime.unblock(self.token);
+            self.target.wake();
         }
     }
 }
@@ -304,10 +321,10 @@ mod tests {
     }
 
     fn make_waker(runtime: Arc<dyn KernelRuntime>) -> Arc<ParkWaker> {
-        Arc::new(ParkWaker::new(
+        Arc::new(ParkWaker::new(WakeTarget::Thread {
             runtime,
-            WaitToken::new(NonZeroU64::new(1).unwrap()),
-        ))
+            token: WaitToken::new(NonZeroU64::new(1).unwrap()),
+        }))
     }
 
     #[test]

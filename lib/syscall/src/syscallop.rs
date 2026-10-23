@@ -102,6 +102,18 @@ pub enum SyscallOp {
     /// Возврат: `0` либо `-(SyscallError)`.
     PortReply = 0x27,
 
+    /// Ставит вызов из IPC-буфера без ожидания встречи. `arg0=port_handle`, требует `WRITE`.
+    /// Возвращает handle `Pending` с правом `READ`. Capability кадра изымаются при постановке.
+    PortCallAsync = 0x28,
+
+    /// Ставит отправку из IPC-буфера без ожидания встречи. `arg0=port_handle`, требует `WRITE`.
+    /// Недоставленные capability возвращаются через `PendingTake`.
+    PortSendAsync = 0x29,
+
+    /// Выдаёт исход `arg0=pending_handle` с правом `READ` в IPC-буфер и расходует handle.
+    /// До `SIGNALED` возвращает `ShouldWait` и сохраняет handle.
+    PendingTake = 0x2A,
+
     // 0x30..=0x3F - handle lifecycle.
     /// Изымает названный handle из таблицы текущего процесса. Аргументы:
     ///  - `arg0=handle`.
@@ -385,6 +397,9 @@ impl SyscallOp {
             0x25 => Some(Self::PortRecv),
             0x26 => Some(Self::PortCall),
             0x27 => Some(Self::PortReply),
+            0x28 => Some(Self::PortCallAsync),
+            0x29 => Some(Self::PortSendAsync),
+            0x2A => Some(Self::PendingTake),
             0x30 => Some(Self::HandleClose),
             0x31 => Some(Self::HandleDuplicate),
             0x40 => Some(Self::ProcessCreate),

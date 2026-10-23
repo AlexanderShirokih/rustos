@@ -51,6 +51,9 @@ fn load_body(out: &mut [u8]) -> Result<usize> {
 /// Владеет хэндлом `Port` (synchronous rendezvous-IPC) и закрывает его на drop.
 pub type Port = OwnedHandle<kind::Port>;
 
+/// Владеет отложенной операцией и отменяет её при закрытии.
+pub type Pending = OwnedHandle<kind::Pending>;
+
 /// Владеет одноразовым reply-хэндлом, выданным `recv` встречного `call`.
 pub type Reply = OwnedHandle<kind::Reply>;
 
@@ -106,6 +109,20 @@ impl OwnedHandle<kind::Port> {
         unit(svc::port_call(self.as_raw(), timeout))
     }
 
+    /// Ставит вызов из IPC-буфера и возвращает объект ожидания ответа.
+    pub fn call_async(&self) -> Result<Pending> {
+        svc::port_call_async(self.as_raw())
+            .map(Pending::from)
+            .map_err(Error::Syscall)
+    }
+
+    /// Ставит отправку из IPC-буфера и возвращает объект ожидания доставки.
+    pub fn send_async(&self) -> Result<Pending> {
+        svc::port_send_async(self.as_raw())
+            .map(Pending::from)
+            .map_err(Error::Syscall)
+    }
+
     /// Шлёт тело без caps: пишет `body` в IPC-буфер и вызывает [`send`](Self::send).
     /// `body` длиннее [`IPC_BUFFER_DATA_MAX`] - `MessageTooBig`.
     pub fn send_bytes(&self, body: &[u8], timeout: Timeout) -> Result<()> {
@@ -143,5 +160,13 @@ impl OwnedHandle<kind::Reply> {
     pub fn reply_bytes(self, body: &[u8]) -> Result<()> {
         store_body(body)?;
         self.reply()
+    }
+}
+
+impl OwnedHandle<kind::Pending> {
+    /// Выдаёт исход в IPC-буфер. `ShouldWait` сохраняет handle, конечный исход расходует его.
+    /// После конечного исхода повторный вызов получает `BadHandle`.
+    pub fn take(&self) -> Result<()> {
+        unit(svc::pending_take(self.as_raw()))
     }
 }

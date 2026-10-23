@@ -11,6 +11,7 @@ error[E0277]: the trait bound `Reply: WaitableKind` is not satisfied
             Port
             Process
             Signal
+            syscall::kind::Pending
             syscall::kind::Thread
 note: required by a bound in `WaitItem::new`
  --> src/handle.rs

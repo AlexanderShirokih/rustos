@@ -46,6 +46,7 @@ Handle — идентификатор (`u32`) записи в таблице т�
 | `Signal`           | `SIGNALED` | `1 << 0` | событие наступило                                    |
 | `Process`/`Thread` | `SIGNALED` | `1 << 0` | объект завершился                                    |
 | `IrqLine`          | `SIGNALED` | `1 << 0` | сработало прерывание линии                           |
+| `Pending`          | `SIGNALED` | `1 << 0` | отложенная операция порта завершилась |
 | `Port`             | `READABLE` | `1 << 0` | отправитель ждёт либо есть непрочитанный уход значка |
 
 ## Ошибки
@@ -132,6 +133,20 @@ Handle — идентификатор (`u32`) записи в таблице т�
 | `0x25` | `PortRecv`   | `handle`, `timeout_ns` | `reply_h` (либо `0`) | `READ`  |
 | `0x26` | `PortCall`   | `handle`, `timeout_ns` | `0`                  | `WRITE` |
 | `0x27` | `PortReply`  | `reply_handle`         | `0`                  | `WRITE` |
+| `0x28` | `PortCallAsync` | `port_handle` | `pending_h` | `WRITE` |
+| `0x29` | `PortSendAsync` | `port_handle` | `pending_h` | `WRITE` |
+| `0x2A` | `PendingTake` | `pending_handle` | `0` либо ошибка исхода | `READ` |
+
+`PortCallAsync` и `PortSendAsync` копируют кадр в ядро и изымают его capability
+при постановке, возвращая `Pending` с правом `READ`. Отказ постановки сохраняет
+capability в таблице. `Pending` ожидается по `SIGNALED`; дублирование и передача
+его handle запрещены. `PendingTake` копирует конечный исход в IPC-буфер и
+расходует handle. До сигнала он возвращает `ShouldWait`, сохраняя handle.
+Недоставленная отправка возвращает capability кадра в зарезервированные слоты
+даже при заполненной таблице; недоставленный вызов закрывает их.
+Закрытие `Pending` снимает операцию с очереди либо отвергает поздний ответ с
+`PeerClosed`. Неполученные capability ответа закрываются. Срок задаётся
+закрытием handle вызывателем.
 
 `PortCreate` создаёт порт. Роль его держателя задают права handle:
 `READ` разрешает приём, `WRITE` — отправку и вызов с ответом.

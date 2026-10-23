@@ -286,10 +286,10 @@ pub fn signal_wait_many(
     }
 
     let deadline_ns = deadline_after(runtime, timeout_ns);
-    let waker = Arc::new(ParkWaker::new(
-        runtime.clone(),
-        runtime.current_wait_token(),
-    ));
+    let waker = Arc::new(ParkWaker::new(super::wait::WakeTarget::Thread {
+        runtime: runtime.clone(),
+        token: runtime.current_wait_token(),
+    }));
     let armed = ArmedWait::new(table, items, sources, waker);
     runtime.set_blocked_cancel(armed.cancel_target());
     if let Err(error) = armed.arm(items) {
@@ -859,10 +859,10 @@ mod tests {
 
         let sources: Vec<Arc<dyn Waitable>> = alloc::vec![signal];
         let runtime = runtime();
-        let waker = Arc::new(ParkWaker::new(
-            runtime.clone(),
-            runtime.current_wait_token(),
-        ));
+        let waker = Arc::new(ParkWaker::new(super::super::wait::WakeTarget::Thread {
+            runtime: runtime.clone(),
+            token: runtime.current_wait_token(),
+        }));
         let items = [(id, SIGNALED)];
         let armed = ArmedWait::new(table, &items, sources, waker);
         let result = armed.arm(&items);
@@ -884,10 +884,10 @@ mod tests {
 
         let sources: Vec<Arc<dyn Waitable>> = alloc::vec![signal];
         let runtime = runtime();
-        let waker = Arc::new(ParkWaker::new(
-            runtime.clone(),
-            runtime.current_wait_token(),
-        ));
+        let waker = Arc::new(ParkWaker::new(super::super::wait::WakeTarget::Thread {
+            runtime: runtime.clone(),
+            token: runtime.current_wait_token(),
+        }));
         let items = [(derived, SIGNALED)];
         let armed = ArmedWait::new(table, &items, sources, waker);
         let result = armed.arm(&items);

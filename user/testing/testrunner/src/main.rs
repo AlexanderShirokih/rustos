@@ -80,6 +80,7 @@ mod pins;
 mod pmic_gpio;
 mod pmic_keys;
 mod port;
+mod port_async;
 mod port_liveness;
 mod port_transport;
 mod probe_protocol;

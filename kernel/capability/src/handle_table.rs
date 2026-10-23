@@ -489,14 +489,7 @@ impl HandleTable {
         min_rights: Rights,
         drained: &mut DrainedHandles,
     ) -> Result<(), IpcError> {
-        for (i, id) in ids.iter().enumerate() {
-            if ids.iter().take(i).any(|prev| prev == id) {
-                return Err(IpcError::BadHandle);
-            }
-        }
-        for id in ids {
-            self.get(*id, min_rights)?;
-        }
+        self.validate_transfer(ids, min_rights)?;
         // Валидация выше гарантирует, что take_slot не упадёт. На недоборе снятое остаётся в
         // `drained`.
         for id in ids {
@@ -505,6 +498,65 @@ impl HandleTable {
             }
         }
         Ok(())
+    }
+
+    fn validate_transfer(&self, ids: &[HandleId], min_rights: Rights) -> Result<(), IpcError> {
+        for (i, id) in ids.iter().enumerate() {
+            if ids.iter().take(i).any(|prev| prev == id) {
+                return Err(IpcError::BadHandle);
+            }
+        }
+        for id in ids {
+            self.get(*id, min_rights)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stage_for_return(
+        &mut self,
+        ids: &[HandleId],
+        drained: &mut DrainedHandles,
+    ) -> Result<Vec<HandleReservation>, IpcError> {
+        self.validate_transfer(ids, Rights::TRANSFER)?;
+        let mut replacements = Vec::new();
+        for _ in ids
+            .iter()
+            .filter(|id| id.generation() == HandleId::MAX_GENERATION)
+        {
+            match self.reserve_slot() {
+                Ok(slot) => replacements.push(slot),
+                Err(error) => {
+                    for slot in replacements {
+                        self.release_reservation(slot);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let mut replacements = replacements.into_iter();
+        let mut returns = Vec::with_capacity(ids.len());
+        for id in ids {
+            if id.generation() == HandleId::MAX_GENERATION {
+                self.take_slot(*id, drained)?;
+                returns.push(replacements.next().ok_or(IpcError::OutOfHandles)?);
+                continue;
+            }
+
+            let slot = self
+                .slots
+                .get_mut(id.slot() as usize)
+                .ok_or(IpcError::BadHandle)?;
+            let taken = core::mem::replace(&mut slot.state, SlotState::Reserved);
+            drained.push_waiters(core::mem::take(&mut slot.waiters));
+            if let SlotState::Occupied(cap) = taken {
+                drained.push_handle(cap);
+            }
+            returns.push(HandleReservation {
+                slot: id.slot(),
+                generation: slot.issue_generation(),
+            });
+        }
+        Ok(returns)
     }
 
     /// Создаёт новый handle на тот же capability target с подмножеством прав и (опционально) badge.
@@ -1945,5 +1997,54 @@ mod tests {
             recipient.get(recv_id, Rights::READ).unwrap_err(),
             IpcError::Revoked
         );
+    }
+
+    #[test]
+    fn staged_return_uses_a_free_slot_when_the_source_generation_is_exhausted() {
+        let mut table = HandleTable::with_capacity(2);
+        let original = table
+            .insert(signal_handle(Rights::READ | Rights::TRANSFER))
+            .unwrap();
+        table.slots[0].generation = HandleId::MAX_GENERATION;
+        let exhausted = HandleId::pack(
+            core::num::NonZeroU16::new(HandleId::MAX_GENERATION).unwrap(),
+            original.slot(),
+        );
+        let mut drained = DrainedHandles::empty();
+        let returns = table.stage_for_return(&[exhausted], &mut drained).unwrap();
+        let caps = drained.take_handles();
+        drained.release();
+        let restored = commit(
+            &mut table,
+            returns.into_iter().next().unwrap(),
+            caps.into_iter().next().unwrap(),
+        );
+        assert_ne!(restored.slot(), exhausted.slot());
+        assert!(table.get(restored, Rights::READ).is_ok());
+        assert!(matches!(
+            table.get(exhausted, Rights::READ),
+            Err(IpcError::BadHandle)
+        ));
+    }
+
+    #[test]
+    fn exhausted_return_reservation_leaves_the_source_capability_in_place() {
+        let mut table = HandleTable::with_capacity(1);
+        table
+            .insert(signal_handle(Rights::READ | Rights::TRANSFER))
+            .unwrap();
+        table.slots[0].generation = HandleId::MAX_GENERATION;
+        let exhausted = HandleId::pack(
+            core::num::NonZeroU16::new(HandleId::MAX_GENERATION).unwrap(),
+            0,
+        );
+        let mut drained = DrainedHandles::empty();
+        assert!(matches!(
+            table.stage_for_return(&[exhausted], &mut drained),
+            Err(IpcError::OutOfHandles)
+        ));
+        assert!(drained.is_empty());
+        assert!(table.get(exhausted, Rights::READ).is_ok());
+        drained.release();
     }
 }

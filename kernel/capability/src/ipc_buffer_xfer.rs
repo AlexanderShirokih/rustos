@@ -1,4 +1,4 @@
-//! Кросс-AS перенос рандеву-сообщения между IPC-буферами двух потоков.
+//! Перенос кадра и capability между IPC-буферами сторон рандеву.
 //!
 //! Офсеты полей [`syscall::IpcBuffer`] (`#[repr(C)]`), по которым адресуются оба
 //! буфера: `tag: u64` @ 0, `caps: [u32; 4]` @ 8, `data: [u8; IPC_BUFFER_DATA_MAX]`
@@ -29,6 +29,31 @@ const BADGE_SIZE: usize = 8;
 const _: () = assert!(size_of::<syscall::IpcBuffer>() <= memory::PAGE_SIZE.get());
 
 const BODY_CHUNK: usize = 512;
+
+/// Источник capability кадра: таблица отправителя либо набор, изъятый при постановке.
+pub enum SenderCaps<'a> {
+    /// Номера кадра разрешаются в таблице отправителя при доставке.
+    Table,
+    /// Набор принадлежит операции и расходуется только после успешной доставки.
+    Staged(&'a mut Vec<Capability>),
+}
+
+pub(crate) fn copy_frame(
+    sender: &ThreadTransport,
+    receiver: &ThreadTransport,
+) -> Result<(), IpcError> {
+    let tag = syscall::decode_tag(read_tag(sender)?);
+    let len = tag.len.min(IPC_BUFFER_DATA_MAX);
+    let count = tag.ncaps.min(IPC_BUFFER_MAX_CAPS);
+    copy_body(sender, receiver, len)?;
+    for (index, raw) in read_caps(sender, count)?.into_iter().enumerate() {
+        write_bytes(receiver, CAPS_OFFSET + index * CAP_SIZE, &raw.to_le_bytes())?;
+    }
+    let mut badge = [0; BADGE_SIZE];
+    read_bytes(sender, BADGE_OFFSET, &mut badge)?;
+    write_bytes(receiver, BADGE_OFFSET, &badge)?;
+    write_tag(receiver, encode_tag(len, count))
+}
 
 fn map_copy_err(_e: UserCopyError) -> IpcError {
     // Непригодный user-указатель буфера трактуем как BufferTooSmall.
@@ -146,13 +171,13 @@ fn kernel_write(buf: &mut syscall::IpcBuffer, off: usize, src: &[u8]) -> Result<
     Ok(())
 }
 
-fn read_tag(t: &ThreadTransport) -> Result<u64, IpcError> {
+pub(crate) fn read_tag(t: &ThreadTransport) -> Result<u64, IpcError> {
     let mut buf = [0u8; TAG_SIZE];
     read_bytes(t, TAG_OFFSET, &mut buf)?;
     Ok(u64::from_le_bytes(buf))
 }
 
-fn write_tag(t: &ThreadTransport, tag: u64) -> Result<(), IpcError> {
+pub(crate) fn write_tag(t: &ThreadTransport, tag: u64) -> Result<(), IpcError> {
     write_bytes(t, TAG_OFFSET, &tag.to_le_bytes())
 }
 
@@ -160,7 +185,7 @@ pub(super) fn write_badge(t: &ThreadTransport, badge: u64) -> Result<(), IpcErro
     write_bytes(t, BADGE_OFFSET, &badge.to_le_bytes())
 }
 
-fn read_caps(t: &ThreadTransport, ncaps: usize) -> Result<Vec<u32>, IpcError> {
+pub(crate) fn read_caps(t: &ThreadTransport, ncaps: usize) -> Result<Vec<u32>, IpcError> {
     let mut out = Vec::with_capacity(ncaps);
     for i in 0..ncaps {
         let mut buf = [0u8; CAP_SIZE];
@@ -170,7 +195,7 @@ fn read_caps(t: &ThreadTransport, ncaps: usize) -> Result<Vec<u32>, IpcError> {
     Ok(out)
 }
 
-fn write_caps(t: &ThreadTransport, ids: &[HandleId]) -> Result<(), IpcError> {
+pub(crate) fn write_caps(t: &ThreadTransport, ids: &[HandleId]) -> Result<(), IpcError> {
     for (i, id) in ids.iter().enumerate() {
         let raw = id.raw().get().to_le_bytes();
         write_bytes(t, CAPS_OFFSET + i * CAP_SIZE, &raw)?;
@@ -268,6 +293,7 @@ impl Drop for ReservedSlots<'_> {
 pub fn transfer_rendezvous(
     sender: &ThreadTransport,
     receiver: &ThreadTransport,
+    caps: SenderCaps<'_>,
 ) -> Result<(), IpcError> {
     let tag = read_tag(sender)?;
     let decoded = decode_tag(tag);
@@ -279,7 +305,7 @@ pub fn transfer_rendezvous(
     write_badge(receiver, sender.badge)?;
 
     if ncaps > 0 {
-        transfer_caps(sender, receiver, ncaps)?;
+        transfer_caps(sender, receiver, ncaps, caps)?;
     }
 
     // Тег пишется последним, поэтому до него частичное тело не наблюдается получателем как
@@ -319,12 +345,21 @@ fn transfer_caps(
     sender: &ThreadTransport,
     receiver: &ThreadTransport,
     ncaps: usize,
+    caps: SenderCaps<'_>,
 ) -> Result<(), IpcError> {
-    let raw_ids = read_caps(sender, ncaps)?;
-    let mut ids: Vec<HandleId> = Vec::with_capacity(ncaps);
-    for raw in raw_ids {
-        let nz = NonZeroU32::new(raw).ok_or(IpcError::BadHandle)?;
-        ids.push(HandleId::from_raw(nz));
+    let mut ids = Vec::new();
+    match &caps {
+        SenderCaps::Staged(staged) => {
+            if staged.len() != ncaps {
+                return Err(IpcError::BadHandle);
+            }
+        }
+        SenderCaps::Table => {
+            for raw in read_caps(sender, ncaps)? {
+                let nz = NonZeroU32::new(raw).ok_or(IpcError::BadHandle)?;
+                ids.push(HandleId::from_raw(nz));
+            }
+        }
     }
 
     let reserved = ReservedSlots::reserve(&receiver.handle_table, ncaps)?;
@@ -332,12 +367,16 @@ fn transfer_caps(
 
     let mut drained = DrainedHandles::empty();
     // Изъятие у отправителя идёт после всех способных упасть шагов на стороне получателя.
-    let taken = sender
-        .handle_table
-        .with_lock(|tbl| tbl.try_drain_for_transfer(&ids, Rights::TRANSFER, &mut drained));
+    let taken = match caps {
+        SenderCaps::Table => sender
+            .handle_table
+            .with_lock(|table| table.try_drain_for_transfer(&ids, Rights::TRANSFER, &mut drained))
+            .map(|()| drained.take_handles()),
+        SenderCaps::Staged(staged) => Ok(core::mem::take(staged)),
+    };
     match taken {
-        Ok(()) => {
-            reserved.commit(drained.take_handles(), &mut drained);
+        Ok(handles) => {
+            reserved.commit(handles, &mut drained);
             drained.release();
             Ok(())
         }
@@ -422,7 +461,7 @@ mod tests {
         let (receiver, rm, _rt) = transport(BASE_B);
         write_buf(&sm, BASE_A, encode_tag(5, 0), &[], b"hello");
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(read_tag(&rm, BASE_B), encode_tag(5, 0));
         assert_eq!(read_data(&rm, BASE_B, 5), b"hello");
@@ -444,7 +483,7 @@ mod tests {
             .unwrap();
         write_buf(&sm, BASE_A, encode_tag(2, 1), &[id.raw().get()], b"hi");
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(st.with_lock(|t| t.live_count()), 0);
         assert_eq!(rt.with_lock(|t| t.live_count()), 1);
@@ -480,7 +519,7 @@ mod tests {
         sender.badge = 0xDEAD_BEEF;
         write_buf(&sm, BASE_A, encode_tag(0, 0), &[], b"");
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(read_badge(&rm, BASE_B), 0xDEAD_BEEF);
     }
@@ -491,7 +530,7 @@ mod tests {
         let (receiver, rm, _rt) = transport(BASE_B);
         write_buf(&sm, BASE_A, encode_tag(3, 0), &[], b"abc");
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(read_badge(&rm, BASE_B), 0);
     }
@@ -512,7 +551,7 @@ mod tests {
             .unwrap();
         write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
 
-        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        let err = transfer_rendezvous(&sender, &receiver, SenderCaps::Table).unwrap_err();
         assert_eq!(err, IpcError::AccessDenied);
         assert_eq!(st.with_lock(|t| t.live_count()), 1);
         assert_eq!(rt.with_lock(|t| t.live_count()), 0);
@@ -560,7 +599,7 @@ mod tests {
         let body = alloc::vec![0x5Au8; IPC_BUFFER_DATA_MAX];
         write_buf(&sm, BASE_A, encode_tag(IPC_BUFFER_DATA_MAX, 0), &[], &body);
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(read_tag(&rm, BASE_B), encode_tag(IPC_BUFFER_DATA_MAX, 0));
         assert_eq!(read_data(&rm, BASE_B, IPC_BUFFER_DATA_MAX), body);
@@ -579,7 +618,7 @@ mod tests {
             &body,
         );
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(read_tag(&rm, BASE_B), encode_tag(IPC_BUFFER_DATA_MAX, 0));
         assert_eq!(read_data(&rm, BASE_B, IPC_BUFFER_DATA_MAX), body);
@@ -601,7 +640,7 @@ mod tests {
             b"",
         );
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(read_tag(&rm, BASE_B), encode_tag(0, IPC_BUFFER_MAX_CAPS));
         assert_eq!(st.with_lock(|t| t.live_count()), 0);
@@ -617,7 +656,7 @@ mod tests {
         let receiver = ThreadTransport::new_kernel(kbuf.clone(), rtable);
         write_buf(&sm, BASE_A, encode_tag(4, 0), &[], b"PING");
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         let (tag, data, badge) = kbuf.with_lock(|b| (b.tag, b.data, b.badge));
         assert_eq!(tag, encode_tag(4, 0));
@@ -636,7 +675,7 @@ mod tests {
         let sender = ThreadTransport::new_kernel(kbuf, stable);
         let (receiver, rm, _rt) = transport(BASE_B);
 
-        transfer_rendezvous(&sender, &receiver).expect("transfer ok");
+        transfer_rendezvous(&sender, &receiver, SenderCaps::Table).expect("transfer ok");
 
         assert_eq!(read_tag(&rm, BASE_B), encode_tag(3, 0));
         assert_eq!(read_data(&rm, BASE_B, 3), b"abc");
@@ -656,7 +695,7 @@ mod tests {
             b"",
         );
 
-        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        let err = transfer_rendezvous(&sender, &receiver, SenderCaps::Table).unwrap_err();
         assert_eq!(err, IpcError::OutOfHandles);
         assert!(st.with_lock(|t| t.get(id_a, Rights::READ).is_ok()));
         assert!(st.with_lock(|t| t.get(id_b, Rights::READ).is_ok()));
@@ -671,7 +710,7 @@ mod tests {
         let id = signal_with_transfer(&st);
         write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
 
-        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        let err = transfer_rendezvous(&sender, &receiver, SenderCaps::Table).unwrap_err();
         assert_eq!(err, IpcError::BufferTooSmall);
         assert!(st.with_lock(|t| t.get(id, Rights::READ).is_ok()));
         assert_eq!(st.with_lock(|t| t.live_count()), 1);
@@ -685,7 +724,7 @@ mod tests {
         let (receiver, rm, _rt) = transport_custom(BADGE_OFFSET, 16);
         write_buf(&sm, BASE_A, encode_tag(4, 0), &[], b"DATA");
 
-        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        let err = transfer_rendezvous(&sender, &receiver, SenderCaps::Table).unwrap_err();
         assert_eq!(err, IpcError::BufferTooSmall);
         assert_eq!(read_tag(&rm, BASE_B - BADGE_OFFSET), 0);
         assert_eq!(read_data(&rm, BASE_B - BADGE_OFFSET, 4), b"DATA");
@@ -699,7 +738,7 @@ mod tests {
         let id = signal_with_transfer(&st);
         write_buf(&sm, BASE_A, encode_tag(0, 1), &[id.raw().get()], b"");
 
-        let err = transfer_rendezvous(&sender, &receiver).unwrap_err();
+        let err = transfer_rendezvous(&sender, &receiver, SenderCaps::Table).unwrap_err();
         assert_eq!(err, IpcError::BufferTooSmall);
         assert!(st.with_lock(|t| t.get(id, Rights::READ).is_ok()));
         assert_eq!(st.with_lock(|t| t.live_count()), 1);

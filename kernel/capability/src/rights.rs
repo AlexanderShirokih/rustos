@@ -10,6 +10,7 @@ use super::target::CapabilityTarget;
 /// источника ([`Capability::derive`](super::Capability::derive)).
 pub fn default_rights_for(obj: &CapabilityTarget) -> Rights {
     match obj {
+        CapabilityTarget::Pending(_) => Rights::READ,
         // Полный набор "сигнальных" прав (READ|WRITE|DUPLICATE|TRANSFER):
         // - Signal сигналуем пользователем; Process/Thread терминацию поднимает
         //   только ядро (через bound-Signal), но WRITE оставлен под terminate-op;

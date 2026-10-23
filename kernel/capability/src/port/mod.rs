@@ -1,8 +1,8 @@
-//! `Port` - объект без очереди сообщений в ядре. Внутри он держит очередь ждущих потоков:
+//! `Port` держит очередь сторон, ожидающих рандеву:
 //! либо отправителей, либо получателей - но никогда оба одновременно.
 //!
-//! Транспорт сообщения - per-thread IPC-буфер. Тело копируется
-//! напрямую между IPC-буферами двух потоков через линейное физическое отображение.
+//! Кадр хранится в IPC-буфере потока либо отложенной операции `Pending`.
+//! Рандеву копирует тело между буферами сторон.
 //! Хендлы переносятся кросс-процессно через handle-таблицы
 //! (см. [`ipc_buffer_xfer`](super::ipc_buffer_xfer)).
 //!
@@ -37,7 +37,7 @@ pub(crate) use self::{
 };
 use super::{
     errors::IpcError,
-    ipc_buffer_xfer::{transfer_rendezvous, write_badge},
+    ipc_buffer_xfer::{SenderCaps, transfer_rendezvous, write_badge},
     reply::{Reply, ReplySlot},
     rev_node::RevocationHook,
     runtime::{KernelRuntime, ParkState},
@@ -51,7 +51,7 @@ use super::{
 /// Объект синхронного обмена сообщениями. Отправитель и получатель встречаются на нём рандеву,
 /// и сообщение переносится напрямую между их IPC-буферами.
 ///
-/// Порт держит очередь заблокированных сторон одного рода. Пока у порта есть держатели с
+/// Порт держит очередь ожидающих сторон одного рода. Пока у порта есть держатели с
 /// правом [`Rights::READ`], отправитель встаёт в очередь. Когда таких держателей не остаётся,
 /// отправка отвергается кодом [`IpcError::PeerClosed`], а очередь снимается - её стороны
 /// будятся тем же кодом.
@@ -130,7 +130,10 @@ impl ParkCtx {
         // пробуждения сторон. Поэтому вызов идёт вне лока порта.
         let token = runtime.current_wait_token();
         Self {
-            waker: Arc::new(ParkWaker::new(runtime.clone(), token)),
+            waker: Arc::new(ParkWaker::new(super::wait::WakeTarget::Thread {
+                runtime: runtime.clone(),
+                token,
+            })),
             outcome: OutcomeSlot::new(),
         }
     }
@@ -306,6 +309,70 @@ impl Port {
         self.with_state(|state, wakes| holder.uncount(state, wakes));
     }
 
+    /// Ставит запрос без парковки потока. Закрытие возвращённого handle отменяет запрос.
+    pub fn call_async(
+        self: &Arc<Self>,
+        caller: &ThreadTransport,
+        hold: Option<OperationHold>,
+    ) -> Result<crate::HandleId, IpcError> {
+        crate::pending::Pending::start(self, SendKind::Call, caller, hold)
+    }
+
+    /// Ставит отправку без парковки потока. Недоставленные capability возвращает `Pending::take`.
+    pub fn send_async(
+        self: &Arc<Self>,
+        sender: &ThreadTransport,
+        hold: Option<OperationHold>,
+    ) -> Result<crate::HandleId, IpcError> {
+        crate::pending::Pending::start(self, SendKind::Send, sender, hold)
+    }
+
+    pub(crate) fn has_receivers(&self) -> bool {
+        self.with_state(|state, _| state.has_receivers())
+    }
+
+    pub(crate) fn enqueue_pending(&self, pending: &crate::pending::Pending) {
+        let placement = self.place_sender(
+            pending.kind,
+            &pending.transport,
+            || ParkCtx {
+                waker: pending.waker.clone(),
+                outcome: pending.outcome.clone(),
+            },
+            || false,
+            Some(&pending.caps),
+        );
+        match placement {
+            SenderPlacement::Queued(_) => {}
+            SenderPlacement::Failed(_) => {
+                pending.outcome.set(RendezvousOutcome::PeerGone);
+                pending.waker.cancel();
+            }
+            SenderPlacement::Matched(receiver) => {
+                let waiter = Waiter {
+                    kind: pending.kind,
+                    transport: pending.transport.clone(),
+                    staged: Some(pending.caps.clone()),
+                    waker: pending.waker.clone(),
+                    outcome: pending.outcome.clone(),
+                    reply_slot: ReplySlot::new(),
+                };
+                match deliver_recv(waiter, &receiver.transport) {
+                    RecvAction::Done { reply } => {
+                        if let Some(reply) = reply {
+                            receiver.reply_slot.install(reply);
+                        }
+                        receiver.outcome.set(RendezvousOutcome::Delivered);
+                    }
+                    _ => receiver
+                        .outcome
+                        .set(RendezvousOutcome::TransferFailed(IpcError::ShouldWait)),
+                }
+                receiver.waker.signal_match();
+            }
+        }
+    }
+
     pub(crate) fn send(
         &self,
         sender: &ThreadTransport,
@@ -314,7 +381,7 @@ impl Port {
         hold: Option<OperationHold>,
     ) -> SendAction {
         let action = self
-            .place_sender(SendKind::Send, sender, runtime, deadline_ns)
+            .place_thread_sender(SendKind::Send, sender, runtime, deadline_ns)
             .into_send(sender);
         // Уход значка застаёт кадр доставленным либо waiter в очереди.
         drop(hold);
@@ -329,7 +396,7 @@ impl Port {
         hold: Option<OperationHold>,
     ) -> CallAction {
         let action = self
-            .place_sender(SendKind::Call, caller, runtime, deadline_ns)
+            .place_thread_sender(SendKind::Call, caller, runtime, deadline_ns)
             .into_call(caller, runtime);
         drop(hold);
         action
@@ -356,6 +423,7 @@ impl Port {
             let reply_slot = ReplySlot::new();
             let waiter = Waiter {
                 kind: (),
+                staged: None,
                 transport: receiver.clone(),
                 waker: ctx.waker.clone(),
                 outcome: ctx.outcome.clone(),
@@ -396,29 +464,46 @@ impl Port {
         self.with_state(|state, _| state.queue_is_empty())
     }
 
-    fn place_sender(
+    fn place_thread_sender(
         &self,
         kind: SendKind,
         sender: &ThreadTransport,
         runtime: &Arc<dyn KernelRuntime>,
         deadline_ns: Option<u64>,
     ) -> SenderPlacement {
+        self.place_sender(
+            kind,
+            sender,
+            || ParkCtx::for_current(runtime),
+            || remaining_until(runtime, deadline_ns) == Some(0),
+            None,
+        )
+    }
+
+    fn place_sender(
+        &self,
+        kind: SendKind,
+        sender: &ThreadTransport,
+        make_ctx: impl Fn() -> ParkCtx,
+        expired: impl Fn() -> bool,
+        staged: Option<&Arc<MutexCell<crate::pending::StagedCaps>>>,
+    ) -> SenderPlacement {
         loop {
             match self.with_state(|state, _| state.take_receiver()) {
                 Err(e) => return SenderPlacement::Failed(e),
                 Ok(Some(receiver)) => return SenderPlacement::Matched(receiver),
-                Ok(None) if remaining_until(runtime, deadline_ns) == Some(0) => {
+                Ok(None) if expired() => {
                     return SenderPlacement::Failed(IpcError::Timeout);
                 }
                 Ok(None) => {}
             }
 
-            // Матч и постановка в очередь - разные захваты queue-лока, поэтому между ними берётся
-            // wait-token. Изменившееся в это окно состояние отвергает постановку, и цикл повторяет
-            // матч.
-            let ctx = ParkCtx::for_current(runtime);
+            // Поточная операция получает wait-token у планировщика, поэтому контекст создаётся
+            // вне лока порта. Изменение очереди за это окно отвергает постановку и повторяет матч.
+            let ctx = make_ctx();
             let waiter = Waiter {
                 kind,
+                staged: staged.cloned(),
                 transport: sender.clone(),
                 waker: ctx.waker.clone(),
                 outcome: ctx.outcome.clone(),
@@ -468,7 +553,7 @@ impl Waitable for Port {
 }
 
 fn deliver_send(sender: &ThreadTransport, receiver: &ReceiverWaiter) -> SendAction {
-    match transfer_rendezvous(sender, &receiver.transport) {
+    match transfer_rendezvous(sender, &receiver.transport, SenderCaps::Table) {
         Ok(()) => {
             receiver.outcome.set(RendezvousOutcome::Delivered);
             receiver.waker.signal_match();
@@ -485,7 +570,7 @@ fn deliver_send(sender: &ThreadTransport, receiver: &ReceiverWaiter) -> SendActi
 }
 
 fn deliver_call(caller: &ThreadTransport, receiver: &ReceiverWaiter, ctx: ParkCtx) -> CallAction {
-    match transfer_rendezvous(caller, &receiver.transport) {
+    match transfer_rendezvous(caller, &receiver.transport, SenderCaps::Table) {
         Ok(()) => {
             ctx.outcome.set_awaiting_reply();
             let reply = Reply::new(caller.clone(), ctx.waker.clone(), ctx.outcome.clone());
@@ -507,8 +592,30 @@ fn deliver_call(caller: &ThreadTransport, receiver: &ReceiverWaiter, ctx: ParkCt
     }
 }
 
+fn transfer_sender(sender: &SenderWaiter, receiver: &ThreadTransport) -> Result<(), IpcError> {
+    let Some(staged) = &sender.staged else {
+        return transfer_rendezvous(&sender.transport, receiver, SenderCaps::Table);
+    };
+    let mut caps = staged.with_lock(|state| core::mem::take(&mut state.caps));
+    let result = transfer_rendezvous(&sender.transport, receiver, SenderCaps::Staged(&mut caps));
+    let returns = staged.with_lock(|state| {
+        state.caps = caps;
+        if result.is_ok() {
+            core::mem::take(&mut state.returns)
+        } else {
+            Vec::new()
+        }
+    });
+    sender.transport.handle_table.with_lock(|table| {
+        for reservation in returns {
+            table.release_reservation(reservation);
+        }
+    });
+    result
+}
+
 fn deliver_recv(sender: SenderWaiter, receiver: &ThreadTransport) -> RecvAction {
-    match transfer_rendezvous(&sender.transport, receiver) {
+    match transfer_sender(&sender, receiver) {
         Ok(()) => match sender.kind {
             SendKind::Send => {
                 sender.outcome.set(RendezvousOutcome::Delivered);
@@ -2319,6 +2426,353 @@ mod tests {
 
             assert_eq!(ep.peek(), READABLE);
             assert!(observer.was_woken());
+        }
+    }
+
+    fn pending_object(sender: &ThreadTransport, id: crate::HandleId) -> Arc<crate::Pending> {
+        sender
+            .handle_table
+            .with_lock(|table| table.get_object::<crate::Pending>(id, Rights::READ))
+            .unwrap()
+    }
+
+    fn take_pending(sender: &ThreadTransport, id: crate::HandleId) -> Result<(), IpcError> {
+        let result = pending_object(sender, id).take(sender);
+        if result != Err(IpcError::ShouldWait) {
+            sender
+                .handle_table
+                .with_lock(|table| table.remove(id))
+                .unwrap()
+                .release();
+        }
+        result
+    }
+
+    #[test]
+    fn async_send_delivers_to_a_waiting_receiver_and_signals() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let rt = StubRuntime::arc();
+        let RecvAction::Park { waker, outcome, .. } =
+            port.recv(&transport(BASE_B), &rt, None, None)
+        else {
+            panic!("receiver must park")
+        };
+        let sender = transport(BASE_A);
+        let id = port.send_async(&sender, None).unwrap();
+        assert_eq!(outcome.get(), Some(RendezvousOutcome::Delivered));
+        assert_eq!(waker.resolve(), crate::wait::ParkResolution::Signaled);
+        assert_eq!(pending_object(&sender, id).peek(), syscall::SIGNALED);
+        assert_eq!(take_pending(&sender, id), Ok(()));
+    }
+
+    #[test]
+    fn async_call_queues_without_a_thread_and_returns_a_reply_capability_once() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let caller = transport(BASE_A);
+        let id = port.call_async(&caller, None).unwrap();
+        assert_eq!(port.peek(), READABLE);
+        assert_eq!(take_pending(&caller, id), Err(IpcError::ShouldWait));
+        let server = transport(BASE_B);
+        let RecvAction::Done { reply: Some(reply) } =
+            port.recv(&server, &StubRuntime::arc(), Some(0), None)
+        else {
+            panic!("call must match")
+        };
+        assert_eq!(port.peek(), 0);
+        let signal_id = server
+            .handle_table
+            .with_lock(|table| {
+                table.insert(Capability::new_with_default_rights(crate::Signal::new()))
+            })
+            .unwrap();
+        crate::ipc_buffer_xfer::write_caps(&server, &[signal_id]).unwrap();
+        crate::ipc_buffer_xfer::write_tag(&server, encode_tag(0, 1)).unwrap();
+        reply.reply(&server).unwrap();
+        assert_eq!(take_pending(&caller, id), Ok(()));
+        assert!(matches!(
+            caller
+                .handle_table
+                .with_lock(|table| table.get_object::<crate::Pending>(id, Rights::READ)),
+            Err(IpcError::BadHandle)
+        ));
+        let raw = crate::ipc_buffer_xfer::read_caps(&caller, 1).unwrap()[0];
+        let received = crate::HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap());
+        caller
+            .handle_table
+            .with_lock(|table| table.remove(received))
+            .unwrap()
+            .release();
+    }
+
+    #[test]
+    fn async_send_reserves_return_slots_against_a_full_table() {
+        let port = Port::new();
+        let receiver = receiver_capability(&port);
+        let (sender, table) = transport_with_signal(BASE_A, Rights::READ | Rights::TRANSFER);
+        let second = table
+            .with_lock(|table| {
+                table.insert(Capability::new_with_default_rights(crate::Signal::new()))
+            })
+            .unwrap();
+        let raw = crate::ipc_buffer_xfer::read_caps(&sender, 1).unwrap()[0];
+        let first = crate::HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap());
+        crate::ipc_buffer_xfer::write_caps(&sender, &[first, second]).unwrap();
+        crate::ipc_buffer_xfer::write_tag(&sender, encode_tag(0, 2)).unwrap();
+        let id = port.send_async(&sender, None).unwrap();
+        assert!(matches!(
+            table.with_lock(|table| table.remove(first)),
+            Err(IpcError::BadHandle)
+        ));
+        while table
+            .with_lock(|table| {
+                table.insert(Capability::new_with_default_rights(crate::Signal::new()))
+            })
+            .is_ok()
+        {}
+        drop(receiver);
+        assert_eq!(take_pending(&sender, id), Err(IpcError::PeerClosed));
+        let restored = crate::ipc_buffer_xfer::read_caps(&sender, 2).unwrap();
+        for raw in restored {
+            let id = crate::HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap());
+            table
+                .with_lock(|table| table.get_object::<crate::Signal>(id, Rights::READ))
+                .unwrap();
+        }
+        table.with_lock(HandleTable::drain).release();
+    }
+
+    #[test]
+    fn async_cancellation_removes_queue_and_rejects_a_late_reply() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let caller = transport(BASE_A);
+        let id = port.call_async(&caller, None).unwrap();
+        caller
+            .handle_table
+            .with_lock(|table| table.remove(id))
+            .unwrap()
+            .release();
+        assert_eq!(port.peek(), 0);
+        assert!(matches!(
+            port.recv(&transport(BASE_B), &StubRuntime::arc(), Some(0), None),
+            RecvAction::Failed(IpcError::Timeout)
+        ));
+        let id = port.call_async(&caller, None).unwrap();
+        let server = transport(BASE_B);
+        let RecvAction::Done { reply: Some(reply) } =
+            port.recv(&server, &StubRuntime::arc(), Some(0), None)
+        else {
+            panic!("call must match")
+        };
+        caller
+            .handle_table
+            .with_lock(|table| table.remove(id))
+            .unwrap()
+            .release();
+        let (server_caps, table) = transport_with_signal(BASE_B, Rights::READ | Rights::TRANSFER);
+        assert_eq!(reply.reply(&server_caps), Err(IpcError::PeerClosed));
+        assert_eq!(table.with_lock(|table| table.live_count()), 1);
+    }
+
+    #[test]
+    fn async_rejected_staging_keeps_every_capability() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let (sender, table) = transport_with_signal(BASE_A, Rights::READ);
+        assert_eq!(port.send_async(&sender, None), Err(IpcError::AccessDenied));
+        assert_eq!(table.with_lock(|table| table.live_count()), 1);
+        assert_eq!(port.peek(), 0);
+        let empty = Port::new();
+        assert_eq!(empty.call_async(&sender, None), Err(IpcError::PeerClosed));
+        assert_eq!(table.with_lock(|table| table.live_count()), 1);
+    }
+
+    #[test]
+    fn async_closing_an_unclaimed_reply_releases_its_capabilities() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let caller = transport(BASE_A);
+        let id = port.call_async(&caller, None).unwrap();
+        let server = transport(BASE_B);
+        let RecvAction::Done { reply: Some(reply) } =
+            port.recv(&server, &StubRuntime::arc(), Some(0), None)
+        else {
+            panic!("call must match")
+        };
+        let watched = Port::new();
+        let root = Capability::new(
+            CapabilityTarget::Port(watched.clone()),
+            Rights::READ | Rights::WRITE | Rights::DUPLICATE | Rights::TRANSFER,
+        );
+        let cap = root
+            .duplicate(Rights::WRITE | Rights::TRANSFER, BADGE_A)
+            .unwrap();
+        let handle = server
+            .handle_table
+            .with_lock(|table| table.insert(cap))
+            .unwrap();
+        crate::ipc_buffer_xfer::write_caps(&server, &[handle]).unwrap();
+        crate::ipc_buffer_xfer::write_tag(&server, encode_tag(0, 1)).unwrap();
+        reply.reply(&server).unwrap();
+        caller
+            .handle_table
+            .with_lock(|table| table.remove(id))
+            .unwrap()
+            .release();
+        assert!(matches!(
+            watched.recv(&server, &StubRuntime::arc(), Some(0), None),
+            RecvAction::SenderGone { badge: BADGE_A }
+        ));
+    }
+
+    #[test]
+    fn async_server_closing_reply_signals_peer_closed() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let caller = transport(BASE_A);
+        let id = port.call_async(&caller, None).unwrap();
+        let RecvAction::Done { reply } =
+            port.recv(&transport(BASE_B), &StubRuntime::arc(), Some(0), None)
+        else {
+            panic!("call must match")
+        };
+        drop(reply);
+        assert_eq!(pending_object(&caller, id).peek(), syscall::SIGNALED);
+        assert_eq!(take_pending(&caller, id), Err(IpcError::PeerClosed));
+    }
+
+    #[test]
+    fn race_async_delivery_and_cancel_share_one_resource_owner() {
+        for _ in 0..64 {
+            let port = Port::new();
+            let _receiver = receiver_capability(&port);
+            let (sender, table) = transport_with_signal(BASE_A, Rights::READ | Rights::TRANSFER);
+            let raw = crate::ipc_buffer_xfer::read_caps(&sender, 1).unwrap()[0];
+            let cap_id = crate::HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap());
+            let signal = table
+                .with_lock(|table| table.get_object::<crate::Signal>(cap_id, Rights::READ))
+                .unwrap();
+            let lifetime = Arc::downgrade(&signal);
+            drop(signal);
+            let id = port.send_async(&sender, None).unwrap();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let receiving = barrier.clone();
+            let other = port.clone();
+            let server = transport(BASE_B);
+            let received = server.handle_table.clone();
+            let receive = std::thread::spawn(move || {
+                receiving.wait();
+                other.recv(&server, &StubRuntime::arc(), Some(0), None)
+            });
+            barrier.wait();
+            table.with_lock(|table| table.remove(id)).unwrap().release();
+            let _ = receive.join().unwrap();
+            assert_eq!(port.peek(), 0);
+            assert_eq!(
+                lifetime.strong_count(),
+                received.with_lock(|table| table.live_count())
+            );
+            received.with_lock(HandleTable::drain).release();
+            assert!(lifetime.upgrade().is_none());
+            assert_eq!(table.with_lock(|table| table.live_count()), 0);
+        }
+    }
+
+    #[test]
+    fn async_receiver_exhaustion_returns_the_staged_capability() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let (sender, _) = transport_with_signal(BASE_A, Rights::READ | Rights::TRANSFER);
+        let id = port.send_async(&sender, None).unwrap();
+        let mut server = transport(BASE_B);
+        server.handle_table = Arc::new(MutexCell::new(HandleTable::with_capacity(0)));
+        assert!(matches!(
+            port.recv(&server, &StubRuntime::arc(), Some(0), None),
+            RecvAction::Failed(IpcError::ShouldWait)
+        ));
+        assert_eq!(take_pending(&sender, id), Err(IpcError::OutOfHandles));
+        let raw = crate::ipc_buffer_xfer::read_caps(&sender, 1).unwrap()[0];
+        let returned = crate::HandleId::from_raw(core::num::NonZeroU32::new(raw).unwrap());
+        sender
+            .handle_table
+            .with_lock(|table| table.get_object::<crate::Signal>(returned, Rights::READ))
+            .unwrap();
+    }
+
+    #[test]
+    fn async_wait_snapshot_does_not_delay_cancellation_on_handle_close() {
+        let port = Port::new();
+        let _receiver = receiver_capability(&port);
+        let caller = transport(BASE_A);
+        let id = port.call_async(&caller, None).unwrap();
+        let source = caller
+            .handle_table
+            .with_lock(|table| table.clone_target(id, Rights::READ))
+            .unwrap()
+            .as_waitable()
+            .unwrap();
+        caller
+            .handle_table
+            .with_lock(|table| table.remove(id))
+            .unwrap()
+            .release();
+        assert_eq!(port.peek(), 0);
+        drop(source);
+    }
+    #[test]
+    fn async_discarded_caps_revoke_root_and_descendant_hooks() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::rev_node::{RevNode, RevocationHook};
+
+        struct Hook(AtomicBool);
+        impl RevocationHook for Hook {
+            fn revoke(&self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        for (send, consume) in [(false, false), (true, false), (false, true), (true, true)] {
+            let port = Port::new();
+            let receiver = receiver_capability(&port);
+            let sender = transport(BASE_A);
+            let cap = Capability::new_with_default_rights(crate::Signal::new());
+            let child = RevNode::new_child(cap.node()).unwrap();
+            let root_hook: Arc<Hook> = Arc::new(Hook(AtomicBool::new(false)));
+            let child_hook: Arc<Hook> = Arc::new(Hook(AtomicBool::new(false)));
+            let root_dyn: Arc<dyn RevocationHook> = root_hook.clone();
+            let child_dyn: Arc<dyn RevocationHook> = child_hook.clone();
+            cap.node().register_hook(Arc::downgrade(&root_dyn)).unwrap();
+            child.register_hook(Arc::downgrade(&child_dyn)).unwrap();
+            let handle = sender
+                .handle_table
+                .with_lock(|table| table.insert(cap))
+                .unwrap();
+            crate::ipc_buffer_xfer::write_caps(&sender, &[handle]).unwrap();
+            crate::ipc_buffer_xfer::write_tag(&sender, encode_tag(0, 1)).unwrap();
+            let pending = if send {
+                port.send_async(&sender, None)
+            } else {
+                port.call_async(&sender, None)
+            }
+            .unwrap();
+            assert!(!root_hook.0.load(Ordering::Acquire));
+            if consume {
+                drop(receiver);
+                assert_eq!(take_pending(&sender, pending), Err(IpcError::PeerClosed));
+            } else {
+                sender
+                    .handle_table
+                    .with_lock(|table| table.remove(pending))
+                    .unwrap()
+                    .release();
+            }
+            let discarded = !(send && consume);
+            assert_eq!(root_hook.0.load(Ordering::Acquire), discarded);
+            assert_eq!(child_hook.0.load(Ordering::Acquire), discarded);
+            sender.handle_table.with_lock(HandleTable::drain).release();
         }
     }
 }

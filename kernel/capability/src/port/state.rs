@@ -23,6 +23,7 @@ use crate::{
 
 pub(super) struct Waiter<K> {
     pub(super) kind: K,
+    pub(super) staged: Option<Arc<kbase::MutexCell<crate::pending::StagedCaps>>>,
     pub(super) transport: ThreadTransport,
     pub(super) waker: Arc<ParkWaker>,
     pub(super) outcome: Arc<OutcomeSlot>,
@@ -229,6 +230,10 @@ impl PortState {
         let index = index?;
         self.departed -= 1;
         Some(self.badges.swap_remove(index).badge)
+    }
+
+    pub(super) fn has_receivers(&self) -> bool {
+        self.receivers > 0
     }
 
     pub(super) fn take_receiver(&mut self) -> Result<Option<ReceiverWaiter>, IpcError> {

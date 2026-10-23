@@ -4,8 +4,8 @@
 //! хендлы в `caps[..ncaps]`.
 
 use capability::{
-    Capability, IpcError, Port, PortAccess, Reply, Rights, ThreadTransport, deadline_after,
-    install_handle, port_call, port_recv, port_send, release_delivered, runtime,
+    Capability, IpcError, Pending, Port, PortAccess, Reply, Rights, ThreadTransport,
+    deadline_after, install_handle, port_call, port_recv, port_send, release_delivered, runtime,
 };
 use kbase::LockCell;
 use memory::virtual_address::VirtualAddress;
@@ -141,6 +141,41 @@ pub(super) fn sys_port_reply(handle: u64) -> Result<u64, SyscallError> {
     }
 
     res?;
+    Ok(0)
+}
+
+pub(super) fn sys_port_async(handle: u64, call: bool) -> Result<u64, SyscallError> {
+    let id = parse_handle_id(handle)?;
+    let context = current_ipc_context()?;
+    let PortAccess { port, badge, hold } = context
+        .handle_table
+        .with_lock(|table| table.get_port(id, Rights::WRITE))
+        .map_err(map_ipc_error)?;
+    let transport = transport_from(&context)?.with_badge(badge);
+    let pending = if call {
+        port.call_async(&transport, hold)
+    } else {
+        port.send_async(&transport, hold)
+    }
+    .map_err(map_ipc_error)?;
+    Ok(u64::from(pending.raw().get()))
+}
+
+pub(super) fn sys_pending_take(handle: u64) -> Result<u64, SyscallError> {
+    let id = parse_handle_id(handle)?;
+    let context = current_ipc_context()?;
+    let pending = context
+        .handle_table
+        .with_lock(|table| table.get_object::<Pending>(id, Rights::READ))
+        .map_err(map_ipc_error)?;
+    let transport = transport_from(&context)?;
+    let result = pending.take(&transport);
+    if result != Err(IpcError::ShouldWait)
+        && let Ok(drained) = context.handle_table.with_lock(|table| table.remove(id))
+    {
+        drained.release();
+    }
+    result.map_err(map_ipc_error)?;
     Ok(0)
 }
 
