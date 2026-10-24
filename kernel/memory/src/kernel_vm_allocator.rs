@@ -358,4 +358,9 @@ impl HeapAllocator {
     pub const fn current_size(&self) -> usize {
         self.current_size
     }
+
+    /// VA-окно арены. Каждый блок heap лежит внутри него.
+    pub const fn arena(&self) -> HeapArena {
+        self.arena
+    }
 }

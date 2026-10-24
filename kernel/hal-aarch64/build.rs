@@ -82,6 +82,7 @@ fn main() {
         spec.boot.offset
     );
     let linker_script = Path::new(&manifest_dir).join(linker_script_name);
+    println!("cargo:rerun-if-changed={}", linker_script.display());
     println!("cargo:rustc-link-arg=-T{}", linker_script.display());
 
     // Экспорт параметров в env для использования в коде и Makefile

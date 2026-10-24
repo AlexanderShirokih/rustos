@@ -469,6 +469,20 @@ where
         });
     }
 
+    /// Блокирует текущий поток без тайм-аута. Вызывает `between` после установки
+    /// состояния `Blocked`, до переключения контекста.
+    #[doc(hidden)]
+    pub fn block_current_interleaved(&self, between: impl FnOnce()) {
+        with_preemption_disabled::<A::Cpu, _>(|| {
+            let action = self.inner.with_lock(|inner| {
+                let now_ns = inner.timer.now_ns();
+                inner.block_current(now_ns, None)
+            });
+            between();
+            perform_schedule_action(&self.inner, action);
+        });
+    }
+
     pub fn on_tick(&self, now_ns: u64) {
         let action = self.inner.with_lock(|inner| inner.on_tick(now_ns));
         perform_schedule_action(&self.inner, action);
@@ -1239,6 +1253,54 @@ where
             }
             _ => {}
         }
+    }
+
+    pub(super) fn unblock_thread_handoff(&mut self, id: ThreadId) {
+        let Some(own) = self.handoff_cpu(id) else {
+            self.unblock_thread(id);
+            return;
+        };
+        let Some(thread) = self.threads.get_mut(id) else {
+            return;
+        };
+        let priority = thread.priority();
+        thread.set_state(ThreadState::Ready);
+        thread.set_time_slice_left(self.time_slice_ticks);
+        // Последующие пробуждения должны ставить получателя в очередь нового CPU.
+        thread.set_cpu_affinity(own);
+        let Some(cpu) = self.current_cpu_mut() else {
+            return;
+        };
+        // Получатель займёт место вызывающего на этом CPU после его блокировки,
+        // поэтому передача не требует пробуждения простаивающих CPU.
+        cpu.ready_queue_mut().push(id, priority);
+        cpu.set_handoff(id);
+    }
+
+    fn handoff_cpu(&self, id: ThreadId) -> Option<CpuId> {
+        let cpu = self.current_cpu()?;
+        if cpu.is_idle() {
+            return None;
+        }
+        let thread = self.threads.get(id)?;
+        if !matches!(
+            thread.state(),
+            ThreadState::Blocked | ThreadState::Sleeping { .. }
+        ) {
+            return None;
+        }
+        // Контекст удержанного потока ещё записывает его CPU вне scheduler-лока.
+        if self.is_thread_held(id) {
+            return None;
+        }
+        if cpu
+            .ready_queue()
+            .peek_highest_priority()
+            .is_some_and(|highest| highest < thread.priority())
+        {
+            return None;
+        }
+        Some(cpu.id())
     }
 
     pub(super) fn current_handle_table(&self) -> Option<Arc<MutexCell<HandleTable>>> {
@@ -2118,13 +2180,34 @@ where
     }
 
     fn take_next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {
-        let next = self.pick_next_runnable(idle_id);
+        let next = self
+            .take_handoff()
+            .unwrap_or_else(|| self.pick_next_runnable(idle_id));
         // Выбор под локом учитывает всю очередь CPU и кражу, поэтому IPI самому себе,
         // поставленный до выбора или кражей, больше не нужен.
         if let Some(own) = self.current_cpu().map(Cpu::id) {
             self.pending_wakeups &= !(1u16 << own.as_index());
         }
         next
+    }
+
+    fn take_handoff(&mut self) -> Option<ThreadId> {
+        let id = self.current_cpu_mut()?.take_handoff()?;
+        let priority = self
+            .threads
+            .get(id)
+            .filter(|thread| matches!(thread.state(), ThreadState::Ready))
+            .map(Thread::priority)?;
+        let cpu = self.current_cpu_mut()?;
+        if cpu
+            .ready_queue()
+            .peek_highest_priority()
+            .is_some_and(|highest| highest < priority)
+        {
+            return None;
+        }
+        // Украденный поток в очереди этого CPU уже не стоит.
+        cpu.ready_queue_mut().remove(id, priority).then_some(id)
     }
 
     fn pick_next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {

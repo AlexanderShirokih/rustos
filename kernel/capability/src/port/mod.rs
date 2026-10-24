@@ -576,7 +576,9 @@ fn deliver_call(caller: &ThreadTransport, receiver: &ReceiverWaiter, ctx: ParkCt
             let reply = Reply::new(caller.clone(), ctx.waker.clone(), ctx.outcome.clone());
             receiver.reply_slot.install(reply);
             receiver.outcome.set(RendezvousOutcome::Delivered);
-            receiver.waker.signal_match();
+            // Вызыватель паркуется до ответа сразу после доставки, и его CPU достаётся
+            // получателю.
+            receiver.waker.signal_handoff();
             CallAction::Park {
                 waker: ctx.waker,
                 outcome: ctx.outcome,
@@ -883,13 +885,23 @@ mod tests {
 
     struct StubRuntime {
         unblocks: AtomicU32,
+        wakes: std::sync::Mutex<Vec<bool>>,
     }
 
     impl StubRuntime {
         fn arc() -> Arc<dyn KernelRuntime> {
+            Self::recording()
+        }
+
+        fn recording() -> Arc<Self> {
             Arc::new(Self {
                 unblocks: AtomicU32::new(0),
+                wakes: std::sync::Mutex::new(Vec::new()),
             })
+        }
+
+        fn take_wakes(&self) -> Vec<bool> {
+            core::mem::take(&mut *self.wakes.lock().unwrap())
         }
     }
 
@@ -913,6 +925,11 @@ mod tests {
         fn block_current_until(&self, _f: &AtomicU32, _t: Option<u64>) {}
         fn unblock(&self, _t: WaitToken) {
             self.unblocks.fetch_add(1, Ordering::AcqRel);
+            self.wakes.lock().unwrap().push(false);
+        }
+        fn unblock_handoff(&self, _t: WaitToken) {
+            self.unblocks.fetch_add(1, Ordering::AcqRel);
+            self.wakes.lock().unwrap().push(true);
         }
         fn set_blocked_cancel(&self, _cancel: Arc<dyn CancelTarget>) {}
         fn clear_blocked_cancel(&self) {}
@@ -1096,6 +1113,57 @@ mod tests {
         assert_eq!(outcome.get(), Some(RendezvousOutcome::Delivered));
         // one-shot: повторный reply отвергнут.
         assert_eq!(reply.reply(&server).unwrap_err(), IpcError::BadHandle);
+    }
+
+    #[test]
+    fn only_a_parking_caller_hands_its_cpu_to_the_receiver() {
+        let stub = StubRuntime::recording();
+        let rt: Arc<dyn KernelRuntime> = stub.clone();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let park_receiver = || {
+            let RecvAction::Park { reply_slot, .. } = ep.recv(&transport(BASE_B), &rt, None, None)
+            else {
+                panic!("recv must park");
+            };
+            reply_slot
+        };
+
+        park_receiver();
+        assert!(matches!(
+            ep.send(&transport(BASE_A), &rt, None, None),
+            SendAction::Done
+        ));
+        assert_eq!(stub.take_wakes(), [false]);
+
+        park_receiver();
+        let (caller, _caller_table) = transport_with_signal(BASE_A, Rights::READ);
+        assert!(matches!(
+            ep.call(&caller, &rt, None, None),
+            CallAction::Failed(IpcError::AccessDenied)
+        ));
+        assert_eq!(stub.take_wakes(), [false]);
+
+        let reply_slot = park_receiver();
+        assert!(matches!(
+            ep.call(&transport(BASE_A), &rt, None, None),
+            CallAction::Park { .. }
+        ));
+        assert_eq!(stub.take_wakes(), [true]);
+
+        let reply = reply_slot.take().expect("reply of the matched call");
+        reply.reply(&transport(BASE_B)).expect("reply ok");
+        assert_eq!(stub.take_wakes(), [false]);
+
+        park_receiver();
+        let sender = transport(BASE_A);
+        let pending = ep.call_async(&sender, None).expect("call_async");
+        assert_eq!(stub.take_wakes(), [false]);
+        sender
+            .handle_table
+            .with_lock(|table| table.remove(pending))
+            .unwrap()
+            .release();
     }
 
     #[test]

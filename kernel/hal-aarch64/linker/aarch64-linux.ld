@@ -8,12 +8,13 @@ KERNEL_VIRT_BASE = 0xFFFFFF8000000000;
 SECTIONS {
     . = KERNEL_VIRT_BASE + KERNEL_OFFSET;
 
+    _kernel_start = .;
+
     /* Загрузочный заголовок: LMA = KERNEL_OFFSET, VMA = KERNEL_VIRT_BASE + KERNEL_OFFSET */
     .head : AT(. - KERNEL_VIRT_BASE) {
         KEEP(*(.head))
     }
 
-    _kernel_start = .;
     _text_start = .;
 
     . = ALIGN(4K);

@@ -423,6 +423,15 @@ where
         notify_pending_cpus(&self.inner);
     }
 
+    fn unblock_handoff(&self, token: WaitToken) {
+        let Ok(thread_id) = ThreadId::try_from(token) else {
+            return;
+        };
+        self.inner
+            .with_lock(|inner| inner.unblock_thread_handoff(thread_id));
+        notify_pending_cpus(&self.inner);
+    }
+
     fn set_blocked_cancel(&self, cancel: Arc<dyn capability::CancelTarget>) {
         let rejected = self
             .inner

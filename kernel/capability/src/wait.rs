@@ -77,8 +77,9 @@ pub(super) enum WakeTarget {
 }
 
 impl WakeTarget {
-    fn wake(&self) {
+    fn wake(&self, handoff: bool) {
         match self {
+            Self::Thread { runtime, token } if handoff => runtime.unblock_handoff(*token),
             Self::Thread { runtime, token } => runtime.unblock(*token),
             Self::Object(signal) => {
                 signal.signal(syscall::SIGNALED, 0);
@@ -112,6 +113,10 @@ impl ParkWaker {
     }
 
     fn signal(&self, index: u32, observed: u32) {
+        self.signal_with(index, observed, false);
+    }
+
+    fn signal_with(&self, index: u32, observed: u32, handoff: bool) {
         self.observed.store(observed, Ordering::Release);
         self.winner_index.store(index, Ordering::Release);
         if self
@@ -124,12 +129,16 @@ impl ParkWaker {
             )
             .is_ok()
         {
-            self.target.wake();
+            self.target.wake(handoff);
         }
     }
 
     pub(super) fn signal_match(&self) {
         self.signal(0, 0);
+    }
+
+    pub(super) fn signal_handoff(&self) {
+        self.signal_with(0, 0, true);
     }
 
     pub(super) fn claim_timeout(&self) -> bool {
@@ -175,7 +184,7 @@ impl ParkWaker {
 impl CancelTarget for ParkWaker {
     fn cancel(&self) {
         if self.claim_cancel() {
-            self.target.wake();
+            self.target.wake(false);
         }
     }
 }

@@ -90,6 +90,10 @@ impl capability::KernelRuntime for ForwardingRuntime {
         self.with(|rt| rt.unblock(token));
     }
 
+    fn unblock_handoff(&self, token: capability::WaitToken) {
+        self.with(|rt| rt.unblock_handoff(token));
+    }
+
     fn set_blocked_cancel(&self, cancel: Arc<dyn capability::CancelTarget>) {
         self.with(|rt| rt.set_blocked_cancel(cancel));
     }
@@ -3112,4 +3116,132 @@ fn a_terminated_thread_stops_counting_towards_the_load_of_its_cpu() {
         "a terminated thread must not keep inflating the load of its cpu",
     );
     assert_ne!(running.thread_cpu_affinity(next), Some(second));
+}
+
+fn parked_flag() -> core::sync::atomic::AtomicU32 {
+    core::sync::atomic::AtomicU32::new(capability::ParkState::REGISTERED)
+}
+
+fn hand_off(handle: &SchedulerHandle<MockContext, MockTimerSource>, thread: scheduler::ThreadId) {
+    capability::KernelRuntime::unblock_handoff(handle, capability::WaitToken::from(thread));
+}
+
+fn block_current(handle: &SchedulerHandle<MockContext, MockTimerSource>) {
+    capability::KernelRuntime::block_current_until(handle, &parked_flag(), None);
+}
+
+#[test]
+fn a_call_runs_a_receiver_blocked_on_another_cpu_on_its_own_cpu() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let caller = scheduler
+        .spawn(SpawnConfig::new("caller"), || {})
+        .expect("spawn caller");
+    let receiver = scheduler
+        .spawn(SpawnConfig::new("receiver"), || {})
+        .expect("spawn receiver");
+
+    let running = scheduler.run();
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(receiver));
+    block_current(&handle);
+
+    set_current_cpu(CpuId::ZERO);
+    let _ = take_reschedules();
+    hand_off(&handle, receiver);
+    assert_eq!(
+        take_reschedules(),
+        vec![],
+        "a handed-off receiver must not interrupt any cpu",
+    );
+    assert_eq!(running.thread_cpu_affinity(receiver), Some(CpuId::ZERO));
+
+    assert_eq!(running.current(), Some(caller));
+    block_current(&handle);
+    assert_eq!(running.current(), Some(receiver));
+}
+
+#[test]
+fn a_receiver_whose_context_is_still_being_saved_is_not_handed_off() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let _caller = scheduler
+        .spawn(SpawnConfig::new("caller"), || {})
+        .expect("spawn caller");
+    let receiver = scheduler
+        .spawn(SpawnConfig::new("receiver"), || {})
+        .expect("spawn receiver");
+
+    let running = scheduler.run();
+    let handle = running.handle();
+    let second = bootstrap_cpu(&handle, 1);
+    set_current_cpu(second);
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(receiver));
+
+    running.block_current_interleaved(|| {
+        set_current_cpu(CpuId::ZERO);
+        hand_off(&handle, receiver);
+        assert_eq!(
+            running.thread_cpu_affinity(receiver),
+            Some(second),
+            "a receiver held by its cpu must stay home",
+        );
+        set_current_cpu(second);
+    });
+
+    assert_eq!(take_reschedules(), vec![second]);
+    handle.on_reschedule();
+    assert_eq!(running.current(), Some(receiver));
+    set_current_cpu(CpuId::ZERO);
+}
+
+#[test]
+fn a_ready_thread_of_higher_priority_cancels_the_handoff() {
+    reset_switches();
+    let timer = MockTimer::new();
+    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
+        .bootstrap()
+        .ok()
+        .expect("bootstrap must succeed in tests");
+    let receiver = scheduler
+        .spawn(
+            SpawnConfig::new("receiver").priority(Priority::new(5)),
+            || {},
+        )
+        .expect("spawn receiver");
+    let caller = scheduler
+        .spawn(SpawnConfig::new("caller").priority(Priority::new(5)), || {})
+        .expect("spawn caller");
+    let urgent = scheduler
+        .spawn(SpawnConfig::new("urgent").priority(Priority::new(1)), || {})
+        .expect("spawn urgent");
+
+    let running = scheduler.run();
+    let handle = running.handle();
+    assert_eq!(running.current(), Some(urgent));
+    block_current(&handle);
+    assert_eq!(running.current(), Some(receiver));
+    block_current(&handle);
+    assert_eq!(running.current(), Some(caller));
+
+    capability::KernelRuntime::unblock(&handle, capability::WaitToken::from(urgent));
+    hand_off(&handle, receiver);
+    block_current(&handle);
+    assert_eq!(
+        running.current(),
+        Some(urgent),
+        "a handoff must not overtake a thread of higher priority",
+    );
 }

@@ -8,6 +8,7 @@ pub struct Cpu {
     current: ThreadId,
     previous: Option<ThreadId>,
     idle: ThreadId,
+    handoff: Option<ThreadId>,
 }
 
 impl Cpu {
@@ -18,6 +19,7 @@ impl Cpu {
             current: idle,
             previous: None,
             idle,
+            handoff: None,
         }
     }
 
@@ -55,6 +57,16 @@ impl Cpu {
 
     pub fn idle(&self) -> ThreadId {
         self.idle
+    }
+
+    /// Назначает кандидата на передачу CPU при ближайшем выборе следующего потока.
+    /// Выбор учитывает приоритеты готовых потоков и присутствие кандидата в очереди CPU.
+    pub fn set_handoff(&mut self, thread: ThreadId) {
+        self.handoff = Some(thread);
+    }
+
+    pub fn take_handoff(&mut self) -> Option<ThreadId> {
+        self.handoff.take()
     }
 
     /// CPU исполняет свой idle-поток.
