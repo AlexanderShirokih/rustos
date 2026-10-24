@@ -13,9 +13,11 @@ bench = false
 doctest = false
 
 [dependencies]
+ipc = { workspace = true }
 kernel-objects = { workspace = true }
 spin = { workspace = true }
 syscall = { workspace = true }
+syscall-user = { workspace = true }
 
 [lints]
 workspace = true

@@ -10,10 +10,12 @@
 
 use std::{
     cell::RefCell,
+    pin::pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Context, Poll, Waker},
     thread,
 };
 
@@ -75,6 +77,14 @@ fn serve_abandoned<S>(
     listener.serve(|frame| dispatch(service, frame))
 }
 
+fn complete<F: Future>(future: F) -> F::Output {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    }
+    .expect("a mock channel operation completes at once")
+}
+
 const ERR_DIVIDE_BY_ZERO: u32 = 1;
 
 ipc::protocol! {
@@ -132,6 +142,30 @@ fn operations_round_trip_through_the_dispatcher() {
 
     assert_eq!(answers, (42, Err(CallError::Remote(ERR_DIVIDE_BY_ZERO)), 5));
     assert_eq!(server.seed, 0xDEAD_BEEF);
+}
+
+#[test]
+fn the_async_client_answers_as_the_sync_client() {
+    let (answers, _) = serve(CalcServer::default(), 8, calc::dispatch, |channel| {
+        let client = calc::Client::new(channel.clone());
+        let sync = (
+            client.add(7, 35),
+            client.div(1, 0),
+            client.echo_len("hello"),
+            client.reset(1),
+        );
+        let client = calc::AsyncClient::new(channel);
+        let asynchronous = (
+            complete(client.add(7, 35)),
+            complete(client.div(1, 0)),
+            complete(client.echo_len("hello")),
+            complete(client.reset(1)),
+        );
+        (sync, asynchronous)
+    });
+
+    assert_eq!(answers.0, answers.1);
+    assert_eq!(answers.1.1, Err(CallError::Remote(ERR_DIVIDE_BY_ZERO)));
 }
 
 #[test]
@@ -603,6 +637,25 @@ fn unsent_one_way_parameters_come_back_in_declaration_order() {
 
     assert_eq!(refused.into_value(), Ok((cap_of(0x45), cap_of(0x46))));
     assert_eq!(fates.closed(), 2);
+}
+
+#[test]
+fn an_unsent_async_one_way_parameter_comes_back_as_the_sync_one() {
+    let fates = Fates::default();
+    let (channel, listener) = ipc_test::pair();
+    drop(listener);
+
+    let client = owned_cast::AsyncClient::new(channel);
+    let refused = complete(client.deliver_pair(fates.handle(0x4C), fates.handle(0x4D)))
+        .expect_err("the cast is refused");
+    let unsent_call =
+        complete(lender::AsyncClient::new(client.into_channel()).keep(fates.handle(0x4E)));
+
+    assert_eq!(refused.error, IpcError::PeerClosed);
+    assert_eq!(unsent_call, Err(IpcError::PeerClosed));
+    assert_eq!(fates.closed(), 1);
+    assert_eq!(refused.into_value(), Ok((cap_of(0x4C), cap_of(0x4D))));
+    assert_eq!(fates.closed(), 3);
 }
 
 #[test]

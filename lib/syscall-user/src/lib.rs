@@ -1,5 +1,5 @@
-//! Сторона userspace у syscall-ABI: обёртки системных вызовов, доступ к IPC-буферу потока и
-//! транспорт ipc-контрактов поверх синхронного port.
+//! Сторона userspace у syscall-ABI: обёртки системных вызовов, доступ к IPC-буферу потока,
+//! монотонные часы и транспорт ipc-контрактов поверх port.
 //!
 //! Крейт не хранит состояния процесса, и две его сборки в одном процессе равнозначны. Он
 //! линкуется и внутрь стандартной библиотеки, и в программу, взявшую его прямой зависимостью.
@@ -10,6 +10,7 @@
 #![no_std]
 #![allow(unsafe_code)]
 
+pub mod clock;
 mod delivery;
 mod ipc_buffer;
 mod issued;
@@ -20,7 +21,7 @@ pub use delivery::{Delivery, ReceivedSession};
 pub use ipc;
 pub use ipc_buffer::ipc_buffer_ptr;
 pub use issued::IssuedHandle;
-pub use port_transport::PortTransport;
+pub use port_transport::{PortTransport, take_call, take_outcome, take_send};
 pub use svc::{
     handle_close, handle_duplicate, ipc_buffer_addr, irq_ack, irq_mint, memory_allocate,
     memory_create_virtual, memory_free, memory_map, memory_region_inspect, memory_remap,

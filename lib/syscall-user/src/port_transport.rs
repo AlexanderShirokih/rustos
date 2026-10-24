@@ -9,6 +9,10 @@
 //! Канал пишет номера capability исходящего кадра в IPC-буфер. Успех отправки снимает закрытие
 //! с их владельцев, отказ `send` и ответа возвращает кадр вызывающему, а отказ `call` кадр
 //! разрушает. Кадр ответа `call` канал читает в буфер исходящего кадра.
+//!
+//! [`PortTransport::post_send`] и [`PortTransport::post_call`] ставят кадр отложенной операцией
+//! порта и сразу возвращают её. Исход после `SIGNALED` операции выдают [`take_send`] и
+//! [`take_call`], а сигнал ждёт вызывающий.
 
 use core::num::NonZeroU32;
 
@@ -17,14 +21,16 @@ use ipc::{
     Unsent, wire::IpcError,
 };
 use syscall::{
-    Handle, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, SyscallError, Timeout, decode_tag,
+    Handle, IPC_BUFFER_DATA_MAX, IPC_BUFFER_MAX_CAPS, IpcBuffer, SyscallError, Timeout, decode_tag,
     encode_tag, kind,
 };
 
 use crate::{
     Delivery, IssuedHandle,
     ipc_buffer::ipc_buffer_ptr,
-    svc::{port_call, port_recv, port_reply, port_send},
+    svc::{
+        pending_take, port_call, port_call_async, port_recv, port_reply, port_send, port_send_async,
+    },
 };
 
 /// Канал ipc-контракта поверх port-handle.
@@ -42,6 +48,36 @@ impl PortTransport {
         Self {
             handle: handle.into(),
         }
+    }
+
+    /// Ставит кадр вызова и возвращает отложенную операцию. Capability кадра переходят ядру при
+    /// постановке, а отказ постановки оставляет их кадру. Исход выдаёт [`take_call`].
+    pub fn post_call(
+        &self,
+        frame: &mut Outgoing<'_, Delivery>,
+    ) -> Result<IssuedHandle<kind::Pending>, IpcError> {
+        self.post(frame, port_call_async)
+    }
+
+    /// Ставит односторонний кадр и возвращает отложенную операцию. До исхода capability кадра
+    /// держит ядро. Отказ доставки возвращает их кадру в [`take_send`], закрытие операции до
+    /// исхода закрывает их, а отказ постановки оставляет их кадру.
+    pub fn post_send(
+        &self,
+        frame: &mut Outgoing<'_, Delivery>,
+    ) -> Result<IssuedHandle<kind::Pending>, IpcError> {
+        self.post(frame, port_send_async)
+    }
+
+    fn post(
+        &self,
+        frame: &mut Outgoing<'_, Delivery>,
+        post: fn(Handle<kind::Port>) -> Result<IssuedHandle<kind::Pending>, SyscallError>,
+    ) -> Result<IssuedHandle<kind::Pending>, IpcError> {
+        store_buffer(frame)?;
+        let pending = post(self.handle).map_err(map_error)?;
+        core::mem::take(frame.resources_mut()).transferred();
+        Ok(pending)
     }
 }
 
@@ -96,6 +132,63 @@ impl ReplyChannel for IssuedHandle<kind::Reply> {
     }
 }
 
+/// Выдаёт исход отложенного вызова `pending` с поднятым `SIGNALED` и читает кадр ответа в
+/// буфер кадра вызова `frame`.
+pub fn take_call(
+    pending: IssuedHandle<kind::Pending>,
+    frame: Outgoing<'_, Delivery>,
+) -> Result<Incoming<'_, Delivery>, IpcError> {
+    take(pending)?;
+    load_buffer(frame.into_parts().buffer, None).ok_or(IpcError::PeerClosed)
+}
+
+/// Выдаёт исход отложенной отправки `pending` с поднятым `SIGNALED`. Отказ возвращает кадр
+/// `frame` с capability, которые вернуло ядро.
+pub fn take_send(
+    pending: IssuedHandle<kind::Pending>,
+    mut frame: Outgoing<'_, Delivery>,
+) -> Result<(), Unsent<'_, Delivery>> {
+    let Err(error) = take(pending) else {
+        return Ok(());
+    };
+
+    if let Some(ptr) = ipc_buffer_ptr() {
+        // SAFETY: см. `load_buffer`. Здесь только чтение полей буфера.
+        let buf = unsafe { &*ptr };
+        // Ядро пишет возвращённые capability в порядке слотов кадра, и номер записи может
+        // смениться поколением.
+        *frame.resources_mut() = Delivery::new(0, buffer_caps(buf), None);
+    }
+
+    Err((error, frame))
+}
+
+/// Выдаёт конечный исход отложенной операции `pending` и расходует её. Операция без исхода
+/// возвращается вызывающему.
+pub fn take_outcome(
+    pending: IssuedHandle<kind::Pending>,
+) -> Result<i64, IssuedHandle<kind::Pending>> {
+    let ret = pending_take(pending.as_raw());
+    if SyscallError::from_return(ret) == Some(SyscallError::ShouldWait) {
+        return Err(pending);
+    }
+
+    // Конечный исход расходует запись.
+    let _ = pending.leak();
+    Ok(ret)
+}
+
+fn take(pending: IssuedHandle<kind::Pending>) -> Result<(), IpcError> {
+    match take_outcome(pending) {
+        Ok(ret) => map_send_result(ret),
+        // Операция без исхода отменяется закрытием.
+        Err(unfinished) => {
+            drop(unfinished);
+            Err(IpcError::PeerClosed)
+        }
+    }
+}
+
 #[inline]
 fn settle(
     sent: Result<(), IpcError>,
@@ -118,20 +211,22 @@ fn load_buffer(
     // SAFETY: ядро замаппило per-thread IPC-буфер user-RW по одной странице; `ptr` валиден
     // и эксклюзивен для текущего потока. Здесь только чтение полей буфера.
     let buf = unsafe { &*ptr };
-    let tag = decode_tag(buf.tag);
-    let len = tag.len.min(IPC_BUFFER_DATA_MAX);
-    let ncaps = tag.ncaps.min(IPC_BUFFER_MAX_CAPS);
+    let len = decode_tag(buf.tag).len.min(IPC_BUFFER_DATA_MAX);
+    let resources = Delivery::new(buf.badge, buffer_caps(buf), reply);
+    let bytes = into.get_mut(..len)?;
+    bytes.copy_from_slice(buf.data.get(..len)?);
+    Some(Incoming { bytes, resources })
+}
+
+fn buffer_caps(buf: &IpcBuffer) -> [Option<Handle<kind::Any>>; IPC_BUFFER_MAX_CAPS] {
+    let ncaps = decode_tag(buf.tag).ncaps.min(IPC_BUFFER_MAX_CAPS);
     let raw = buf.caps.get(..ncaps).unwrap_or_default();
-    let caps = core::array::from_fn(|index| {
+    core::array::from_fn(|index| {
         raw.get(index)
             .copied()
             .and_then(NonZeroU32::new)
             .map(Handle::<kind::Any>::from_abi)
-    });
-    let resources = Delivery::new(buf.badge, caps, reply);
-    let bytes = into.get_mut(..len)?;
-    bytes.copy_from_slice(buf.data.get(..len)?);
-    Some(Incoming { bytes, resources })
+    })
 }
 
 fn store_buffer(frame: &Outgoing<'_, Delivery>) -> Result<(), IpcError> {
@@ -176,10 +271,15 @@ fn map_recv_error(error: SyscallError) -> RecvError {
 fn map_send_result(ret: i64) -> Result<(), IpcError> {
     match SyscallError::from_return(ret) {
         None if ret == 0 => Ok(()),
-        Some(SyscallError::Timeout) => Err(IpcError::Timeout),
-        Some(SyscallError::OutOfHandles | SyscallError::ResourceExhausted) => {
-            Err(IpcError::ResourceExhausted)
-        }
-        _ => Err(IpcError::PeerClosed),
+        Some(error) => Err(map_error(error)),
+        None => Err(IpcError::PeerClosed),
+    }
+}
+
+const fn map_error(error: SyscallError) -> IpcError {
+    match error {
+        SyscallError::Timeout => IpcError::Timeout,
+        SyscallError::OutOfHandles | SyscallError::ResourceExhausted => IpcError::ResourceExhausted,
+        _ => IpcError::PeerClosed,
     }
 }

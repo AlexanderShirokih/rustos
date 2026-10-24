@@ -30,12 +30,14 @@ pub use declare::start_parent;
 pub use declare::{Requirements, StartupError, StartupFailure};
 pub use export::{
     ExportStopped, MintedSession, Polled, SessionEvent, SessionEvents, SessionPort, serve_export,
-    whole_export,
+    serve_export_async, whole_export,
 };
 pub use import::Import;
 pub use ipc::wire::IpcError;
 pub use kernel_objects::{OwnedHandle, Port, PortTransport, Session, kind};
 pub use providers::{ProviderSessions, ProviderWatch, Providers};
 pub use query::{AnyOf, Query};
-pub use request::{Found, SessionRequest, accept, all, next, open, session, watch};
+pub use request::{
+    AsyncStartup, Found, SessionRequest, accept, accept_async, all, next, open, session, watch,
+};
 pub use syscall::{Handle, ObjectKind};

@@ -1,12 +1,13 @@
 //! Транспорт кадров поверх рандеву ядра.
 //!
-//! Клиентская сторона - [`Channel`]: односторонняя отправка и вызов с ответом. Серверная
-//! сторона - [`Listener`]: приём кадра вместе с ресурсами его доставки. Ответ встречному вызову
-//! уходит каналом [`ReplyChannel`], который приходит в ресурсах кадра вызова. Канал принимает
-//! исходящий кадр [`Outgoing`]: байты, заимствованные у построителя
-//! [`MessageBuf`](crate::wire::MessageBuf), и владельцев его capability значением.
+//! Клиентская сторона - [`Channel`]: односторонняя отправка и вызов с ответом. [`AsyncChannel`]
+//! выполняет те же операции и возвращает future с результатом. Серверная сторона -
+//! [`Listener`]: приём кадра вместе с ресурсами его доставки. Ответ встречному вызову уходит
+//! каналом [`ReplyChannel`], который приходит в ресурсах кадра вызова. Канал принимает исходящий
+//! кадр [`Outgoing`]: байты, заимствованные у построителя [`MessageBuf`](crate::wire::MessageBuf),
+//! и владельцев его capability значением.
 
-use core::fmt;
+use core::{fmt, future::Future};
 
 use syscall::Timeout;
 
@@ -58,6 +59,12 @@ impl<'b, R> Outgoing<'b, R> {
     #[must_use]
     pub const fn resources(&self) -> &R {
         &self.resources
+    }
+
+    /// Ресурсы кадра для замены capability. Индексы в байтах кадра называют слоты ресурсов, и
+    /// новая capability занимает слот заменённой.
+    pub const fn resources_mut(&mut self) -> &mut R {
+        &mut self.resources
     }
 
     /// Ресурсы кадра без его байтов.
@@ -112,6 +119,30 @@ pub trait Channel {
         frame: Outgoing<'b, Self::Resources>,
         wait: Timeout,
     ) -> Result<Incoming<'b, Self::Resources>, IpcError>;
+}
+
+/// Клиентская сторона асинхронного канала. Методы возвращают future с результатом операции.
+///
+/// Результаты операций и смысл срока `wait` те же, что у [`Channel`]. Разрушение future до
+/// завершения отменяет операцию. Правила возврата или закрытия capability одностороннего
+/// кадра при тайм-ауте или разрушении future определяет реализация.
+pub trait AsyncChannel {
+    /// Ресурсы исходящего кадра и кадра ответа.
+    type Resources: ReceivedResources;
+
+    /// Отправляет односторонний кадр, как [`Channel::send`].
+    fn send<'b>(
+        &'b self,
+        frame: Outgoing<'b, Self::Resources>,
+        wait: Timeout,
+    ) -> impl Future<Output = Result<(), Unsent<'b, Self::Resources>>> + 'b;
+
+    /// Отправляет кадр вызова и принимает кадр ответа, как [`Channel::call`].
+    fn call<'b>(
+        &'b self,
+        frame: Outgoing<'b, Self::Resources>,
+        wait: Timeout,
+    ) -> impl Future<Output = Result<Incoming<'b, Self::Resources>, IpcError>> + 'b;
 }
 
 /// Серверная сторона канала.

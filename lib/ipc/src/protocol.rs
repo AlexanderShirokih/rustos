@@ -64,6 +64,8 @@ pub trait Protocol {
 ///   метод отдаёт прочитанным ответом, как любой другой тип. Ассоциированная функция
 ///   `Client::new(channel)` строит клиента, `with_wait` задаёт срок ожидания получателя,
 ///   `into_channel` отдаёт канал обратно;
+/// - `struct AsyncClient<C: AsyncChannel>` с теми же конструкторами, сроком по умолчанию и
+///   методами операций. Метод возвращает future с результатом метода `Client`;
 /// - `trait Service<F: ReceivedResources>` с методом на каждую операцию. Метод получает ресурсы
 ///   своего кадра `frame: &F`, например значок отправителя, и прочитанные параметры.
 ///   Реализация этого трейта - серверная сторона контракта;
@@ -320,37 +322,21 @@ macro_rules! protocol {
                 }
             )*
 
-            /// Клиент контракта поверх канала.
-            pub struct Client<C: $crate::Channel> {
-                channel: C,
-                wait: $crate::Timeout,
+            $crate::__protocol_client! {
+                [
+                    /// Клиент контракта поверх канала.
+                ]
+                Client Channel { [] __protocol_send __protocol_call [] }
+                [$( { $kind $op $docs $ret $flat $params $owned } )*]
             }
 
-            impl<C: $crate::Channel> Client<C> {
-                /// Создаёт клиента поверх указанного канала со сроком
-                /// [`DEFAULT_OPERATION_TIMEOUT`]($crate::DEFAULT_OPERATION_TIMEOUT).
-                pub fn new(channel: C) -> Self {
-                    Self {
-                        channel,
-                        wait: $crate::DEFAULT_OPERATION_TIMEOUT,
-                    }
-                }
-
-                /// Задаёт срок ожидания получателя для всех операций клиента.
-                #[must_use]
-                pub fn with_wait(mut self, wait: $crate::Timeout) -> Self {
-                    self.wait = wait;
-                    self
-                }
-
-                /// Отдаёт канал обратно.
-                pub fn into_channel(self) -> C {
-                    self.channel
-                }
-
-                $(
-                    $crate::__protocol_client_method! { $kind $op $docs $ret $flat $params $owned }
-                )*
+            $crate::__protocol_client! {
+                [
+                    /// Клиент контракта поверх асинхронного канала. Метод операции возвращает
+                    /// future с результатом метода [`Client`].
+                ]
+                AsyncClient AsyncChannel { [async] __protocol_send_async __protocol_call_async [. await] }
+                [$( { $kind $op $docs $ret $flat $params $owned } )*]
             }
 
             /// Серверная сторона контракта над ресурсами кадра `F`.
@@ -568,115 +554,193 @@ macro_rules! __protocol_write_params {
     };
 }
 
-/// Метод клиента для операции.
+/// Клиент контракта над каналом с границей `$channel`: конструкторы, срок ожидания и метод на
+/// каждую операцию. Вид методов задаёт первый токен [`__protocol_client_method`].
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __protocol_client {
+    ([$(#[$doc:meta])*] $name:ident $channel:ident $mode:tt [$( { $($method:tt)* } )*]) => {
+        $(#[$doc])*
+        pub struct $name<C: $crate::$channel> {
+            channel: C,
+            wait: $crate::Timeout,
+        }
+
+        impl<C: $crate::$channel> $name<C> {
+            /// Создаёт клиента поверх указанного канала со сроком
+            /// [`DEFAULT_OPERATION_TIMEOUT`]($crate::DEFAULT_OPERATION_TIMEOUT).
+            pub fn new(channel: C) -> Self {
+                Self {
+                    channel,
+                    wait: $crate::DEFAULT_OPERATION_TIMEOUT,
+                }
+            }
+
+            /// Задаёт срок ожидания получателя для всех операций клиента.
+            #[must_use]
+            pub fn with_wait(mut self, wait: $crate::Timeout) -> Self {
+                self.wait = wait;
+                self
+            }
+
+            /// Отдаёт канал обратно.
+            pub fn into_channel(self) -> C {
+                self.channel
+            }
+
+            $(
+                $crate::__protocol_client_method! { $mode $($method)* }
+            )*
+        }
+    };
+}
+
+/// Метод клиента для операции. Первый токен задаёт вид клиента: синхронный
+/// `{ [] __protocol_send __protocol_call [] }` либо асинхронный
+/// `{ [async] __protocol_send_async __protocol_call_async [. await] }`.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __protocol_client_method {
-    (cast $op:ident [$(#[$doc:meta])*] $ret:tt $flat:tt
+    ({ $async:tt $send:ident $call:ident [$($await:tt)*] }
+     cast $op:ident $docs:tt $ret:tt $flat:tt
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*] []) => {
-        $(#[$doc])*
-        pub fn $op(&self $(, $param: $sig_ty)*)
-            -> ::core::result::Result<(), $crate::wire::IpcError>
-        {
-            $crate::__protocol_send(
-                &self.channel,
-                $op::ORDINAL,
-                self.wait,
-                $crate::__protocol_write_params!(
-                    [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
-                ),
-                |_, _| ::core::result::Result::Ok(()),
-            )
-            .map_err(|undelivered| undelivered.error)
+        $crate::__protocol_client_fn! {
+            $async $docs $op [] (&self $(, $param: $sig_ty)*)
+            [::core::result::Result<(), $crate::wire::IpcError>]
+            {
+                $crate::$send(
+                    &self.channel,
+                    $op::ORDINAL,
+                    self.wait,
+                    $crate::__protocol_write_params!(
+                        [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
+                    ),
+                    |_, _| ::core::result::Result::Ok(()),
+                )
+                $($await)*
+                .map_err(|undelivered| undelivered.error)
+            }
         }
     };
 
     // Отказ отдаёт единственный владеющий параметр сам, а несколько - кортежем в порядке
     // объявления.
-    (cast $op:ident $docs:tt $ret:tt $flat:tt $params:tt
+    ($mode:tt cast $op:ident $docs:tt $ret:tt $flat:tt $params:tt
      [{ $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty }]) => {
         $crate::__protocol_client_method! {
-            @owned_cast $op $docs $params [{ $owned_id , $generic , $owned , $owned_ty }]
+            @owned_cast $mode $op $docs $params [{ $owned_id , $generic , $owned , $owned_ty }]
             [$crate::Received<$owned_ty, C::Resources>] [$owned]
         }
     };
 
-    (cast $op:ident $docs:tt $ret:tt $flat:tt $params:tt
+    ($mode:tt cast $op:ident $docs:tt $ret:tt $flat:tt $params:tt
      [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )+]) => {
         $crate::__protocol_client_method! {
-            @owned_cast $op $docs $params [$( { $owned_id , $generic , $owned , $owned_ty } )+]
+            @owned_cast $mode $op $docs $params [$( { $owned_id , $generic , $owned , $owned_ty } )+]
             [($($crate::Received<$owned_ty, C::Resources>,)+)] [($($owned,)+)]
         }
     };
 
-    (@owned_cast $op:ident [$(#[$doc:meta])*]
+    (@owned_cast { $async:tt $send:ident $call:ident [$($await:tt)*] } $op:ident $docs:tt
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]
      [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )+]
      [$refused:ty] [$refused_value:expr]) => {
-        $(#[$doc])*
-        pub fn $op<$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),+>(
-            &self $(, $param: $sig_ty)*
-        ) -> ::core::result::Result<(), $crate::Undelivered<$refused>> {
-            $crate::__protocol_send(
-                &self.channel,
-                $op::ORDINAL,
-                self.wait,
-                $crate::__protocol_write_params!(
-                    [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
-                ),
-                |body, frame| {
-                    $crate::__protocol_decode_params!(
-                        body, frame, [$( { $owned_id , $owned , $owned_ty } )+]
-                    );
-                    ::core::result::Result::Ok($refused_value)
-                },
-            )
+        $crate::__protocol_client_fn! {
+            $async $docs $op
+            [$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),+]
+            (&self $(, $param: $sig_ty)*)
+            [::core::result::Result<(), $crate::Undelivered<$refused>>]
+            {
+                $crate::$send(
+                    &self.channel,
+                    $op::ORDINAL,
+                    self.wait,
+                    $crate::__protocol_write_params!(
+                        [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
+                    ),
+                    |body, frame| {
+                        $crate::__protocol_decode_params!(
+                            body, frame, [$( { $owned_id , $owned , $owned_ty } )+]
+                        );
+                        ::core::result::Result::Ok($refused_value)
+                    },
+                )
+                $($await)*
+            }
         }
     };
 
-    (call $op:ident [$(#[$doc:meta])*] [$read:ty] [$ok:ty , $err:ty]
+    ({ $async:tt $send:ident $call:ident [$($await:tt)*] }
+     call $op:ident $docs:tt [$read:ty] [$ok:ty , $err:ty]
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]
      [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )*]) => {
-        $(#[$doc])*
-        pub fn $op<$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),*>(
-            &self $(, $param: $sig_ty)*
-        ) -> ::core::result::Result<
-            $crate::Received<$ok, C::Resources>,
-            $crate::CallError<$crate::Received<$err, C::Resources>>,
-        > {
-            let mut frame = $crate::wire::MessageBuf::new();
-            let answered = $crate::__protocol_call(
-                &self.channel,
-                $op::ORDINAL,
-                self.wait,
-                &mut frame,
-                $crate::__protocol_write_params!(
-                    [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
-                ),
-            );
-            $crate::__protocol_outcome::<$ok, $err, _>($op::ORDINAL, answered?)
+        $crate::__protocol_client_fn! {
+            $async $docs $op
+            [$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),*]
+            (&self $(, $param: $sig_ty)*)
+            [::core::result::Result<
+                $crate::Received<$ok, C::Resources>,
+                $crate::CallError<$crate::Received<$err, C::Resources>>,
+            >]
+            {
+                let mut frame = $crate::wire::MessageBuf::new();
+                let answered = $crate::$call(
+                    &self.channel,
+                    $op::ORDINAL,
+                    self.wait,
+                    &mut frame,
+                    $crate::__protocol_write_params!(
+                        [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
+                    ),
+                )
+                $($await)*;
+                $crate::__protocol_outcome::<$ok, $err, _>($op::ORDINAL, answered?)
+            }
         }
     };
 
-    (call $op:ident [$(#[$doc:meta])*] [$read:ty] []
+    ({ $async:tt $send:ident $call:ident [$($await:tt)*] }
+     call $op:ident $docs:tt [$read:ty] []
      [$( { $field_id:expr , $param:ident , $sig_ty:ty , $wire_ty:ty , $own:tt } )*]
      [$( { $owned_id:expr , $generic:ident , $owned:ident , $owned_ty:ty } )*]) => {
+        $crate::__protocol_client_fn! {
+            $async $docs $op
+            [$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),*]
+            (&self $(, $param: $sig_ty)*)
+            [::core::result::Result<$crate::Received<$read, C::Resources>, $crate::wire::IpcError>]
+            {
+                let mut frame = $crate::wire::MessageBuf::new();
+                let answered = $crate::$call(
+                    &self.channel,
+                    $op::ORDINAL,
+                    self.wait,
+                    &mut frame,
+                    $crate::__protocol_write_params!(
+                        [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
+                    ),
+                )
+                $($await)*;
+                $crate::__protocol_answer::<$read, _>($op::ORDINAL, answered?)
+            }
+        }
+    };
+}
+
+/// Сигнатура метода клиента. Метод асинхронного клиента возвращает `impl Future` с телом в
+/// `async move` и принимает параметры с невыписанным временем жизни, которые `async fn`
+/// отвергает.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __protocol_client_fn {
+    ([] [$(#[$doc:meta])*] $op:ident [$($generics:tt)*] ($($args:tt)*) [$ret:ty] $body:block) => {
         $(#[$doc])*
-        pub fn $op<$($generic: $crate::IntoWireValue<C::Resources, Read = $owned_ty>),*>(
-            &self $(, $param: $sig_ty)*
-        ) -> ::core::result::Result<$crate::Received<$read, C::Resources>, $crate::wire::IpcError>
-        {
-            let mut frame = $crate::wire::MessageBuf::new();
-            let answered = $crate::__protocol_call(
-                &self.channel,
-                $op::ORDINAL,
-                self.wait,
-                &mut frame,
-                $crate::__protocol_write_params!(
-                    [$( { $field_id , $param , $sig_ty , $wire_ty , $own } )*]
-                ),
-            );
-            $crate::__protocol_answer::<$read, _>($op::ORDINAL, answered?)
+        pub fn $op<$($generics)*>($($args)*) -> $ret $body
+    };
+
+    ([async] [$(#[$doc:meta])*] $op:ident [$($generics:tt)*] ($($args:tt)*) [$ret:ty] $body:block) => {
+        $(#[$doc])*
+        pub fn $op<$($generics)*>($($args)*) -> impl ::core::future::Future<Output = $ret> {
+            async move $body
         }
     };
 }
@@ -728,6 +792,16 @@ pub(crate) fn build_frame<R: crate::ReceivedResources>(
     frame.finish()
 }
 
+fn one_way_frame<R: crate::ReceivedResources, V>(
+    ordinal: u64,
+    write: impl FnOnce(&mut crate::wire::MessageBuf<R>) -> Result<(), crate::wire::IpcError>,
+) -> Result<crate::wire::MessageBuf<R>, crate::Undelivered<V>> {
+    let mut frame = crate::wire::MessageBuf::new();
+    build_frame(&mut frame, crate::wire::Header::new(ordinal), write)
+        .map_err(crate::Undelivered::unwritten)?;
+    Ok(frame)
+}
+
 /// Отправляет каналом односторонний кадр операции `ordinal` с записями параметров `write`.
 /// Отказ отправки разбирает кадр чтением `read` в значение [`Undelivered`](crate::Undelivered),
 /// отказ записи кадра закрывает capability параметров.
@@ -739,12 +813,9 @@ pub fn __protocol_send<C: crate::Channel, V>(
     write: impl FnOnce(&mut crate::wire::MessageBuf<C::Resources>) -> Result<(), crate::wire::IpcError>,
     read: impl FnOnce(&[u8], &mut C::Resources) -> Result<V, crate::wire::IpcError>,
 ) -> Result<(), crate::Undelivered<V>> {
-    let mut frame = crate::wire::MessageBuf::new();
-    build_frame(&mut frame, crate::wire::Header::new(ordinal), write)
-        .map_err(crate::Undelivered::unwritten)?;
-    channel
-        .send(frame.outgoing(), wait)
-        .map_err(|unsent| crate::Undelivered::__new(unsent, read))
+    let mut frame = one_way_frame(ordinal, write)?;
+    let sent = channel.send(frame.outgoing(), wait);
+    sent.map_err(|unsent| crate::Undelivered::__new(unsent, read))
 }
 
 /// Отправляет каналом кадр вызова операции `ordinal`, построенный в `frame` записями параметров
@@ -760,6 +831,33 @@ pub fn __protocol_call<'b, C: crate::Channel>(
 ) -> Result<crate::Incoming<'b, C::Resources>, crate::wire::IpcError> {
     build_frame(frame, crate::wire::Header::new(ordinal), write)?;
     channel.call(frame.outgoing(), wait)
+}
+
+/// Отправляет односторонний кадр асинхронным каналом, как [`__protocol_send`].
+#[doc(hidden)]
+pub async fn __protocol_send_async<C: crate::AsyncChannel, V>(
+    channel: &C,
+    ordinal: u64,
+    wait: crate::Timeout,
+    write: impl FnOnce(&mut crate::wire::MessageBuf<C::Resources>) -> Result<(), crate::wire::IpcError>,
+    read: impl FnOnce(&[u8], &mut C::Resources) -> Result<V, crate::wire::IpcError>,
+) -> Result<(), crate::Undelivered<V>> {
+    let mut frame = one_way_frame(ordinal, write)?;
+    let sent = channel.send(frame.outgoing(), wait).await;
+    sent.map_err(|unsent| crate::Undelivered::__new(unsent, read))
+}
+
+/// Отправляет кадр вызова асинхронным каналом, как [`__protocol_call`].
+#[doc(hidden)]
+pub async fn __protocol_call_async<'b, C: crate::AsyncChannel>(
+    channel: &'b C,
+    ordinal: u64,
+    wait: crate::Timeout,
+    frame: &'b mut crate::wire::MessageBuf<C::Resources>,
+    write: impl FnOnce(&mut crate::wire::MessageBuf<C::Resources>) -> Result<(), crate::wire::IpcError>,
+) -> Result<crate::Incoming<'b, C::Resources>, crate::wire::IpcError> {
+    build_frame(frame, crate::wire::Header::new(ordinal), write)?;
+    channel.call(frame.outgoing(), wait).await
 }
 
 pub(crate) fn read_answer<'b, V: crate::WireValue<'b, R>, R: crate::ReceivedResources>(

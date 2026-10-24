@@ -1,15 +1,16 @@
 use core::marker::PhantomData;
 
 use component_abi::{Attributes, STARTUP_REQUEST_TIMEOUT, SessionError, component_startup};
+use executor::Reactor;
 use ipc::{CallError, Timeout};
 use kernel_objects::{PortTransport, Session, kind};
 use syscall::Handle;
 
 use crate::{
     StartupError, StartupFailure,
-    declare::{answered, request_session, start_parent},
+    declare::{answered, repeats, request_session, start_parent},
     query::Query,
-    request::{Found, all, next, open, watch},
+    request::{Found, all, next, next_async, open, open_async, watch},
 };
 
 type Enumerate = fn(
@@ -99,6 +100,22 @@ impl<P: ipc::Protocol> Providers<P> {
             open::<P>(found, STARTUP_REQUEST_TIMEOUT)
         })
     }
+
+    /// Открывает сессию экспорта результата `found`, как [`Self::open`]. Ответы родителя задача
+    /// ждёт через `reactor`.
+    pub async fn open_async(
+        &self,
+        reactor: &Reactor,
+        found: &Found,
+    ) -> Result<Session<P>, StartupError> {
+        loop {
+            let answer = open_async::<P>(found, reactor, STARTUP_REQUEST_TIMEOUT).await;
+
+            if !repeats(&answer) {
+                return answered(self.requirement, answer);
+            }
+        }
+    }
 }
 
 impl ProviderWatch {
@@ -112,7 +129,24 @@ impl ProviderWatch {
     /// - `NoSpace` - у родителя не хватило ресурса на результат;
     /// - `Ipc` - другой отказ транспорта.
     pub fn next(&self, wait: Timeout) -> Result<Found, StartupError> {
-        answered(self.requirement, next(&self.watch, wait))?.ok_or(StartupError {
+        self.found(next(&self.watch, wait))
+    }
+
+    /// Ждёт не дольше `wait` экспорт, как [`Self::next`]. Ответ родителя задача ждёт через
+    /// `reactor`.
+    pub async fn next_async(
+        &self,
+        reactor: &Reactor,
+        wait: Timeout,
+    ) -> Result<Found, StartupError> {
+        self.found(next_async(&self.watch, reactor, wait).await)
+    }
+
+    fn found(
+        &self,
+        answer: Result<Option<Found>, CallError<SessionError>>,
+    ) -> Result<Found, StartupError> {
+        answered(self.requirement, answer)?.ok_or(StartupError {
             requirement: self.requirement,
             failure: StartupFailure::Refused,
         })

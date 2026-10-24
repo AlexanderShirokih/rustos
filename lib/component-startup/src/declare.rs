@@ -173,11 +173,16 @@ pub(crate) fn request_session<T>(
     mut request: impl FnMut() -> Result<T, CallError<SessionError>>,
 ) -> Result<T, StartupError> {
     loop {
-        match request() {
-            Err(CallError::Ipc(IpcError::PeerClosed)) => {}
-            answer => return answered(requirement, answer),
+        let answer = request();
+
+        if !repeats(&answer) {
+            return answered(requirement, answer);
         }
     }
+}
+
+pub(crate) const fn repeats<T>(answer: &Result<T, CallError<SessionError>>) -> bool {
+    matches!(answer, Err(CallError::Ipc(IpcError::PeerClosed)))
 }
 
 pub(crate) fn answered<T>(

@@ -11,7 +11,7 @@ use ipc::{CallError, FrameBytes, Incoming, Listener, RecvError, wire::MESSAGE_IN
 use kernel_objects::{Delivery, Error, Port, PortTransport};
 use syscall::{Rights, Timeout};
 
-use crate::request::accept;
+use crate::request::{AsyncStartup, accept, accept_async};
 
 /// Порт сессий экспорта и счётчик его значков. Значок не повторяется и после отказа.
 #[derive(Debug)]
@@ -27,7 +27,7 @@ pub struct MintedSession {
     pub port: Port,
 }
 
-/// Остановка [`serve_export`]: отказ `accept`.
+/// Отказ `accept`, которым остановился [`serve_export`] либо [`serve_export_async`].
 #[derive(Debug)]
 pub struct ExportStopped(CallError<AcceptError>);
 
@@ -162,6 +162,24 @@ pub fn serve_export<P: ipc::Protocol>(
     let parent = parent.with_wait(Timeout::INFINITE);
     loop {
         match accept::<P>(&parent) {
+            Ok(request) => {
+                let session = open(request.attributes.as_attributes());
+                let _ = request.reply.send(session);
+            }
+            Err(error) => return ExportStopped(error),
+        }
+    }
+}
+
+/// Отвечает на заявки импортёров, как [`serve_export`]. Заявку задача ждёт через reactor
+/// канала `parent`.
+pub async fn serve_export_async<P: ipc::Protocol>(
+    parent: AsyncStartup,
+    mut open: impl FnMut(Attributes<'_>) -> Result<Port, SessionError>,
+) -> ExportStopped {
+    let parent = parent.with_wait(Timeout::INFINITE);
+    loop {
+        match accept_async::<P>(&parent).await {
             Ok(request) => {
                 let session = open(request.attributes.as_attributes());
                 let _ = request.reply.send(session);

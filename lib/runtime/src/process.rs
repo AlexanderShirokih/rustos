@@ -86,8 +86,10 @@ pub fn take_bootstrap() -> Option<IssuedHandle<kind::Any>> {
     Some(unsafe { IssuedHandle::adopt(raw) })
 }
 
-/// Завершает процесс со всеми его потоками. Не возвращается.
+/// Завершает процесс со всеми его потоками, дождавшись приёма поставленных строк журнала не
+/// дольше [`LOG_FLUSH_TIMEOUT`](crate::log::LOG_FLUSH_TIMEOUT). Не возвращается.
 pub fn exit(code: i32) -> ! {
+    crate::log::settle();
     svc::process_exit(u64::from(code.cast_unsigned()))
 }
 

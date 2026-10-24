@@ -3,6 +3,9 @@
 //! устройств и дескриптор устройства по номеру. Протокол `InputFocus` открывает держателю фокуса
 //! сессии `Input` и выбирает, какой из них видны устройства. Каждому видимому экспорту
 //! `InputSource` хаб передаёт новую сессию `InputInject`.
+//!
+//! Экспорты, их сессии и подключение источников обслуживают задачи одного executor на потоке
+//! входа.
 
 #![no_std]
 #![no_main]
@@ -13,15 +16,12 @@ use alloc::{boxed::Box, rc::Rc};
 use core::{cell::RefCell, fmt};
 
 use component_startup::{
-    Polled, Requirements as _, SessionEvent, SessionPort, SessionRequest, StartupError, accept,
-    component_abi::AcceptError, component_manifest, component_startup as startup_contract,
-    serve_export, whole_export,
+    AsyncStartup, ExportStopped, Polled, Requirements as _, SessionEvent, SessionPort,
+    StartupError, component_manifest, serve_export_async, whole_export,
 };
-use executor::{Channel, Executor, Reactor, Receiver, Sender, channel, yield_now};
+use executor::{Executor, PortChannel, Reactor, yield_now};
 use input_abi::{input, input_focus, input_inject, input_source};
-use ipc::CallError;
-use runtime::{PortTransport, spawn_bound};
-use syscall::{Handle, READABLE, SyscallError, Timeout, WaitItem, kind};
+use syscall::{Handle, READABLE, SyscallError, WaitItem, kind};
 
 mod hub;
 mod queue;
@@ -45,8 +45,7 @@ enum Stopped {
     ConsumerPortClosed,
     SourcePortClosed,
     FocusPortClosed,
-    InputExport(CallError<AcceptError>),
-    InputRequestsClosed,
+    Export(ExportStopped),
     SourceWatch(StartupError),
 }
 
@@ -57,8 +56,7 @@ impl fmt::Display for Stopped {
             Self::ConsumerPortClosed => formatter.write_str("consumer port closed"),
             Self::SourcePortClosed => formatter.write_str("source port closed"),
             Self::FocusPortClosed => formatter.write_str("focus port closed"),
-            Self::InputExport(error) => write!(formatter, "input export {error:?}"),
-            Self::InputRequestsClosed => formatter.write_str("input requests closed"),
+            Self::Export(stopped) => stopped.fmt(formatter),
             Self::SourceWatch(error) => write!(formatter, "source watch: {error}"),
         }
     }
@@ -82,27 +80,26 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let sources: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
     let consumers: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
     let holders: &'static SessionPort = Box::leak(Box::new(SessionPort::create()?));
+
     let executor = Executor::new()?;
     let reactor = executor.reactor();
     let hub = Rc::new(RefCell::new(Hub::new()));
-    let Channel {
-        sender: requests,
-        receiver: accepted,
-    } = channel();
+    let startup = || AsyncStartup::new(PortChannel::new(parent, reactor.clone()));
 
-    // Потоки экспортов и подключения работают до конца процесса.
-    let consumers_parent = requirements.parent;
-    let watched = requirements.sources;
-    let sources_parent = startup_contract::Client::new(PortTransport::new(parent));
-    let holders_parent = startup_contract::Client::new(PortTransport::new(parent));
-    let _ = spawn_bound(move || accept_input(consumers_parent, &requests))?;
-    let _ = spawn_bound(move || {
-        serve_export::<input_inject::Protocol>(sources_parent, whole_export(sources))
-    })?;
-    let _ = spawn_bound(move || {
-        serve_export::<input_focus::Protocol>(holders_parent, whole_export(holders))
-    })?;
-    let _ = spawn_bound(move || Stopped::SourceWatch(attach_sources(&watched, sources)))?;
+    let inputs = hub.clone();
+    let input =
+        serve_export_async::<input::Protocol>(startup(), move |_| open_input(&inputs, consumers));
+    let inject = serve_export_async::<input_inject::Protocol>(startup(), whole_export(sources));
+    let focus = serve_export_async::<input_focus::Protocol>(startup(), whole_export(holders));
+
+    executor.spawn(stop_on(exported(input)));
+    executor.spawn(stop_on(exported(inject)));
+    executor.spawn(stop_on(exported(focus)));
+
+    let watching = reactor.clone();
+    executor.spawn(stop_on(async move {
+        Stopped::SourceWatch(attach_sources(&requirements.sources, sources, &watching).await)
+    }));
 
     let mut source = Source { hub: hub.clone() };
     executor.spawn(stop_on(serve(
@@ -127,8 +124,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
             SessionEvent::Gone(badge) => holder.gone(badge),
         },
     )));
-    let mut consumer = Consumer { hub: hub.clone() };
-    executor.spawn(stop_on(open_inputs(accepted, consumers, hub)));
+    let mut consumer = Consumer { hub };
 
     Err(executor.block_on(serve(
         reactor,
@@ -141,33 +137,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     )))
 }
 
-fn accept_input(
-    parent: startup_contract::Client<PortTransport>,
-    requests: &Sender<SessionRequest>,
-) -> Stopped {
-    let parent = parent.with_wait(Timeout::INFINITE);
-    loop {
-        match accept::<input::Protocol>(&parent) {
-            Ok(request) => {
-                if requests.send(request).is_err() {
-                    return Stopped::InputRequestsClosed;
-                }
-            }
-            Err(error) => return Stopped::InputExport(error),
-        }
-    }
-}
-
-async fn open_inputs(
-    mut accepted: Receiver<SessionRequest>,
-    consumers: &'static SessionPort,
-    hub: Rc<RefCell<Hub>>,
-) -> Stopped {
-    while let Some(request) = accepted.recv().await {
-        let _ = request.reply.send(open_input(&hub, consumers));
-        yield_now().await;
-    }
-    Stopped::InputRequestsClosed
+async fn exported(export: impl Future<Output = ExportStopped>) -> Stopped {
+    Stopped::Export(export.await)
 }
 
 async fn serve(

@@ -3,29 +3,28 @@
 use alloc::{rc::Rc, sync::Arc, vec::Vec};
 use core::{
     cell::{Cell, RefCell},
-    future::{Future, poll_fn},
+    future::poll_fn,
     num::NonZeroU64,
-    pin::pin,
     sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::SeqCst},
     task::{Poll, Waker},
     time::Duration,
 };
 
 use component_startup::{Polled, SessionEvent, SessionEvents};
-use executor::{Channel, Executor, Reactor, channel, yield_now};
+use executor::{Executor, Reactor, yield_now};
 use kernel_objects::{Error, Port, Signal};
-use runtime::{Mutex, Timeout, port_send, sleep, spawn_owned};
+use runtime::{Instant, Mutex, Timeout, port_send, sleep, spawn_owned};
 use syscall::{READABLE, Rights, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem};
 
 use crate::{fixture::JOIN_TIMEOUT, ipc_raw};
 
 const SEND_TIMEOUT: Timeout = Timeout::from_secs(3);
 const ROUND_DELAY: Duration = Duration::from_millis(50);
+const SLEEP_DEADLINE: Timeout = Timeout::from_millis(300);
 
 const HANDOFF_VALUE: u64 = 0x0e7e_c000;
 const FIRST_BADGE: NonZeroU64 = NonZeroU64::new(0xe7ec_0001).expect("badge is non-zero");
 const SECOND_BADGE: NonZeroU64 = NonZeroU64::new(0xe7ec_0002).expect("badge is non-zero");
-const CHANNEL_VALUES: [u64; 3] = [0x0c4a_0001, 0x0c4a_0002, 0x0c4a_0003];
 
 struct Handoff {
     value: AtomicU64,
@@ -34,7 +33,7 @@ struct Handoff {
     woken: AtomicBool,
 }
 
-fn executor() -> Executor {
+pub(crate) fn executor() -> Executor {
     Executor::new().expect("executor create")
 }
 
@@ -302,64 +301,64 @@ fn executor_alternates_constantly_ready_objects() {
 }
 
 #[test_harness::test]
-fn executor_channel_passes_values_from_a_thread() {
-    let Channel {
-        sender,
-        mut receiver,
-    } = channel();
-    let polled = Arc::new(Signal::create().expect("signal create"));
-    let remote = Arc::clone(&polled);
-    let thread = spawn_owned(move || {
-        // Значения уходят после того, как задача вернула `Pending` на пустом канале, поэтому
-        // приём возобновляет отправка.
-        remote
-            .wait(SIGNALED, SEND_TIMEOUT)
-            .expect("receiver polled");
-        for value in CHANNEL_VALUES {
-            sender.send(value).expect("receiver is alive");
-        }
-        drop(sender);
-        0
-    })
-    .expect("spawn sender");
+fn executor_resumes_a_sleep_while_another_task_receives() {
+    let port = Port::create().expect("port create");
 
-    let values = executor().block_on(async {
-        let first = {
-            let mut first = pin!(receiver.recv());
-            poll_fn(|cx| {
-                let polled_first = first.as_mut().poll(cx);
-                if polled_first.is_pending() {
-                    polled.notify_all().expect("signal raise");
-                }
-                polled_first
-            })
-            .await
-        };
-        let mut values: Vec<u64> = first.into_iter().collect();
-        while let Some(value) = receiver.recv().await {
-            values.push(value);
-        }
-        values
+    let executor = executor();
+    let reactor = executor.reactor();
+    let received = Rc::new(Cell::new(false));
+    let slept = Rc::new(Cell::new(None));
+    let sleeper = (reactor.clone(), Rc::clone(&received), Rc::clone(&slept));
+    let start = Instant::now();
+    executor.spawn(async move {
+        let (reactor, received, slept) = sleeper;
+        reactor.sleep(SLEEP_DEADLINE).await;
+        slept.set(Some((Instant::now().since(start), received.get())));
     });
 
-    test_harness::check_eq!(values.as_slice(), CHANNEL_VALUES.as_slice());
-    thread.join(JOIN_TIMEOUT).expect("sender joins");
+    let sender = send_frame(session(&port, FIRST_BADGE), &FIRST_SEND);
+    let main = executor.block_on(async {
+        let badge = first_frame(&reactor, &port).await;
+        received.set(true);
+        until(|| slept.get().is_some()).await;
+        badge
+    });
+
+    test_harness::check_eq!(main, Ok(FIRST_BADGE.get()));
+
+    let (elapsed, received_first) = slept.get().expect("sleeper resumed");
+    test_harness::check!(received_first);
+    test_harness::check!(elapsed >= SLEEP_DEADLINE);
+    sender.join(JOIN_TIMEOUT).expect("sender joins");
+    test_harness::check_eq!(FIRST_SEND.load(SeqCst), 0);
 }
 
-static RETURNED: AtomicU64 = AtomicU64::new(0);
-
 #[test_harness::test]
-fn executor_channel_returns_a_value_to_the_sender() {
-    let Channel { sender, receiver } = channel();
-    executor().block_on(async move { drop(receiver) });
+fn executor_timeout_drops_a_wait_without_a_signal() {
+    struct Dropped(Rc<Cell<bool>>);
 
-    RETURNED.store(0, SeqCst);
-    let thread = spawn_owned(move || {
-        RETURNED.store(sender.send(HANDOFF_VALUE).err().unwrap_or(0), SeqCst);
-        0
-    })
-    .expect("spawn sender");
-    thread.join(JOIN_TIMEOUT).expect("sender joins");
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
 
-    test_harness::check_eq!(RETURNED.load(SeqCst), HANDOFF_VALUE);
+    let signal = Signal::create().expect("signal create");
+    let item = WaitItem::new(signal.as_raw(), SIGNALED);
+
+    let executor = executor();
+    let reactor = executor.reactor();
+    let dropped = Rc::new(Cell::new(false));
+    let guard = Dropped(Rc::clone(&dropped));
+
+    let waited = executor.block_on(reactor.timeout(SLEEP_DEADLINE, {
+        let reactor = reactor.clone();
+        async move {
+            let _guard = guard;
+            reactor.wait(item).await
+        }
+    }));
+
+    test_harness::check!(waited.is_none());
+    test_harness::check!(dropped.get());
 }
