@@ -117,7 +117,7 @@ fn run_case(case: &TestCase) {
 
 /// Прогоняет зарегистрированные кейсы профиля `kind` и выключает машину.
 ///
-/// Фильтр по подстроке имени кейса читается из `image`.
+/// Фильтр по подстроке пути кейса читается из `image`.
 ///
 /// Порядок обхода задаётся раскладкой секции `.tests` линкером и не
 /// является частью контракта. Кейс обязан быть самодостаточным - сам создавать
@@ -155,7 +155,7 @@ pub fn run_tests(kind: TestKind, image: Option<&DecodedImage<'_>>) -> ! {
 }
 
 fn is_selected(case: &TestCase, kind: TestKind, filter: Option<&str>) -> bool {
-    case.kind == kind && filter.is_none_or(|filter| case.name.contains(filter))
+    case.kind == kind && filter.is_none_or(|filter| case.path.contains(filter))
 }
 
 fn image_filter<'a>(image: &DecodedImage<'a>) -> Result<Option<&'a str>, Utf8Error> {
@@ -173,20 +173,25 @@ mod tests {
     use crate::case::{TestCase, TestKind};
 
     #[test]
-    fn a_filter_selects_cases_whose_name_contains_it() {
-        let case = |name| TestCase {
-            name,
+    fn a_filter_selects_cases_whose_path_contains_it() {
+        let case = |path| TestCase {
+            name: "",
+            path,
             run: || {},
             kind: TestKind::Regular,
         };
 
-        let filter = Some("liveness");
+        let filter = Some("port_liveness");
         assert!(is_selected(
-            &case("port_liveness_on_close"),
+            &case("testrunner::port_liveness::a_reader_departs"),
             TestKind::Regular,
             filter
         ));
-        assert!(!is_selected(&case("port_send"), TestKind::Regular, filter));
+        assert!(!is_selected(
+            &case("testrunner::port::a_message_arrives"),
+            TestKind::Regular,
+            filter
+        ));
     }
 
     #[test]

@@ -130,14 +130,14 @@ cargo xtask qemu-test [--timeout <seconds>] [--spec <path>] [--durations <n>] [<
 `--durations <n>` выводит после каждого прохода `n` самых долгих тестов.
 Длительность измеряется на хосте между маркерами начала и результата теста.
 
-`<filter>` запускает только тесты, имя которых содержит указанную подстроку.
-Фильтр без совпадений завершает команду отказом:
+`<filter>` запускает только тесты, путь которых `<module>::<function>` содержит
+указанную подстроку. Фильтр без совпадений завершает команду отказом:
 
 ```bash
-cargo xtask qemu-test badge_departs
+cargo xtask qemu-test gpio_keys
 ```
 
-Альтернативный контроллер прерываний проверяется так:
+`--spec <path>` задаёт другую конфигурацию:
 
 ```bash
 cargo xtask qemu-test --spec devices/spec/qemu-aarch64-test-gicv2.yaml
@@ -155,7 +155,7 @@ TRYBUILD=overwrite cargo test -p syscall --test compile_fail
 ### Замеры
 
 `cargo xtask bench [<filter>]` запускает файловые замеры testrunner.
-`<filter>` отбирает замеры по подстроке имени, как у `qemu-test`.
+`<filter>` отбирает замеры по подстроке пути, как у `qemu-test`.
 `--timeout` задаёт срок прогона в секундах; по умолчанию 120.
 Результаты публикуются строками `[TEST-REPORT]`.
 

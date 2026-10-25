@@ -195,7 +195,7 @@ fn filter_file(filter: Option<&str>) -> Result<Option<ExtraFile>> {
 
 fn require_match(filter: Option<&str>, ran: usize) -> Result<()> {
     match filter {
-        Some(filter) if ran == 0 => bail!("no test name contains '{filter}'"),
+        Some(filter) if ran == 0 => bail!("no test path contains '{filter}'"),
         _ => Ok(()),
     }
 }

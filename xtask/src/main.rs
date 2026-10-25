@@ -53,7 +53,7 @@ enum Commands {
     Build(BuildArgs),
     /// Run the QEMU integration tests
     QemuTest {
-        /// Run only the tests whose name contains this substring
+        /// Run only the tests whose path contains this substring
         filter: Option<String>,
         /// Timeout in seconds
         #[arg(long, default_value_t = 120)]
@@ -67,7 +67,7 @@ enum Commands {
     },
     /// Run the userspace filesystem benchmarks in QEMU
     Bench {
-        /// Run only the benchmarks whose name contains this substring
+        /// Run only the benchmarks whose path contains this substring
         filter: Option<String>,
         /// Timeout in seconds
         #[arg(long, default_value_t = 120)]
