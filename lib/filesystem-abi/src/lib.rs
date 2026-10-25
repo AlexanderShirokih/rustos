@@ -26,6 +26,7 @@ mod descriptor;
 mod entry;
 mod error;
 mod flags;
+mod io;
 mod kind;
 mod limits;
 mod mode;
@@ -40,6 +41,10 @@ pub use descriptor::NodeDescriptor;
 pub use entry::{DecodedEntry, DirEntry, ENTRY_HEADER_SIZE};
 pub use error::FileSystemError;
 pub use flags::OpenFlags;
+pub use io::{
+    IO_FRAME_BYTES, IO_SCRATCH_BYTES, IO_TRANSFER_MAX, IoBootstrap, IoPhase, IoRecord,
+    fits_scratch, scratch_room,
+};
 pub use kind::NodeKind;
 pub use limits::{NAME_MAX, PATH_MAX};
 pub use mode::AccessMode;

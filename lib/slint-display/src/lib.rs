@@ -1,8 +1,8 @@
 //! Платформа Slint над сессией `Display`.
 //!
 //! [`ScreenPlatform::open`] ставит окно Slint на весь экран с масштабом по плотности экрана,
-//! [`ScreenPlatform::run`] крутит цикл кадра в том же потоке по задачам, таймерам и анимациям
-//! Slint. [`ScreenPlatform::release`] отдаёт экран, [`ScreenPlatform::attach`] подключает
+//! [`ScreenPlatform::run`] выполняет цикл кадра задачей executor по событиям, таймерам и
+//! анимациям Slint. [`ScreenPlatform::release`] отдаёт экран, [`ScreenPlatform::attach`] подключает
 //! новую сессию экрана.
 //!
 //! [`ScreenPlatform::deliver_input`] переводит записи сессии `Input` в события окна.

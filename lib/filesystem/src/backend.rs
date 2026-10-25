@@ -7,6 +7,15 @@ use crate::{
     store::{ByteStore, StoreId},
 };
 
+/// Записи каталога, уложенные в буфер одним перечислением.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirBatch {
+    /// Итог перечисления: число записей, позиция продолжения и признак исчерпания.
+    pub listed: Listed,
+    /// Длина уложенных записей от начала буфера.
+    pub len: usize,
+}
+
 /// Вид узла бекенда и его размер.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeMetadata {
@@ -86,39 +95,23 @@ pub trait FileSystemBackend {
     /// узел в системе отсутствует, возвращает `NotFound`.
     fn metadata(&self, node: NodeId) -> Result<NodeMetadata, FileSystemError>;
 
-    /// Копирует в `out` байты файла, начиная со смещения `offset`, и возвращает их число.
-    /// Смещение от длины файла и дальше даёт ноль байт. Если узел оказался каталогом, возвращает
-    /// `IsADirectory`.
-    fn read_at(
-        &self,
-        stores: &dyn ByteStore,
-        node: NodeId,
-        offset: u64,
-        out: &mut [u8],
-    ) -> Result<usize, FileSystemError>;
+    /// Возвращает регион содержимого файла. Действующую длину задаёт metadata.
+    /// пустой файл без региона даёт NotSupported, каталог - IsADirectory.
+    fn read_window(&self, node: NodeId) -> Result<Window, FileSystemError>;
 
-    /// Кладёт `data` по смещению `offset` и возвращает число записанных байт. Успешная запись
-    /// укладывает `data` целиком. Промежуток между прежней длиной файла и началом записи
-    /// заполняется нулями. Если запись выводит файл за предел, установленный файловой системой,
-    /// возвращает `NoSpace` и содержимое узла оставляет как есть. Если узел оказался каталогом,
-    /// возвращает `IsADirectory`.
-    fn write_at(
+    /// Резервирует диапазон записи, не публикуя новую длину файла. Рост сохраняет прежние
+    /// байты, промежуток до offset заполнен нулями. Вызывающий исключает конкурирующие
+    /// изменения узла до commit_write либо отказа от окна.
+    fn prepare_write(
         &mut self,
         stores: &mut dyn ByteStore,
         node: NodeId,
         offset: u64,
-        data: &[u8],
-    ) -> Result<usize, FileSystemError>;
+        len: usize,
+    ) -> Result<Window, FileSystemError>;
 
-    /// Дописывает `data` в конец файла и возвращает смещение, по которому легли байты. Если
-    /// дозапись выводит файл за предел, установленный файловой системой, возвращает `NoSpace`.
-    /// Если узел оказался каталогом, возвращает `IsADirectory`.
-    fn append(
-        &mut self,
-        stores: &mut dyn ByteStore,
-        node: NodeId,
-        data: &[u8],
-    ) -> Result<u64, FileSystemError>;
+    /// Публикует конец перенесённого префикса. Запись внутри длины её не уменьшает.
+    fn commit_write(&mut self, node: NodeId, end: u64) -> Result<(), FileSystemError>;
 
     /// Задаёт длину файла. Байты за `size` отбрасываются, недостающие дописываются нулями. Если
     /// `size` больше предела, установленного файловой системой, возвращает `NoSpace`. Если узел
@@ -131,27 +124,18 @@ pub trait FileSystemBackend {
     ) -> Result<(), FileSystemError>;
 
     /// Укладывает записи каталога подряд в начало `out`, начиная с позиции `from`, пока они
-    /// помещаются, и возвращает итог перечисления: число уложенных записей, позицию продолжения и
-    /// признак исчерпанного каталога. `from` - [`DirCursor::START`] либо позиция, выданная
-    /// прежним перечислением этого же узла, а трактовка значения принадлежит бекенду. Нулевое число
-    /// записей значит, что буфер остался нетронутым. Такой итог без признака исчерпания значит,
-    /// что очередная запись длиннее всего буфера, и позиция продолжения указывает на неё. Если
-    /// узел оказался файлом, возвращает `NotADirectory`.
+    /// помещаются, и возвращает итог перечисления и длину уложенных записей. `from` -
+    /// [`DirCursor::START`] либо позиция, выданная прежним перечислением этого же узла, а
+    /// трактовка значения принадлежит бекенду. Нулевое число записей значит, что буфер остался
+    /// нетронутым. Такой итог без признака исчерпания значит, что очередная запись длиннее всего
+    /// буфера, и позиция продолжения указывает на неё. Если узел оказался файлом, возвращает
+    /// `NotADirectory`.
     fn list(
         &self,
         node: NodeId,
         from: DirCursor,
         out: &mut [u8],
-    ) -> Result<Listed, FileSystemError>;
-
-    /// Возвращает окно байт узла, при необходимости перенося их в отдельное хранилище `stores`.
-    /// Если узел пуст либо байт хранилища не занимает, возвращает `NotSupported`. Если узел
-    /// оказался каталогом, возвращает `IsADirectory`.
-    fn backing(
-        &mut self,
-        stores: &mut dyn ByteStore,
-        node: NodeId,
-    ) -> Result<Window, FileSystemError>;
+    ) -> Result<DirBatch, FileSystemError>;
 
     /// Закрепляет ёмкость узла за его хранилищем после выдачи клиенту capability этого
     /// хранилища. Закреплённый узел за пределы ёмкости не растёт, и запись за неё возвращает
@@ -173,6 +157,81 @@ pub trait FileSystemBackend {
     ) -> Result<NodeId, FileSystemError> {
         Err(FileSystemError::NotSupported)
     }
+
+    /// Копирует доступную часть файла со смещения `offset` в `out`. Каталог даёт
+    /// `IsADirectory`, чтение за концом файла возвращает ноль.
+    fn read_at(
+        &self,
+        stores: &dyn ByteStore,
+        node: NodeId,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, FileSystemError> {
+        let metadata = self.metadata(node)?;
+        if metadata.kind.is_directory() {
+            return Err(FileSystemError::IsADirectory);
+        }
+
+        let Ok(offset) = usize::try_from(offset) else {
+            return Ok(0);
+        };
+        let size = usize::try_from(metadata.size).map_err(|_| FileSystemError::NoSpace)?;
+        let count = size.saturating_sub(offset).min(out.len());
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let window = self.read_window(node)?;
+        stores.read(
+            window.store,
+            store_offset(window, offset)?,
+            out.get_mut(..count)
+                .ok_or(FileSystemError::BufferTooSmall)?,
+        )?;
+        Ok(count)
+    }
+
+    /// Копирует `data` в подготовленное окно и публикует конец записи после переноса байт.
+    /// Вызывающий исключает конкурирующие изменения узла на время операции.
+    fn write_at(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<usize, FileSystemError> {
+        if data.is_empty() {
+            if !self.is_mutable() {
+                return Err(FileSystemError::ReadOnly);
+            }
+
+            let size = self.metadata(node)?.size;
+            self.set_size(stores, node, size.max(offset))?;
+            return Ok(0);
+        }
+
+        let window = self.prepare_write(stores, node, offset, data.len())?;
+        let len = u64::try_from(data.len()).map_err(|_| FileSystemError::NoSpace)?;
+        let end = offset.checked_add(len).ok_or(FileSystemError::NoSpace)?;
+        let offset = usize::try_from(offset).map_err(|_| FileSystemError::NoSpace)?;
+
+        stores.write(window.store, store_offset(window, offset)?, data)?;
+        self.commit_write(node, end)?;
+        Ok(data.len())
+    }
+
+    /// Копирует `data` в конец файла и возвращает смещение записи. Вызывающий исключает
+    /// конкурирующие изменения узла на время операции.
+    fn append(
+        &mut self,
+        stores: &mut dyn ByteStore,
+        node: NodeId,
+        data: &[u8],
+    ) -> Result<u64, FileSystemError> {
+        let offset = self.metadata(node)?.size;
+        self.write_at(stores, node, offset, data)?;
+        Ok(offset)
+    }
 }
 
 pub(crate) const fn kind_mismatch(expected: NodeKind) -> FileSystemError {
@@ -180,4 +239,9 @@ pub(crate) const fn kind_mismatch(expected: NodeKind) -> FileSystemError {
         NodeKind::File => FileSystemError::IsADirectory,
         NodeKind::Directory => FileSystemError::NotADirectory,
     }
+}
+
+fn store_offset(window: Window, offset: usize) -> Result<usize, FileSystemError> {
+    let base = usize::try_from(window.offset).map_err(|_| FileSystemError::NoSpace)?;
+    base.checked_add(offset).ok_or(FileSystemError::NoSpace)
 }

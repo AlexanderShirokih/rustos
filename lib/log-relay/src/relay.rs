@@ -1,7 +1,10 @@
 //! Пересылка строк лога доверенному стоку. Источник строки выводится из значка
 //! сессии. Capability из принятых кадров дальше не переносятся.
 
-use core::fmt::Write as _;
+use core::{
+    cell::{Cell, RefCell},
+    fmt::Write as _,
+};
 
 use ipc::{
     Listener, RecvError,
@@ -79,13 +82,13 @@ impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
                 Err(RecvError::Closed) => return "stopped: log port closed",
             };
 
-            let mut forwarding = Forwarding {
-                sink: &mut self.sink,
+            let forwarding = Forwarding {
+                sink: RefCell::new(&mut self.sink),
                 names: &self.names,
-                forwarded: None,
+                forwarded: Cell::new(None),
             };
-            let _ = log::dispatch(&mut forwarding, frame);
-            let forwarded = forwarding.forwarded;
+            let _ = log::dispatch(&forwarding, frame);
+            let forwarded = forwarding.forwarded.into_inner();
 
             match forwarded {
                 // Кадр вне контракта до стока не доходит и следа в журнале не
@@ -104,15 +107,19 @@ impl<S: LogSink, N: SourceNames> LogRelay<S, N> {
 }
 
 struct Forwarding<'a, S: LogSink, N: SourceNames> {
-    sink: &'a mut S,
+    sink: RefCell<&'a mut S>,
     names: &'a N,
-    forwarded: Option<Result<(), IpcError>>,
+    forwarded: Cell<Option<Result<(), IpcError>>>,
 }
 
 impl<S: LogSink, N: SourceNames> log::Service<Delivery> for Forwarding<'_, S, N> {
-    fn write(&mut self, frame: &Delivery, message: &str) {
+    fn write(&self, frame: &Delivery, message: &str) {
         let source = source_of(self.names, frame.badge);
-        self.forwarded = Some(forward_message(self.sink, source.as_str(), message));
+        self.forwarded.set(Some(forward_message(
+            &mut **self.sink.borrow_mut(),
+            source.as_str(),
+            message,
+        )));
     }
 }
 

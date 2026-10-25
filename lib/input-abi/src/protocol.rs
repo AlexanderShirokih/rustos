@@ -165,7 +165,7 @@ ipc::protocol! {
 
         /// Отдаёт записи из начала очереди: целые кадры и одиночные записи состава устройств,
         /// сколько их помещается в ответ. Пустая очередь задерживает ответ до первой записи.
-        call(defer) fn next() -> Result<RecordBuf, NextError>;
+        call async fn next() -> Result<RecordBuf, NextError>;
 
         /// Отдаёт дескриптор устройства `device`, видимого сессии.
         call fn describe(device: DeviceNumber) -> Result<DeviceLayout, DescribeError>;
@@ -200,7 +200,7 @@ ipc::protocol! {
 
         /// Передаёт источнику сессию `inject`. Источник объявляет по ней свои устройства и
         /// держит её, пока обслуживает их.
-        call fn attach(
+        call async fn attach(
             own inject: ipc::wire::Session<input_inject::Protocol>,
         ) -> Result<(), AttachError>;
     }

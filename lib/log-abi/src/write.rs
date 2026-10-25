@@ -9,7 +9,7 @@ impl<C: Channel> log::Client<C> {
     /// Шлёт [`log::write`]. Сообщение длиннее кадра уходит несколькими кадрами.
     pub fn write_str(&self, message: &str) -> Result<(), IpcError> {
         for chunk in chunks::<LOG_MESSAGE_MAX>(message) {
-            self.write(chunk)?;
+            self.write(chunk).wait()?;
         }
         Ok(())
     }
@@ -26,11 +26,11 @@ mod tests {
         log::Client::new(client_end)
             .write_str(message)
             .expect("log write");
-        let mut sink = Sink::default();
+        let sink = Sink::default();
         let mut frames = Vec::new();
         server_end
             .serve_all(|frame| {
-                log::dispatch(&mut sink, frame)?;
+                log::dispatch(&sink, frame)?;
                 frames.extend(sink.last.take());
                 Ok::<_, ipc::wire::IpcError>(())
             })

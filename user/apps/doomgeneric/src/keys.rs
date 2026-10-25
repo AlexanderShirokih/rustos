@@ -23,7 +23,7 @@ pub(crate) fn start(session: Session<input::Protocol>, layout: Layout) -> Result
     let client = session.client().with_wait(Timeout::INFINITE);
     spawn_owned(move || {
         loop {
-            let records = match client.next() {
+            let records = match client.next().wait() {
                 Ok(records) => records,
                 Err(error) => {
                     log_fmt(format_args!("input stopped: {error:?}"));
@@ -39,7 +39,7 @@ pub(crate) fn start(session: Session<input::Protocol>, layout: Layout) -> Result
                 let descriptor = if record.kind == Kind::DeviceAdded {
                     record
                         .device
-                        .and_then(|number| client.describe(number).ok())
+                        .and_then(|number| client.describe(number).wait().ok())
                 } else {
                     None
                 };

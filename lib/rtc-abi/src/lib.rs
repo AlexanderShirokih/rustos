@@ -10,9 +10,9 @@ ipc::protocol! {
         name = "Rtc";
 
         /// Текущее время устройства в секундах.
-        call fn now() -> u64;
+        call async fn now() -> u64;
 
         /// Заводит будильник устройства и возвращает время после его срабатывания.
-        call fn tick() -> u64;
+        call async fn tick() -> u64;
     }
 }

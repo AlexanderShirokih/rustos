@@ -1,17 +1,18 @@
 //! Сессии `Platform` и описание, линии и регионы, которые они взяли.
 
-use alloc::vec::Vec;
-use core::fmt;
+use alloc::{rc::Rc, vec::Vec};
+use core::{cell::RefCell, fmt};
 
 use bootstrap_abi::hardware;
 use device_resolver::{DeviceTreePlatform, InterruptLine, PlatformDescription, ResolveError};
+use executor::PortChannel;
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{
     Delivery, Error, IrqControl, IrqLine, MemoryRegion, ObjectKind, OwnedHandle, SessionTransport,
     kind,
 };
 use platform_abi::{DescriptionRegion, DeviceId, MmioWindow, PlatformError, platform};
-use runtime::{Mutex, log_fmt};
+use runtime::log_fmt;
 use syscall::{MemoryAccess, Rights, SyscallError};
 
 const RESOURCE_RIGHTS: Rights = Rights::READ
@@ -46,11 +47,11 @@ struct HeldRegion {
 }
 
 pub(crate) struct Platform {
-    sessions: &'static Mutex<Vec<SessionRecord>>,
+    sessions: Rc<RefCell<Vec<SessionRecord>>>,
     resolver: DeviceTreePlatform<'static>,
     description: HardwareDescription,
     lines: IrqControl,
-    hardware: hardware::Client<SessionTransport>,
+    hardware: hardware::Client<PortChannel<SessionTransport>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,12 +78,12 @@ impl SessionRecord {
 }
 
 impl Platform {
-    pub(crate) const fn new(
-        sessions: &'static Mutex<Vec<SessionRecord>>,
+    pub(crate) fn new(
+        sessions: Rc<RefCell<Vec<SessionRecord>>>,
         resolver: DeviceTreePlatform<'static>,
         description: HardwareDescription,
         lines: IrqControl,
-        hardware: hardware::Client<SessionTransport>,
+        hardware: hardware::Client<PortChannel<SessionTransport>>,
     ) -> Self {
         Self {
             sessions,
@@ -95,11 +96,13 @@ impl Platform {
 
     pub(crate) fn close(&self, badge: u64) {
         // Удаление записи закрывает корни сессии, и ядро отзывает их копии у держателей.
-        self.sessions.lock().retain(|record| record.badge != badge);
+        self.sessions
+            .borrow_mut()
+            .retain(|record| record.badge != badge);
     }
 
     fn granted_description(&self, badge: u64) -> Result<DescriptionRegion<MemoryRegion>, Refusal> {
-        let mut sessions = self.sessions.lock();
+        let mut sessions = self.sessions.borrow_mut();
         let record = sessions
             .iter_mut()
             .find(|record| record.badge == badge)
@@ -128,11 +131,12 @@ impl Platform {
     }
 
     fn line(&self, badge: u64, device: &DeviceId, resource: u16) -> Result<IrqLine, Refusal> {
-        let mut sessions = self.sessions.lock();
+        let mut sessions = self.sessions.borrow_mut();
         let record = sessions
             .iter_mut()
             .find(|record| record.badge == badge)
             .ok_or(Refusal::NoSession)?;
+
         let interrupt = self
             .resolver
             .interrupt(device, resource)
@@ -153,6 +157,7 @@ impl Platform {
             line: interrupt.line,
             root,
         });
+
         Ok(granted)
     }
 
@@ -162,21 +167,30 @@ impl Platform {
         device: &DeviceId,
         resource: u16,
     ) -> Result<MmioWindow<MemoryRegion>, Refusal> {
-        let mut sessions = self.sessions.lock();
-        if !sessions.iter().any(|record| record.badge == badge) {
+        if !self
+            .sessions
+            .borrow()
+            .iter()
+            .any(|record| record.badge == badge)
+        {
             return Err(Refusal::NoSession);
         }
+
         let mmio = self
             .resolver
             .mmio(device, resource)
             .map_err(Refusal::Resolve)?;
+
         let found = self
             .hardware
             .acquire_device_memory_containing::<MemoryRegion>(mmio.base, mmio.size)
             .ok()
             .flatten()
             .ok_or(Refusal::WindowNotGranted)?;
+
         let base = mmio.base - found.offset;
+        let mut sessions = self.sessions.borrow_mut();
+
         // Регионы набора ядра не пересекаются, и совпадение базы означает общий регион.
         if sessions.iter().any(|record| {
             record.badge != badge && record.regions.iter().any(|held| held.base == base)
@@ -210,9 +224,10 @@ impl Platform {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl platform::Service<Delivery> for Platform {
     fn irq(
-        &mut self,
+        &self,
         frame: &Delivery,
         device: DeviceId,
         resource: u16,
@@ -224,7 +239,7 @@ impl platform::Service<Delivery> for Platform {
     }
 
     fn mmio(
-        &mut self,
+        &self,
         frame: &Delivery,
         device: DeviceId,
         resource: u16,
@@ -236,7 +251,7 @@ impl platform::Service<Delivery> for Platform {
     }
 
     fn description(
-        &mut self,
+        &self,
         frame: &Delivery,
     ) -> impl IntoWireValue<Delivery, Read = Result<DescriptionRegion, PlatformError>> {
         self.granted_description(frame.badge)

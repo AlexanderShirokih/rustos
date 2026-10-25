@@ -1,7 +1,5 @@
 use ipc::wire::IpcError;
-use kernel_objects::{
-    MapError, MemoryRegion, MmioMapping, MmioWindow, ReadOnlyMapping, SessionTransport,
-};
+use kernel_objects::{MapError, MemoryRegion, MmioMapping, MmioWindow, ReadOnlyMapping};
 
 use crate::{
     description::{Description, DescriptionRegion},
@@ -48,12 +46,17 @@ impl MappedDescription {
     }
 }
 
-impl platform::Client<SessionTransport> {
-    /// Берёт окно `resource` устройства `device` и отображает его, как [`MmioMapping::new`].
-    /// Окно отзывается с концом сессии `Platform`, которая его выдала.
-    pub fn map_mmio(&self, device: &DeviceId, resource: u16) -> Result<MmioMapping, WindowRefusal> {
+impl<C: ipc::AsyncChannel<Resources = kernel_objects::Delivery>> platform::Client<C> {
+    /// Берёт и отображает окно устройства. Ответ `Platform` задача ждёт через канал клиента.
+    /// Окно отзывается с концом сессии, которая его выдала.
+    pub async fn map_mmio(
+        &self,
+        device: &DeviceId,
+        resource: u16,
+    ) -> Result<MmioMapping, WindowRefusal> {
         let window = self
             .mmio(device.clone(), resource)
+            .await
             .map_err(|error| error.fold(WindowRefusal::Call, WindowRefusal::Platform))?;
 
         MmioMapping::new(MmioWindow::from(window))

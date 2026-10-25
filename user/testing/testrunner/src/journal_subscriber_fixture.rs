@@ -91,8 +91,9 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .open()
         .map_err(|_| Failed)?
         .client();
-    let ring = session.subscribe().map_err(|_| Failed)?;
-    let again = session.subscribe();
+
+    let ring = session.subscribe().wait().map_err(|_| Failed)?;
+    let again = session.subscribe().wait();
     if again.is_ok() {
         log_line(&format!("second subscribe: {again:?}"));
         return Err(Failed);

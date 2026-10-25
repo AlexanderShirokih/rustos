@@ -27,8 +27,10 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let Some(device) = DeviceId::new("/pl031@9010000") else {
         return Err(Failed);
     };
-    let (Ok(_line), Ok(window)) = (platform.irq(device.clone(), 0), platform.mmio(device, 0))
-    else {
+    let (Ok(_line), Ok(window)) = (
+        platform.irq(device.clone(), 0).wait(),
+        platform.mmio(device, 0).wait(),
+    ) else {
         log_line("resources refused");
         return Err(Failed);
     };

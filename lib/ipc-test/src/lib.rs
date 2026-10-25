@@ -32,6 +32,9 @@ use ipc::{
 use syscall::{ObjectKind, kind};
 
 mod async_channel;
+mod complete;
+
+pub use complete::complete;
 
 /// Capability кадра как владельцы [`MockHandle`] по слотам. Вид результата задаёт вид поля
 /// контракта, а фактический объект ядра мок не проверяет.

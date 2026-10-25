@@ -5,8 +5,6 @@ use ipc::{AsyncChannel, Channel, Incoming, Outgoing, Timeout, Unsent, wire::IpcE
 use crate::{MockChannel, MockResources};
 
 impl AsyncChannel for MockChannel {
-    type Resources = MockResources;
-
     fn send<'b>(
         &'b self,
         frame: Outgoing<'b, MockResources>,

@@ -184,11 +184,7 @@ struct ArchFlags {
 const ARCH_FLAGS: &[ArchFlags] = &[ArchFlags {
     name: "aarch64",
     cpu_family: "aarch64",
-    cflags: &[
-        "--target=aarch64-none-elf",
-        "-march=armv8-a",
-        "-mstrict-align",
-    ],
+    cflags: &["--target=aarch64-none-elf", "-march=armv8-a"],
 }];
 
 pub(crate) fn materialize(force: bool) -> Result<PathBuf> {

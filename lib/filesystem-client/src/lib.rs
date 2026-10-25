@@ -1,5 +1,5 @@
 //! Даёт программе открывать узлы файловой подсистемы по пути, читать и писать их, обходить
-//! дерево каталогов. Разбор пути, сессии файловых систем и их буфер данных остаются внутри
+//! дерево каталогов. Разбор пути, файловые сессии и отображения содержимого остаются внутри
 //! библиотеки.
 //!
 //! Транспорт и отображения фасад берёт у [`Environment`]. Под таргетом системы окружение
@@ -22,10 +22,11 @@ mod session;
 #[cfg(target_os = "molecular")]
 mod system;
 
-pub use environment::{Environment, SharedRegion};
+pub use environment::{Environment, IoContext, SharedRegion};
 pub use error::{Failure, Result};
 pub use filesystem::FileSystem;
 pub use listing::Listing;
 pub use node::OpenNode;
+pub use session::staged;
 #[cfg(target_os = "molecular")]
-pub use system::{FileSystemEnvironment, SessionRegion};
+pub use system::{FileSystemEnvironment, SessionIo, SessionRegion};

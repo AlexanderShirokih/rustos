@@ -4,15 +4,16 @@
 use component_startup::{Requirements as _, component_manifest};
 use filesystem_abi::{AccessMode, FileSystemError, NodeKind, OpenFlags, file_system, namespace};
 use ipc::CallError;
-use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
-use runtime::{Timeout, UserMemFlags, log_line};
+use kernel_objects::SessionTransport;
+use runtime::{Timeout, log_line};
 use syscall::{Handle, kind};
 
 mod failed;
+#[allow(dead_code)]
+mod filesystem_io;
 
 use failed::Failed;
-
-const BUFFER_SIZE: u32 = 4096;
+use filesystem_io::IoClient;
 
 const RECORD: &str = "/sample";
 const RECORD_BODY: &[u8] = b"component area of the userland image\n";
@@ -37,37 +38,38 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .client()
         .with_wait(Timeout::from_secs(5))
         .resolve(root)
+        .wait()
         .map_err(|_| Failed)?;
-    let area = kernel_objects::Session::from_session(session).client();
+    let area = IoClient::new(kernel_objects::Session::from_session(session).client());
 
     if inspect(&area) {
         log_line("area read");
     }
+
     Err(Failed)
 }
 
-fn inspect(client: &file_system::Client<SessionTransport>) -> bool {
-    let Ok(cap) = client.acquire_buffer(BUFFER_SIZE) else {
-        return false;
-    };
-    let region = MemoryRegion::from(cap);
-    let Ok(buffer) = Mapping::full(region, UserMemFlags::ReadWrite) else {
+fn inspect(client: &IoClient) -> bool {
+    let Ok(opened) = client
+        .open(RECORD, AccessMode::Read, OpenFlags::NONE)
+        .wait()
+    else {
         return false;
     };
 
-    let Ok(opened) = client.open(RECORD, AccessMode::Read, OpenFlags::NONE) else {
-        return false;
-    };
     if opened.info.kind != NodeKind::File || opened.info.size != RECORD_BODY.len() as u64 {
         return false;
     }
-    let Ok(count) = client.read(opened.fd, 0, BUFFER_SIZE) else {
+
+    let mut body = [0; RECORD_BODY.len()];
+    let Ok(count) = client.read(opened.fd, 0, &mut body) else {
         return false;
     };
-    let mut body = [0; RECORD_BODY.len()];
-    if count as usize != RECORD_BODY.len() || buffer.copy_out(&mut body).is_err() {
+
+    if count as usize != RECORD_BODY.len() {
         return false;
     }
+
     if body != RECORD_BODY {
         return false;
     }
@@ -85,5 +87,5 @@ fn escapes(
     text: &str,
     refused: FileSystemError,
 ) -> bool {
-    client.open(text, AccessMode::Read, OpenFlags::NONE) != Err(CallError::Remote(refused))
+    client.open(text, AccessMode::Read, OpenFlags::NONE).wait() != Err(CallError::Remote(refused))
 }

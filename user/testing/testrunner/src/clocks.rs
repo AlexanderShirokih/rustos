@@ -419,9 +419,9 @@ fn the_board_controller_enables_the_dma_clock_and_refuses_a_disabled_qup_and_con
             .with_wait(CLOCKS_REPLY_TIMEOUT);
 
     let enable = |path| client.enable(device(path));
-    let dma = enable(BOARD_DMA);
-    let qup = enable(BOARD_DISABLED_QUP);
-    let console = enable(BOARD_CONSOLE);
+    let dma = enable(BOARD_DMA).wait();
+    let qup = enable(BOARD_DISABLED_QUP).wait();
+    let console = enable(BOARD_CONSOLE).wait();
 
     test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));
     test_harness::check_eq!(dma, Ok(()));

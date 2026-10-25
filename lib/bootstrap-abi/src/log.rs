@@ -14,7 +14,8 @@ impl<C: Channel> bootstrap::Client<C> {
         let message = message
             .get(..message.floor_char_boundary(log_message_max(tag)))
             .unwrap_or_default();
-        self.log(tag, message)
+
+        self.log(tag, message).wait()
     }
 }
 
@@ -28,6 +29,7 @@ pub const fn log_message_max(tag: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
     use std::{format, string::String};
 
     use ipc_test::{MockHandle, MockResources};
@@ -36,16 +38,16 @@ mod tests {
 
     #[derive(Default)]
     struct Sink {
-        last_log: Option<String>,
+        last_log: RefCell<Option<String>>,
     }
 
     impl crate::bootstrap::Service<MockResources> for Sink {
-        fn log(&mut self, _frame: &MockResources, tag: &str, message: &str) {
-            self.last_log = Some(format!("[{tag}] {message}"));
+        fn log(&self, _frame: &MockResources, tag: &str, message: &str) {
+            *self.last_log.borrow_mut() = Some(format!("[{tag}] {message}"));
         }
 
         fn acquire_userland_image(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl ipc::IntoWireValue<
             MockResources,
@@ -55,7 +57,7 @@ mod tests {
         }
 
         fn acquire_hardware(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl ipc::IntoWireValue<
             MockResources,
@@ -67,7 +69,7 @@ mod tests {
         }
 
         fn acquire_system_info(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl ipc::IntoWireValue<
             MockResources,
@@ -80,7 +82,7 @@ mod tests {
         }
 
         fn acquire_log(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl ipc::IntoWireValue<MockResources, Read = Result<log_abi::LogRing, u32>> {
             Err::<
@@ -98,11 +100,14 @@ mod tests {
         let (client_end, server_end) = ipc_test::pair();
         let client = bootstrap::Client::new(client_end);
         client.log_str("rtc-client", "clock ok").expect("log write");
-        let mut sink = Sink::default();
+        let sink = Sink::default();
         server_end
-            .serve(|frame| bootstrap::dispatch(&mut sink, frame))
+            .serve(|frame| bootstrap::dispatch(&sink, frame))
             .expect("dispatch ok");
-        assert_eq!(sink.last_log.as_deref(), Some("[rtc-client] clock ok"));
+        assert_eq!(
+            sink.last_log.borrow().as_deref(),
+            Some("[rtc-client] clock ok")
+        );
     }
 
     #[test]
@@ -114,11 +119,11 @@ mod tests {
         client
             .log_str(&tag, &long_message)
             .expect("clamped log write");
-        let mut sink = Sink::default();
+        let sink = Sink::default();
         server_end
-            .serve(|frame| bootstrap::dispatch(&mut sink, frame))
+            .serve(|frame| bootstrap::dispatch(&sink, frame))
             .expect("dispatch ok");
-        let logged = sink.last_log.expect("logged");
+        let logged = sink.last_log.into_inner().expect("logged");
         assert_eq!(logged.len(), 1 + tag.len() + 2 + log_message_max(&tag));
     }
 }

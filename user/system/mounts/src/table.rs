@@ -6,23 +6,24 @@
 //! Строки монтируются одновременно, вложенная ждёт монтирования строки-родителя. Строки одной
 //! файловой системы сверх `managed_component::IMPORTER_REQUESTS_PER_EXPORT_MAX` получают `NoSpace`.
 
-use alloc::{string::String, vec::Vec};
+use alloc::{rc::Rc, string::String, vec::Vec};
 
 use bootstrap_abi::image;
 use component_abi::{
     ATTRIBUTE_COUNT_MAX, ATTRIBUTE_KEY_MAX_BYTES, ATTRIBUTE_VALUE_MAX_BYTES, Attribute,
     AttributeSet, Attributes, attributes_len, encode_attributes_into,
 };
-use component_startup::{Import, SessionPort, session};
+use component_startup::{Import, session_async};
+use executor::{Executor, PortChannel, Reactor};
 use filesystem_abi::{
     FileSystemError, MountEnded, Path, file_system, file_system_mount, namespace,
 };
 use ipc::CallError;
 use kernel_objects::{MemoryRegion, ReadOnlyMapping, Session};
-use runtime::{log_fmt, spawn_owned};
+use runtime::log_fmt;
 use syscall::{Handle, Timeout, kind};
 
-use crate::router::{open, open_mount};
+use crate::router::Router;
 
 const TABLE_PATH: &str = "/mounts/table";
 
@@ -42,19 +43,21 @@ pub(crate) struct MountLine {
     attributes: AttributeSet,
 }
 
-pub(crate) fn read(image: &Import<image::Protocol>) -> Vec<MountLine> {
-    let image = match image.open() {
+pub(crate) async fn read(image: &Import<image::Protocol>, reactor: &Reactor) -> Vec<MountLine> {
+    let image = match image.open_async(reactor).await {
         Ok(image) => image,
         Err(error) => {
             log_fmt(format_args!("mount table skipped: {error}"));
             return Vec::new();
         }
     };
-    let client = image.client();
-    let Ok(region) = client.region().map(MemoryRegion::from) else {
+
+    let client = PortChannel::client(image, reactor.clone());
+    let Ok(region) = client.region().await.map(MemoryRegion::from) else {
         log_fmt(format_args!("mount table skipped: image region refused"));
         return Vec::new();
     };
+
     let Ok(mapping) = ReadOnlyMapping::new(region) else {
         log_fmt(format_args!("mount table skipped: image not mapped"));
         return Vec::new();
@@ -93,19 +96,16 @@ pub(crate) fn read(image: &Import<image::Protocol>) -> Vec<MountLine> {
 pub(crate) fn start(
     lines: Vec<MountLine>,
     parent: Handle<kind::Port>,
-    views: &'static SessionPort,
-    export: &'static SessionPort,
+    router: &Rc<Router>,
+    executor: &Executor,
 ) {
     let enclosing: Vec<Option<String>> = lines.iter().map(|line| enclosing(&lines, line)).collect();
     for (line, enclosing) in lines.into_iter().zip(enclosing) {
-        let number = line.number;
-        let started = spawn_owned(move || {
-            mount(&line, enclosing.as_deref(), parent, views, export);
-            0
+        let router = router.clone();
+        let reactor = executor.reactor();
+        executor.spawn(async move {
+            mount(&line, enclosing.as_deref(), parent, &router, &reactor).await;
         });
-        if started.is_err() {
-            log_fmt(format_args!("mount table line {number} not started"));
-        }
     }
 }
 
@@ -154,17 +154,17 @@ fn parsed(number: usize, line: &str) -> Result<MountLine, LineError> {
     })
 }
 
-fn mount(
+async fn mount(
     line: &MountLine,
     enclosing: Option<&str>,
     parent: Handle<kind::Port>,
-    views: &SessionPort,
-    export: &SessionPort,
+    router: &Router,
+    reactor: &Reactor,
 ) {
     let number = line.number;
     loop {
         if let Some(enclosing) = enclosing
-            && let Err(error) = await_mount(enclosing, views)
+            && let Err(error) = await_mount(enclosing, router, reactor).await
         {
             log_fmt(format_args!(
                 "mount table line {number} {}: {enclosing} not awaited: {error:?}",
@@ -172,12 +172,15 @@ fn mount(
             ));
         }
 
-        let filesystem = match session::<file_system::Protocol>(
+        let filesystem = match session_async::<file_system::Protocol>(
             parent,
+            reactor,
             FILESYSTEM_REQUIREMENT,
             line.attributes.as_attributes(),
             Timeout::INFINITE,
-        ) {
+        )
+        .await
+        {
             Ok(filesystem) => filesystem,
             Err(error) => {
                 log_fmt(format_args!(
@@ -187,7 +190,8 @@ fn mount(
                 return;
             }
         };
-        let session = match open_mount(export) {
+
+        let session = match router.open_mount() {
             Ok(session) => Session::<file_system_mount::Protocol>::from_handle(session),
             Err(error) => {
                 log_fmt(format_args!(
@@ -197,11 +201,9 @@ fn mount(
                 return;
             }
         };
-        match session
-            .client()
-            .with_wait(Timeout::INFINITE)
-            .mount(&line.path, filesystem)
-        {
+
+        let client = PortChannel::client(session, reactor.clone()).with_wait(Timeout::INFINITE);
+        match client.mount(&line.path, filesystem).await {
             Ok(MountEnded::FileSystemGone) => {}
             ended => {
                 log_fmt(format_args!(
@@ -226,13 +228,16 @@ fn enclosing(lines: &[MountLine], line: &MountLine) -> Option<String> {
         .map(|other| other.path.clone())
 }
 
-fn await_mount(path: &str, views: &SessionPort) -> Result<(), CallError<FileSystemError>> {
-    let view = open(views, path).map_err(CallError::Remote)?;
-    // Разрешение в виде на путь родителя использует монтирования только на этом пути и под ним.
-    // Под ним лежат лишь строки, ждущие того же родителя.
-    Session::<namespace::Protocol>::from_handle(view)
-        .client()
-        .with_wait(Timeout::INFINITE)
-        .resolve("/")
-        .map(drop)
+async fn await_mount(
+    path: &str,
+    router: &Router,
+    reactor: &Reactor,
+) -> Result<(), CallError<FileSystemError>> {
+    let view = router.open(path).map_err(CallError::Remote)?;
+    let client = PortChannel::client(
+        Session::<namespace::Protocol>::from_handle(view),
+        reactor.clone(),
+    )
+    .with_wait(Timeout::INFINITE);
+    client.resolve("/").await.map(drop)
 }

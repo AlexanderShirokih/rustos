@@ -6,7 +6,10 @@
 //! `port_send` этим handle возвращает `WrongType`. Получатель остаётся жив, освобождает
 //! запись и обслуживает следующий корректный запрос.
 
-use core::sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst};
+use core::{
+    cell::RefCell,
+    sync::atomic::{AtomicI64, AtomicU32, Ordering::SeqCst},
+};
 
 use ipc::{
     Channel as _, IntoWireValue as _, Listener as _,
@@ -41,12 +44,13 @@ struct Probe {
     handed: Option<Port>,
 }
 
-impl kind_probe::Service<Delivery> for Probe {
-    fn hand(&mut self, _frame: &Delivery, capability: IssuedHandle<kind::Port>) {
-        self.handed = Some(OwnedHandle::from(capability));
+impl kind_probe::Service<Delivery> for RefCell<&mut Probe> {
+    fn hand(&self, _frame: &Delivery, capability: IssuedHandle<kind::Port>) {
+        let mut probe = self.borrow_mut();
+        probe.handed = Some(OwnedHandle::from(capability));
     }
 
-    fn echo(&mut self, _frame: &Delivery, value: u32) -> u32 {
+    fn echo(&self, _frame: &Delivery, value: u32) -> u32 {
         value
     }
 }
@@ -83,7 +87,9 @@ fn sending_worker(arg: usize, signal: Signal) -> u32 {
 
     let answered = kind_probe::Client::new(transport)
         .with_wait(CALL_TIMEOUT)
-        .echo(PROBE_VALUE);
+        .echo(PROBE_VALUE)
+        .wait();
+
     exchange
         .answered
         .store(i64::from(answered == Ok(PROBE_VALUE)), SeqCst);
@@ -112,7 +118,7 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     let frame = transport
         .recv(&mut bytes, RECV_TIMEOUT)
         .expect("frame delivered");
-    kind_probe::dispatch(&mut probe, frame).expect("frame dispatched");
+    kind_probe::dispatch(&RefCell::new(&mut probe), frame).expect("frame dispatched");
     let owned = probe.handed.take().expect("the capability has an owner");
 
     test_harness::check_eq!(
@@ -130,7 +136,7 @@ fn a_declared_port_field_carrying_a_signal_is_refused_by_the_kernel() {
     let frame = transport
         .recv(&mut bytes, RECV_TIMEOUT)
         .expect("next request delivered");
-    kind_probe::dispatch(&mut probe, frame).expect("next request answered");
+    kind_probe::dispatch(&RefCell::new(&mut probe), frame).expect("next request answered");
 
     worker.join(JOIN_TIMEOUT).expect("worker joins");
     test_harness::check_eq!(exchange.sent.load(SeqCst), 1);

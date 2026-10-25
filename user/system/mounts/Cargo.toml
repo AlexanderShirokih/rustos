@@ -16,6 +16,7 @@ test = false
 bench = false
 
 [dependencies]
+executor = { workspace = true }
 kernel-objects = { workspace = true }
 bootstrap-abi = { workspace = true }
 component-abi = { workspace = true }

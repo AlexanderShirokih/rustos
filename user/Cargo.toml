@@ -38,6 +38,7 @@ members = [
     "testing/cxx-exit",
     "testing/cxx-selftest",
     "testing/sqlite-selftest",
+    "testing/slint-selftest",
     "testing/std-selftest",
     "testing/testrunner",
     "../lib/c-library",

@@ -15,10 +15,10 @@ use log_fixture_protocol::FIXTURE_LINE;
 #[program_entry::process]
 fn probe(log: &Port) -> Result<(), Failed> {
     let bootstrap = bootstrap::Client::new(PortTransport::new(log.borrow()));
-    if bootstrap.acquire_hardware().is_ok() {
+    if bootstrap.acquire_hardware().wait().is_ok() {
         return Err(Failed);
     }
-    if bootstrap.acquire_userland_image().is_ok() {
+    if bootstrap.acquire_userland_image().wait().is_ok() {
         return Err(Failed);
     }
 

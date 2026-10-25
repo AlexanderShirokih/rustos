@@ -219,7 +219,7 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
         buffer,
         table: table.clone(),
     };
-    let mut server = BootstrapServer { table, resources };
+    let server = BootstrapServer { table, resources };
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
 
     loop {
@@ -235,9 +235,9 @@ pub fn run_bootstrap(port: &Arc<Port>, _receiver: Capability, resources: Bootstr
         };
         // Вызыватель уже получил отказ разбора либо доставки ответа, и приём продолжается.
         let _ = match frame.resources.badge {
-            HARDWARE_BADGE => hardware::dispatch(&mut server, frame),
-            SYSTEM_INFO_BADGE => system_info::dispatch(&mut server, frame),
-            _ => bootstrap::dispatch(&mut server, frame),
+            HARDWARE_BADGE => hardware::dispatch(&server, frame),
+            SYSTEM_INFO_BADGE => system_info::dispatch(&server, frame),
+            _ => bootstrap::dispatch(&server, frame),
         };
     }
 }
@@ -327,13 +327,13 @@ impl<K: ObjectKind> Drop for KernelEntry<K> {
 }
 
 impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
-    fn log(&mut self, _frame: &BootstrapFrame, tag: &str, message: &str) {
+    fn log(&self, _frame: &BootstrapFrame, tag: &str, message: &str) {
         klog::log_user(tag, message);
         log_ring::notify();
     }
 
     fn acquire_userland_image(
-        &mut self,
+        &self,
         _frame: &BootstrapFrame,
     ) -> impl IntoWireValue<BootstrapFrame, Read = Result<Cap<kind::MemoryRegion>, u32>> {
         self.vend_root::<kind::MemoryRegion>(CapabilityTarget::Memory(
@@ -342,7 +342,7 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
     }
 
     fn acquire_hardware(
-        &mut self,
+        &self,
         _frame: &BootstrapFrame,
     ) -> impl IntoWireValue<BootstrapFrame, Read = Result<Session<hardware::Protocol>, u32>> {
         self.resources
@@ -354,7 +354,7 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
     }
 
     fn acquire_system_info(
-        &mut self,
+        &self,
         _frame: &BootstrapFrame,
     ) -> impl IntoWireValue<BootstrapFrame, Read = Result<Session<system_info::Protocol>, u32>>
     {
@@ -367,7 +367,7 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
     }
 
     fn acquire_log(
-        &mut self,
+        &self,
         _frame: &BootstrapFrame,
     ) -> impl IntoWireValue<BootstrapFrame, Read = Result<LogRing, u32>> {
         let (region, signal) = log_ring::acquire().ok_or(ACQUIRE_FAILED)?;
@@ -387,7 +387,7 @@ impl bootstrap::Service<BootstrapFrame> for BootstrapServer {
 
 impl hardware::Service<BootstrapFrame> for BootstrapServer {
     fn acquire_irq_control(
-        &mut self,
+        &self,
         _frame: &BootstrapFrame,
     ) -> impl IntoWireValue<BootstrapFrame, Read = Result<Cap<kind::IrqControl>, u32>> {
         self.vend_root::<kind::IrqControl>(CapabilityTarget::IrqControl(
@@ -396,7 +396,7 @@ impl hardware::Service<BootstrapFrame> for BootstrapServer {
     }
 
     fn acquire_boot_fdt(
-        &mut self,
+        &self,
         _frame: &BootstrapFrame,
     ) -> impl IntoWireValue<BootstrapFrame, Read = Result<BootFdt, u32>> {
         self.vend_root::<kind::MemoryRegion>(CapabilityTarget::Memory(
@@ -409,7 +409,7 @@ impl hardware::Service<BootstrapFrame> for BootstrapServer {
     }
 
     fn acquire_device_memory(
-        &mut self,
+        &self,
         _frame: &BootstrapFrame,
         index: u32,
     ) -> impl IntoWireValue<BootstrapFrame, Read = Result<Cap<kind::MemoryRegion>, u32>> {
@@ -424,7 +424,7 @@ impl hardware::Service<BootstrapFrame> for BootstrapServer {
 }
 
 impl system_info::Service<BootstrapFrame> for BootstrapServer {
-    fn snapshot(&mut self, _frame: &BootstrapFrame) -> SystemSnapshot {
+    fn snapshot(&self, _frame: &BootstrapFrame) -> SystemSnapshot {
         let system = &self.resources.system;
 
         SystemSnapshot {

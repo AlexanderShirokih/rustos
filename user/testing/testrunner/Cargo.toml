@@ -10,6 +10,12 @@ build = "build.rs"
 stack_size = 65536
 
 [[bin]]
+name = "async-component-fixture"
+path = "src/async_component_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "testrunner"
 path = "src/main.rs"
 test = false

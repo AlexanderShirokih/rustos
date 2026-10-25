@@ -1,5 +1,5 @@
 //! E2E приёма порта сессий экспорта [`SessionEvents`] из EL0: отброшенный кадр и уход значка
-//! не прерывают приём, опрос пустого порта не ждёт, а capability порта без права приёма
+//! не прерывают приём, на пустом порту приём ждёт, а capability порта без права приёма
 //! заканчивает приём.
 
 use core::{
@@ -7,7 +7,7 @@ use core::{
     sync::atomic::{AtomicI64, Ordering::SeqCst},
 };
 
-use component_startup::{Polled, SessionEvent, SessionEvents};
+use component_startup::{SessionEvent, SessionEvents};
 use kernel_objects::{Port, wait_any};
 use runtime::{Timeout, port_send, spawn_owned};
 use syscall::{READABLE, Rights, SyscallError, WaitItem};
@@ -53,6 +53,8 @@ fn exhausting_sender(session: &Port) -> u32 {
 
 #[test_harness::test]
 fn session_events_skip_a_discarded_frame() {
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
     let port = Port::create().expect("port create");
     let first = session(&port, FIRST_BADGE);
     DISCARDED_SEND.store(i64::MIN, SeqCst);
@@ -61,7 +63,14 @@ fn session_events_skip_a_discarded_frame() {
     let sender = spawn_owned(move || exhausting_sender(&first)).expect("spawn sender");
     let mut events = SessionEvents::new(&port);
 
-    test_harness::check_eq!(frame_badge(events.recv()), Some(FIRST_BADGE.get()));
+    test_harness::check_eq!(
+        frame_badge(
+            executor
+                .block_on(events.recv(&reactor))
+                .expect("session receive")
+        ),
+        Some(FIRST_BADGE.get())
+    );
     sender.join(JOIN_TIMEOUT).expect("sender joins");
     test_harness::check_eq!(
         DISCARDED_SEND.load(SeqCst),
@@ -72,6 +81,8 @@ fn session_events_skip_a_discarded_frame() {
 
 #[test_harness::test]
 fn session_events_yield_a_departed_badge() {
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
     let port = Port::create().expect("port create");
     let first = session(&port, FIRST_BADGE);
     let second = session(&port, SECOND_BADGE);
@@ -86,37 +97,57 @@ fn session_events_yield_a_departed_badge() {
     let mut events = SessionEvents::new(&port);
 
     test_harness::check!(matches!(
-        events.recv(),
+        executor.block_on(events.recv(&reactor)).expect("session receive"),
         Some(SessionEvent::Gone(badge)) if badge == FIRST_BADGE.get()
     ));
-    test_harness::check_eq!(frame_badge(events.recv()), Some(SECOND_BADGE.get()));
+    test_harness::check_eq!(
+        frame_badge(
+            executor
+                .block_on(events.recv(&reactor))
+                .expect("session receive")
+        ),
+        Some(SECOND_BADGE.get())
+    );
     sender.join(JOIN_TIMEOUT).expect("sender joins");
     test_harness::check_eq!(DELIVERED_SEND.load(SeqCst), 0);
 }
 
 #[test_harness::test]
 fn session_events_end_without_receive_right() {
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
     let port = Port::create().expect("port create");
     let unreadable = port
         .duplicate(Rights::WRITE, None)
         .expect("mint capability without READ");
 
-    test_harness::check!(SessionEvents::new(&unreadable).recv().is_none());
+    test_harness::check!(
+        executor
+            .block_on(SessionEvents::new(&unreadable).recv(&reactor))
+            .expect("closed receive")
+            .is_none()
+    );
 }
 
 #[test_harness::test]
-fn session_events_poll_an_empty_port() {
+fn session_events_wait_on_an_empty_port() {
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
     let port = Port::create().expect("port create");
     let _client = session(&port, FIRST_BADGE);
+    let mut events = SessionEvents::new(&port);
 
-    test_harness::check!(matches!(
-        SessionEvents::new(&port).try_recv(),
-        Polled::Empty
-    ));
+    test_harness::check!(
+        executor
+            .block_on(reactor.timeout(Timeout::POLL, events.recv(&reactor)))
+            .is_none()
+    );
 }
 
 #[test_harness::test]
-fn session_events_poll_a_waiting_frame() {
+fn session_events_yield_a_waiting_frame() {
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
     let port = Port::create().expect("port create");
     let first = session(&port, FIRST_BADGE);
     DELIVERED_SEND.store(i64::MIN, SeqCst);
@@ -130,10 +161,12 @@ fn session_events_poll_a_waiting_frame() {
     test_harness::check!(matches!(wait_any(&items, SEND_TIMEOUT), Ok(0)));
 
     let mut events = SessionEvents::new(&port);
-    test_harness::check!(matches!(
-        events.try_recv(),
-        Polled::Event(SessionEvent::Frame(frame)) if frame.resources.badge == FIRST_BADGE.get()
-    ));
+    test_harness::check_eq!(
+        executor
+            .block_on(reactor.timeout(Timeout::POLL, events.recv(&reactor)))
+            .map(|received| frame_badge(received.expect("session receive"))),
+        Some(Some(FIRST_BADGE.get()))
+    );
     sender.join(JOIN_TIMEOUT).expect("sender joins");
     test_harness::check_eq!(DELIVERED_SEND.load(SeqCst), 0);
 }

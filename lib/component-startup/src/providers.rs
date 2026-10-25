@@ -1,23 +1,19 @@
 use core::marker::PhantomData;
 
-use component_abi::{Attributes, STARTUP_REQUEST_TIMEOUT, SessionError, component_startup};
-use executor::Reactor;
+use component_abi::{
+    Attributes, STARTUP_REQUEST_TIMEOUT, SessionError, SessionRequirement, component_startup,
+};
+use executor::{PortChannel, Reactor};
 use ipc::{CallError, Timeout};
-use kernel_objects::{PortTransport, Session, kind};
+use kernel_objects::{Port, Session, kind};
 use syscall::Handle;
 
 use crate::{
     StartupError, StartupFailure,
-    declare::{answered, repeats, request_session, start_parent},
+    declare::{answered, repeats},
     query::Query,
-    request::{Found, all, next, next_async, open, open_async, watch},
+    request::{AsyncStartup, Found, next, open, watch},
 };
-
-type Enumerate = fn(
-    &component_startup::Client<PortTransport>,
-    &str,
-    Attributes<'_>,
-) -> Result<Session<component_startup::Protocol>, CallError<SessionError>>;
 
 /// Провайдеры требования `all`. Стартовый handle принадлежит процессу до его завершения.
 pub struct Providers<P> {
@@ -32,7 +28,7 @@ pub struct Providers<P> {
 pub struct ProviderSessions<Q> {
     parent: Handle<kind::Port>,
     requirement: &'static str,
-    enumerate: Enumerate,
+    protocol: &'static str,
     query: Q,
     step: usize,
     stage: Stage,
@@ -62,29 +58,40 @@ impl<P: ipc::Protocol> Providers<P> {
         }
     }
 
-    /// Ищет экспорты протокола `P`, совпавшие с наборами `query`. Первый набор запрашивается
-    /// вызовом, следующий - когда перебор исчерпал результаты предыдущего. Результаты набора
-    /// фиксируются на момент его запроса, и новый вызов повторяет поиск.
-    pub fn all<Q: Query>(&self, query: Q) -> Result<ProviderSessions<Q>, StartupError> {
+    /// Ищет экспорты протокола `P`, совпавшие с наборами `query`. Ответы родителя задача ждёт
+    /// через `reactor`. Наборы запрашиваются по очереди, результаты набора фиксируются на
+    /// момент запроса.
+    pub async fn all<Q: Query>(
+        &self,
+        reactor: &Reactor,
+        query: Q,
+    ) -> Result<ProviderSessions<Q>, StartupError> {
         let mut sessions = ProviderSessions {
             parent: self.parent,
             requirement: self.requirement,
-            enumerate: all::<P>,
+            protocol: P::ID,
             query,
             step: 0,
             stage: Stage::Finished,
         };
-        sessions.stage = sessions.enumerate_next()?;
+
+        sessions.stage = sessions.enumerate_next(reactor).await?;
         Ok(sessions)
     }
 
-    /// Запрашивает наблюдение за экспортами протокола `P`, совпавшими с `attributes`. Запрос
-    /// ждёт ответ не дольше `STARTUP_REQUEST_TIMEOUT`.
-    pub fn watch(&self, attributes: Attributes<'_>) -> Result<ProviderWatch, StartupError> {
-        let parent = start_parent(self.parent).with_wait(STARTUP_REQUEST_TIMEOUT);
+    /// Запрашивает наблюдение за экспортами протокола `P`, совпавшими с `attributes`. Ответ
+    /// родителя задача ждёт через `reactor` не дольше `STARTUP_REQUEST_TIMEOUT`.
+    pub async fn watch(
+        &self,
+        reactor: &Reactor,
+        attributes: Attributes<'_>,
+    ) -> Result<ProviderWatch, StartupError> {
+        let parent = AsyncStartup::new(PortChannel::new(self.parent, reactor.clone()))
+            .with_wait(STARTUP_REQUEST_TIMEOUT);
+
         let watch = answered(
             self.requirement,
-            watch::<P>(&parent, self.requirement, attributes),
+            watch::<P>(&parent, self.requirement, attributes).await,
         )?;
 
         Ok(ProviderWatch {
@@ -93,53 +100,50 @@ impl<P: ipc::Protocol> Providers<P> {
         })
     }
 
-    /// Открывает сессию экспорта результата `found`. Каждый запрос ждёт ответ не дольше
+    /// Открывает сессию экспорта `found` через `reactor`. Каждый запрос ждёт не дольше
     /// `STARTUP_REQUEST_TIMEOUT` и повторяется при `IpcError::PeerClosed`.
-    pub fn open(&self, found: &Found) -> Result<Session<P>, StartupError> {
-        request_session(self.requirement, || {
-            open::<P>(found, STARTUP_REQUEST_TIMEOUT)
-        })
-    }
-
-    /// Открывает сессию экспорта результата `found`, как [`Self::open`]. Ответы родителя задача
-    /// ждёт через `reactor`.
-    pub async fn open_async(
-        &self,
-        reactor: &Reactor,
-        found: &Found,
-    ) -> Result<Session<P>, StartupError> {
+    pub async fn open(&self, reactor: &Reactor, found: &Found) -> Result<Session<P>, StartupError> {
         loop {
-            let answer = open_async::<P>(found, reactor, STARTUP_REQUEST_TIMEOUT).await;
+            let answer = open::<P>(found, reactor, STARTUP_REQUEST_TIMEOUT).await;
 
             if !repeats(&answer) {
                 return answered(self.requirement, answer);
             }
         }
     }
+
+    /// Открывает через `reactor` сессию первого экспорта, совпавшего с наборами `query`.
+    /// `None` - ни один набор не дал совпадений.
+    pub async fn open_first<Q: Query>(
+        &self,
+        reactor: &Reactor,
+        query: Q,
+    ) -> Result<Option<Session<P>>, StartupError> {
+        let Some(found) = self
+            .all(reactor, query)
+            .await?
+            .next(reactor)
+            .await
+            .transpose()?
+        else {
+            return Ok(None);
+        };
+
+        self.open(reactor, &found).await.map(Some)
+    }
 }
 
 impl ProviderWatch {
-    /// Ждёт не дольше `wait` экспорт, ещё не выданный этим наблюдением.
+    /// Ждёт не дольше `wait` экспорт, ещё не выданный этим наблюдением. Ответ родителя
+    /// задача ждёт через `reactor`.
     ///
     /// Отказы:
-    /// - `Ipc(IpcError::Timeout)` - срок истёк. Экспорт, ставший видимым позже, выдаст
-    ///   следующий вызов;
-    /// - `Refused` - вызов заменён вызовом из другого потока либо родитель ответил концом
-    ///   перечисления;
+    /// - `Ipc(IpcError::Timeout)` - срок истёк, экспорт остаётся для следующего вызова;
+    /// - `Refused` - вызов заменён либо родитель ответил концом перечисления;
     /// - `NoSpace` - у родителя не хватило ресурса на результат;
     /// - `Ipc` - другой отказ транспорта.
-    pub fn next(&self, wait: Timeout) -> Result<Found, StartupError> {
-        self.found(next(&self.watch, wait))
-    }
-
-    /// Ждёт не дольше `wait` экспорт, как [`Self::next`]. Ответ родителя задача ждёт через
-    /// `reactor`.
-    pub async fn next_async(
-        &self,
-        reactor: &Reactor,
-        wait: Timeout,
-    ) -> Result<Found, StartupError> {
-        self.found(next_async(&self.watch, reactor, wait).await)
+    pub async fn next(&self, reactor: &Reactor, wait: Timeout) -> Result<Found, StartupError> {
+        self.found(next(&self.watch, reactor, wait).await)
     }
 
     fn found(
@@ -154,53 +158,71 @@ impl ProviderWatch {
 }
 
 impl<Q: Query> ProviderSessions<Q> {
-    fn enumerate_next(&mut self) -> Result<Stage, StartupError> {
-        let Some(attributes) = self.query.attributes(self.step) else {
-            return Ok(Stage::Finished);
-        };
-
-        let parent = start_parent(self.parent).with_wait(STARTUP_REQUEST_TIMEOUT);
-        let enumeration = answered(
-            self.requirement,
-            (self.enumerate)(&parent, self.requirement, attributes),
-        )?;
-        self.step = self.step.saturating_add(1);
-        Ok(Stage::Enumerating(enumeration))
-    }
-}
-
-impl<Q: Query> Iterator for ProviderSessions<Q> {
-    type Item = Result<Found, StartupError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Забирает следующий результат перечисления через `reactor`.
+    pub async fn next(&mut self, reactor: &Reactor) -> Option<Result<Found, StartupError>> {
         loop {
             let failed = match &self.stage {
                 Stage::Enumerating(enumeration) => {
-                    match answered(self.requirement, next(enumeration, STARTUP_REQUEST_TIMEOUT)) {
+                    match answered(
+                        self.requirement,
+                        next(enumeration, reactor, STARTUP_REQUEST_TIMEOUT).await,
+                    ) {
                         Ok(Some(found)) => return Some(Ok(found)),
-                        // Исчерпанное перечисление закрывается до запроса следующего набора и
-                        // не держит место в пределе поисков владельца.
                         Ok(None) => {
                             self.stage = Stage::NextSet;
                             continue;
                         }
+
                         Err(error) => error,
                     }
                 }
-                Stage::NextSet => match self.enumerate_next() {
+                Stage::NextSet => match self.enumerate_next(reactor).await {
                     Ok(stage) => {
                         self.stage = stage;
                         continue;
                     }
+
                     Err(error) => error,
                 },
                 Stage::Finished => return None,
             };
 
-            if failed.failure != StartupFailure::NoSpace {
-                self.stage = Stage::Finished;
-            }
-            return Some(Err(failed));
+            return Some(Err(self.failed(failed)));
         }
+    }
+
+    async fn enumerate_next(&mut self, reactor: &Reactor) -> Result<Stage, StartupError> {
+        let Some(attributes) = self.query.attributes(self.step) else {
+            return Ok(Stage::Finished);
+        };
+
+        let parent = AsyncStartup::new(PortChannel::new(self.parent, reactor.clone()))
+            .with_wait(STARTUP_REQUEST_TIMEOUT);
+
+        let enumeration = answered(
+            self.requirement,
+            parent
+                .all(
+                    SessionRequirement {
+                        name: self.requirement,
+                        protocol: self.protocol,
+                    },
+                    attributes.as_bytes(),
+                )
+                .await,
+        )?;
+
+        self.step = self.step.saturating_add(1);
+        Ok(Stage::Enumerating(Session::from_handle(Port::from(
+            enumeration,
+        ))))
+    }
+
+    fn failed(&mut self, failed: StartupError) -> StartupError {
+        if failed.failure != StartupFailure::NoSpace {
+            self.stage = Stage::Finished;
+        }
+
+        failed
     }
 }

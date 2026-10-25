@@ -3,13 +3,14 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::rc::Rc;
 use core::fmt::Debug;
 
 use bootstrap_abi::{features, hardware, image, system_info};
 use component_startup::{
     Attributes, Providers, Requirements as _, SessionPort, component_manifest,
 };
+use executor::{Executor, PortChannel, Reactor};
 use kernel_objects::Session;
 use log_abi::journal;
 use runtime::{log_fmt, log_line};
@@ -38,37 +39,76 @@ component_manifest! {
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let requirements = FeaturedExportStartup::from_parent(parent);
+    let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
+    let reactor = executor.reactor();
 
-    log_opened("hardware", &requirements.hardware, drop)?;
-    log_opened("system_info", &requirements.system_info, |session| {
-        session.client().snapshot().is_ok_and(|snapshot| {
-            snapshot.cpus > 0 && snapshot.free_frames <= snapshot.managed_frames
-        })
-    })?;
-    log_opened("image", &requirements.images, drop)?;
-    log_opened("features", &requirements.features, drop)?;
-    log_opened("journal", &requirements.journal, drop)?;
+    executor.block_on(async {
+        log_opened(
+            "hardware",
+            &requirements.hardware,
+            &reactor,
+            async |_session| {},
+        )
+        .await?;
+        log_opened(
+            "system_info",
+            &requirements.system_info,
+            &reactor,
+            async |session| {
+                PortChannel::client(session, reactor.clone())
+                    .snapshot()
+                    .await
+                    .is_ok_and(|snapshot| {
+                        snapshot.cpus > 0 && snapshot.free_frames <= snapshot.managed_frames
+                    })
+            },
+        )
+        .await?;
 
-    let export = SessionPort::create().map_err(|_| Failed)?;
-    log_line("started");
-    serve_probe(parent, Box::leak(Box::new(export)))
+        log_opened("image", &requirements.images, &reactor, async |_session| {}).await?;
+        log_opened(
+            "features",
+            &requirements.features,
+            &reactor,
+            async |_session| {},
+        )
+        .await?;
+        log_opened(
+            "journal",
+            &requirements.journal,
+            &reactor,
+            async |_session| {},
+        )
+        .await?;
+
+        let export = SessionPort::create().map_err(|_| Failed)?;
+        log_line("started");
+        serve_probe(&executor, parent, export).await
+    })
 }
 
-fn log_opened<P: ipc::Protocol, T: Debug>(
+async fn log_opened<P: ipc::Protocol, T: Debug>(
     name: &str,
     providers: &Providers<P>,
-    inspect: impl FnOnce(Session<P>) -> T,
+    reactor: &Reactor,
+    inspect: impl AsyncFnOnce(Session<P>) -> T,
 ) -> Result<(), Failed> {
-    let found = providers
-        .all(Attributes::empty())
-        .map_err(|_| Failed)?
-        .next()
+    let mut found = providers
+        .all(reactor, Attributes::empty())
+        .await
+        .map_err(|_| Failed)?;
+
+    let found = found
+        .next(reactor)
+        .await
         .ok_or(Failed)?
         .map_err(|_| Failed)?;
-    let opened = providers
-        .open(&found)
-        .map(inspect)
-        .map_err(|error| error.failure);
+
+    let opened = match providers.open(reactor, &found).await {
+        Ok(session) => Ok(inspect(session).await),
+        Err(error) => Err(error.failure),
+    };
+
     log_fmt(format_args!("{name} {opened:?}"));
     Ok(())
 }

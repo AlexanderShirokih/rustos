@@ -9,19 +9,21 @@ extern crate alloc;
 mod display_fixture_protocol;
 mod failed;
 
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{rc::Rc, vec::Vec};
+use core::cell::RefCell;
 
 use component_startup::{
-    Requirements as _, SessionEvent, SessionPort, component_manifest, serve_export, whole_export,
+    AsyncStartup, Requirements as _, SessionPort, component_manifest, serve_component, whole_export,
 };
 use display_abi::{
     Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES, display,
 };
 use display_fixture_protocol::{DIMENSION, PHYSICAL_SIZE};
+use executor::{Executor, PortChannel};
 use failed::Failed;
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Resource};
-use runtime::{MemoryAccess, UserMemFlags, log_line, spawn_bound};
+use runtime::{MemoryAccess, UserMemFlags, log_line};
 use syscall::{Handle, Rights, kind};
 
 const ROW_MAX_BYTES: usize = DIMENSION.width as usize * SURFACE_PIXEL_BYTES as usize;
@@ -40,7 +42,7 @@ struct Surface {
 struct Screen {
     pixels: Mapping,
     surface_size: u64,
-    surfaces: Vec<Surface>,
+    surfaces: RefCell<Vec<Surface>>,
     budget: Resource,
     _origin: Resource,
 }
@@ -58,14 +60,19 @@ impl Screen {
         Some(Self {
             pixels,
             surface_size,
-            surfaces: Vec::new(),
+            surfaces: RefCell::new(Vec::new()),
             budget,
             _origin: origin,
         })
     }
 
-    fn acquire(&mut self, badge: u64) -> Result<MemoryRegion, DisplayError> {
-        if self.surfaces.iter().any(|surface| surface.badge == badge) {
+    fn acquire(&self, badge: u64) -> Result<MemoryRegion, DisplayError> {
+        if self
+            .surfaces
+            .borrow()
+            .iter()
+            .any(|surface| surface.badge == badge)
+        {
             return Err(DisplayError::AlreadyAcquired);
         }
 
@@ -82,13 +89,13 @@ impl Screen {
             .duplicate(Rights::READ | Rights::WRITE | Rights::TRANSFER, None)
             .map_err(|_| DisplayError::NoSpace)?;
 
-        self.surfaces.push(Surface { badge, mapping });
+        self.surfaces.borrow_mut().push(Surface { badge, mapping });
         Ok(granted)
     }
 
     fn copy(&self, badge: u64, area: Area) -> Result<(), DisplayError> {
-        let surface = self
-            .surfaces
+        let surfaces = self.surfaces.borrow();
+        let surface = surfaces
             .iter()
             .find(|surface| surface.badge == badge)
             .ok_or(DisplayError::NoSurface)?;
@@ -119,58 +126,58 @@ impl Screen {
         Ok(())
     }
 
-    fn close(&mut self, badge: u64) {
-        self.surfaces.retain(|surface| surface.badge != badge);
+    fn close(&self, badge: u64) {
+        self.surfaces
+            .borrow_mut()
+            .retain(|surface| surface.badge != badge);
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl display::Service<Delivery> for Screen {
-    fn dimension(&mut self, _frame: &Delivery) -> DisplayDimension {
+    fn dimension(&self, _frame: &Delivery) -> DisplayDimension {
         DIMENSION
     }
 
-    fn physical_size(&mut self, _frame: &Delivery) -> Option<PhysicalSize> {
+    fn physical_size(&self, _frame: &Delivery) -> Option<PhysicalSize> {
         Some(PHYSICAL_SIZE)
     }
 
     fn acquire_surface(
-        &mut self,
+        &self,
         frame: &Delivery,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, DisplayError>> {
         self.acquire(frame.badge)
     }
 
-    fn present(&mut self, frame: &Delivery, area: Area) -> Result<(), DisplayError> {
+    async fn present(&self, frame: &Delivery, area: Area) -> Result<(), DisplayError> {
         self.copy(frame.badge, area)
     }
 }
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
-    let service = SessionPort::create().map_err(|_| Failed)?;
-    let mut screen = Screen::new().ok_or(Failed)?;
-    let service: &'static SessionPort = Box::leak(Box::new(service));
-    let parent_port = DisplayStartup::from_parent(parent).parent;
-    let export_thread =
-        spawn_bound(move || serve_export::<display::Protocol>(parent_port, whole_export(service)));
-    if export_thread.is_err() {
-        return Err(Failed);
-    }
+    let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
+    let service = Rc::new(SessionPort::create().map_err(|_| Failed)?);
+    let screen = Rc::new(Screen::new().ok_or(Failed)?);
+    let parent = DisplayStartup::from_parent(parent).parent;
+    let parent = AsyncStartup::new(PortChannel::from_transport(
+        parent.into_channel(),
+        executor.reactor(),
+    ));
+    let calls = screen.clone();
+    let opened = service.clone();
+
+    let served = serve_component::<display::Protocol, _>(
+        &executor,
+        parent,
+        service,
+        move |frame| display::serve(&calls, frame),
+        whole_export(opened),
+        move |badge| screen.close(badge),
+    );
 
     log_line("started");
-    serve(service, &mut screen);
+    let _ = executor.block_on(served);
     Err(Failed)
-}
-
-fn serve(service: &SessionPort, screen: &mut Screen) {
-    let mut events = service.events();
-
-    while let Some(event) = events.recv() {
-        match event {
-            SessionEvent::Frame(frame) => {
-                let _ = display::dispatch(screen, frame);
-            }
-            SessionEvent::Gone(badge) => screen.close(badge),
-        }
-    }
 }

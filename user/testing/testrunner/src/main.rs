@@ -37,6 +37,8 @@ use syscall::{Handle, kind};
 mod address_space_isolation;
 mod answer_exhaustion_protocol;
 mod application;
+mod async_component;
+mod async_component_protocol;
 mod c_selftest;
 mod child_steps_protocol;
 mod clock;
@@ -51,6 +53,7 @@ mod executor;
 mod failing_filesystem;
 mod filesystem;
 mod filesystem_bench;
+mod filesystem_io;
 mod filesystem_scope;
 mod filesystem_stress;
 mod fixture;
@@ -61,6 +64,7 @@ mod heap;
 mod heap_bench;
 mod i2c;
 mod input_hub;
+mod ipc_bench;
 mod ipc_buffer;
 mod ipc_raw;
 mod irq_provision;
@@ -70,6 +74,7 @@ mod load_program;
 mod log_fixture_protocol;
 mod log_relay;
 mod memory_capability_target;
+mod memory_copy;
 mod memory_share;
 mod memory_stress;
 mod mismatched_kind;
@@ -102,6 +107,7 @@ mod signal;
 #[cfg(target_arch = "aarch64")]
 mod simd_state;
 mod simplefb;
+mod slint_platform;
 mod smp_stress;
 mod source_fixture;
 mod spawn_from_image;
@@ -204,6 +210,7 @@ pub(crate) fn bootstrap_handle() -> Handle<kind::Port> {
 pub(crate) fn hardware_session() -> Session<hardware::Protocol> {
     bootstrap::Client::new(PortTransport::new(bootstrap_handle()))
         .acquire_hardware()
+        .wait()
         .map(Session::from_session)
         .expect("hardware session granted")
 }
@@ -211,6 +218,7 @@ pub(crate) fn hardware_session() -> Session<hardware::Protocol> {
 pub(crate) fn system_info_session() -> Session<system_info::Protocol> {
     bootstrap::Client::new(PortTransport::new(bootstrap_handle()))
         .acquire_system_info()
+        .wait()
         .map(Session::from_session)
         .expect("system info session granted")
 }

@@ -37,12 +37,13 @@ pub(crate) const MODE_INPUT: u8 = 0;
 
 /// Регистры устройства контроллера за шиной SPMI по 16-битному адресу: старший байт - блок,
 /// младший - регистр блока.
+#[allow(async_fn_in_trait)]
 pub trait Registers {
     /// Читает регистр `address`.
-    fn read(&self, address: u16) -> Result<u8, DeviceError>;
+    async fn read(&self, address: u16) -> Result<u8, DeviceError>;
 
     /// Заменяет биты `mask` регистра `address` битами `value`, остальные биты сохраняются.
-    fn update(&self, address: u16, mask: u8, value: u8) -> Result<(), DeviceError>;
+    async fn update(&self, address: u16, mask: u8, value: u8) -> Result<(), DeviceError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,21 +80,24 @@ impl<R: Registers> Gpio<R> {
     ///   не пишутся;
     /// - [`PinsError::Denied`] - шина запретила обращение к блоку;
     /// - [`PinsError::Failed`] - шина не выполнила чтение либо запись.
-    pub fn apply(&mut self, settings: &[Setting]) -> Result<(), PinsError> {
-        let layouts = settings
-            .iter()
-            .map(|setting| self.layout(setting.block))
-            .collect::<Result<Vec<_>, _>>()?;
+    pub async fn apply(&mut self, settings: &[Setting]) -> Result<(), PinsError> {
+        let mut layouts = Vec::with_capacity(settings.len());
+        for setting in settings {
+            layouts.push(self.layout(setting.block).await?);
+        }
 
         for (setting, layout) in settings.iter().zip(layouts) {
-            self.mode(setting.block, layout, setting.mode, setting.function)?;
+            self.mode(setting.block, layout, setting.mode, setting.function)
+                .await?;
             if let Some(pull) = setting.pull {
-                self.update(setting.block, PULL, PULL_MASK, pull)?;
+                self.update(setting.block, PULL, PULL_MASK, pull).await?;
             }
+
             if let Some(drive) = setting.drive {
-                self.update(setting.block, DRIVE, DRIVE_MASK, drive)?;
+                self.update(setting.block, DRIVE, DRIVE_MASK, drive).await?;
             }
-            self.update(setting.block, ENABLE, ENABLED, ENABLED)?;
+
+            self.update(setting.block, ENABLE, ENABLED, ENABLED).await?;
         }
 
         Ok(())
@@ -102,30 +106,35 @@ impl<R: Registers> Gpio<R> {
     /// Переводит вывод блока `block` в цифровой вход и ставит бит включения.
     ///
     /// Отказы - как у [`apply`](Self::apply).
-    pub fn input(&mut self, block: u8) -> Result<(), PinsError> {
-        let layout = self.layout(block)?;
-        self.mode(block, layout, Some(MODE_INPUT), None)?;
-        self.update(block, ENABLE, ENABLED, ENABLED)
+    pub async fn input(&mut self, block: u8) -> Result<(), PinsError> {
+        let layout = self.layout(block).await?;
+        self.mode(block, layout, Some(MODE_INPUT), None).await?;
+        self.update(block, ENABLE, ENABLED, ENABLED).await
     }
 
     /// Уровень входа вывода блока `block`: `true` для высокого.
     ///
     /// Отказы:
     /// - [`PinsError::Denied`], [`PinsError::Failed`] - как у [`apply`](Self::apply).
-    pub fn level(&self, block: u8) -> Result<bool, PinsError> {
+    pub async fn level(&self, block: u8) -> Result<bool, PinsError> {
         let status = self
             .registers
             .read(address(block, STATUS))
+            .await
             .map_err(refused)?;
         Ok(status & STATUS_LEVEL != 0)
     }
 
-    fn layout(&mut self, block: u8) -> Result<Layout, PinsError> {
+    async fn layout(&mut self, block: u8) -> Result<Layout, PinsError> {
         if let Some(layout) = self.layouts.get(&block) {
             return Ok(*layout);
         }
 
-        let kind = self.registers.read(address(block, TYPE)).map_err(refused)?;
+        let kind = self
+            .registers
+            .read(address(block, TYPE))
+            .await
+            .map_err(refused)?;
         if kind != GPIO_TYPE {
             return Err(PinsError::Unsupported);
         }
@@ -133,6 +142,7 @@ impl<R: Registers> Gpio<R> {
         let subtype = self
             .registers
             .read(address(block, SUBTYPE))
+            .await
             .map_err(refused)?;
         let layout = if LV_MV_SUBTYPES.contains(&subtype) {
             Layout::LvMv
@@ -146,7 +156,7 @@ impl<R: Registers> Gpio<R> {
         Ok(layout)
     }
 
-    fn mode(
+    async fn mode(
         &self,
         block: u8,
         layout: Layout,
@@ -156,11 +166,14 @@ impl<R: Registers> Gpio<R> {
         match layout {
             Layout::LvMv => {
                 if let Some(mode) = mode {
-                    self.update(block, MODE, LV_MV_MODE_MASK, mode)?;
+                    self.update(block, MODE, LV_MV_MODE_MASK, mode).await?;
                 }
+
                 if let Some(function) = function {
-                    self.update(block, LV_MV_FUNCTION, LV_MV_FUNCTION_MASK, function)?;
+                    self.update(block, LV_MV_FUNCTION, LV_MV_FUNCTION_MASK, function)
+                        .await?;
                 }
+
                 Ok(())
             }
             Layout::Shared => {
@@ -173,17 +186,20 @@ impl<R: Registers> Gpio<R> {
                     mask |= FUNCTION_MASK;
                     value |= (function << FUNCTION_SHIFT) & FUNCTION_MASK;
                 }
+
                 if mask == 0 {
                     return Ok(());
                 }
-                self.update(block, MODE, mask, value)
+
+                self.update(block, MODE, mask, value).await
             }
         }
     }
 
-    fn update(&self, block: u8, register: u8, mask: u8, value: u8) -> Result<(), PinsError> {
+    async fn update(&self, block: u8, register: u8, mask: u8, value: u8) -> Result<(), PinsError> {
         self.registers
             .update(address(block, register), mask, value & mask)
+            .await
             .map_err(refused)
     }
 }

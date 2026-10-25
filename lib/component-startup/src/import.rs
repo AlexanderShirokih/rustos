@@ -1,10 +1,15 @@
 use core::marker::PhantomData;
 
 use component_abi::{Attributes, STARTUP_REQUEST_TIMEOUT};
+use executor::Reactor;
 use kernel_objects::{Session, kind};
 use syscall::Handle;
 
-use crate::{StartupError, declare::request_session, request::session};
+use crate::{
+    StartupError,
+    declare::{answered, repeats, request_session},
+    request::{session, session_async},
+};
 
 /// Сессия требования `session`. Стартовый handle принадлежит процессу до его завершения.
 pub struct Import<P> {
@@ -41,5 +46,22 @@ impl<P: ipc::Protocol> Import<P> {
                 STARTUP_REQUEST_TIMEOUT,
             )
         })
+    }
+
+    /// Открывает сессию как [`Self::open`], ожидая ответ через `reactor`.
+    pub async fn open_async(&self, reactor: &Reactor) -> Result<Session<P>, StartupError> {
+        loop {
+            let answer = session_async::<P>(
+                self.parent,
+                reactor,
+                self.requirement,
+                Attributes::empty(),
+                STARTUP_REQUEST_TIMEOUT,
+            )
+            .await;
+            if !repeats(&answer) {
+                return answered(self.requirement, answer);
+            }
+        }
     }
 }

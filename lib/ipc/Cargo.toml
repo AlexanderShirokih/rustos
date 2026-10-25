@@ -7,9 +7,10 @@ publish.workspace = true
 
 [features]
 # Крейт собирается в графе зависимостей стандартной библиотеки: `core` берётся из её дерева.
-rustc-dep-of-std = ["dep:core", "syscall/rustc-dep-of-std"]
+rustc-dep-of-std = ["dep:alloc", "dep:core", "syscall/rustc-dep-of-std"]
 
 [dependencies]
+alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 syscall = { workspace = true }
 

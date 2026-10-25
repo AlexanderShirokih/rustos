@@ -11,7 +11,7 @@ use memory::{
     memory_mapper::MemoryMapper,
     physical_address::PageAlignedAddress,
     testing::{PageMapper, UnmapCall},
-    user_vm_allocator::{MappingTag, UserVmAllocator},
+    user_vm_allocator::{MappingBacking, MappingTag, UserVmAllocator},
     user_vm_context::UserVmContext,
     virtual_address::{PageAlignedVirtualAddress, VirtualAddress},
 };
@@ -39,9 +39,11 @@ fn setup() -> (UserVmContext, Arc<PageMapper>, PageAlignedVirtualAddress) {
             nz(PAGE),
             MappingTag {
                 flags: MemFlags::user_rw(),
-                region: region(),
+                backing: Some(MappingBacking {
+                    region: region(),
+                    revocation: None,
+                }),
                 grant: AccessMask::RW,
-                revocation: None,
             },
         )
         .unwrap();
@@ -99,4 +101,45 @@ fn drain_releases_mappings_while_an_allocator_clone_survives() {
         }]
     );
     allocator.with_lock(|a| assert_eq!(a.live_count(), 0));
+}
+
+#[test]
+fn revocation_reserves_va_without_retaining_the_region() {
+    let (ctx, mapper, base) = setup();
+    let held_region = ctx.allocator().with_lock(|allocator| {
+        Arc::downgrade(
+            allocator
+                .lookup(base, nz(PAGE))
+                .unwrap()
+                .tag()
+                .backing
+                .as_ref()
+                .map(|backing| &backing.region)
+                .unwrap(),
+        )
+    });
+    ctx.revoke_range(base, nz(PAGE), |_| true);
+    assert!(held_region.upgrade().is_none());
+    ctx.allocator().with_lock(|allocator| {
+        let revoked = allocator.lookup(base, nz(PAGE)).unwrap();
+        assert!(revoked.tag().backing.is_none());
+        let next = allocator
+            .allocate(
+                nz(PAGE),
+                MappingTag {
+                    flags: MemFlags::user_rw(),
+                    backing: Some(MappingBacking {
+                        region: region(),
+                        revocation: None,
+                    }),
+                    grant: AccessMask::RW,
+                },
+            )
+            .unwrap();
+        assert_ne!(next.base(), base);
+    });
+    ctx.unmap_range(base, nz(PAGE));
+    ctx.allocator()
+        .with_lock(|allocator| assert!(allocator.lookup(base, nz(PAGE)).is_err()));
+    assert_eq!(mapper.unmaps().len(), 1);
 }

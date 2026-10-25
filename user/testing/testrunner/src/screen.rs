@@ -37,9 +37,16 @@ fn screens(importer: &Importer) -> Vec<Found> {
 }
 
 fn opened(screen: &Found) -> display::Client<SessionTransport> {
-    component_startup::open::<display::Protocol>(screen, SCREEN_REPLY_TIMEOUT)
-        .expect("screen opens")
-        .client()
+    {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::open::<display::Protocol>(
+            screen,
+            &executor.reactor(),
+            SCREEN_REPLY_TIMEOUT,
+        ))
+    }
+    .expect("screen opens")
+    .client()
 }
 
 fn fill(
@@ -83,8 +90,8 @@ fn each_screen_shows_a_gradient_and_a_rectangle() {
 
     for screen in &found {
         let session = opened(screen);
-        let dimension = session.dimension().expect("dimension call");
-        let region = MemoryRegion::from(session.acquire_surface().expect("surface granted"));
+        let dimension = session.dimension().wait().expect("dimension call");
+        let region = MemoryRegion::from(session.acquire_surface().wait().expect("surface granted"));
         let surface = Mapping::full(region, UserMemFlags::ReadWrite).expect("surface maps");
         let rectangle = Area {
             x: dimension.width / 4,
@@ -97,9 +104,9 @@ fn each_screen_shows_a_gradient_and_a_rectangle() {
             (channel(x, dimension.width) << SURFACE_RED_SHIFT)
                 | (channel(y, dimension.height) << SURFACE_GREEN_SHIFT)
         });
-        let gradient = session.present(whole(dimension));
+        let gradient = session.present(whole(dimension)).wait();
         fill(&surface, dimension, rectangle, |_, _| RECTANGLE_COLOR);
-        let shown = session.present(rectangle);
+        let shown = session.present(rectangle).wait();
 
         test_harness::check_eq!(gradient, Ok(()));
         test_harness::check_eq!(shown, Ok(()));
@@ -127,9 +134,12 @@ fn surfaces_of_a_screen_end_with_the_budget_and_return_with_their_sessions() {
         // Каждая поверхность занимает не меньше страницы бюджета драйвера.
         let refusal = (0..=DRIVER_MEMORY / USERLAND_PAGE_SIZE).find_map(|_| {
             let session = opened(screen);
-            let before = session.present(whole(session.dimension().expect("dimension call")));
+            let before = session
+                .present(whole(session.dimension().wait().expect("dimension call")))
+                .wait();
+
             test_harness::check_eq!(before, Err(CallError::Remote(DisplayError::NoSurface)));
-            match session.acquire_surface() {
+            match session.acquire_surface().wait() {
                 Ok(region) => {
                     screens.push((session, MemoryRegion::from(region)));
                     None
@@ -140,7 +150,7 @@ fn surfaces_of_a_screen_end_with_the_budget_and_return_with_their_sessions() {
         let held = screens.len();
         drop(screens);
         let reopened = opened(screen);
-        let regained = reopened.acquire_surface().map(drop);
+        let regained = reopened.acquire_surface().wait().map(drop);
 
         test_harness::check_eq!(refusal, Some(CallError::Remote(DisplayError::NoSpace)));
         test_harness::check!(held >= 1);

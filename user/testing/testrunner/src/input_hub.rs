@@ -185,7 +185,7 @@ fn holder(importer: &Importer) -> Holder {
 }
 
 fn open_app(holder: &Holder) -> App {
-    let FocusSession { session, number } = holder.open().expect("focus session opened");
+    let FocusSession { session, number } = holder.open().wait().expect("focus session opened");
     let session = Session::from_handle(Port::from(session.into_handle()));
     test_harness::check_eq!(read(&consumer(&session)), Ok(vec![Record::resync()]));
 
@@ -193,7 +193,10 @@ fn open_app(holder: &Holder) -> App {
 }
 
 fn declare(source: &Source, parts: &DescriptorParts) -> DeviceNumber {
-    source.declare(parts.descriptor()).expect("device declared")
+    source
+        .declare(parts.descriptor())
+        .wait()
+        .expect("device declared")
 }
 
 pub(crate) fn command(
@@ -227,11 +230,14 @@ fn update(
     time: Option<u64>,
     command: &Command,
 ) -> Result<(), CallError<UpdateError>> {
-    source.update(device, time, command.as_bytes())
+    source.update(device, time, command.as_bytes()).wait()
 }
 
 fn read(consumer: &Consumer) -> NextAnswer {
-    consumer.next().map(|records| records.records().collect())
+    consumer
+        .next()
+        .wait()
+        .map(|records| records.records().collect())
 }
 
 fn read_until(consumer: &Consumer, last: Record) -> Vec<Record> {
@@ -251,9 +257,9 @@ fn attached(input: &Session<input::Protocol>, name: &str) -> bool {
     while let Ok(records) = read(&consumer) {
         let added = records.iter().any(|record| {
             record.kind == Kind::DeviceAdded
-                && record
-                    .device
-                    .is_some_and(|device| consumer.describe(device).as_ref() == Ok(&expected))
+                && record.device.is_some_and(|device| {
+                    consumer.describe(device).wait().as_ref() == Ok(&expected)
+                })
         });
         if added {
             return true;
@@ -313,7 +319,7 @@ fn a_relative_contact_axis_is_refused_as_malformed() {
         .push(AxisDecl::relative(Usage::X))
         .expect("axis fits");
 
-    let declared = source.declare(parts.descriptor());
+    let declared = source.declare(parts.descriptor()).wait();
 
     test_harness::check_eq!(declared, Err(CallError::Remote(DeclareError::Malformed)));
     drop(source);
@@ -329,7 +335,7 @@ fn a_device_beyond_the_start_sequence_budget_is_refused_and_others_keep_working(
     let mut declared = Vec::new();
     let mut refusal = None;
     for _ in 0..DECLARE_ATTEMPTS {
-        match source.declare(wide.descriptor()) {
+        match source.declare(wide.descriptor()).wait() {
             Ok(device) => declared.push(device),
             Err(error) => {
                 refusal = Some(error);
@@ -416,7 +422,7 @@ fn describe_returns_the_declared_descriptor() {
     let device = declare(&source, &parts);
     read_until(&consumer, Record::device_added(device));
 
-    let described = consumer.describe(device);
+    let described = consumer.describe(device).wait();
 
     let declared = parts.descriptor().layout().expect("descriptor is valid");
     test_harness::check_eq!(described, Ok(declared));
@@ -436,7 +442,7 @@ fn a_source_closed_mid_gesture_cancels_and_removes_its_device() {
 
     drop(source);
     let records = read_until(&consumer, Record::device_removed(device));
-    let described = consumer.describe(device);
+    let described = consumer.describe(device).wait();
 
     test_harness::check!(matches!(
         records.as_slice(),
@@ -634,7 +640,7 @@ fn a_focus_session_gets_no_frames_until_focus_starts_it_with_the_snapshot() {
     update(&source, device, Some(TOUCH_TIME), &touch()).expect("touch accepted");
     let plain = read(&consumer(&input));
     pause(HUB_SETTLE_WAIT);
-    let focused = holder.focus(Some(app.number));
+    let focused = holder.focus(Some(app.number)).wait();
     let answer = pending.answer();
 
     let mut expected = vec![Record::resync(), Record::device_added(device)];
@@ -655,13 +661,17 @@ fn a_session_losing_focus_gets_a_resync_without_devices() {
     update(&source, device, Some(TOUCH_TIME), &touch()).expect("touch accepted");
     let first = open_app(&holder);
     let second = open_app(&holder);
-    holder.focus(Some(first.number)).expect("first focused");
+    holder
+        .focus(Some(first.number))
+        .wait()
+        .expect("first focused");
+
     read_until(
         &consumer(&first.session),
         Record::frame(Some(device), TOUCH_TIME),
     );
 
-    let moved = holder.focus(Some(second.number));
+    let moved = holder.focus(Some(second.number)).wait();
     let left = read(&consumer(&first.session));
 
     test_harness::check_eq!(moved, Ok(()));
@@ -681,12 +691,12 @@ fn a_reserved_device_is_hidden_from_the_focused_session_but_not_from_a_plain_one
     let buttons = declare(&source, &keyboard(1));
     read_until(&plain, Record::device_added(buttons));
     let app = open_app(&holder);
-    holder.focus(Some(app.number)).expect("app focused");
+    holder.focus(Some(app.number)).wait().expect("app focused");
     read_until(&consumer(&app.session), Record::device_added(buttons));
 
-    let reserved = holder.reserve(buttons);
+    let reserved = holder.reserve(buttons).wait();
     let removed = read(&consumer(&app.session));
-    let hidden = consumer(&app.session).describe(buttons);
+    let hidden = consumer(&app.session).describe(buttons).wait();
     let pending = PendingNext::start(&app.session);
     update(&source, buttons, None, &command(|c| c.press(0))).expect("press accepted");
     let pressed = read(&plain);
@@ -713,10 +723,10 @@ fn a_second_holder_is_busy_until_the_first_closes_with_its_sessions() {
     let second = holder(&importer);
     let app = open_app(&first);
 
-    let refused = second.open().map(drop);
+    let refused = second.open().wait().map(drop);
     drop(first);
     let closed = read(&consumer(&app.session));
-    let granted = second.open().map(drop);
+    let granted = second.open().wait().map(drop);
 
     test_harness::check_eq!(refused, Err(CallError::Remote(FocusError::Busy)));
     test_harness::check!(closed.is_err());

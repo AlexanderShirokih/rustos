@@ -126,10 +126,7 @@ pub trait Channel {
 /// Результаты операций и смысл срока `wait` те же, что у [`Channel`]. Разрушение future до
 /// завершения отменяет операцию. Правила возврата или закрытия capability одностороннего
 /// кадра при тайм-ауте или разрушении future определяет реализация.
-pub trait AsyncChannel {
-    /// Ресурсы исходящего кадра и кадра ответа.
-    type Resources: ReceivedResources;
-
+pub trait AsyncChannel: Channel {
     /// Отправляет односторонний кадр, как [`Channel::send`].
     fn send<'b>(
         &'b self,
@@ -207,6 +204,31 @@ pub struct Undelivered<V> {
     /// Причина отказа отправки.
     pub error: IpcError,
     value: Result<V, IpcError>,
+}
+
+impl<'b, R> Undelivered<Incoming<'b, R>> {
+    pub(crate) fn decode<V>(
+        self,
+        read: impl FnOnce(Incoming<'b, R>) -> Result<V, IpcError>,
+    ) -> Undelivered<V> {
+        Undelivered {
+            error: self.error,
+            value: self.value.and_then(read),
+        }
+    }
+
+    pub(crate) fn returned((error, frame): Unsent<'b, R>) -> Self {
+        let Outgoing {
+            buffer,
+            len,
+            resources,
+        } = frame;
+        let value = buffer
+            .get(..len)
+            .map(|bytes| Incoming { bytes, resources })
+            .ok_or(IpcError::Truncated);
+        Self { error, value }
+    }
 }
 
 impl<V> Undelivered<V> {

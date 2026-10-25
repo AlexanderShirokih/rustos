@@ -4,7 +4,7 @@
 //! ответ на требование `rtc`, диапазон времени суток, которое ребёнок мог отсчитать от этих
 //! часов к концу прогона, и разбирает строку `time N` с выведенным временем.
 
-use core::ops::RangeInclusive;
+use core::{cell::Cell, ops::RangeInclusive};
 
 use ipc::{Listener as _, Protocol as _, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Port};
@@ -31,7 +31,7 @@ pub(crate) struct SelftestClock {
 
 #[derive(Default)]
 struct Clock {
-    answered: bool,
+    answered: Cell<bool>,
 }
 
 impl SelftestClock {
@@ -72,13 +72,14 @@ impl SelftestClock {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl rtc::Service<Delivery> for Clock {
-    fn now(&mut self, _frame: &Delivery) -> u64 {
-        self.answered = true;
+    async fn now(&self, _frame: &Delivery) -> u64 {
+        self.answered.set(true);
         RTC_SECONDS
     }
 
-    fn tick(&mut self, _frame: &Delivery) -> u64 {
+    async fn tick(&self, _frame: &Delivery) -> u64 {
         RTC_SECONDS
     }
 }
@@ -88,17 +89,19 @@ pub(crate) fn printed_time(line: &str) -> Option<u64> {
 }
 
 fn serve_until_now_answered(port: Handle<kind::Port>, timeout: Timeout) -> u32 {
-    let mut clock = Clock::default();
+    let clock = Clock::default();
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    while !clock.answered {
+    let executor = crate::executor::executor();
+    while !clock.answered.get() {
         match PortTransport::new(port).recv(&mut bytes, timeout) {
             Ok(incoming) => {
-                let _ = rtc::dispatch(&mut clock, incoming);
+                let owned = ipc::OwnedIncoming::new(incoming).expect("clock frame fits");
+                let _ = executor.block_on(rtc::dispatch(&clock, owned));
             }
             Err(RecvError::SenderGone(_) | RecvError::Discarded) => {}
             Err(RecvError::Timeout | RecvError::Closed) => break,
         }
     }
 
-    u32::from(clock.answered)
+    u32::from(clock.answered.get())
 }

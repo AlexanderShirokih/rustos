@@ -1,50 +1,51 @@
 //! Сессии `Clocks`: значок сессии занимает включённые ею узлы.
 
+use core::cell::RefCell;
+
 use clk_qcom::Gcc;
 use clocks_abi::{ClocksError, clocks};
-use component_startup::{SessionEvent, SessionPort};
 use kernel_objects::{Delivery, MmioMapping};
-use platform_abi::{Description, DeviceClaims, DeviceId};
+use platform_abi::{DeviceClaims, DeviceId, MappedDescription};
 
-pub(crate) struct Controller<'d> {
-    pub(crate) description: &'d Description<'d>,
+pub(crate) struct Controller {
+    pub(crate) description: MappedDescription,
     pub(crate) gcc: Gcc<MmioMapping>,
-    pub(crate) claims: DeviceClaims,
+    pub(crate) claims: RefCell<DeviceClaims>,
 }
 
-impl clocks::Service<Delivery> for Controller<'_> {
-    fn enable(&mut self, frame: &Delivery, device: DeviceId) -> Result<(), ClocksError> {
-        self.gcc
-            .enable(self.description, &mut self.claims, frame.badge, &device)
+#[allow(clippy::unused_async_trait_impl)]
+impl clocks::Service<Delivery> for Controller {
+    fn enable(&self, frame: &Delivery, device: DeviceId) -> Result<(), ClocksError> {
+        let description = self
+            .description
+            .description()
+            .map_err(|_| ClocksError::NoDevice)?;
+        self.gcc.enable(
+            &description,
+            &mut self.claims.borrow_mut(),
+            frame.badge,
+            &device,
+        )
     }
 
     fn set_rate(
-        &mut self,
+        &self,
         frame: &Delivery,
         device: DeviceId,
         name: &str,
         hz: u64,
     ) -> Result<(), ClocksError> {
+        let description = self
+            .description
+            .description()
+            .map_err(|_| ClocksError::NoDevice)?;
         self.gcc.set_rate(
-            self.description,
-            &self.claims,
+            &description,
+            &self.claims.borrow(),
             frame.badge,
             &device,
             name,
             hz,
         )
-    }
-}
-
-pub(crate) fn serve(controller: &mut Controller<'_>, sessions: &SessionPort) {
-    let mut events = sessions.events();
-
-    while let Some(event) = events.recv() {
-        match event {
-            SessionEvent::Frame(frame) => {
-                let _ = clocks::dispatch(controller, frame);
-            }
-            SessionEvent::Gone(badge) => controller.claims.release(badge),
-        }
     }
 }

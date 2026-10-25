@@ -6,8 +6,8 @@ use alloc::{
 };
 
 use filesystem_abi::{
-    AccessMode, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened, Path,
-    SEPARATOR, file_system, namespace,
+    AccessMode, FileSystemError, IO_TRANSFER_MAX, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
+    Opened, Path, SEPARATOR, file_system, namespace,
 };
 use ipc::{Timeout, wire::IpcError};
 use syscall::kind;
@@ -140,7 +140,7 @@ impl<E: Environment> FileSystem<E> {
             cache: _,
             wait,
         } = self;
-        let pair = namespace.resolve_pair(from.as_str(), to.as_str())?;
+        let pair = namespace.resolve_pair(from.as_str(), to.as_str()).wait()?;
         let (from, to) = scoped(from, to, pair.root_len)?;
         rename_in(
             &Session::establish(environment, pair.session, *wait)?,
@@ -150,8 +150,8 @@ impl<E: Environment> FileSystem<E> {
     }
 
     /// Копирует содержимое файла `from` в `to` и возвращает число перенесённых байт. Назначение
-    /// создаётся либо усекается. Байты проходят через клиента порциями размером с буфер данных
-    /// сессии источника. Каталог по пути `from` возвращает `IsADirectory`, и назначение при этом
+    /// создаётся либо усекается. Байты проходят через клиента порциями в пределах файловой
+    /// операции. Каталог по пути `from` возвращает `IsADirectory`, и назначение при этом
     /// не открывается.
     pub fn copy(&mut self, from: Path<'_>, to: Path<'_>) -> Result<u64> {
         let mut source = self.open(from, AccessMode::Read, OpenFlags::NONE)?;
@@ -223,7 +223,7 @@ fn resolve<E: Environment>(
     namespace: &namespace::Client<E::Transport>,
     directory: Path<'_>,
 ) -> Result<ipc::wire::Session<file_system::Protocol, E::Handle<kind::Port>>> {
-    Ok(namespace.resolve(directory.as_str())?)
+    Ok(namespace.resolve(directory.as_str()).wait()?)
 }
 
 fn scoped<'a, 'b>(from: Path<'a>, to: Path<'b>, root_len: u32) -> Result<(Path<'a>, Path<'b>)> {
@@ -244,7 +244,7 @@ fn scoped<'a, 'b>(from: Path<'a>, to: Path<'b>, root_len: u32) -> Result<(Path<'
 }
 
 fn rename_in<E: Environment>(session: &Session<E>, from: Path<'_>, to: Path<'_>) -> Result<()> {
-    session.client().rename(from.as_str(), to.as_str())?;
+    session.client().rename(from.as_str(), to.as_str()).wait()?;
     Ok(())
 }
 
@@ -257,14 +257,14 @@ fn open_owned<E: Environment>(
     wait: Timeout,
 ) -> Result<OpenNode<E>> {
     let (directory, leaf) = route::split_scope(within)?;
-    let scoped = session.client().open_root(directory.as_str())?;
+    let scoped = session.client().open_root(directory.as_str()).wait()?;
     let scoped = Session::establish(environment, scoped, wait)?;
-    let opened = scoped.client().open(leaf.as_str(), mode, flags)?;
+    let opened = scoped.client().open(leaf.as_str(), mode, flags).wait()?;
     Ok(OpenNode::new(scoped, opened))
 }
 
 fn transfer<E: Environment>(source: &mut OpenNode<E>, target: &mut OpenNode<E>) -> Result<u64> {
-    let len = source.session().capacity().max(1);
+    let len = IO_TRANSFER_MAX as usize;
     let mut chunk = Vec::new();
     chunk
         .try_reserve_exact(len)
@@ -341,10 +341,11 @@ fn children_of<E: Environment>(
     directory: Path<'_>,
     children: &mut Vec<(String, NodeKind)>,
 ) -> Result<()> {
-    let mut walk = Walk::new(session.capacity())?;
+    let mut walk = Walk::new(IO_TRANSFER_MAX as usize)?;
     while let Some(entry) = walk.next_entry(session, descriptor)? {
         children.push((child(directory, entry.name)?, entry.kind));
     }
+
     Ok(())
 }
 
@@ -355,15 +356,16 @@ fn open_in<E: Environment>(
 ) -> Result<Opened> {
     Ok(session
         .client()
-        .open(path.as_str(), AccessMode::Read, flags)?)
+        .open(path.as_str(), AccessMode::Read, flags)
+        .wait()?)
 }
 
 fn close_in<E: Environment>(session: &Session<E>, descriptor: NodeDescriptor) {
-    let _ = session.client().close(descriptor);
+    let _ = session.client().close(descriptor).wait();
 }
 
 fn unlink<E: Environment>(session: &Session<E>, path: Path<'_>, expected: NodeKind) -> Result<()> {
-    session.client().unlink(path.as_str(), expected)?;
+    session.client().unlink(path.as_str(), expected).wait()?;
     Ok(())
 }
 

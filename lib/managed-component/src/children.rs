@@ -1,7 +1,7 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{any::TypeId, mem::size_of, num::NonZeroU64};
 
-use component_abi::{AcceptError, AttributeSet, SessionError, SessionRequest, component_startup};
+use component_abi::{AcceptError, AttributeSet, SessionError, component_startup};
 use kernel_objects::{
     BorrowedHandle, Error, IssuedHandle, ObjectKind, OwnedHandle, Port, Process, Resource, kind,
 };
@@ -9,6 +9,8 @@ use runtime::{Instant, Timeout};
 use syscall::{ProcessName, Rights, SyscallError};
 use userland::ProgramView;
 use userland_loader::{ImagePages, load_program};
+
+use crate::requests::{Accept, Requests, owned};
 
 const SESSION_CLOSED_EXIT_CODE: u32 = 0xFFFF_FFFD;
 
@@ -18,7 +20,6 @@ const NO_MEMORY: Error = Error::Syscall(SyscallError::OutOfMemory);
 pub const IMPORTER_REQUESTS_PER_EXPORT_MAX: usize = 16;
 
 type ImporterDebt = component_startup::session::Reply<IssuedHandle<kind::Reply>>;
-type AcceptDebt = component_startup::accept::Reply<IssuedHandle<kind::Reply>>;
 
 /// Записи дочерних компонентов с ключом `C` и отложенные ответы на их запросы `ComponentStartup`.
 ///
@@ -28,12 +29,11 @@ type AcceptDebt = component_startup::accept::Reply<IssuedHandle<kind::Reply>>;
 /// добавлению записей, и затем закрывает порт.
 pub struct Children<'a, C, V> {
     pages: ImagePages<'a>,
-    port: ::component_startup::SessionPort,
+    port: Arc<::component_startup::SessionPort>,
     entries: Vec<Entry<'a, C, V>>,
     importers: Vec<(u64, Importer<C>)>,
     holdings: Vec<(u64, Holdings)>,
-    requests: Vec<PendingRequest<C>>,
-    accepts: Vec<PendingAccept<C>>,
+    requests: Requests<C>,
 }
 
 /// Конец incarnation записи.
@@ -130,22 +130,6 @@ struct Importer<C> {
     owner: Option<u64>,
 }
 
-struct PendingRequest<C> {
-    provider: C,
-    protocol: String,
-    importer: u64,
-    requirement: String,
-    attributes: AttributeSet,
-    reply: ImporterDebt,
-}
-
-struct PendingAccept<C> {
-    provider: C,
-    badge: u64,
-    protocol: String,
-    reply: AcceptDebt,
-}
-
 impl From<Error> for GrantError {
     fn from(error: Error) -> Self {
         Self::Kernel(error)
@@ -166,19 +150,25 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     pub fn new(pages: ImagePages<'a>) -> Result<Self, Error> {
         Ok(Self {
             pages,
-            port: ::component_startup::SessionPort::create()?,
+            port: Arc::new(::component_startup::SessionPort::create()?),
             entries: Vec::new(),
             importers: Vec::new(),
             holdings: Vec::new(),
-            requests: Vec::new(),
-            accepts: Vec::new(),
+            requests: Requests::new(),
         })
     }
 
     /// Серверная сторона порта `ComponentStartup`.
     #[must_use]
-    pub const fn port(&self) -> &Port {
+    pub fn port(&self) -> &Port {
         self.port.port()
+    }
+
+    /// Порт сессий вместе с владельцем. Обслуживание может держать его независимо от
+    /// короткого заёма таблицы компонентов.
+    #[must_use]
+    pub fn sessions(&self) -> Arc<::component_startup::SessionPort> {
+        self.port.clone()
     }
 
     /// Заводит запись `child` в [`Status::Waiting`] с бюджетом `budget_bytes` из `parent_resource`.
@@ -281,7 +271,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     /// `requirement` на экспорт `protocol`.
     #[must_use]
     pub const fn request_bytes(requirement: &str, protocol: &str) -> usize {
-        size_of::<PendingRequest<C>>() + requirement.len() + protocol.len()
+        Requests::<C>::request_bytes(requirement, protocol)
     }
 
     /// Ставит заявку импортёра со значком `importer` и атрибутами его запроса `attributes` по
@@ -298,61 +288,19 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
         attributes: AttributeSet,
         reply: ImporterDebt,
     ) {
-        let prepared = owned(protocol)
-            .zip(owned(requirement))
-            .filter(|_| self.requests.try_reserve(1).is_ok());
-        let Some((protocol_name, requirement)) = prepared else {
-            let _ = reply.send(Err::<IssuedHandle<kind::Port>, _>(SessionError::NoSpace));
-            return;
-        };
-
-        let request = PendingRequest {
-            provider,
-            protocol: protocol_name,
-            importer,
-            requirement,
-            attributes,
-            reply,
-        };
-        if let Some(replaced) = queue_request(&mut self.requests, request) {
-            let _ = replaced
-                .reply
-                .send(Err::<IssuedHandle<kind::Port>, _>(SessionError::NoSpace));
-        }
-
-        self.match_pair(provider, protocol);
+        self.requests
+            .request(provider, importer, requirement, protocol, attributes, reply);
     }
 
-    /// Отвечает провайдеру `provider` первой заявкой на экспорт `protocol` либо ставит его запрос
-    /// в очередь.
-    pub fn accept(&mut self, provider: C, badge: u64, protocol: &str, reply: AcceptDebt) {
-        let prepared = owned(protocol).filter(|_| self.accepts.try_reserve(1).is_ok());
-        let Some(protocol_name) = prepared else {
-            let _ = reply.send(Err::<SessionRequest<ImporterDebt>, _>(AcceptError::NoSpace));
-            return;
-        };
-
-        let accept = PendingAccept {
-            provider,
-            badge,
-            protocol: protocol_name,
-            reply,
-        };
-        let pending = self
-            .accepts
-            .iter_mut()
-            .find(|pending| pending.badge == badge && pending.protocol == protocol);
-        match pending {
-            Some(pending) => {
-                let replaced = core::mem::replace(pending, accept);
-                let _ = replaced
-                    .reply
-                    .send(Err::<SessionRequest<ImporterDebt>, _>(AcceptError::NoSpace));
-            }
-            None => self.accepts.push(accept),
-        }
-
-        self.match_pair(provider, protocol);
+    /// Ждёт первую заявку на экспорт `protocol`. Ожидание не заимствует таблицу процессов.
+    /// Его отмена оставляет импортёрские заявки в очереди.
+    pub fn accept(
+        &mut self,
+        provider: C,
+        badge: u64,
+        protocol: &str,
+    ) -> Result<Accept<C>, AcceptError> {
+        self.requests.accept(provider, badge, protocol)
     }
 
     /// Снимает incarnation либо клиентскую capability, чья сессия со значком `badge`
@@ -414,17 +362,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
 
     /// Отвечает `SessionError::Unavailable` заявкам к экспортам записи `child`.
     pub fn refuse_pending(&mut self, child: C) {
-        let mut index = 0;
-        while let Some(pending) = self.requests.get(index) {
-            if pending.provider == child {
-                let refused = self.requests.remove(index);
-                let _ = refused.reply.send(Err::<IssuedHandle<kind::Port>, _>(
-                    SessionError::Unavailable,
-                ));
-            } else {
-                index += 1;
-            }
-        }
+        self.requests.refuse_pending(child);
     }
 
     /// Завершает процесс записи `child` в [`Status::Running`] кодом `code`. Исход приходит из
@@ -534,9 +472,7 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
     /// Есть ли у записи `child` заявки, ещё не выданные провайдеру.
     #[must_use]
     pub fn has_pending(&self, child: C) -> bool {
-        self.requests
-            .iter()
-            .any(|pending| pending.provider == child)
+        self.requests.has_pending(child)
     }
 
     #[must_use]
@@ -583,74 +519,14 @@ impl<'a, C: Copy + Eq, V: ProgramView<'a>> Children<'a, C, V> {
             .iter()
             .filter(|(_, importer)| importer.owner.is_some_and(&owned_by))
             .count();
-        let requests = self
-            .requests
-            .iter()
-            .filter(|request| owned_by(request.importer));
-
-        let mut held = Held {
-            states: issued,
-            bytes: issued * Self::ISSUE_BYTES,
-        };
-        for request in requests {
-            held.states += 1;
-            held.bytes += size_of::<PendingRequest<C>>()
-                + request.protocol.capacity()
-                + request.requirement.capacity();
-        }
+        let mut held = self.requests.held_where(owned_by);
+        held.states += issued;
+        held.bytes += issued * Self::ISSUE_BYTES;
         held
     }
 
-    fn match_pair(&mut self, provider: C, protocol: &str) {
-        let Some(accept) = self
-            .accepts
-            .iter()
-            .position(|accept| accept.provider == provider && accept.protocol == protocol)
-        else {
-            return;
-        };
-        let Some(request) = self
-            .requests
-            .iter()
-            .position(|request| request.provider == provider && request.protocol == protocol)
-        else {
-            return;
-        };
-
-        let accept = self.accepts.remove(accept);
-        let PendingRequest {
-            provider,
-            protocol,
-            importer,
-            requirement,
-            attributes,
-            reply,
-        } = self.requests.remove(request);
-        let sent = accept
-            .reply
-            .send(Ok::<_, AcceptError>(SessionRequest { reply, attributes }));
-
-        // Недоставленная заявка возвращается на своё место в очереди.
-        if let Err(undelivered) = sent
-            && let Ok(Ok(SessionRequest { reply, attributes })) = undelivered.into_value()
-        {
-            self.requests.insert(
-                request,
-                PendingRequest {
-                    provider,
-                    protocol,
-                    importer,
-                    requirement,
-                    attributes,
-                    reply,
-                },
-            );
-        }
-    }
-
     fn release(&mut self, owner: u64) {
-        self.requests.retain(|request| request.importer != owner);
-        self.accepts.retain(|accept| accept.badge != owner);
+        self.requests.release(owner);
         self.importers
             .retain(|(_, importer)| importer.owner != Some(owner));
         self.holdings.retain(|(holder, _)| *holder != owner);
@@ -803,34 +679,4 @@ fn copy_root<K: ObjectKind + 'static>(
         }
     }
     Ok(copy)
-}
-
-fn owned(text: &str) -> Option<String> {
-    let mut owned = String::new();
-    owned.try_reserve_exact(text.len()).ok()?;
-    owned.push_str(text);
-    Some(owned)
-}
-
-fn queue_request<C: PartialEq>(
-    requests: &mut Vec<PendingRequest<C>>,
-    request: PendingRequest<C>,
-) -> Option<PendingRequest<C>> {
-    let same_key = |pending: &PendingRequest<C>| {
-        pending.importer == request.importer
-            && pending.requirement == request.requirement
-            && pending.provider == request.provider
-            && pending.protocol == request.protocol
-    };
-    let waiting = requests.iter().filter(|pending| same_key(pending)).count();
-    let oldest = requests.iter().position(same_key);
-
-    let evicted = match oldest {
-        Some(oldest) if waiting >= IMPORTER_REQUESTS_PER_EXPORT_MAX => {
-            Some(requests.remove(oldest))
-        }
-        _ => None,
-    };
-    requests.push(request);
-    evicted
 }

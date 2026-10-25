@@ -28,9 +28,11 @@ fn run(parent: Handle<kind::Port>) -> Result<()> {
         .client();
     let region = image
         .region()
+        .wait()
         .ok()
         .map(MemoryRegion::from)
         .ok_or(Error::Start)?;
+
     let Err(error) = serve(parent, Some(region), |backing| {
         let backing = backing.ok_or(Error::Start)?;
         Ok(ImageFileSystem::new(backing)?)

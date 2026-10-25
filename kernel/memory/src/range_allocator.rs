@@ -20,7 +20,7 @@ use crate::{
 const PAGE_SIZE: usize = PageAlignedVirtualAddress::ALIGNMENT;
 
 /// Дефолтный лимит одновременно живых регионов в реестре.
-pub const DEFAULT_LIVE_REGION_CAPACITY: usize = 64;
+pub const DEFAULT_LIVE_REGION_CAPACITY: usize = 256;
 
 const DEFAULT_PREALLOCATED_LIVE_REGIONS: usize = 4;
 const DEFAULT_PREALLOCATED_FREE_RANGES: usize = DEFAULT_PREALLOCATED_LIVE_REGIONS + 1;

@@ -1397,7 +1397,7 @@ diff -ruN a/std/src/sys/time/mod.rs b/std/src/sys/time/mod.rs
 diff -ruN a/std/src/sys/time/molecular.rs b/std/src/sys/time/molecular.rs
 --- a/std/src/sys/time/molecular.rs	1970-01-01 00:00:00.000000000 +0000
 +++ b/std/src/sys/time/molecular.rs	2026-10-10 01:28:01.965850626 +0000
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,97 @@
 +//! Часы `std` поверх часов процесса в `runtime`: монотонные часы и время суток.
 +
 +use kernel_objects::{Port, Session};
@@ -1486,6 +1486,7 @@ diff -ruN a/std/src/sys/time/molecular.rs b/std/src/sys/time/molecular.rs
 +        .client()
 +        .with_wait(NOW_REPLY_TIMEOUT)
 +        .now()
++        .wait()
 +        .map_err(transport_error)?;
 +
 +    if runtime::install_realtime(seconds) {

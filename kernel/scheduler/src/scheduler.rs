@@ -12,7 +12,7 @@ use capability::{
 };
 use kbase::{LockCell, MutexCell, StaticString};
 use memory::{
-    AccessMask, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE,
+    AccessMask, MappingBacking, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE,
     frame_allocator::FrameAllocator,
     memory_mapper::{AddressSpaceFactory, AddressSpaceHandle},
     range_allocator::AllocateError,
@@ -1578,10 +1578,12 @@ where
                     size,
                     MappingTag {
                         flags,
-                        region: region.clone(),
+                        backing: Some(MappingBacking {
+                            region: region.clone(),
+                            // IPC-буфер не имеет публичной капы - отзывать нечего.
+                            revocation: None,
+                        }),
                         grant,
-                        // IPC-буфер не имеет публичной капы - отзывать нечего.
-                        revocation: None,
                     },
                 )
             })

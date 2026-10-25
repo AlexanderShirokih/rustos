@@ -3,6 +3,7 @@
 use alloc::string::String;
 
 use component_abi::RequirementDeclaration;
+use executor::PortChannel;
 use ipc::{CallError, Protocol};
 use kernel_objects::{Error, IrqLine, Session, SessionTransport};
 use runtime::Timeout;
@@ -45,11 +46,23 @@ pub(crate) fn bus_session(importer: &Importer) -> virtio_mmio::Client<SessionTra
         .with_wait(BUS_REPLY_TIMEOUT)
 }
 
+pub(crate) fn open_transport(
+    importer: &Importer,
+    device: DeviceType,
+) -> Result<Session<virtio_slot::Protocol>, CallError<VirtioMmioError>> {
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
+    let session = request::<virtio_mmio::Protocol>(importer.handle(), BUS, BUS_REPLY_TIMEOUT)
+        .expect("bus session");
+    let bus = PortChannel::client(session, reactor.clone()).with_wait(BUS_REPLY_TIMEOUT);
+    executor.block_on(open_slot(&bus, &reactor, device))
+}
+
 fn open(
     bus: &virtio_mmio::Client<SessionTransport>,
     device_type: u32,
 ) -> Result<Session<virtio_slot::Protocol>, CallError<VirtioMmioError>> {
-    bus.open(device_type).map(Session::from_session)
+    bus.open(device_type).wait().map(Session::from_session)
 }
 
 fn client(slot: Session<virtio_slot::Protocol>) -> virtio_slot::Client<SessionTransport> {
@@ -71,7 +84,7 @@ fn a_gpu_slot_reads_the_gpu_device_id_and_a_second_open_is_busy() {
     let bus = bus_session(&importer);
 
     let gpu = client(open(&bus, GPU).expect("gpu slot"));
-    let device_id = gpu.read(offset(register::DEVICE_ID));
+    let device_id = gpu.read(offset(register::DEVICE_ID)).wait();
     let second = bus_session(&importer);
     let busy = open(&second, GPU).map(drop);
     // Транспорт, окно которого не выдано, шина пропускает строкой журнала до итоговой.
@@ -115,11 +128,11 @@ fn a_register_past_the_window_or_unaligned_is_out_of_range() {
     let gpu = client(open(&bus, GPU).expect("gpu slot"));
     let status = offset(register::STATUS);
 
-    let past_window = gpu.write(u16::MAX - 3, 1);
-    let unaligned = gpu.write(status + 1, 1);
-    let read_past = gpu.read(u16::MAX - 3);
-    let config_past = gpu.config_read(0x100, AccessWidth::Word);
-    let untouched = gpu.read(status);
+    let past_window = gpu.write(u16::MAX - 3, 1).wait();
+    let unaligned = gpu.write(status + 1, 1).wait();
+    let read_past = gpu.read(u16::MAX - 3).wait();
+    let config_past = gpu.config_read(0x100, AccessWidth::Word).wait();
+    let untouched = gpu.read(status).wait();
 
     test_harness::check_eq!(past_window, Err(CallError::Remote(SlotError::OutOfRange)));
     test_harness::check_eq!(unaligned, Err(CallError::Remote(SlotError::OutOfRange)));
@@ -142,10 +155,10 @@ fn a_gpu_config_field_reads_with_any_width_and_an_unaligned_one_is_out_of_range(
     let bus = bus_session(&importer);
     let gpu = client(open(&bus, GPU).expect("gpu slot"));
 
-    let word = gpu.config_read(NUM_SCANOUTS, AccessWidth::Word);
-    let byte = gpu.config_read(NUM_SCANOUTS, AccessWidth::Byte);
-    let unaligned = gpu.config_read(2, AccessWidth::Word);
-    let device_id = gpu.read(offset(register::DEVICE_ID));
+    let word = gpu.config_read(NUM_SCANOUTS, AccessWidth::Word).wait();
+    let byte = gpu.config_read(NUM_SCANOUTS, AccessWidth::Byte).wait();
+    let unaligned = gpu.config_read(2, AccessWidth::Word).wait();
+    let device_id = gpu.read(offset(register::DEVICE_ID)).wait();
 
     test_harness::check_eq!(word, Ok(QEMU_GPU_SCANOUTS));
     test_harness::check_eq!(byte, Ok(QEMU_GPU_SCANOUTS));
@@ -168,9 +181,9 @@ fn the_slot_of_a_terminated_client_reopens_with_the_device_reset() {
 
     let fixture = spawn_entry(SLOT_FIXTURE, slot.into_handle());
     fixture.join(JOIN_TIMEOUT).expect("slot client terminates");
-    let status = open_slot(&bus, DeviceType::Gpu)
+    let status = open_transport(&importer, DeviceType::Gpu)
         .map(client)
-        .map(|gpu| gpu.read(offset(register::STATUS)));
+        .map(|gpu| gpu.read(offset(register::STATUS)).wait());
 
     test_harness::check_eq!(fixture.exit_code().expect("exit code"), 0);
     test_harness::check_eq!(status, Ok(Ok(0)));
@@ -188,11 +201,11 @@ fn the_line_of_a_closed_slot_is_revoked() {
     let importer = composition.importer(&[BUS_IMPORT]);
     let bus = bus_session(&importer);
     let gpu = client(open(&bus, GPU).expect("gpu slot"));
-    let line = IrqLine::from(gpu.irq().expect("gpu line"));
+    let line = IrqLine::from(gpu.irq().wait().expect("gpu line"));
 
     let held = line.ack().err();
     drop(gpu);
-    let reopened = open_slot(&bus, DeviceType::Gpu);
+    let reopened = open_transport(&importer, DeviceType::Gpu);
     let released = line.ack().err();
 
     test_harness::check!(held != Some(Error::Syscall(SyscallError::Revoked)));

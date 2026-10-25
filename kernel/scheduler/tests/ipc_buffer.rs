@@ -26,7 +26,8 @@ use crate::common::{
 type TestScheduler = Scheduler<MockContext, MockTimerSource, Uninit>;
 const TEST_CONFIG: SchedulerConfig = SchedulerConfig::new(32, 16);
 
-const MAPPING_TABLE_FILL_THREADS_MAX: usize = 256;
+const MAPPING_TABLE_FILL_THREADS_MAX: usize =
+    memory::range_allocator::DEFAULT_LIVE_REGION_CAPACITY + 2;
 
 fn factory_static(factory: PageMapperFactory) -> &'static PageMapperFactory {
     Box::leak(Box::new(factory))

@@ -28,8 +28,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
         .client();
     let feature = FEATURE;
 
-    let first = features.publish(feature);
-    let again = features.publish(feature);
+    let first = features.publish(feature).wait();
+    let again = features.publish(feature).wait();
     // Закрытие сессии `Features` завершает публикацию, и rootkeeper запускает удержанные записи.
     drop(features);
     log_fmt(format_args!("published {first:?} {again:?}"));

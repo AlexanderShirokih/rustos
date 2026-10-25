@@ -5,8 +5,10 @@ extern crate alloc;
 
 use component_abi::Attributes;
 use component_startup::{SessionError, component_manifest};
-use filesystem::{ByteStore, FileSystemBackend, NodeId, NodeMetadata, RamFileSystem, Window};
-use filesystem_abi::{DirCursor, FileSystemError, Listed, NodeKind, Path, file_system};
+use filesystem::{
+    ByteStore, DirBatch, FileSystemBackend, NodeId, NodeMetadata, RamFileSystem, Window,
+};
+use filesystem_abi::{DirCursor, FileSystemError, NodeKind, Path, file_system};
 use filesystem_server::serve_volumes;
 use runtime::{FAILED_EXIT_CODE, exit};
 use syscall::{Handle, USER_VA_END, kind};
@@ -65,33 +67,22 @@ impl FileSystemBackend for CrashingFileSystem {
         self.inner.metadata(node)
     }
 
-    fn read_at(
-        &self,
-        stores: &dyn ByteStore,
-        node: NodeId,
-        offset: u64,
-        out: &mut [u8],
-    ) -> Result<usize, FileSystemError> {
-        self.inner.read_at(stores, node, offset, out)
+    fn read_window(&self, node: NodeId) -> Result<Window, FileSystemError> {
+        self.inner.read_window(node)
     }
 
-    fn write_at(
+    fn prepare_write(
         &mut self,
         stores: &mut dyn ByteStore,
         node: NodeId,
         offset: u64,
-        data: &[u8],
-    ) -> Result<usize, FileSystemError> {
-        self.inner.write_at(stores, node, offset, data)
+        len: usize,
+    ) -> Result<Window, FileSystemError> {
+        self.inner.prepare_write(stores, node, offset, len)
     }
 
-    fn append(
-        &mut self,
-        stores: &mut dyn ByteStore,
-        node: NodeId,
-        data: &[u8],
-    ) -> Result<u64, FileSystemError> {
-        self.inner.append(stores, node, data)
+    fn commit_write(&mut self, node: NodeId, end: u64) -> Result<(), FileSystemError> {
+        self.inner.commit_write(node, end)
     }
 
     fn set_size(
@@ -108,16 +99,8 @@ impl FileSystemBackend for CrashingFileSystem {
         node: NodeId,
         from: DirCursor,
         out: &mut [u8],
-    ) -> Result<Listed, FileSystemError> {
+    ) -> Result<DirBatch, FileSystemError> {
         self.inner.list(node, from, out)
-    }
-
-    fn backing(
-        &mut self,
-        stores: &mut dyn ByteStore,
-        node: NodeId,
-    ) -> Result<Window, FileSystemError> {
-        self.inner.backing(stores, node)
     }
 
     fn pin(&mut self, node: NodeId) -> Result<(), FileSystemError> {

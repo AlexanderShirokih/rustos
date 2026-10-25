@@ -7,6 +7,7 @@
 
 use std::{collections::BTreeMap, sync::mpsc::Sender};
 
+use executor::PortChannel;
 use input_abi::{DeviceLayout, DeviceNumber, Kind, Record, Usage, input};
 use kernel_objects::SessionTransport;
 
@@ -25,10 +26,13 @@ struct Device {
     reserved: bool,
 }
 
-pub(crate) fn watch(session: &input::Client<SessionTransport>, commands: &Sender<Command>) {
+pub(crate) async fn watch(
+    session: &input::Client<PortChannel<SessionTransport>>,
+    commands: &Sender<Command>,
+) {
     let mut devices = BTreeMap::new();
     loop {
-        let records: Vec<Record> = match session.next() {
+        let records: Vec<Record> = match session.next().await {
             Ok(records) => records.records().collect(),
             Err(error) => {
                 println!("buttons stopped: {error:?}");
@@ -47,7 +51,7 @@ pub(crate) fn watch(session: &input::Client<SessionTransport>, commands: &Sender
                     devices.clear();
                     None
                 }
-                (Kind::DeviceAdded, Some(number)) => added(session, &mut devices, number),
+                (Kind::DeviceAdded, Some(number)) => added(session, &mut devices, number).await,
                 (Kind::DeviceRemoved, Some(number)) => {
                     devices.remove(&number);
                     None
@@ -70,12 +74,12 @@ pub(crate) fn watch(session: &input::Client<SessionTransport>, commands: &Sender
     }
 }
 
-fn added(
-    session: &input::Client<SessionTransport>,
+async fn added(
+    session: &input::Client<PortChannel<SessionTransport>>,
     devices: &mut BTreeMap<DeviceNumber, Device>,
     number: DeviceNumber,
 ) -> Option<Command> {
-    let layout = session.describe(number).ok()?;
+    let layout = session.describe(number).await.ok()?;
     let reserved = only_buttons(&layout);
     devices.insert(number, Device { layout, reserved });
     reserved.then_some(Command::Reserve(number))

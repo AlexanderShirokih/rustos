@@ -4,11 +4,18 @@
 //! Кадр значка, которым занят транспорт, идёт протоколу `VirtioSlot`, остальные кадры -
 //! протоколу `VirtioMmio`.
 
-use alloc::vec::Vec;
-use core::sync::atomic::{Ordering, fence};
+use alloc::{rc::Rc, vec::Vec};
+use core::{
+    cell::RefCell,
+    sync::atomic::{Ordering, fence},
+};
 
-use component_startup::{SessionEvent, SessionPort};
-use ipc::{IntoWireValue, wire::Cap};
+use component_startup::SessionPort;
+use executor::PortChannel;
+use ipc::{
+    Incoming, IntoWireValue,
+    wire::{Cap, IpcError},
+};
 use kernel_objects::{Delivery, IrqLine, MmioMapping, Port, SessionTransport};
 use platform_abi::{DeviceId, MappedDescription, PlatformError, WindowRefusal, platform};
 use runtime::log_fmt;
@@ -28,6 +35,7 @@ const LINE_RIGHTS: Rights = Rights::READ
 
 pub(crate) struct Bus {
     transports: Vec<Transport>,
+    sessions: Rc<SessionPort>,
 }
 
 struct Transport {
@@ -35,18 +43,13 @@ struct Transport {
     device_type: u32,
     registers: MmioMapping,
     line: IrqLine,
-    slot: Slot,
+    slot: RefCell<Slot>,
 }
 
 enum Slot {
     Free,
     Held { badge: u64, lease: Option<IrqLine> },
     Resetting,
-}
-
-struct Opener<'a> {
-    sessions: &'a SessionPort,
-    transports: &'a mut [Transport],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,13 +60,17 @@ enum Refusal {
 }
 
 impl Bus {
-    pub(crate) fn take(platform: &platform::Client<SessionTransport>) -> Option<Self> {
-        let mapped = MappedDescription::new(platform.description().ok()?).ok()?;
+    pub(crate) async fn take(
+        platform: &platform::Client<PortChannel<SessionTransport>>,
+        sessions: Rc<SessionPort>,
+    ) -> Option<Self> {
+        let region = platform.description().await.ok()?;
+        let mapped = MappedDescription::new(region).ok()?;
         let description = mapped.description().ok()?;
 
         let mut transports = Vec::new();
         for device in description.compatible_devices(COMPATIBLE) {
-            match Transport::take(platform, device.id()) {
+            match Transport::take(platform, device.id()).await {
                 Ok(transport) => transports.push(transport),
                 Err(refusal) => log_fmt(format_args!(
                     "{} skipped: {refusal:?}",
@@ -71,49 +78,46 @@ impl Bus {
                 )),
             }
         }
+
         log_fmt(format_args!("{} transports taken", transports.len()));
-        Some(Self { transports })
+        Some(Self {
+            transports,
+            sessions,
+        })
     }
 
-    pub(crate) fn serve(&mut self, sessions: &SessionPort) {
-        let mut events = sessions.events();
-
-        while let Some(event) = events.recv() {
-            match event {
-                SessionEvent::Frame(frame) => {
-                    let badge = frame.resources.badge;
-                    if let Some(slot) = self.slot(badge) {
-                        let _ = virtio_slot::dispatch(slot, frame);
-                    } else {
-                        let mut opener = Opener {
-                            sessions,
-                            transports: &mut self.transports,
-                        };
-                        let _ = virtio_mmio::dispatch(&mut opener, frame);
-                    }
-                }
-                SessionEvent::Gone(badge) => {
-                    if let Some(slot) = self.slot(badge) {
-                        slot.release();
-                    }
-                }
-            }
+    pub(crate) fn dispatch(&self, frame: Incoming<'_, Delivery>) -> Result<(), IpcError> {
+        if let Some(slot) = self.slot(frame.resources.badge) {
+            virtio_slot::dispatch(slot, frame)
+        } else {
+            virtio_mmio::dispatch(self, frame)
         }
     }
 
-    fn slot(&mut self, badge: u64) -> Option<&mut Transport> {
-        self.transports.iter_mut().find(
-            |transport| matches!(transport.slot, Slot::Held { badge: held, .. } if held == badge),
+    pub(crate) fn gone(&self, badge: u64) {
+        if let Some(slot) = self.slot(badge) {
+            slot.release();
+        }
+    }
+
+    fn slot(&self, badge: u64) -> Option<&Transport> {
+        self.transports.iter().find(
+            |transport| matches!(*transport.slot.borrow(), Slot::Held { badge: held, .. } if held == badge),
         )
     }
 }
 
 impl Transport {
-    fn take(platform: &platform::Client<SessionTransport>, id: &DeviceId) -> Result<Self, Refusal> {
+    async fn take(
+        platform: &platform::Client<PortChannel<SessionTransport>>,
+        id: &DeviceId,
+    ) -> Result<Self, Refusal> {
         let line = platform
             .irq(id.clone(), 0)
+            .await
             .map_err(|error| error.fold(|_| Refusal::Call, Refusal::Platform))?;
-        let registers = platform.map_mmio(id, 0).map_err(Refusal::Window)?;
+
+        let registers = platform.map_mmio(id, 0).await.map_err(Refusal::Window)?;
         let device_type = registers.mmio().read::<u32>(register::DEVICE_ID);
 
         Ok(Self {
@@ -121,7 +125,7 @@ impl Transport {
             device_type,
             registers,
             line: IrqLine::from(line),
-            slot: Slot::Free,
+            slot: RefCell::new(Slot::Free),
         })
     }
 
@@ -167,31 +171,31 @@ impl Transport {
         }
     }
 
-    fn release(&mut self) {
-        self.slot = Slot::Resetting;
+    fn release(&self) {
+        *self.slot.borrow_mut() = Slot::Resetting;
         self.registers.mmio().write::<u32>(register::STATUS, 0);
 
         self.settle();
-        if matches!(self.slot, Slot::Resetting) {
+        if matches!(*self.slot.borrow(), Slot::Resetting) {
             log_fmt(format_args!("{} reset pending", self.id.as_str()));
         }
     }
 
-    fn settle(&mut self) {
-        if matches!(self.slot, Slot::Resetting)
+    fn settle(&self) {
+        if matches!(*self.slot.borrow(), Slot::Resetting)
             && self.registers.mmio().read::<u32>(register::STATUS) == 0
         {
-            self.slot = Slot::Free;
+            *self.slot.borrow_mut() = Slot::Free;
         }
     }
 }
 
-impl Opener<'_> {
-    fn open(&mut self, device_type: u32) -> Result<Port, VirtioMmioError> {
-        self.transports.iter_mut().for_each(Transport::settle);
+impl Bus {
+    fn open(&self, device_type: u32) -> Result<Port, VirtioMmioError> {
+        self.transports.iter().for_each(Transport::settle);
         let mut matching = self
             .transports
-            .iter_mut()
+            .iter()
             .filter(|transport| device_type != 0 && transport.device_type == device_type)
             .peekable();
         if matching.peek().is_none() {
@@ -199,23 +203,25 @@ impl Opener<'_> {
         }
 
         let transport = matching
-            .find(|transport| matches!(transport.slot, Slot::Free))
+            .find(|transport| matches!(*transport.slot.borrow(), Slot::Free))
             .ok_or(VirtioMmioError::Busy)?;
         let minted = self
             .sessions
             .create_session()
             .map_err(|_| VirtioMmioError::NoSpace)?;
-        transport.slot = Slot::Held {
+        *transport.slot.borrow_mut() = Slot::Held {
             badge: minted.badge.get(),
             lease: None,
         };
+
         Ok(minted.port)
     }
 }
 
-impl virtio_mmio::Service<Delivery> for Opener<'_> {
+#[allow(clippy::unused_async_trait_impl)]
+impl virtio_mmio::Service<Delivery> for Bus {
     fn open(
-        &mut self,
+        &self,
         _frame: &Delivery,
         device_type: u32,
     ) -> impl IntoWireValue<
@@ -223,24 +229,25 @@ impl virtio_mmio::Service<Delivery> for Opener<'_> {
         Read = Result<ipc::wire::Session<virtio_slot::Protocol>, VirtioMmioError>,
     > {
         // Порт сессии слота выпускает эта шина, и она же обслуживает на нём `VirtioSlot`.
-        Opener::open(self, device_type).map(kernel_objects::Session::from_handle)
+        Bus::open(self, device_type).map(kernel_objects::Session::from_handle)
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl virtio_slot::Service<Delivery> for Transport {
-    fn read(&mut self, _frame: &Delivery, offset: u16) -> Result<u32, SlotError> {
+    fn read(&self, _frame: &Delivery, offset: u16) -> Result<u32, SlotError> {
         let offset = self.register(offset)?;
         Ok(self.load(offset, AccessWidth::Word))
     }
 
-    fn write(&mut self, _frame: &Delivery, offset: u16, value: u32) -> Result<(), SlotError> {
+    fn write(&self, _frame: &Delivery, offset: u16, value: u32) -> Result<(), SlotError> {
         let offset = self.register(offset)?;
         self.store(offset, AccessWidth::Word, value);
         Ok(())
     }
 
     fn config_read(
-        &mut self,
+        &self,
         _frame: &Delivery,
         offset: u16,
         width: AccessWidth,
@@ -250,7 +257,7 @@ impl virtio_slot::Service<Delivery> for Transport {
     }
 
     fn config_write(
-        &mut self,
+        &self,
         _frame: &Delivery,
         offset: u16,
         width: AccessWidth,
@@ -262,10 +269,11 @@ impl virtio_slot::Service<Delivery> for Transport {
     }
 
     fn irq(
-        &mut self,
+        &self,
         _frame: &Delivery,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::IrqLine>, SlotError>> {
-        let Slot::Held { lease, .. } = &mut self.slot else {
+        let mut slot = self.slot.borrow_mut();
+        let Slot::Held { lease, .. } = &mut *slot else {
             return Err(SlotError::Unavailable);
         };
         // Копии держателя выводятся из `lease`, и уход держателя отзывает их вместе с ним.

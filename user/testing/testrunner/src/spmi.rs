@@ -790,7 +790,7 @@ pub(crate) fn open(
     bus: &spmi::Client<SessionTransport>,
     path: &str,
 ) -> Result<spmi_device::Client<SessionTransport>, CallError<SpmiError>> {
-    bus.open(device(path)).map(|session| {
+    bus.open(device(path)).wait().map(|session| {
         Session::<spmi_device::Protocol>::from_session(session)
             .client()
             .with_wait(SPMI_REPLY_TIMEOUT)
@@ -801,7 +801,7 @@ fn irq(
     device: &spmi_device::Client<SessionTransport>,
     resource: u16,
 ) -> Result<spmi_interrupt::Client<SessionTransport>, CallError<DeviceError>> {
-    device.irq(resource).map(|session| {
+    device.irq(resource).wait().map(|session| {
         Session::<spmi_interrupt::Protocol>::from_session(session)
             .client()
             .with_wait(SPMI_REPLY_TIMEOUT)
@@ -825,38 +825,46 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
     let bus = spmi_bus(&importer, &controller);
     let clock = open(&bus, PMIC_CLOCK).expect("pmic clock session");
 
-    let first = clock.read(RTC_READ, 4).expect("count read");
+    let first = clock.read(RTC_READ, 4).wait().expect("count read");
     pause(COUNT_PAUSE);
-    let second = clock.read(RTC_READ, 4).expect("count read");
+    let second = clock.read(RTC_READ, 4).wait().expect("count read");
 
     let busy = open(&bus, PMIC_CLOCK).map(drop);
     let outside = open(&bus, OUTSIDE_THE_BUS).map(drop);
-    let past_blocks = clock.write(RTC_PAST_BLOCKS, 1, 0);
+    let past_blocks = clock.write(RTC_PAST_BLOCKS, 1, 0).wait();
 
     let interrupt = irq(&clock, 0).expect("alarm interrupt session");
-    let alarm = Signal::from(interrupt.signal().expect("alarm signal"));
+    let alarm = Signal::from(interrupt.signal().wait().expect("alarm signal"));
     let set = clock
         .update(ALARM_CONTROL, ALARM_ENABLE, 0)
-        .and_then(|()| clock.write(ALARM_WRITE, 4, second + ALARM_AHEAD))
-        .and_then(|()| clock.update(ALARM_CONTROL, ALARM_ENABLE, ALARM_ENABLE));
+        .wait()
+        .and_then(|()| clock.write(ALARM_WRITE, 4, second + ALARM_AHEAD).wait())
+        .and_then(|()| {
+            clock
+                .update(ALARM_CONTROL, ALARM_ENABLE, ALARM_ENABLE)
+                .wait()
+        });
+
     let raised = set.is_ok() && alarm.wait(SIGNALED, ALARM_WAIT).is_ok();
 
     let cleared = clock
         .update(ALARM_CONTROL, ALARM_ENABLE, 0)
-        .and_then(|()| clock.update(ALARM_CONTROL_2, ALARM_CLEAR, 0));
-    let acknowledged = interrupt.ack();
+        .wait()
+        .and_then(|()| clock.update(ALARM_CONTROL_2, ALARM_CLEAR, 0).wait());
+
+    let acknowledged = interrupt.ack().wait();
     let lowered = alarm.wait(SIGNALED, Timeout::from_millis(0));
     let repeated = irq(&clock, 0).map(drop);
 
     drop(interrupt);
 
     let revoked_alone = await_revoked(|| alarm.wait(SIGNALED, Timeout::from_millis(0)));
-    let read_after = clock.read(RTC_READ, 4).map(drop);
+    let read_after = clock.read(RTC_READ, 4).wait().map(drop);
     let renewed = irq(&clock, 0);
     let renewed_alarm = renewed
         .as_ref()
         .ok()
-        .and_then(|interrupt| interrupt.signal().ok())
+        .and_then(|interrupt| interrupt.signal().wait().ok())
         .map(Signal::from);
 
     drop(clock);
@@ -864,7 +872,11 @@ fn a_pmic_clock_counts_and_its_alarm_raises_the_signal_of_its_session() {
     let revoked = renewed_alarm
         .as_ref()
         .is_some_and(|alarm| await_revoked(|| alarm.wait(SIGNALED, Timeout::from_millis(0))));
-    let departed = renewed.as_ref().ok().map(spmi_interrupt::Client::ack);
+
+    let departed = renewed
+        .as_ref()
+        .ok()
+        .map(|interrupt| interrupt.ack().wait());
 
     let reopened = (0..POLL_ATTEMPTS).any(|_| match open(&bus, PMIC_CLOCK) {
         Err(CallError::Remote(SpmiError::Busy)) => {

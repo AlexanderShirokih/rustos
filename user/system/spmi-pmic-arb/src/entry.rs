@@ -1,17 +1,20 @@
-use alloc::{sync::Arc, vec::Vec};
-use core::fmt;
+use alloc::{rc::Rc, vec::Vec};
+use core::{cell::RefCell, fmt};
 
 use component_startup::{
-    SessionPort, StartupError, component_manifest, serve_export, whole_export,
+    AsyncStartup, Requirements as _, SessionError, SessionPort, StartupError, component_manifest,
+    serve_component,
 };
+use executor::{Executor, PortChannel, Reactor, TaskHandle};
 use kernel_objects::{IrqLine, SessionTransport};
 use platform_abi::{MappedDescription, platform};
-use runtime::{Mutex, Timeout, log_fmt, log_line, spawn_bound};
+use runtime::{FAILED_EXIT_CODE, exit, log_fmt, log_line};
 use spmi_abi::spmi;
 use spmi_pmic_arb::{Arbiter, ArbiterNode, Refusal};
+use syscall::{Handle, SIGNALED, WaitItem, kind};
 
 use crate::{
-    bus::{Bus, Device, serve},
+    bus::{Bus, Device},
     windows::Windows,
 };
 
@@ -28,67 +31,113 @@ component_manifest! {
 #[derive(Debug)]
 enum Stopped {
     Startup(StartupError),
-    Arbiter,
     ServicePort,
-    ServiceThreads,
+    Executor,
     ServicePortClosed,
-    ArbiterLine,
+}
+
+struct Bound {
+    bus: Rc<Bus>,
+    _interrupts: Option<TaskHandle>,
 }
 
 impl fmt::Display for Stopped {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Startup(error) => error.fmt(formatter),
-            Self::Arbiter => formatter.write_str("arbiter refused"),
             Self::ServicePort => formatter.write_str("service port refused"),
-            Self::ServiceThreads => formatter.write_str("service threads refused"),
+            Self::Executor => formatter.write_str("executor refused"),
             Self::ServicePortClosed => formatter.write_str("service port closed"),
-            Self::ArbiterLine => formatter.write_str("arbiter line lost"),
         }
     }
 }
 
 #[program_entry::component]
-fn run(requirements: SpmiStartup) -> Result<(), Stopped> {
-    // Сессия `Platform` держит окна и линию арбитра до конца процесса.
-    let platform = requirements
-        .platform
-        .open()
-        .map_err(Stopped::Startup)?
-        .client();
-    let (bus, line) = take(&platform).ok_or(Stopped::Arbiter)?;
-    let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
+fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
+    let requirements = SpmiStartup::from_parent(parent);
+    let platform = requirements.platform.open().map_err(Stopped::Startup)?;
 
-    let bus = Arc::new(Mutex::new(bus));
-    let sessions = Arc::new(sessions);
+    let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
+    let reactor = executor.reactor();
 
-    let delivered = Arc::clone(&bus);
-    let interrupts = line.map(|line| {
-        spawn_bound(move || {
-            while line.wait(Timeout::INFINITE).is_ok() {
-                delivered.lock().deliver();
-                if line.ack().is_err() {
-                    break;
-                }
+    let platform = PortChannel::client(platform, reactor.clone());
+
+    let sessions = Rc::new(SessionPort::create().map_err(|_| Stopped::ServicePort)?);
+    let bound = Rc::new(RefCell::new(None::<Rc<Bound>>));
+
+    let dispatch = bound.clone();
+    let opened = bound.clone();
+    let closed = bound.clone();
+    let port = sessions.clone();
+    let received = sessions.clone();
+    let spawning = Rc::downgrade(&executor);
+
+    let served = serve_component::<spmi::Protocol, core::future::Ready<_>>(
+        &executor,
+        AsyncStartup::new(PortChannel::new(parent, reactor.clone())),
+        sessions,
+        move |frame| {
+            let bound = dispatch.borrow().clone();
+            let bound = bound.ok_or(ipc::wire::IpcError::PeerClosed)?;
+            bound.bus.dispatch(&received, frame).map(|()| None)
+        },
+        async move |_| {
+            if opened.borrow().is_none() {
+                let (bus, line) = take(&platform).await.ok_or(SessionError::Refused)?;
+                let bus = Rc::new(bus);
+                let interrupts = if let Some(line) = line {
+                    Some(
+                        spawning
+                            .upgrade()
+                            .ok_or(SessionError::Unavailable)?
+                            .spawn_now(deliver(line, bus.clone(), reactor.clone()))
+                            .abort_on_drop(),
+                    )
+                } else {
+                    None
+                };
+                *opened.borrow_mut() = Some(Rc::new(Bound {
+                    bus,
+                    _interrupts: interrupts,
+                }));
             }
-            Stopped::ArbiterLine
-        })
-    });
 
-    let exporter = requirements.parent;
-    let port = Arc::clone(&sessions);
-    let export = spawn_bound(move || serve_export::<spmi::Protocol>(exporter, whole_export(&port)));
+            port.open_session()
+        },
+        move |badge| {
+            if let Some(bound) = closed.borrow().as_ref() {
+                bound.bus.release(badge);
+            }
+        },
+    );
 
-    if matches!(interrupts, Some(Err(_))) || export.is_err() {
-        return Err(Stopped::ServiceThreads);
-    }
-
-    serve(&bus, &sessions);
+    let _ = executor.block_on(served);
     Err(Stopped::ServicePortClosed)
 }
 
-fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<IrqLine>)> {
-    let Ok(description) = platform.description() else {
+async fn deliver(line: IrqLine, bus: Rc<Bus>, reactor: Reactor) {
+    loop {
+        if reactor
+            .wait(WaitItem::new(line.as_raw(), SIGNALED))
+            .await
+            .is_err()
+        {
+            log_line("arbiter line lost");
+            exit(FAILED_EXIT_CODE);
+        }
+
+        bus.deliver();
+        if line.ack().is_err() {
+            log_line("arbiter line lost");
+            exit(FAILED_EXIT_CODE);
+        }
+    }
+}
+
+async fn take(
+    platform: &platform::Client<PortChannel<SessionTransport>>,
+) -> Option<(Bus, Option<IrqLine>)> {
+    let Ok(description) = platform.description().await else {
         log_line("platform description refused");
         return None;
     };
@@ -109,6 +158,7 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
         .inspect_err(|error| log_fmt(format_args!("{} refused: {error:?}", id.as_str())))
         .ok()?;
     let windows = Windows::take(platform, &id, &node)
+        .await
         .inspect_err(|error| log_fmt(format_args!("{} windows refused: {error:?}", id.as_str())))
         .ok()?;
 
@@ -132,13 +182,20 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
         }
     };
 
-    let line = arbiter
-        .as_ref()
-        .map(|_| platform.irq(id.clone(), 0))
-        .transpose()
-        .inspect_err(|error| log_fmt(format_args!("{} line refused: {error:?}", id.as_str())))
-        .ok()?
-        .map(IrqLine::from);
+    let line = if arbiter.is_some() {
+        Some(
+            platform
+                .irq(id.clone(), 0)
+                .await
+                .inspect_err(|error| {
+                    log_fmt(format_args!("{} line refused: {error:?}", id.as_str()));
+                })
+                .ok()?
+                .into(),
+        )
+    } else {
+        None
+    };
 
     let mut devices = Vec::new();
     for found in node.peripherals(&description, &id) {
@@ -160,8 +217,8 @@ fn take(platform: &platform::Client<SessionTransport>) -> Option<(Bus, Option<Ir
     Some((
         Bus {
             arbiter,
-            devices,
-            departed_interrupts: Vec::new(),
+            devices: RefCell::new(devices),
+            departed_interrupts: RefCell::new(Vec::new()),
         },
         line,
     ))

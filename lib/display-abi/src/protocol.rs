@@ -28,6 +28,6 @@ ipc::protocol! {
         /// Возвращает `NoSurface`, если у сессии нет поверхности, и `OutOfBounds` для `area`,
         /// которую отвергает [`DisplayDimension::check_area`]. При этих отказах экран не
         /// меняется. `Hardware` - устройство экрана вернуло ошибку либо не ответило в срок.
-        call fn present(area: Area) -> Result<(), DisplayError>;
+        call async fn present(area: Area) -> Result<(), DisplayError>;
     }
 }

@@ -1,16 +1,21 @@
 //! Подключает NT36672A как источник `InputSource` и передаёт касания по прерываниям чипа.
 
-use alloc::sync::Arc;
-use core::{convert::Infallible, fmt, time::Duration};
+use alloc::rc::{Rc, Weak};
+use core::{
+    cell::{Cell, RefCell},
+    convert::Infallible,
+    fmt,
+};
 
 use component_startup::{
-    AnyOf, Import, Providers, SessionEvent, SessionPort, StartupError,
-    component_startup as startup_contract, serve_export, whole_export,
+    AnyOf, AsyncStartup, Import, Providers, SessionPort, StartupError, serve_component,
+    whole_export,
 };
 use driver_novatek_nvt_ts::{
     Contacts, Device, DeviceError, PARAMETERS_ADDRESS, PARAMETERS_LENGTH, Parameters,
     ParametersError, REPORT_ADDRESS,
 };
+use executor::{Executor, Mutex, PortChannel, Reactor};
 use i2c_abi::{I2cError, TransferError, i2c, i2c_device};
 use input_abi::{
     AttachError, DeclareError, DeviceNumber, RecordsError, UpdateError, input_inject, input_source,
@@ -22,40 +27,41 @@ use platform_abi::{
     CONTROLLER_KEY, Description, DescriptionError, DeviceId, MappedDescription, PlatformError,
     platform,
 };
-use runtime::{
-    FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, sleep, spawn_bound,
-    spawn_owned,
-};
-use syscall::SIGNALED;
+use runtime::{FAILED_EXIT_CODE, Instant, Timeout, exit, log_fmt};
+use syscall::{Handle, SIGNALED, WaitItem, kind};
+
+type Channel = PortChannel<SessionTransport>;
 
 const COMPATIBLE: &str = "novatek,nt36672a-ts";
 const RESET_LINE: &str = "reset";
 const INTERRUPT_RECORD: u8 = 0;
-const RESET_DELAY: Duration = Duration::from_millis(100);
+const RESET_DELAY: Timeout = Timeout::from_millis(100);
 
 #[derive(Debug)]
 pub(crate) enum Stopped {
     Startup(StartupError),
     ExportPort,
-    ExportThread,
+    Executor,
     ExportPortClosed,
 }
 
 struct Source {
     i2c: Providers<i2c::Protocol>,
     pins: Providers<pins::Protocol>,
-    platform: platform::Client<SessionTransport>,
-    node: Option<DeviceId>,
-    attached: bool,
-    refused: bool,
+    platform: platform::Client<Channel>,
+    node: RefCell<Option<DeviceId>>,
+    attached: Mutex<bool>,
+    refused: Cell<bool>,
+    executor: Weak<Executor>,
+    reactor: Reactor,
 }
 
 struct Touchscreen {
-    _pins_provider: pins::Client<SessionTransport>,
-    _bus: i2c::Client<SessionTransport>,
-    pins: device_pins::Client<SessionTransport>,
-    chip: i2c_device::Client<SessionTransport>,
-    inject: input_inject::Client<SessionTransport>,
+    _pins_provider: pins::Client<Channel>,
+    _bus: i2c::Client<Channel>,
+    pins: device_pins::Client<Channel>,
+    chip: i2c_device::Client<Channel>,
+    inject: input_inject::Client<Channel>,
     device: DeviceNumber,
     interrupt: u8,
     signal: Signal,
@@ -84,7 +90,7 @@ enum Failure {
     Records(RecordsError),
     Update(CallError<UpdateError>),
     Wait(kernel_objects::Error),
-    Thread,
+    Executor,
 }
 
 impl fmt::Display for Stopped {
@@ -92,15 +98,20 @@ impl fmt::Display for Stopped {
         match self {
             Self::Startup(error) => error.fmt(formatter),
             Self::ExportPort => formatter.write_str("export port refused"),
-            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::Executor => formatter.write_str("executor refused"),
             Self::ExportPortClosed => formatter.write_str("export port closed"),
         }
     }
 }
 
 impl Source {
-    fn bind(&mut self, inject: input_inject::Client<SessionTransport>) -> Result<(), Failure> {
-        let description = self.platform.description().map_err(Failure::Platform)?;
+    async fn bind(&self, inject: input_inject::Client<Channel>) -> Result<(), Failure> {
+        let description = self
+            .platform
+            .description()
+            .await
+            .map_err(Failure::Platform)?;
+
         let mapped = MappedDescription::new(description)
             .map_err(|refused| Failure::Mapping(refused.error))?;
         let description = mapped.description().map_err(Failure::Description)?;
@@ -110,38 +121,52 @@ impl Source {
             .next()
             .map(|device| device.id().clone())
             .ok_or(Failure::NoNode)?;
-        let node = self.node.insert(node);
+        *self.node.borrow_mut() = Some(node.clone());
 
-        let touchscreen = Touchscreen::bind(&description, node, &self.i2c, &self.pins, inject)?;
-        spawn_owned(move || touchscreen.watch())
-            .map(drop)
-            .map_err(|_| Failure::Thread)
+        let touchscreen = Touchscreen::bind(
+            &description,
+            &node,
+            &self.i2c,
+            &self.pins,
+            inject,
+            &self.reactor,
+        )
+        .await?;
+        self.executor
+            .upgrade()
+            .ok_or(Failure::Executor)?
+            .spawn(touchscreen.watch(self.reactor.clone()));
+
+        Ok(())
     }
 }
 
 impl input_source::Service<Delivery> for Source {
-    fn attach(
-        &mut self,
+    async fn attach(
+        &self,
         _frame: &Delivery,
         inject: ReceivedSession<input_inject::Protocol>,
     ) -> Result<(), AttachError> {
-        if self.attached {
+        let mut attached = self.attached.lock().await;
+        if *attached {
             return Err(AttachError::Busy);
         }
 
-        let inject = Session::from_session(inject).client();
+        let inject = PortChannel::client(Session::from_session(inject), self.reactor.clone());
 
-        let bound = self.bind(inject);
-        let node = self.node.as_ref().map_or(COMPATIBLE, DeviceId::as_str);
+        let bound = self.bind(inject).await;
+        let node = self.node.borrow();
+        let node = node.as_ref().map_or(COMPATIBLE, DeviceId::as_str);
         match bound {
             Ok(()) => {
                 log_fmt(format_args!("{node} bound"));
-                self.attached = true;
+                *attached = true;
                 Ok(())
             }
+
             Err(failure) => {
                 log_fmt(format_args!("{node} not bound: {failure:?}"));
-                self.refused = true;
+                self.refused.set(true);
                 Err(AttachError::Refused)
             }
         }
@@ -149,45 +174,60 @@ impl input_source::Service<Delivery> for Source {
 }
 
 impl Touchscreen {
-    fn bind(
+    async fn bind(
         description: &Description<'_>,
         node: &DeviceId,
         i2c: &Providers<i2c::Protocol>,
         pins: &Providers<pins::Protocol>,
-        inject: input_inject::Client<SessionTransport>,
+        inject: input_inject::Client<Channel>,
+        reactor: &Reactor,
     ) -> Result<Self, Failure> {
         let states = controllers(description, node.as_str()).ok_or(Failure::State)?;
         let [controller] = states.as_slice() else {
             return Err(Failure::Controllers(states.len()));
         };
-        let pins_provider = provider(pins, controller)?.client();
-        let device_pins =
-            Session::<device_pins::Protocol>::from_session(pins_provider.open(node.clone())?)
-                .client();
-        device_pins.output(node.clone(), RESET_LINE, 0, false)?;
-        sleep(RESET_DELAY);
+
+        let pins_provider =
+            PortChannel::client(provider(pins, controller, reactor).await?, reactor.clone());
+        let device_pins = PortChannel::client(
+            Session::<device_pins::Protocol>::from_session(pins_provider.open(node.clone()).await?),
+            reactor.clone(),
+        );
+        device_pins
+            .output(node.clone(), RESET_LINE, 0, false)
+            .await?;
+
+        reactor.sleep(RESET_DELAY).await;
 
         let parent = description
             .ancestors(node)
             .next()
             .ok_or(Failure::NoParent)?;
-        let bus = provider(i2c, &parent.node)?.client();
-        let chip = Session::<i2c_device::Protocol>::from_session(
-            bus.open(node.clone()).map_err(Failure::I2c)?,
-        )
-        .client();
+        let bus = PortChannel::client(provider(i2c, &parent.node, reactor).await?, reactor.clone());
+
+        let chip = PortChannel::client(
+            Session::<i2c_device::Protocol>::from_session(
+                bus.open(node.clone()).await.map_err(Failure::I2c)?,
+            ),
+            reactor.clone(),
+        );
+
         let parameters = chip
             .write_read(&[PARAMETERS_ADDRESS], PARAMETERS_LENGTH)
+            .await
             .map_err(Failure::Parameters)?;
         let parameters = Parameters::parse(&parameters.0).map_err(Failure::Chip)?;
 
         let described = description.node(node).ok_or(Failure::NoNode)?;
         let device = Device::new(&described, parameters).map_err(Failure::Device)?;
-        let interrupt = device_pins.interrupt(node.clone(), INTERRUPT_RECORD)?;
-        let signal = Signal::from(device_pins.irq(interrupt)?);
+        let interrupt = device_pins
+            .interrupt(node.clone(), INTERRUPT_RECORD)
+            .await?;
+
+        let signal = Signal::from(device_pins.irq(interrupt).await?);
 
         let descriptor = device.descriptor().ok_or(Failure::Descriptor)?;
-        let number = inject.declare(descriptor).map_err(Failure::Declare)?;
+        let number = inject.declare(descriptor).await.map_err(Failure::Declare)?;
 
         Ok(Self {
             _pins_provider: pins_provider,
@@ -202,24 +242,26 @@ impl Touchscreen {
         })
     }
 
-    fn watch(mut self) -> u32 {
-        match self.serve() {
+    async fn watch(mut self, reactor: Reactor) {
+        match self.serve(&reactor).await {
             Ok(never) => match never {},
             Err(failure) => stop(&failure),
         }
     }
 
-    fn serve(&mut self) -> Result<Infallible, Failure> {
+    async fn serve(&mut self, reactor: &Reactor) -> Result<Infallible, Failure> {
         let mut read_refused = false;
         loop {
-            self.signal
-                .wait(SIGNALED, Timeout::INFINITE)
+            reactor
+                .wait(WaitItem::new(self.signal.as_raw(), SIGNALED))
+                .await
                 .map_err(Failure::Wait)?;
             let time = Instant::now().as_nanos();
 
             match self
                 .chip
                 .write_read(&[REPORT_ADDRESS], self.contacts.report_length())
+                .await
             {
                 Ok(report) => {
                     let command = self
@@ -229,9 +271,11 @@ impl Touchscreen {
                     if !command.as_bytes().is_empty() {
                         self.inject
                             .update(self.device, Some(time), command.as_bytes())
+                            .await
                             .map_err(Failure::Update)?;
                     }
                 }
+
                 Err(error) => {
                     if !read_refused {
                         log_fmt(format_args!("{COMPATIBLE} report not read: {error:?}"));
@@ -240,7 +284,7 @@ impl Touchscreen {
                 }
             }
 
-            self.pins.ack(self.interrupt)?;
+            self.pins.ack(self.interrupt).await?;
         }
     }
 }
@@ -255,52 +299,65 @@ pub(crate) fn run(
     i2c: Providers<i2c::Protocol>,
     pins: Providers<pins::Protocol>,
     platform: &Import<platform::Protocol>,
-    parent: startup_contract::Client<PortTransport>,
+    parent: Handle<kind::Port>,
 ) -> Result<(), Stopped> {
-    let platform = platform.open().map_err(Stopped::Startup)?.client();
+    let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
+    let reactor = executor.reactor();
 
-    let export = Arc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
-    let port = Arc::clone(&export);
-    spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(&port)))
-        .map_err(|_| Stopped::ExportThread)?;
+    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?, reactor.clone());
 
-    let mut source = Source {
+    let export = Rc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
+    let source = Rc::new(Source {
         i2c,
         pins,
         platform,
-        node: None,
-        attached: false,
-        refused: false,
-    };
-    let mut events = export.events();
+        node: RefCell::new(None),
+        attached: Mutex::new(false),
+        refused: Cell::new(false),
+        executor: Rc::downgrade(&executor),
+        reactor: reactor.clone(),
+    });
 
-    while let Some(event) = events.recv() {
-        if let SessionEvent::Frame(frame) = event {
-            let _ = input_source::dispatch(&mut source, frame);
-            if source.refused {
-                exit(FAILED_EXIT_CODE)
-            }
-        }
-    }
+    let opened = export.clone();
 
+    let served = serve_component::<input_source::Protocol, _>(
+        &executor,
+        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        export,
+        move |frame| {
+            let call = input_source::serve(&source, frame)?;
+            let source = source.clone();
+            Ok(call.map(|call| async move {
+                let outcome = call.await;
+                if source.refused.get() {
+                    exit(FAILED_EXIT_CODE);
+                }
+                outcome
+            }))
+        },
+        whole_export(opened),
+        |_| {},
+    );
+
+    let _ = executor.block_on(served);
     Err(Stopped::ExportPortClosed)
 }
 
-fn provider<P: Protocol>(
+async fn provider<P: Protocol>(
     providers: &Providers<P>,
     controller: &platform_abi::Node<'_>,
+    reactor: &Reactor,
 ) -> Result<Session<P>, Failure> {
     let compatible = controller
         .strings("compatible")
         .map_err(Failure::Description)?
         .ok_or(Failure::NoController)?;
-    let found = providers
-        .all(AnyOf::new(CONTROLLER_KEY, compatible))
+
+    providers
+        .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+        .await
         .map_err(Failure::Startup)?
-        .next()
-        .ok_or(Failure::NoProvider)?
-        .map_err(Failure::Startup)?;
-    providers.open(&found).map_err(Failure::Startup)
+        .ok_or(Failure::NoProvider)
 }
 
 fn stop(failure: &Failure) -> ! {

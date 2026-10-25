@@ -3,9 +3,10 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::rc::Rc;
 
 use component_startup::{Requirements as _, SessionPort, component_manifest};
+use executor::{Executor, PortChannel};
 use filesystem_abi::{AccessMode, FileSystemError, OpenFlags, file_system, namespace};
 use ipc::CallError;
 use kernel_objects::{Resource, SessionTransport};
@@ -33,46 +34,61 @@ component_manifest! {
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
-    let files = BudgetHolderStartup::from_parent(parent)
-        .files
-        .open()
-        .map_err(|_| Failed)?;
-    let root = "/tmp";
-    let session = files
-        .client()
-        .with_wait(CALL_TIMEOUT)
-        .resolve(root)
-        .map_err(|_| Failed)?;
-    let files = kernel_objects::Session::from_session(session).client();
-    let started_path = STARTED_PATH;
-    let held_path = HELD_PATH;
+    let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
+    let reactor = executor.reactor();
 
-    match files.open(started_path, AccessMode::Read, OpenFlags::NONE) {
-        Ok(_) => {
-            let export = SessionPort::create().map_err(|_| Failed)?;
-            log_line("started");
-            serve_probe(parent, Box::leak(Box::new(export)))
+    executor.block_on(async {
+        let files = BudgetHolderStartup::from_parent(parent)
+            .files
+            .open_async(&reactor)
+            .await
+            .map_err(|_| Failed)?;
+        let root = "/tmp";
+        let namespace = PortChannel::client(files, reactor.clone()).with_wait(CALL_TIMEOUT);
+        let session = namespace.resolve(root).await.map_err(|_| Failed)?;
+        let files = PortChannel::client(
+            kernel_objects::Session::from_session(session),
+            reactor.clone(),
+        );
+        let started_path = STARTED_PATH;
+        let held_path = HELD_PATH;
+
+        match files
+            .open(started_path, AccessMode::Read, OpenFlags::NONE)
+            .await
+        {
+            Ok(_) => {
+                let export = SessionPort::create().map_err(|_| Failed)?;
+                log_line("started");
+                serve_probe(&executor, parent, export).await
+            }
+            Err(CallError::Remote(FileSystemError::NotFound)) => {
+                hold_budget(&files, started_path, held_path).await?;
+                log_line("budget held");
+                Err(Failed)
+            }
+            _ => Err(Failed),
         }
-        Err(CallError::Remote(FileSystemError::NotFound)) => {
-            hold_budget(&files, started_path, held_path)?;
-            log_line("budget held");
-            Err(Failed)
-        }
-        _ => Err(Failed),
-    }
+    })
 }
 
-fn hold_budget(
-    files: &file_system::Client<SessionTransport>,
+async fn hold_budget(
+    files: &file_system::Client<PortChannel<SessionTransport>>,
     started: &str,
     held: &str,
 ) -> Result<(), Failed> {
     files
         .open(started, AccessMode::ReadWrite, OpenFlags::CREATE)
+        .await
         .map_err(|_| Failed)?;
     let region = Resource::self_resource()
         .and_then(|resource| resource.create_virtual(USERLAND_PAGE_SIZE, MemoryAccess::RW))
         .map_err(|_| Failed)?;
-    files.create_backed(held, region, 0).map_err(|_| Failed)?;
+
+    files
+        .create_backed(held, region, 0)
+        .await
+        .map_err(|_| Failed)?;
+
     Ok(())
 }

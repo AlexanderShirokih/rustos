@@ -1,21 +1,26 @@
 //! Экспорт `FileSystem` и приём кадров файловых сессий всех томов процесса.
 
-use alloc::boxed::Box;
+use alloc::{
+    boxed::Box,
+    rc::{Rc, Weak},
+};
 use core::convert::Infallible;
 
 use component_abi::Attributes;
-use component_startup::{SessionError, SessionEvent, SessionPort};
+use component_startup::{AsyncStartup, SessionError, SessionPort, serve_component};
+use executor::{Executor, PortChannel};
 use filesystem::FileSystemBackend;
-use filesystem_abi::file_system;
+use filesystem_abi::{FileSystemError, file_system};
 use ipc::wire::IpcError;
 use kernel_objects::{MemoryRegion, Port, ReadOnlyMapping, Resource};
-use runtime::{Mutex, PortTransport, log_line, spawn_bound};
+use runtime::{Mutex, log_fmt};
 use spin::Once;
 use syscall::{Handle, kind};
 
 use crate::{
+    control::Control,
     error::{Error, Result, no_space},
-    service::{FileSystemState, Frame, Serving},
+    service::FileSystemState,
     session,
     volume::{Volume, Volumes},
 };
@@ -24,7 +29,19 @@ static IMAGE: Once<ReadOnlyMapping> = Once::new();
 
 pub(crate) struct Shared {
     pub(crate) volumes: Mutex<Volumes>,
-    pub(crate) service: SessionPort,
+    pub(crate) service: Rc<SessionPort>,
+    pub(crate) executor: Weak<Executor>,
+}
+
+impl Shared {
+    pub(crate) fn with_state<T>(
+        &self,
+        volume: usize,
+        operation: impl FnOnce(&mut FileSystemState) -> core::result::Result<T, FileSystemError>,
+    ) -> core::result::Result<T, FileSystemError> {
+        let mut volumes = self.volumes.lock();
+        operation(volumes.state(volume).ok_or(FileSystemError::NoSession)?)
+    }
 }
 
 /// Строит бекенд из `backing` либо из `None` и обслуживает экспорт и файловые сессии одного
@@ -85,52 +102,38 @@ where
 fn run(
     start: Handle<kind::Port>,
     volumes: Volumes,
-    mut open: impl FnMut(&'static Shared, Attributes<'_>) -> core::result::Result<Port, SessionError>
-    + Send
-    + 'static,
+    mut open: impl FnMut(&Shared, Attributes<'_>) -> core::result::Result<Port, SessionError> + 'static,
 ) -> Result<Infallible> {
-    let shared: &'static Shared = Box::leak(Box::new(Shared {
+    let executor = Rc::new(Executor::new()?);
+    let shared = Rc::new(Shared {
         volumes: Mutex::new(volumes),
-        service: SessionPort::create()?,
-    }));
-    let _ = spawn_bound(move || {
-        let parent = component_abi::component_startup::Client::new(PortTransport::new(start));
-        component_startup::serve_export::<file_system::Protocol>(parent, |attributes| {
-            open(shared, attributes)
-        })
-    })?;
-    serve_sessions(shared);
+        service: Rc::new(SessionPort::create()?),
+        executor: Rc::downgrade(&executor),
+    });
+    let calls = shared.clone();
+    let export = shared.clone();
+    let gone = shared.clone();
+    let served = serve_component::<file_system::Protocol, _>(
+        &executor,
+        AsyncStartup::new(PortChannel::new(start, executor.reactor())),
+        shared.service.clone(),
+        move |incoming| {
+            let volume = calls.volumes.lock().of(incoming.resources.badge);
+            let control = Control {
+                shared: calls.clone(),
+                volume,
+            };
+            file_system::serve(&control, incoming)
+        },
+        async move |attributes| open(&export, attributes),
+        move |badge| {
+            let exchange = gone.volumes.lock().remove_session(badge);
+            drop(exchange);
+        },
+    );
+    log_fmt(format_args!(
+        "filesystem stopped: {}",
+        executor.block_on(served)
+    ));
     Err(Error::Ipc(IpcError::PeerClosed))
-}
-
-fn serve_sessions(shared: &Shared) {
-    let mut events = shared.service.events();
-
-    while let Some(event) = events.recv() {
-        let incoming = match event {
-            SessionEvent::Frame(incoming) => incoming,
-            // Сессия ушедшей стороны убирается, а приём продолжается.
-            SessionEvent::Gone(badge) => {
-                shared.volumes.lock().remove_session(badge);
-                continue;
-            }
-        };
-        // Том выбирает значок сессии до разбора кадра. Кадр без известной сессии получает
-        // отказ `NoSession` от первого тома. Таблица при кадре не пуста, потому что значок
-        // выдаётся только сессии тома, а тома не удаляются.
-        let mut volumes = shared.volumes.lock();
-        let volume = volumes.of(incoming.resources.badge);
-        let Some(state) = volumes.state(volume) else {
-            continue;
-        };
-        let mut frame = Frame::default();
-        let mut serving = Serving {
-            state: &mut *state,
-            frame: &mut frame,
-            service: &shared.service,
-        };
-        let delivered = file_system::dispatch(&mut serving, incoming).is_ok();
-        frame.end(delivered, state);
-    }
-    log_line("service port closed");
 }

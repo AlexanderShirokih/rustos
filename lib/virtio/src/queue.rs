@@ -96,7 +96,7 @@ impl SplitQueue {
     /// устройству адреса её областей.
     ///
     /// Размер - меньшее из `requested` и предела устройства.
-    pub fn new<R: Registers, M: DeviceMemory>(
+    pub async fn new<R: Registers, M: DeviceMemory>(
         transport: &mut Transport<R>,
         memory: &mut M,
         index: u16,
@@ -104,11 +104,20 @@ impl SplitQueue {
     ) -> Result<Self, QueueError<R::Error>> {
         transport
             .select_queue(index)
+            .await
             .map_err(QueueError::Register)?;
-        if transport.queue_ready().map_err(QueueError::Register)? {
+        if transport
+            .queue_ready()
+            .await
+            .map_err(QueueError::Register)?
+        {
             return Err(QueueError::AlreadyActive);
         }
-        let limit = transport.queue_size_max().map_err(QueueError::Register)?;
+
+        let limit = transport
+            .queue_size_max()
+            .await
+            .map_err(QueueError::Register)?;
         let size = limit.min(u32::from(requested));
         let valid = size.is_power_of_two() && size <= u32::from(QUEUE_SIZE_MAX);
         let size = u16::try_from(size)
@@ -127,6 +136,7 @@ impl SplitQueue {
         let [descriptors, driver, device] = AREA_OFFSETS.map(|offset| base + offset as u64);
         transport
             .configure_queue(size, descriptors, driver, device)
+            .await
             .map_err(QueueError::Register)?;
 
         Ok(Self {
@@ -152,7 +162,7 @@ impl SplitQueue {
     /// Отказы, при которых очередь не меняется:
     /// - `EmptyChain` - в цепочке нет буферов;
     /// - `Full` - свободных дескрипторов меньше числа буферов.
-    pub fn submit<R: Registers, M: DeviceMemory>(
+    pub async fn submit<R: Registers, M: DeviceMemory>(
         &mut self,
         transport: &mut Transport<R>,
         memory: &mut M,
@@ -187,7 +197,8 @@ impl SplitQueue {
             )?;
             descriptor = next;
         }
-        self.publish(transport, memory, chain)
+
+        self.publish(transport, memory, chain).await
     }
 
     /// Забирает очередную завершённую цепочку и освобождает её дескрипторы.
@@ -222,7 +233,7 @@ impl SplitQueue {
         }))
     }
 
-    fn publish<R: Registers, M: DeviceMemory>(
+    async fn publish<R: Registers, M: DeviceMemory>(
         &mut self,
         transport: &mut Transport<R>,
         memory: &mut M,
@@ -242,7 +253,10 @@ impl SplitQueue {
         transport.barrier();
         self.descriptors.commit(chain);
         self.available_index = available_index;
-        transport.notify(self.index).map_err(QueueError::Register)?;
+        transport
+            .notify(self.index)
+            .await
+            .map_err(QueueError::Register)?;
         Ok(Token(head))
     }
 }
@@ -274,7 +288,9 @@ fn write_descriptor<M: DeviceMemory, E>(
 mod tests {
     use super::*;
     use crate::{
-        testing::{Event, FakeMemory, FakeRegisters, Log, REGION_ADDRESS, RegisterFailure},
+        testing::{
+            Event, FakeMemory, FakeRegisters, Log, REGION_ADDRESS, RegisterFailure, complete,
+        },
         transport::{DeviceType, register},
     };
 
@@ -302,7 +318,7 @@ mod tests {
         let mut registers = FakeRegisters::gpu(&log);
         registers.set(register::QUEUE_SIZE_MAX, queue_limit);
         registers.set(register::QUEUE_READY, queue_ready);
-        let transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
         let memory = FakeMemory::new(QUEUE_REGION_BYTES, &log).at(address);
         Fixture {
             log,
@@ -336,7 +352,7 @@ mod tests {
             mut memory,
         } = fixture(64);
 
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 256).unwrap();
+        let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 0, 256)).unwrap();
         let used = queue.take_used(&mut transport, &mut memory);
 
         let low = |address: u64| u32::try_from(address & u64::from(u32::MAX)).unwrap();
@@ -380,7 +396,7 @@ mod tests {
                 mut memory,
             } = fixture_with(limit, ready, address);
 
-            let result = SplitQueue::new(&mut transport, &mut memory, 0, 256);
+            let result = complete(SplitQueue::new(&mut transport, &mut memory, 0, 256));
 
             assert_eq!(result.err(), Some(expected));
             assert_eq!(log.writes(), [Event::Write(register::QUEUE_SELECT, 0)]);
@@ -396,10 +412,10 @@ mod tests {
     fn queue_setup_stops_at_register_failure() {
         let log = Log::default();
         let registers = FakeRegisters::gpu(&log).refusing_write(register::QUEUE_DRIVER_LOW);
-        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
         let mut memory = FakeMemory::new(QUEUE_REGION_BYTES, &log);
 
-        let result = SplitQueue::new(&mut transport, &mut memory, 0, 2);
+        let result = complete(SplitQueue::new(&mut transport, &mut memory, 0, 2));
 
         assert_eq!(
             result.err(),
@@ -418,12 +434,12 @@ mod tests {
     fn failed_notification_keeps_published_descriptors_until_completion() {
         let log = Log::default();
         let registers = FakeRegisters::gpu(&log).refusing_write(register::QUEUE_NOTIFY);
-        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
         let mut memory = FakeMemory::new(QUEUE_REGION_BYTES, &log);
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
+        let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 0, 2)).unwrap();
 
-        let failed = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
-        let occupied = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
+        let failed = complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]));
+        let occupied = complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]));
         publish_first_used(&mut memory, 0, RESPONSE.length);
         let completion = queue.take_used(&mut transport, &mut memory).unwrap();
 
@@ -451,12 +467,10 @@ mod tests {
             mut transport,
             mut memory,
         } = fixture(2);
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 3, 2).unwrap();
+        let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 3, 2)).unwrap();
         log.clear();
 
-        queue
-            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
-            .unwrap();
+        complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])).unwrap();
 
         let events = log.events();
         let tail = &events[events.len() - 5..];
@@ -487,15 +501,15 @@ mod tests {
             mut memory,
             ..
         } = fixture(4);
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 4).unwrap();
+        let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 0, 4)).unwrap();
         let status = Buffer {
             address: 0x3000,
             length: 1,
         };
 
-        let token = queue
-            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE, status])
-            .unwrap();
+        let token =
+            complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE, status]))
+                .unwrap();
         let chained: Vec<_> = (0..3)
             .map(|descriptor| {
                 memory
@@ -505,9 +519,10 @@ mod tests {
             .collect();
         publish_first_used(&mut memory, u32::from(token.0), 1);
         queue.take_used(&mut transport, &mut memory).unwrap();
-        let refilled = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE, status]);
-        let last = queue.submit(&mut transport, &mut memory, &[status], &[]);
-        let overflow = queue.submit(&mut transport, &mut memory, &[status], &[]);
+        let refilled =
+            complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE, status]));
+        let last = complete(queue.submit(&mut transport, &mut memory, &[status], &[]));
+        let overflow = complete(queue.submit(&mut transport, &mut memory, &[status], &[]));
 
         assert_eq!(chained, [[1, 0, 1, 0], [3, 0, 2, 0], [2, 0, 0, 0]]);
         assert!(refilled.is_ok());
@@ -522,10 +537,10 @@ mod tests {
             mut transport,
             mut memory,
         } = fixture(2);
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
+        let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 0, 2)).unwrap();
         log.clear();
 
-        let result = queue.submit(&mut transport, &mut memory, &[], &[]);
+        let result = complete(queue.submit(&mut transport, &mut memory, &[], &[]));
 
         assert_eq!(result, Err(QueueError::EmptyChain));
         assert!(log.events().is_empty());
@@ -540,15 +555,16 @@ mod tests {
                 mut transport,
                 mut memory,
             } = fixture(size);
-            let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
+            let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 0, 2)).unwrap();
             for _ in 0..submitted {
-                queue
-                    .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
+                complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]))
                     .unwrap();
             }
+
             log.clear();
 
-            let result = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
+            let result =
+                complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]));
 
             assert_eq!(result, Err(QueueError::Full));
             assert!(log.events().is_empty());
@@ -563,17 +579,17 @@ mod tests {
             mut transport,
             mut memory,
         } = fixture(2);
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 2).unwrap();
-        let token = queue
-            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
-            .unwrap();
+        let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 0, 2)).unwrap();
+        let token =
+            complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])).unwrap();
         publish_first_used(&mut memory, u32::from(token.0), 408);
         log.clear();
 
         let completion = queue.take_used(&mut transport, &mut memory).unwrap();
         let read_order = log.events();
         let again = queue.take_used(&mut transport, &mut memory).unwrap();
-        let resubmitted = queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]);
+        let resubmitted =
+            complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE]));
 
         assert_eq!(
             completion,
@@ -601,10 +617,8 @@ mod tests {
             mut memory,
             ..
         } = fixture(4);
-        let mut queue = SplitQueue::new(&mut transport, &mut memory, 0, 4).unwrap();
-        queue
-            .submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])
-            .unwrap();
+        let mut queue = complete(SplitQueue::new(&mut transport, &mut memory, 0, 4)).unwrap();
+        complete(queue.submit(&mut transport, &mut memory, &[REQUEST], &[RESPONSE])).unwrap();
         publish_first_used(&mut memory, 1, 0);
 
         let result = queue.take_used(&mut transport, &mut memory);

@@ -1,15 +1,10 @@
-//! Обход каталога. Записи приходят порциями в буфер данных сессии.
+//! Обход каталога. Записи приходят пачками в окно перечисления.
 
 use alloc::vec::Vec;
 
-use filesystem_abi::{DirCursor, DirEntry, FileSystemError, NodeDescriptor};
+use filesystem_abi::{DirCursor, DirEntry, FileSystemError, IO_TRANSFER_MAX, NodeDescriptor};
 
-use crate::{
-    environment::{Environment, SharedRegion},
-    error::Result,
-    node::OpenNode,
-    session::Session,
-};
+use crate::{environment::Environment, error::Result, node::OpenNode, session::Session};
 
 /// Обход каталога записями в порядке перечисления. Каталог и его сессия принадлежат обходу.
 pub struct Listing<E: Environment> {
@@ -20,6 +15,7 @@ pub struct Listing<E: Environment> {
 pub(crate) struct Walk {
     chunk: Vec<u8>,
     offset: usize,
+    initialized: usize,
     remaining: u32,
     cursor: DirCursor,
     end: bool,
@@ -27,12 +23,12 @@ pub(crate) struct Walk {
 
 impl<E: Environment> Listing<E> {
     pub(crate) fn new(node: OpenNode<E>) -> Result<Self> {
-        let walk = Walk::new(node.session().capacity())?;
+        let walk = Walk::new(IO_TRANSFER_MAX as usize)?;
         Ok(Self { node, walk })
     }
 
-    /// Следующая запись каталога. `None` - обход закончен. Запись, которая длиннее буфера данных
-    /// сессии, останавливает обход ответом `BufferTooSmall`.
+    /// Следующая запись каталога. `None` означает конец обхода. Ответ без записей и без
+    /// продвижения позиции возвращает `BufferTooSmall`.
     pub fn next_entry(&mut self) -> Result<Option<DirEntry<'_>>> {
         let Self { node, walk } = self;
         walk.next_entry(node.session(), node.descriptor())
@@ -50,6 +46,7 @@ impl Walk {
         Ok(Self {
             chunk,
             offset: 0,
+            initialized: 0,
             remaining: 0,
             cursor: DirCursor::START,
             end: false,
@@ -67,10 +64,11 @@ impl Walk {
             }
             self.fill(session, descriptor)?;
         }
+
         let start = self.offset;
         let tail = self
             .chunk
-            .get(start..)
+            .get(start..self.initialized)
             .ok_or(FileSystemError::BufferTooSmall)?;
         let decoded = DirEntry::decode(tail)?;
 
@@ -84,11 +82,12 @@ impl Walk {
         session: &Session<E>,
         descriptor: NodeDescriptor,
     ) -> Result<()> {
-        let listed = session.client().list(descriptor, self.cursor)?;
+        let (listed, initialized) = session.list(descriptor, self.cursor, &mut self.chunk)?;
         if listed.count == 0 && !listed.end {
             return Err(FileSystemError::BufferTooSmall.into());
         }
-        session.region().read_at(0, &mut self.chunk)?;
+
+        self.initialized = initialized;
 
         self.cursor = listed.next;
         self.end = listed.end;

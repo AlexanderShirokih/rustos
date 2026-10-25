@@ -618,7 +618,8 @@ fn walk(fs: &RamFileSystem, node: NodeId, capacity: usize) -> Option<Vec<(String
     for _ in 0..LIST_BATCHES_MAX {
         let listed = fs
             .list(node, from, &mut out)
-            .unwrap_or_else(|error| panic!("list of a directory: {error:?}"));
+            .unwrap_or_else(|error| panic!("list of a directory: {error:?}"))
+            .listed;
         collect(&out, listed, &mut names);
         if listed.end {
             return Some(names);

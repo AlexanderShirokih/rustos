@@ -3,10 +3,12 @@
 
 extern crate alloc;
 
+use alloc::rc::Rc;
+
 use application_abi::application;
 use application_window::accept_window;
-use component_startup::{component_manifest, component_startup as startup_contract};
-use kernel_objects::PortTransport;
+use component_startup::{AsyncStartup, component_manifest};
+use executor::{Executor, PortChannel};
 use syscall::{Handle, kind};
 
 mod failed;
@@ -19,8 +21,11 @@ component_manifest! {
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
-    let shown = accept_window(startup_contract::Client::new(PortTransport::new(parent)))
-        .map_err(|_| Failed)?;
-    shown.session.serve();
-    Ok(())
+    let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
+    executor.block_on(async {
+        let parent = AsyncStartup::new(PortChannel::new(parent, executor.reactor()));
+        let shown = accept_window(&executor, parent).await.map_err(|_| Failed)?;
+        shown.session.serve().await;
+        Ok(())
+    })
 }

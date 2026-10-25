@@ -92,7 +92,7 @@ boot = true
 [lib/component-startup](../lib/component-startup/src/declare.rs);
 формат декларации — в
 [lib/component-abi/src/manifest.rs](../lib/component-abi/src/manifest.rs).
-Пример объявления — [driver-pl031](../user/system/driver-pl031/src/main.rs).
+Пример объявления — [driver-pl031](../user/system/driver-pl031/src/driver.rs).
 
 ### Старт компонента
 
@@ -191,9 +191,10 @@ component_manifest! {
 #[program_entry::component]
 fn run(requirements: ClockStartup) -> Result<(), StartupError> {
     let ClockStartup { rtc, .. } = requirements;
-    if let Ok(seconds) = rtc.open()?.client().now() {
+    if let Ok(seconds) = rtc.open()?.client().now().wait() {
         log_fmt(format_args!("rtc reads {seconds}"));
     }
+
     Ok(())
 }
 ```

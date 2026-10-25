@@ -1,20 +1,21 @@
 //! Тестовый родитель поверх `Children`: записи фикстур, ответы на их требования и оборот
 //! цикла родителя в своём потоке.
 
-use alloc::{sync::Arc, vec::Vec};
-use core::{num::NonZeroU64, ops::ControlFlow};
+use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
+use core::{future::Future, num::NonZeroU64, task::Poll};
 
 use component_abi::{
     AcceptError, AttributeSet, Attributes, Found, LOG_REQUIREMENT, QueryAttributes, SessionError,
-    SessionRequest, SessionRequirement, component_startup as startup_contract,
+    SessionRequirement, component_startup as startup_contract,
 };
-use ipc::{IntoWireValue, Listener as _, Protocol as _, RecvError, wire::MESSAGE_INLINE_MAX};
+use executor::Executor;
+use ipc::{IntoWireValue, Protocol as _};
 use kernel_objects::{Delivery, Error, IssuedHandle, Port, Resource, Session, kind};
 use log_abi::log;
-use managed_component::{Children, Departure, GrantError, Status};
+use managed_component::{Accept, Children, Departure, GrantError, Status};
 use rootkeeper::relay::LogSessions as _;
-use runtime::{Instant, Mutex, PortTransport, Timeout};
-use syscall::{Handle, ProcessName, Rights};
+use runtime::{Instant, Mutex, Timeout};
+use syscall::{ProcessName, Rights};
 use userland::DecodedProgram;
 
 use crate::{
@@ -144,7 +145,6 @@ impl Child {
 impl Parent {
     pub(crate) fn start() -> Self {
         let children = Children::new(image().pages()).expect("startup port created");
-        let port = children.port().as_raw();
         let state = Arc::new(Mutex::new(State {
             children,
             records: Vec::new(),
@@ -156,7 +156,7 @@ impl Parent {
         }));
         let turned = Arc::clone(&state);
         Self {
-            _turn: TurnThread::start(move || turn(&turned, port)),
+            _turn: TurnThread::start(move |executor| Box::pin(serve(executor, turned))),
             state,
             resource: Resource::self_resource().expect("self metering resource"),
         }
@@ -332,8 +332,8 @@ impl State {
     }
 }
 
-impl startup_contract::Service<Delivery> for State {
-    fn session(
+impl State {
+    fn request_session(
         &mut self,
         frame: &Delivery,
         requirement: SessionRequirement<'_>,
@@ -408,15 +408,16 @@ impl startup_contract::Service<Delivery> for State {
             }
         }
     }
+}
 
-    fn accept(
-        &mut self,
-        frame: &Delivery,
-        export: &str,
-        reply: startup_contract::accept::Reply<Debt>,
-    ) {
+struct Serving {
+    state: Arc<Mutex<State>>,
+}
+
+impl State {
+    fn begin_accept(&mut self, badge: u64, export: &str) -> Result<Accept<Key>, AcceptError> {
         self.accepts += 1;
-        let provider = match self.caller(frame.badge) {
+        let provider = match self.caller(badge) {
             Some(Key::Record(child))
                 if self
                     .records
@@ -425,19 +426,59 @@ impl startup_contract::Service<Delivery> for State {
             {
                 Key::Record(child)
             }
-            Some(Key::Record(_) | Key::Importer(_)) | None => {
-                let _ = reply.send(Err::<
-                    SessionRequest<startup_contract::session::Reply<Debt>>,
-                    _,
-                >(AcceptError::Refused));
-                return;
-            }
+            _ => return Err(AcceptError::Refused),
         };
-        self.children.accept(provider, frame.badge, export, reply);
+
+        self.children.accept(provider, badge, export)
+    }
+}
+
+#[allow(clippy::unused_async_trait_impl)]
+impl startup_contract::Service<Delivery> for Serving {
+    fn session(
+        &self,
+        frame: &Delivery,
+        requirement: SessionRequirement<'_>,
+        attributes: QueryAttributes<'_>,
+        reply: startup_contract::session::Reply<Debt>,
+    ) {
+        self.state
+            .lock()
+            .request_session(frame, requirement, attributes, reply);
+    }
+
+    async fn accept(
+        &self,
+        frame: &Delivery,
+        export: &str,
+        reply: startup_contract::accept::Reply<Debt>,
+    ) {
+        let begun = self.state.lock().begin_accept(frame.badge, export);
+        let accepted = match begun {
+            Ok(waiting) => waiting.await,
+            Err(error) => Err(error),
+        };
+        let (answer, receipt) = match accepted {
+            Ok((request, receipt)) => (Ok(request), Some(receipt)),
+            Err(error) => (Err(error), None),
+        };
+
+        if let Err(returned) = reply.send(answer)
+            && let Some(receipt) = receipt
+            && let Ok(Ok(request)) = returned.into_value()
+            && self
+                .state
+                .lock()
+                .children
+                .caller(receipt.importer())
+                .is_some()
+        {
+            receipt.restore(request);
+        }
     }
 
     fn all(
-        &mut self,
+        &self,
         _frame: &Delivery,
         _requirement: SessionRequirement<'_>,
         _attributes: QueryAttributes<'_>,
@@ -446,7 +487,7 @@ impl startup_contract::Service<Delivery> for State {
     }
 
     fn watch(
-        &mut self,
+        &self,
         _frame: &Delivery,
         _requirement: SessionRequirement<'_>,
         _attributes: QueryAttributes<'_>,
@@ -454,40 +495,67 @@ impl startup_contract::Service<Delivery> for State {
         Err::<Port, _>(SessionError::Refused)
     }
 
-    fn next(&mut self, _frame: &Delivery, reply: startup_contract::next::Reply<Debt>) {
+    async fn next(&self, _frame: &Delivery, reply: startup_contract::next::Reply<Debt>) {
         let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
     }
 
-    fn open(&mut self, _frame: &Delivery, reply: startup_contract::open::Reply<Debt>) {
+    fn open(&self, _frame: &Delivery, reply: startup_contract::open::Reply<Debt>) {
         let _ = reply.send(Err::<Port, _>(SessionError::Refused));
     }
 }
 
-fn turn(state: &Mutex<State>, port: Handle<kind::Port>) -> ControlFlow<()> {
-    let wait = {
-        let mut state = state.lock();
-        while let Some(departure) = state.children.launch_due(|_| true) {
-            state.depart(departure);
-        }
-        let next = state.children.next_launch(|_| true);
-        next.min(LAUNCH_CHECK_INTERVAL)
-    };
+fn serve(executor: &Rc<Executor>, state: Arc<Mutex<State>>) -> impl Future<Output = ()> + 'static {
+    let sessions = state.lock().children.sessions();
+    let serving = Rc::new(Serving {
+        state: state.clone(),
+    });
 
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    match PortTransport::new(port).recv(&mut bytes, wait) {
-        Ok(incoming) => {
-            let _ = startup_contract::dispatch(&mut *state.lock(), incoming);
-        }
-        Err(RecvError::SenderGone(badge)) => {
-            let mut state = state.lock();
+    let gone = state.clone();
+    let served = component_startup::serve_calls(
+        executor,
+        sessions,
+        move |frame| startup_contract::serve(&serving, frame),
+        move |badge| {
+            let mut state = gone.lock();
             let since = Instant::now();
             if let Some(departure) = state.children.depart(badge) {
                 state.last_depart = Instant::now().since(since);
                 state.depart(departure);
             }
-        }
-        Err(RecvError::Timeout | RecvError::Discarded) => {}
-        Err(RecvError::Closed) => return ControlFlow::Break(()),
+        },
+    );
+
+    let reactor = executor.reactor();
+
+    async move {
+        let maintenance = async {
+            loop {
+                let wait = {
+                    let mut state = state.lock();
+                    while let Some(departure) = state.children.launch_due(|_| true) {
+                        state.depart(departure);
+                    }
+                    state
+                        .children
+                        .next_launch(|_| true)
+                        .min(LAUNCH_CHECK_INTERVAL)
+                };
+
+                reactor.sleep(wait).await;
+            }
+        };
+
+        let mut maintenance = core::pin::pin!(maintenance);
+        let mut served = core::pin::pin!(served);
+
+        core::future::poll_fn(|cx| {
+            let _ = maintenance.as_mut().poll(cx);
+            if served.as_mut().poll(cx).is_ready() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
     }
-    ControlFlow::Continue(())
 }

@@ -50,17 +50,47 @@ impl<V, C: ReplyChannel> Reply<V, C> {
         W: IntoWireValue<C::Resources, Read = V>,
         V: for<'a> WireValue<'a, C::Resources, Owned = O>,
     {
+        let ordinal = self.record.ordinal;
+        let mut outcome = Ok(());
+        let _ = self.deliver(value, |result| {
+            outcome = result.map_err(|undelivered| {
+                undelivered.decode(|incoming| crate::__protocol_answer::<V, _>(ordinal, incoming))
+            });
+        });
+        outcome
+    }
+
+    /// Отправка для диспетчера. Недоставленный ответ закрывает свои capability.
+    #[doc(hidden)]
+    pub fn __send<W>(self, value: W) -> Result<(), IpcError>
+    where
+        W: IntoWireValue<C::Resources, Read = V>,
+    {
+        self.deliver(value, |_| {})
+    }
+
+    fn deliver<W>(
+        self,
+        value: W,
+        observe: impl FnOnce(Result<(), Undelivered<crate::Incoming<'_, C::Resources>>>),
+    ) -> Result<(), IpcError>
+    where
+        W: IntoWireValue<C::Resources, Read = V>,
+    {
         let Record { channel, ordinal } = self.record;
         let mut frame = MessageBuf::new();
-        crate::protocol::build_frame(&mut frame, Header::new(ordinal), |frame| {
+        let result = crate::protocol::build_frame(&mut frame, Header::new(ordinal), |frame| {
             value.write_into(frame, FIELD_ID_MIN)
         })
-        .map_err(Undelivered::unwritten)?;
-        channel.send(frame.outgoing()).map_err(|unsent| {
-            Undelivered::__new(unsent, |body, resources| {
-                crate::protocol::read_answer::<V, _>(body, resources)
-            })
-        })
+        .map_err(Undelivered::unwritten)
+        .and_then(|()| {
+            channel
+                .send(frame.outgoing())
+                .map_err(Undelivered::returned)
+        });
+        let error = result.as_ref().err().map(|undelivered| undelivered.error);
+        observe(result);
+        error.map_or(Ok(()), Err)
     }
 }
 

@@ -38,14 +38,14 @@ ipc::protocol! {
         /// приходит и отказ установления. Файловая система без ответа в срок
         /// [`FILE_SYSTEM_OPEN_ROOT_TIMEOUT`] - `Unresponsive`. Маршрутизатор, которому нечем
         /// удержать запрос, отвечает `NoSpace`.
-        call(defer) fn resolve(
+        call async fn resolve(
             path: &str,
         ) -> own Result<ipc::wire::Session<crate::file_system::Protocol>, FileSystemError>;
 
         /// Разбирает оба пути по одному снимку монтирований и отдаёт сессию их общего каталога, не
         /// выше корня монтирования. Пока хотя бы один путь не накрыт, запрос ждёт. Пути под
         /// разными монтированиями - `CrossMount`. Путь выше монтирования - `NotFound`.
-        call(defer) fn resolve_pair(
+        call async fn resolve_pair(
             from: &str,
             to: &str,
         ) -> own Result<ResolvedPair, FileSystemError>;
@@ -62,7 +62,7 @@ mod tests {
     };
 
     use ipc::wire::Session;
-    use ipc_test::{MockHandle, MockReply, MockResources};
+    use ipc_test::{MockHandle, MockResources, complete};
     use syscall::kind;
 
     use super::{FileSystemError, ResolvedPair, namespace};
@@ -78,9 +78,10 @@ mod tests {
         resolved: Arc<Mutex<Vec<String>>>,
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl namespace::Service<MockResources> for Router {
         fn open_root(
-            &mut self,
+            &self,
             _frame: &MockResources,
             _path: &str,
         ) -> impl ipc::IntoWireValue<
@@ -91,37 +92,39 @@ mod tests {
                 FileSystemError::NoSession,
             )
         }
-        fn resolve(
-            &mut self,
+
+        async fn resolve(
+            &self,
             _frame: &MockResources,
             path: &str,
-            reply: namespace::resolve::Reply<MockReply>,
-        ) {
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<Session<file_system::Protocol>, FileSystemError>,
+        > {
             self.resolved
                 .lock()
                 .expect("mutex not poisoned")
                 .push(path.to_string());
-            let session = if path.starts_with("/boot") {
+            if path.starts_with("/boot") {
                 Ok(SESSION)
             } else {
                 Err(FileSystemError::NotFound)
-            };
-            reply.send(session).expect("the caller waits");
+            }
         }
 
-        fn resolve_pair(
-            &mut self,
+        async fn resolve_pair(
+            &self,
             _frame: &MockResources,
             from: &str,
             to: &str,
-            reply: namespace::resolve_pair::Reply<MockReply>,
-        ) {
-            let mut resolved = self.resolved.lock().expect("mutex not poisoned");
-            resolved.push(from.to_string());
-            resolved.push(to.to_string());
-            drop(resolved);
-
-            reply.send(pair_of(from, to)).expect("the caller waits");
+        ) -> impl ipc::IntoWireValue<MockResources, Read = Result<ResolvedPair, FileSystemError>>
+        {
+            {
+                let mut resolved = self.resolved.lock().expect("mutex not poisoned");
+                resolved.push(from.to_string());
+                resolved.push(to.to_string());
+            }
+            pair_of(from, to)
         }
     }
 
@@ -154,14 +157,19 @@ mod tests {
     ) -> (R, Vec<String>) {
         let (client_end, server_end) = ipc_test::pair();
         let recorded = Arc::new(Mutex::new(Vec::new()));
-        let mut router = Router {
+        let router = Router {
             resolved: recorded.clone(),
         };
         thread::scope(|scope| {
             let server = scope.spawn(|| {
                 for _ in 0..calls_expected {
                     server_end
-                        .serve(|frame| namespace::dispatch(&mut router, frame))
+                        .serve(|frame| {
+                            complete(namespace::dispatch(
+                                &router,
+                                ipc::OwnedIncoming::new(frame).expect("frame fits"),
+                            ))
+                        })
                         .expect("dispatch ok");
                 }
             });
@@ -175,7 +183,8 @@ mod tests {
 
     #[test]
     fn resolve_carries_the_session_opened_on_the_path() {
-        let (mounted, resolved) = with_router(1, |client| client.resolve(path("/boot/sample")));
+        let (mounted, resolved) =
+            with_router(1, |client| client.resolve(path("/boot/sample")).wait());
 
         assert_eq!(mounted, Ok(SESSION));
         assert_eq!(resolved, ["/boot/sample".to_string()]);
@@ -183,7 +192,7 @@ mod tests {
 
     #[test]
     fn resolve_carries_a_refusal_of_the_file_system() {
-        let (mounted, _) = with_router(1, |client| client.resolve(path("/nowhere")));
+        let (mounted, _) = with_router(1, |client| client.resolve(path("/nowhere")).wait());
 
         assert_eq!(
             mounted,
@@ -194,7 +203,9 @@ mod tests {
     #[test]
     fn resolve_pair_carries_the_session_and_the_length_of_the_common_root() {
         let (pair, resolved) = with_router(1, |client| {
-            client.resolve_pair(path("/boot/first"), path("/boot/second"))
+            client
+                .resolve_pair(path("/boot/first"), path("/boot/second"))
+                .wait()
         });
 
         let decoded = pair.expect("one mount covers the pair");
@@ -209,7 +220,9 @@ mod tests {
     #[test]
     fn resolve_pair_reports_paths_under_different_mounts() {
         let (pair, _) = with_router(1, |client| {
-            client.resolve_pair(path("/boot/first"), path("/data/second"))
+            client
+                .resolve_pair(path("/boot/first"), path("/data/second"))
+                .wait()
         });
 
         assert_eq!(
@@ -221,7 +234,9 @@ mod tests {
     #[test]
     fn resolve_pair_carries_a_refusal_of_the_file_system() {
         let (pair, _) = with_router(1, |client| {
-            client.resolve_pair(path("/nowhere/first"), path("/boot/second"))
+            client
+                .resolve_pair(path("/nowhere/first"), path("/boot/second"))
+                .wait()
         });
 
         assert_eq!(pair, Err(ipc::CallError::Remote(FileSystemError::NotFound)));

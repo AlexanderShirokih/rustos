@@ -8,8 +8,8 @@ const PAIR_MAX_BYTES: usize = attributes_len(&[Attribute {
     value: &[0; ATTRIBUTE_VALUE_MAX_BYTES],
 }]);
 
-/// Запрос перечисления [`Providers::all`](crate::Providers::all) задаёт наборы атрибутов,
-/// которые перечисление проходит по очереди. Набор [`Attributes`] - запрос из одного набора.
+/// Запрос перечисления [`Providers::all`](crate::Providers::all) задаёт наборы
+/// атрибутов, которые перечисление проходит по очереди. [`Attributes`] задаёт один набор.
 pub trait Query {
     /// Набор шага `step`. Перечисление вызывает шаги подряд с 0, повторяет шаг после отказа
     /// `NoSpace` и заканчивается на первом `None`.

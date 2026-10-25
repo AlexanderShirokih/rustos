@@ -1,13 +1,17 @@
-use core::fmt;
+use alloc::rc::Rc;
+use core::{
+    cell::{Cell, RefCell},
+    fmt,
+    task::{Poll, Waker},
+};
 
 use application_abi::{ApplicationError, application};
-use component_startup::{
-    AcceptError, SessionEvent, SessionPort, component_startup as startup_contract,
-};
+use component_startup::{AcceptError, AsyncStartup, SessionPort, accept, serve_calls};
 use display_abi::display;
+use executor::{Executor, TaskHandle};
 use input_abi::input;
 use ipc::{CallError, Timeout};
-use kernel_objects::{Delivery, IssuedHandle, PortTransport, ReceivedSession, Session, kind};
+use kernel_objects::{Delivery, ReceivedSession, Session};
 
 /// Отказ получения окна приложения.
 #[derive(Debug)]
@@ -29,14 +33,16 @@ pub struct ApplicationWindow {
 
 /// Сессия `Application` после `show`.
 pub struct ApplicationSession {
-    service: SessionPort,
-    application: Application,
+    state: Rc<Application>,
+    _serving: TaskHandle,
 }
 
 struct Application {
-    shown: bool,
-    shown_window: Option<ShownWindow>,
-    closed: Option<application::closed::Reply<IssuedHandle<kind::Reply>>>,
+    shown: Cell<bool>,
+    shown_window: RefCell<Option<ShownWindow>>,
+    closed: Cell<bool>,
+    ended: Cell<bool>,
+    changed: RefCell<Option<Waker>>,
 }
 
 struct ShownWindow {
@@ -56,97 +62,118 @@ impl fmt::Display for WindowError {
 
 impl core::error::Error for WindowError {}
 
+impl Application {
+    fn wake(&self) {
+        let waker = self.changed.borrow_mut().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn end(&self) {
+        self.ended.set(true);
+        self.wake();
+    }
+}
+
+#[allow(clippy::unused_async_trait_impl)]
 impl application::Service<Delivery> for Application {
     fn show(
-        &mut self,
+        &self,
         _frame: &Delivery,
         window: ReceivedSession<display::Protocol>,
         input: ReceivedSession<input::Protocol>,
     ) -> Result<(), ApplicationError> {
-        if self.shown {
+        if self.shown.replace(true) {
             return Err(ApplicationError::Refused);
         }
 
-        self.shown = true;
-        self.shown_window = Some(ShownWindow {
+        *self.shown_window.borrow_mut() = Some(ShownWindow {
             window: Session::from_session(window),
             input: Session::from_session(input),
         });
+        self.wake();
         Ok(())
     }
 
-    fn closed(
-        &mut self,
-        _frame: &Delivery,
-        reply: application::closed::Reply<IssuedHandle<kind::Reply>>,
-    ) {
-        if self.closed.is_some() {
-            let _ = reply.send(Err::<(), _>(ApplicationError::Refused));
-            return;
+    async fn closed(&self, _frame: &Delivery) -> Result<(), ApplicationError> {
+        if self.closed.replace(true) {
+            return Err(ApplicationError::Refused);
         }
-        self.closed = Some(reply);
+        core::future::pending().await
     }
 }
 
 impl ApplicationSession {
-    /// Отвечает `Refused` на повторный `show` и возвращается, когда открывший приложение
-    /// закрывает сессию.
-    pub fn serve(mut self) {
-        let mut events = self.service.events();
-
-        while let Some(event) = events.recv() {
-            match event {
-                SessionEvent::Frame(frame) => {
-                    let _ = application::dispatch(&mut self.application, frame);
-                }
-                SessionEvent::Gone(_) => return,
+    /// Ждёт закрытия сессии открывшим приложение. Незавершённые вызовы отменяются
+    /// задачей обслуживания перед возвратом.
+    pub async fn serve(self) {
+        core::future::poll_fn(|cx| {
+            if self.state.ended.get() {
+                return Poll::Ready(());
             }
-        }
+            *self.state.changed.borrow_mut() = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
     }
 }
 
-/// Принимает заявку на экспорт `Application` от родителя `parent` и возвращает окно и ввод из
-/// её вызова `show` вместе с сессией `Application`.
-pub fn accept_window(
-    parent: startup_contract::Client<PortTransport>,
+/// Принимает заявку на экспорт `Application` от родителя `parent` и возвращает окно и ввод
+/// из вызова `show`. `executor` обслуживает сессию до разрушения `ApplicationSession`.
+pub async fn accept_window(
+    executor: &Rc<Executor>,
+    parent: AsyncStartup,
 ) -> Result<ApplicationWindow, WindowError> {
-    let parent = parent.with_wait(Timeout::INFINITE);
-    let service = SessionPort::create().map_err(WindowError::Kernel)?;
-    let request =
-        component_startup::accept::<application::Protocol>(&parent).map_err(WindowError::Accept)?;
+    let service = Rc::new(SessionPort::create().map_err(WindowError::Kernel)?);
+    let request = accept::<application::Protocol>(&parent.with_wait(Timeout::INFINITE))
+        .await
+        .map_err(WindowError::Accept)?;
     let session = service.create_session().map_err(WindowError::Kernel)?;
     let _ = request.reply.send(Ok(session.port));
 
-    let mut application = Application {
-        shown: false,
-        shown_window: None,
-        closed: None,
-    };
-    let ShownWindow { window, input } = wait_show(&service, &mut application)?;
+    let state = Rc::new(Application {
+        shown: Cell::new(false),
+        shown_window: RefCell::new(None),
+        closed: Cell::new(false),
+        ended: Cell::new(false),
+        changed: RefCell::new(None),
+    });
+    let calls = state.clone();
+    let gone = state.clone();
+    let serving = serve_calls(
+        executor,
+        service,
+        move |frame| application::serve(&calls, frame),
+        move |_| gone.end(),
+    );
+    let stopped = state.clone();
+    let serving = executor
+        .spawn_now(async move {
+            let _ = serving.await;
+            stopped.end();
+        })
+        .abort_on_drop();
+
+    let ShownWindow { window, input } = core::future::poll_fn(|cx| {
+        if let Some(shown) = state.shown_window.borrow_mut().take() {
+            return Poll::Ready(Ok(shown));
+        }
+
+        if state.ended.get() {
+            return Poll::Ready(Err(WindowError::Closed));
+        }
+        *state.changed.borrow_mut() = Some(cx.waker().clone());
+        Poll::Pending
+    })
+    .await?;
 
     Ok(ApplicationWindow {
         window,
         input,
         session: ApplicationSession {
-            service,
-            application,
+            state,
+            _serving: serving,
         },
     })
-}
-
-fn wait_show(
-    service: &SessionPort,
-    application: &mut Application,
-) -> Result<ShownWindow, WindowError> {
-    let mut events = service.events();
-
-    loop {
-        let Some(SessionEvent::Frame(frame)) = events.recv() else {
-            return Err(WindowError::Closed);
-        };
-        let _ = application::dispatch(application, frame);
-        if let Some(shown) = application.shown_window.take() {
-            return Ok(shown);
-        }
-    }
 }

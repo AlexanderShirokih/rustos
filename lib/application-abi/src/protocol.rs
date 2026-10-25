@@ -17,18 +17,19 @@ ipc::protocol! {
         ) -> Result<(), ApplicationError>;
 
         /// Завершается `PeerClosed` с уходом приложения. Второй ждущий вызов получает `Refused`.
-        call(defer) fn closed() -> Result<(), ApplicationError>;
+        call async fn closed() -> Result<(), ApplicationError>;
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
     use std::vec::Vec;
 
     use display_abi::display;
     use input_abi::input;
     use ipc::wire::Session;
-    use ipc_test::{MockHandle, MockReply, MockResources};
+    use ipc_test::{MockHandle, MockResources, complete};
     use syscall::kind;
 
     use super::{ApplicationError, application};
@@ -42,43 +43,51 @@ mod tests {
 
     #[derive(Default)]
     struct Shown {
-        sessions: Vec<(u32, u32)>,
+        sessions: RefCell<Vec<(u32, u32)>>,
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl application::Service<MockResources> for Shown {
         fn show(
-            &mut self,
+            &self,
             _frame: &MockResources,
             window: Window,
             input: Input,
         ) -> Result<(), ApplicationError> {
             self.sessions
+                .borrow_mut()
                 .push((window.into_handle().raw(), input.into_handle().raw()));
             Ok(())
         }
 
-        fn closed(&mut self, _frame: &MockResources, reply: application::closed::Reply<MockReply>) {
-            drop(reply);
+        async fn closed(&self, _frame: &MockResources) -> Result<(), ApplicationError> {
+            Err(ApplicationError::Refused)
         }
     }
 
     #[test]
     fn show_carries_the_window_and_input_session_capabilities() {
         let (client_end, server_end) = ipc_test::pair();
-        let mut shown = Shown::default();
-        std::thread::scope(|scope| {
-            let server = scope.spawn(|| {
+        let shown = Shown::default();
+        let shown = std::thread::scope(|scope| {
+            let server = scope.spawn(move || {
                 server_end
-                    .serve(|frame| application::dispatch(&mut shown, frame))
+                    .serve(|frame| {
+                        complete(application::dispatch(
+                            &shown,
+                            ipc::OwnedIncoming::new(frame).expect("frame fits"),
+                        ))
+                    })
                     .expect("dispatch ok");
+                shown
             });
 
             let client = application::Client::new(client_end);
-            assert_eq!(client.show(WINDOW, INPUT), Ok(()));
-            server.join().expect("server joins");
+            assert_eq!(client.show(WINDOW, INPUT).wait(), Ok(()));
+            server.join().expect("server joins")
         });
         assert_eq!(
-            shown.sessions,
+            shown.sessions.into_inner(),
             [(WINDOW.into_handle().raw(), INPUT.into_handle().raw())]
         );
     }

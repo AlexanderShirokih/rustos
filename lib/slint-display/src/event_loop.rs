@@ -1,11 +1,14 @@
 //! Платформа, которую получает Slint: окно программы, время с запуска и очередь задач
 //! главного потока.
 
-use core::time::Duration;
+use core::{
+    task::{Poll, Waker},
+    time::Duration,
+};
 use std::{
     collections::VecDeque,
     rc::Rc,
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -17,12 +20,13 @@ use slint::{
 type Task = Box<dyn FnOnce() + Send>;
 
 #[derive(Clone, Default)]
-pub(crate) struct TaskQueue(Arc<Pending>);
+pub(crate) struct TaskQueue(Arc<Mutex<Pending>>);
 
 #[derive(Default)]
 struct Pending {
-    tasks: Mutex<VecDeque<Task>>,
-    posted: Condvar,
+    tasks: VecDeque<Task>,
+    revision: u64,
+    waker: Option<Waker>,
 }
 
 pub(crate) struct EventLoop {
@@ -32,28 +36,43 @@ pub(crate) struct EventLoop {
 }
 
 impl TaskQueue {
-    pub(crate) fn run_pending(&self) {
-        let pending = self
+    pub(crate) fn run_pending(&self) -> u64 {
+        let (pending, revision) = self
             .0
-            .tasks
             .lock()
-            .map(|mut queue| core::mem::take(&mut *queue))
+            .map(|mut state| (core::mem::take(&mut state.tasks), state.revision))
             .unwrap_or_default();
+
         for task in pending {
             task();
         }
+        revision
     }
 
-    pub(crate) fn wait_for_task(&self, timeout: Option<Duration>) {
-        let Ok(tasks) = self.0.tasks.lock() else {
-            return;
-        };
-        let empty = |tasks: &mut VecDeque<Task>| tasks.is_empty();
-
-        match timeout {
-            Some(timeout) => drop(self.0.posted.wait_timeout_while(tasks, timeout, empty)),
-            None => drop(self.0.posted.wait_while(tasks, empty)),
+    pub(crate) fn notify(&self) {
+        let waker = self.0.lock().ok().and_then(|mut state| {
+            state.revision = state.revision.wrapping_add(1);
+            state.waker.take()
+        });
+        if let Some(waker) = waker {
+            waker.wake();
         }
+    }
+
+    pub(crate) async fn changed(&self, revision: u64) {
+        core::future::poll_fn(|cx| {
+            let Ok(mut state) = self.0.lock() else {
+                return Poll::Ready(());
+            };
+
+            if state.revision != revision || !state.tasks.is_empty() {
+                return Poll::Ready(());
+            }
+
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
     }
 }
 
@@ -63,12 +82,19 @@ impl EventLoopProxy for TaskQueue {
     }
 
     fn invoke_from_event_loop(&self, event: Task) -> Result<(), EventLoopError> {
-        self.0
-            .tasks
-            .lock()
-            .map_err(|_| EventLoopError::EventLoopTerminated)?
-            .push_back(event);
-        self.0.posted.notify_one();
+        let waker = {
+            let mut state = self
+                .0
+                .lock()
+                .map_err(|_| EventLoopError::EventLoopTerminated)?;
+            state.tasks.push_back(event);
+            state.revision = state.revision.wrapping_add(1);
+            state.waker.take()
+        };
+
+        if let Some(waker) = waker {
+            waker.wake();
+        }
 
         Ok(())
     }

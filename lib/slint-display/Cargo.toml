@@ -11,6 +11,7 @@ bench = false
 doctest = false
 
 [dependencies]
+executor = { workspace = true }
 application-window = { workspace = true }
 component-startup = { workspace = true }
 display-abi = { workspace = true }

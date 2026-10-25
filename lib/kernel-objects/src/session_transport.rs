@@ -29,6 +29,12 @@ impl SessionTransport {
     }
 }
 
+impl AsRef<PortTransport> for SessionTransport {
+    fn as_ref(&self) -> &PortTransport {
+        &self.transport
+    }
+}
+
 impl Channel for SessionTransport {
     type Resources = Delivery;
 

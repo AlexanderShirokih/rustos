@@ -2,7 +2,7 @@
 //! детей и глубина ресурса родителя.
 
 use alloc::{vec, vec::Vec};
-use core::num::NonZeroU64;
+use core::{cell::RefCell, num::NonZeroU64};
 
 use component_abi::SessionError;
 use component_startup::STARTUP_REQUEST_TIMEOUT;
@@ -100,13 +100,14 @@ struct Received {
     reply: Option<child_steps::next::Reply<Debt>>,
 }
 
-impl child_steps::Service<Delivery> for Received {
-    fn next(&mut self, _frame: &Delivery, report: Report, reply: child_steps::next::Reply<Debt>) {
-        self.report = Some(Reported {
+impl child_steps::Service<Delivery> for RefCell<&mut Received> {
+    fn next(&self, _frame: &Delivery, report: Report, reply: child_steps::next::Reply<Debt>) {
+        let mut received = self.borrow_mut();
+        received.report = Some(Reported {
             outcome: report.outcome,
             value: report.value,
         });
-        self.reply = Some(reply);
+        received.reply = Some(reply);
     }
 }
 
@@ -140,7 +141,7 @@ impl Steps {
             match PortTransport::new(self.port.as_raw()).recv(&mut bytes, wait) {
                 Ok(incoming) => {
                     let mut received = Received::default();
-                    let _ = child_steps::dispatch(&mut received, incoming);
+                    let _ = child_steps::dispatch(&RefCell::new(&mut received), incoming);
                     if let (Some(report), Some(reply)) = (received.report, received.reply) {
                         self.waiting = Some(reply);
                         return Some(report);
@@ -612,7 +613,8 @@ fn an_unexpected_call_on_the_startup_port_refuses_its_caller() {
     test_harness::check_eq!(
         probe::Client::new(PortTransport::new(&outsider))
             .with_wait(OUTSIDER_REFUSAL_TIMEOUT)
-            .ping(PING),
+            .ping(PING)
+            .wait(),
         Err(IpcError::PeerClosed)
     );
     test_harness::check_eq!(

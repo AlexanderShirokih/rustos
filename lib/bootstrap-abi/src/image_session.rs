@@ -39,7 +39,7 @@ mod tests {
 
     impl image::Service<MockResources> for Sink {
         fn region(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, ImageError>>
         {
@@ -54,10 +54,10 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 server_end
-                    .serve(|frame| image::dispatch(&mut Sink, frame))
+                    .serve(|frame| image::dispatch(&Sink, frame))
                     .expect("dispatch ok");
             });
-            assert_eq!(client.region(), Ok(MockHandle::new(0x66)));
+            assert_eq!(client.region().wait(), Ok(MockHandle::new(0x66)));
         });
     }
 }

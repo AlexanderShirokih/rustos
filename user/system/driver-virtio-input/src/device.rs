@@ -17,12 +17,13 @@ const KEY_RELEASED: i32 = 0;
 const KEY_PRESSED: i32 = 1;
 
 /// Чтение разделов конфигурации virtio-input.
+#[allow(async_fn_in_trait)]
 pub trait Config {
     /// Тип отказа чтения.
     type Error;
 
     /// Копирует байты раздела `select` с `subsel` в `destination` и возвращает их число.
-    fn section(
+    async fn section(
         &mut self,
         select: u8,
         subsel: u8,
@@ -30,7 +31,7 @@ pub trait Config {
     ) -> Result<usize, Self::Error>;
 
     /// Читает диапазон абсолютной оси `axis`. `None` - конфигурация не содержит раздела оси.
-    fn abs_info(&mut self, axis: u8) -> Result<Option<AbsInfo>, Self::Error>;
+    async fn abs_info(&mut self, axis: u8) -> Result<Option<AbsInfo>, Self::Error>;
 }
 
 /// Устройство ввода: дескриптор, коды событий его клавиш и осей и состояние кадра.
@@ -71,17 +72,19 @@ struct Slot {
 impl<R: Registers> Config for Transport<R> {
     type Error = R::Error;
 
-    fn section(
+    async fn section(
         &mut self,
         select: u8,
         subsel: u8,
         destination: &mut [u8; SECTION_BYTES],
     ) -> Result<usize, R::Error> {
-        input::read_section(self, select, subsel, destination).map(<[u8]>::len)
+        input::read_section(self, select, subsel, destination)
+            .await
+            .map(<[u8]>::len)
     }
 
-    fn abs_info(&mut self, axis: u8) -> Result<Option<AbsInfo>, R::Error> {
-        input::read_abs_info(self, axis)
+    async fn abs_info(&mut self, axis: u8) -> Result<Option<AbsInfo>, R::Error> {
+        input::read_abs_info(self, axis).await
     }
 }
 
@@ -95,20 +98,14 @@ impl Device {
     /// [`abs::MT_POSITION_X`] и [`abs::MT_POSITION_Y`] и не объявляет абсолютных осей
     /// устройства. Клавиши - переведённые коды `EV_KEY` по возрастанию. Привязка - `Screen`
     /// при абсолютных X и Y устройства либо контакта.
-    pub fn describe<C: Config>(config: &mut C) -> Result<Self, C::Error> {
+    pub async fn describe<C: Config>(config: &mut C) -> Result<Self, C::Error> {
         let mut section = [0; SECTION_BYTES];
-        let length = config.section(select::ID_NAME, 0, &mut section)?;
-        let name = section
-            .get(..length)
-            .and_then(|name| name.split(|byte| *byte == 0).next())
-            .and_then(|name| core::str::from_utf8(name).ok())
-            .unwrap_or(FALLBACK_NAME)
-            .into();
+        let name = name(config, &mut section).await?;
 
         let mut axes = AxisList::new();
         let mut axis_states: Vec<AxisState> = Vec::new();
         let declared = |states: &[AxisState], usage| states.iter().any(|axis| axis.usage == usage);
-        for code in codes(config, kind::REL, &mut section)? {
+        for code in codes(config, kind::REL, &mut section).await? {
             if let Some(usage) = Usage::from_linux_rel(code.into())
                 && !declared(&axis_states, usage)
                 && axes.push(AxisDecl::relative(usage)).is_ok()
@@ -116,9 +113,15 @@ impl Device {
                 axis_states.push(AxisState::new(kind::REL, code, usage));
             }
         }
-        let abs_codes = codes(config, kind::ABS, &mut section)?;
+
+        let abs_codes = codes(config, kind::ABS, &mut section).await?;
         let multitouch = abs_codes.contains(&abs::MT_SLOT);
-        let mut contacts = if multitouch { slot_count(config)? } else { 0 };
+        let mut contacts = if multitouch {
+            slot_count(config).await?
+        } else {
+            0
+        };
+
         let mut contact_axes = AxisList::new();
         let mut contact_usages = Vec::new();
         let mut contact_codes = Vec::new();
@@ -131,9 +134,10 @@ impl Device {
                 abs::MT_POSITION_Y => Some(Usage::Y),
                 _ => None,
             };
+
             if let Some(usage) = contact_usage {
                 if contacts != 0
-                    && let Some(AbsInfo { min, max }) = config.abs_info(subsel)?
+                    && let Some(AbsInfo { min, max }) = config.abs_info(subsel).await?
                     && contact_axes
                         .push(AxisDecl::absolute(usage, min, max))
                         .is_ok()
@@ -144,7 +148,7 @@ impl Device {
             } else if !multitouch
                 && let Some(usage) = Usage::from_linux_abs(code.into())
                 && !declared(&axis_states, usage)
-                && let Some(AbsInfo { min, max }) = config.abs_info(subsel)?
+                && let Some(AbsInfo { min, max }) = config.abs_info(subsel).await?
                 && axes.push(AxisDecl::absolute(usage, min, max)).is_ok()
             {
                 axis_states.push(AxisState::new(kind::ABS, code, usage));
@@ -156,7 +160,7 @@ impl Device {
 
         let mut keys = KeyList::new();
         let mut key_states = Vec::new();
-        for code in codes(config, kind::KEY, &mut section)? {
+        for code in codes(config, kind::KEY, &mut section).await? {
             if let Some(usage) = Usage::from_linux_key(code.into())
                 && keys.push(usage).is_ok()
             {
@@ -385,27 +389,32 @@ impl Slot {
             Some(_) => contacts.restart(contact),
             None => contacts.touch(contact),
         }
+
         self.touch = Some(id);
     }
 }
 
-fn slot_count<C: Config>(config: &mut C) -> Result<usize, C::Error> {
+async fn slot_count<C: Config>(config: &mut C) -> Result<usize, C::Error> {
     let Ok(subsel) = u8::try_from(abs::MT_SLOT) else {
         return Ok(0);
     };
-    let slots = config.abs_info(subsel)?.map_or(0, |AbsInfo { max, .. }| {
-        usize::try_from(max.saturating_add(1)).unwrap_or(0)
-    });
+
+    let slots = config
+        .abs_info(subsel)
+        .await?
+        .map_or(0, |AbsInfo { max, .. }| {
+            usize::try_from(max.saturating_add(1)).unwrap_or(0)
+        });
     Ok(slots.min(usize::from(CONTACTS_MAX)))
 }
 
-fn codes<C: Config>(
+async fn codes<C: Config>(
     config: &mut C,
     kind: u16,
     section: &mut [u8; SECTION_BYTES],
 ) -> Result<Vec<u16>, C::Error> {
     let subsel = u8::try_from(kind).unwrap_or(u8::MAX);
-    let length = config.section(select::EV_BITS, subsel, section)?;
+    let length = config.section(select::EV_BITS, subsel, section).await?;
     let bytes = section.get(..length).unwrap_or_default();
     Ok((0u16..)
         .zip(bytes)
@@ -415,4 +424,17 @@ fn codes<C: Config>(
                 .map(move |bit| position * 8 + bit)
         })
         .collect())
+}
+
+async fn name<C: Config>(
+    config: &mut C,
+    section: &mut [u8; SECTION_BYTES],
+) -> Result<String, C::Error> {
+    let length = config.section(select::ID_NAME, 0, section).await?;
+    Ok(section
+        .get(..length)
+        .and_then(|name| name.split(|byte| *byte == 0).next())
+        .and_then(|name| core::str::from_utf8(name).ok())
+        .unwrap_or(FALLBACK_NAME)
+        .into())
 }

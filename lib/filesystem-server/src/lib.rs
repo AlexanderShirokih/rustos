@@ -4,8 +4,9 @@
 
 extern crate alloc;
 
-mod buffer;
+mod control;
 mod error;
+mod io;
 mod server;
 mod service;
 mod session;

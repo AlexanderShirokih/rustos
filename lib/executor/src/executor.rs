@@ -1,13 +1,14 @@
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
+    rc::Rc,
     sync::Arc,
     task::Wake,
 };
 use core::{
     cell::{Cell, RefCell},
-    future::Future,
-    pin::{Pin, pin},
+    future::{Future, IntoFuture},
+    pin::Pin,
     sync::atomic::{AtomicBool, Ordering::SeqCst},
     task::{Context, Poll, Waker},
 };
@@ -16,9 +17,12 @@ use kernel_objects::Signal;
 use spin::Mutex;
 use syscall::Timeout;
 
-use crate::reactor::Reactor;
+use crate::{
+    reactor::Reactor,
+    task::{JoinHandle, Slot, TaskFuture, TaskSlot},
+};
 
-type TaskId = u64;
+pub(crate) type TaskId = u64;
 
 const MAIN_TASK: TaskId = 0;
 
@@ -29,7 +33,7 @@ const MAIN_TASK: TaskId = 0;
 /// задачи потока. Задача ждёт сигналы объекта ядра через [`Reactor::wait`].
 pub struct Executor {
     shared: Arc<Shared>,
-    tasks: RefCell<BTreeMap<TaskId, Task>>,
+    tasks: Rc<RefCell<BTreeMap<TaskId, Task>>>,
     next_id: Cell<TaskId>,
     reactor: Reactor,
 }
@@ -40,8 +44,9 @@ pub(crate) struct Shared {
     pub(crate) sleeping: AtomicBool,
 }
 
-struct Task {
-    future: Pin<Box<dyn Future<Output = ()>>>,
+pub(crate) struct Task {
+    future: Pin<Box<dyn TaskFuture>>,
+    slot: Rc<dyn TaskSlot>,
     waker: Arc<TaskWaker>,
 }
 
@@ -60,7 +65,7 @@ impl Executor {
                 notify: Signal::create()?,
                 sleeping: AtomicBool::new(false),
             }),
-            tasks: RefCell::new(BTreeMap::new()),
+            tasks: Rc::new(RefCell::new(BTreeMap::new())),
             next_id: Cell::new(MAIN_TASK.saturating_add(1)),
             reactor: Reactor::new(),
         })
@@ -68,19 +73,50 @@ impl Executor {
 
     /// Порождает задачу. Задача выполняется внутри [`Self::block_on`]. Задачи, не завершённые
     /// к возврату главной, освобождаются вместе с executor.
-    pub fn spawn(&self, task: impl Future<Output = ()> + 'static) {
+    pub fn spawn<F: Future<Output: 'static> + 'static>(&self, task: F) -> JoinHandle<F::Output> {
+        let (handle, waker) = self.insert_task(Box::pin(task));
+        waker.wake_by_ref();
+        handle
+    }
+
+    /// Порождает задачу, как [`Self::spawn`], и выполняет её на текущем потоке до первого
+    /// ожидания.
+    pub fn spawn_now<F: Future<Output: 'static> + 'static>(
+        &self,
+        task: F,
+    ) -> JoinHandle<F::Output> {
+        self.spawn_pinned(Box::pin(task))
+    }
+
+    /// Начинает задачу, как [`Self::spawn_now`], из future, уже размещённой в куче.
+    pub fn spawn_pinned<F: Future<Output: 'static> + 'static>(
+        &self,
+        task: Pin<Box<F>>,
+    ) -> JoinHandle<F::Output> {
+        let (handle, _) = self.insert_task(task);
+        self.poll_task(handle.id());
+        handle
+    }
+
+    fn insert_task<F: Future<Output: 'static> + 'static>(
+        &self,
+        task: Pin<Box<F>>,
+    ) -> (JoinHandle<F::Output>, Arc<TaskWaker>) {
         let id = self.next_id.get();
         self.next_id.set(id.saturating_add(1));
 
         let waker = self.waker(id);
+        let slot = Rc::new(Slot::new());
         self.tasks.borrow_mut().insert(
             id,
             Task {
-                future: Box::pin(task),
+                future: task,
+                slot: slot.clone(),
                 waker: Arc::clone(&waker),
             },
         );
-        waker.wake_by_ref();
+
+        (JoinHandle::new(slot, Rc::downgrade(&self.tasks), id), waker)
     }
 
     /// Reactor, через который задачи этого executor ждут объекты ядра.
@@ -91,8 +127,8 @@ impl Executor {
 
     /// Выполняет `main` и порождённые задачи до готовности `main` и возвращает её результат.
     /// Пока ни одна задача не разбужена, поток ждёт в ядре.
-    pub fn block_on<F: Future>(&self, main: F) -> F::Output {
-        let mut main = pin!(main);
+    pub fn block_on<F: IntoFuture>(&self, main: F) -> F::Output {
+        let mut main = Box::pin(main.into_future());
         let main_task = self.waker(MAIN_TASK);
         let main_waker = Waker::from(Arc::clone(&main_task));
         main_task.wake_by_ref();
@@ -153,11 +189,18 @@ impl Executor {
         if task
             .future
             .as_mut()
-            .poll(&mut Context::from_waker(&waker))
+            .poll_task(&mut Context::from_waker(&waker), &*task.slot)
             .is_pending()
+            && task.slot.is_pending()
         {
             self.tasks.borrow_mut().insert(id, task);
         }
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.slot.release();
     }
 }
 

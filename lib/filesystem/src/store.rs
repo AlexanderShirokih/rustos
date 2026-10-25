@@ -25,8 +25,8 @@ impl StoreId {
 
 /// Хранилище байт, чьё владение и способ доступа определяет файловый сервер.
 pub trait ByteStore {
-    /// Выделяет хранилище ровно на `size` байт. Нехватка ресурса либо объём, не подошедший
-    /// реализации, - `NoSpace`.
+    /// Выделяет занулённое хранилище ровно на `size` байт. Нехватка ресурса либо
+    /// неподдерживаемый объём дают `NoSpace`.
     fn allocate(&mut self, size: usize) -> Result<StoreId, FileSystemError>;
 
     /// Копирует байты хранилища со смещения `offset` в `out`. Незнакомое хранилище - `NotFound`,
@@ -36,6 +36,17 @@ pub trait ByteStore {
     /// Копирует `data` в хранилище со смещения `offset`. Незнакомое хранилище - `NotFound`,
     /// диапазон за его границей - `NoSpace`.
     fn write(&mut self, store: StoreId, offset: usize, data: &[u8]) -> Result<(), FileSystemError>;
+
+    /// Копирует диапазон между различными хранилищами без промежуточного буфера.
+    /// Совпавшие хранилища либо диапазон вне границ дают `NoSpace`.
+    fn copy(
+        &mut self,
+        source: StoreId,
+        source_offset: usize,
+        target: StoreId,
+        target_offset: usize,
+        len: usize,
+    ) -> Result<(), FileSystemError>;
 
     /// Заполняет нулями диапазон хранилища. Незнакомое хранилище - `NotFound`, диапазон за его
     /// границей - `NoSpace`.
@@ -121,6 +132,36 @@ impl ByteStore for HeapByteStore {
         Ok(())
     }
 
+    fn copy(
+        &mut self,
+        source: StoreId,
+        source_offset: usize,
+        target: StoreId,
+        target_offset: usize,
+        len: usize,
+    ) -> Result<(), FileSystemError> {
+        let [source, target] = self
+            .stores
+            .get_disjoint_mut([source.raw() as usize, target.raw() as usize])
+            .map_err(|_| FileSystemError::NoSpace)?;
+        let source = source.as_deref().ok_or(FileSystemError::NotFound)?;
+        let target = target.as_deref_mut().ok_or(FileSystemError::NotFound)?;
+        let source_end = source_offset
+            .checked_add(len)
+            .ok_or(FileSystemError::NoSpace)?;
+        let target_end = target_offset
+            .checked_add(len)
+            .ok_or(FileSystemError::NoSpace)?;
+        let bytes = source
+            .get(source_offset..source_end)
+            .ok_or(FileSystemError::NoSpace)?;
+        target
+            .get_mut(target_offset..target_end)
+            .ok_or(FileSystemError::NoSpace)?
+            .copy_from_slice(bytes);
+        Ok(())
+    }
+
     fn zero(&mut self, store: StoreId, offset: usize, len: usize) -> Result<(), FileSystemError> {
         let end = offset.checked_add(len).ok_or(FileSystemError::NoSpace)?;
         self.bytes_mut(store)?
@@ -182,7 +223,12 @@ pub(crate) mod host {
         }
 
         pub(crate) fn backing(&mut self, node: NodeId) -> Result<Window, FileSystemError> {
-            self.backend.backing(&mut self.stores, node)
+            let window = self.backend.read_window(node)?;
+            if self.backend.metadata(node)?.size == 0 {
+                return Err(FileSystemError::NotSupported);
+            }
+
+            Ok(window)
         }
 
         pub(crate) fn unlink(

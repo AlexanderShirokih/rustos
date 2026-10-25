@@ -6,6 +6,11 @@ path = "/testrunner/plan"
 
 [[programs]]
 package = "testrunner"
+bin = "async-component-fixture"
+path = "/async-component-fixture"
+
+[[programs]]
+package = "testrunner"
 bin = "testrunner"
 path = "/testrunner"
 boot = true
@@ -318,3 +323,8 @@ path = "/cxx-selftest"
 [[programs]]
 package = "cxx-exit"
 path = "/cxx-exit"
+
+[[programs]]
+package = "slint-selftest"
+bin = "slint-selftest"
+path = "/slint-selftest"

@@ -106,55 +106,65 @@ impl Event {
 /// Выбирает раздел `select` с `subsel` и копирует его байты в `destination`.
 ///
 /// Возвращает прочитанную часть `destination`. Байты читаются обращениями в 1 байт.
-pub fn read_section<'a, R: Registers>(
+pub async fn read_section<'a, R: Registers>(
     transport: &mut Transport<R>,
     select: u8,
     subsel: u8,
     destination: &'a mut [u8; SECTION_BYTES],
 ) -> Result<&'a [u8], R::Error> {
-    let size = choose(transport, select, subsel)?;
+    let size = choose(transport, select, subsel).await?;
     let length = usize::try_from(size).map_or(SECTION_BYTES, |size| size.min(SECTION_BYTES));
     let (section, _) = destination.split_at_mut(length);
     for (offset, byte) in (UNION_OFFSET..).zip(section.iter_mut()) {
-        let value = transport.read_config(offset, AccessWidth::Byte)?;
+        let value = transport.read_config(offset, AccessWidth::Byte).await?;
         *byte = value.to_le_bytes()[0];
     }
+
     Ok(section)
 }
 
 /// Читает диапазон абсолютной оси `axis` 32-битными обращениями.
 ///
 /// Возвращает `None`, если раздел оси короче 8 байт.
-pub fn read_abs_info<R: Registers>(
+pub async fn read_abs_info<R: Registers>(
     transport: &mut Transport<R>,
     axis: u8,
 ) -> Result<Option<AbsInfo>, R::Error> {
-    if choose(transport, ABS_INFO, axis)? < ABS_RANGE_BYTES {
+    if choose(transport, ABS_INFO, axis).await? < ABS_RANGE_BYTES {
         return Ok(None);
     }
-    let min = transport.read_config(UNION_OFFSET, AccessWidth::Word)?;
-    let max = transport.read_config(UNION_OFFSET + 4, AccessWidth::Word)?;
+
+    let min = transport
+        .read_config(UNION_OFFSET, AccessWidth::Word)
+        .await?;
+    let max = transport
+        .read_config(UNION_OFFSET + 4, AccessWidth::Word)
+        .await?;
     Ok(Some(AbsInfo {
         min: min.cast_signed(),
         max: max.cast_signed(),
     }))
 }
 
-fn choose<R: Registers>(
+async fn choose<R: Registers>(
     transport: &mut Transport<R>,
     select: u8,
     subsel: u8,
 ) -> Result<u32, R::Error> {
-    transport.write_config(SELECT_OFFSET, AccessWidth::Byte, u32::from(select))?;
-    transport.write_config(SUBSEL_OFFSET, AccessWidth::Byte, u32::from(subsel))?;
-    transport.read_config(SIZE_OFFSET, AccessWidth::Byte)
+    transport
+        .write_config(SELECT_OFFSET, AccessWidth::Byte, u32::from(select))
+        .await?;
+    transport
+        .write_config(SUBSEL_OFFSET, AccessWidth::Byte, u32::from(subsel))
+        .await?;
+    transport.read_config(SIZE_OFFSET, AccessWidth::Byte).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        testing::{Event as Access, FakeRegisters, Log},
+        testing::{Event as Access, FakeRegisters, Log, complete},
         transport::DeviceType,
     };
 
@@ -163,7 +173,8 @@ mod tests {
         for (offset, bytes) in config {
             registers.set_config(*offset, bytes);
         }
-        let transport = Transport::probe(registers, DeviceType::Input).unwrap();
+
+        let transport = complete(Transport::probe(registers, DeviceType::Input)).unwrap();
         log.clear();
         transport
     }
@@ -175,7 +186,13 @@ mod tests {
             input_transport(&log, &[(SIZE_OFFSET, &[5]), (UNION_OFFSET, b"mouse!")]);
         let mut destination = [0; SECTION_BYTES];
 
-        let name = read_section(&mut transport, select::ID_NAME, 0, &mut destination).unwrap();
+        let name = complete(read_section(
+            &mut transport,
+            select::ID_NAME,
+            0,
+            &mut destination,
+        ))
+        .unwrap();
 
         assert_eq!(name, b"mouse");
         assert_eq!(

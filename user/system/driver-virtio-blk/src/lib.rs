@@ -5,6 +5,8 @@
 //! и держит состояние отказа устройства.
 #![no_std]
 
+extern crate alloc;
+
 mod disk;
 mod geometry;
 

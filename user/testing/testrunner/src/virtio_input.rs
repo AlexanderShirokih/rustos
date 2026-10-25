@@ -13,7 +13,6 @@ use virtio::{
     DeviceType,
     input::{AbsInfo, Event, SECTION_BYTES, abs, kind, select, sync},
 };
-use virtio_driver::open_slot;
 use virtio_mmio_abi::VirtioMmioError;
 
 use crate::{
@@ -22,7 +21,7 @@ use crate::{
     rootkeeper_system::{
         FIRST_VIRTIO, POLL_ATTEMPTS, POLL_INTERVAL, finish, platform_describes, with_drivers,
     },
-    virtio_mmio::{BUS_IMPORT, bus_session},
+    virtio_mmio::{BUS_IMPORT, open_transport},
 };
 
 const KEY_A: u16 = 30;
@@ -52,10 +51,11 @@ struct Synthetic {
     slots: i32,
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl Config for Synthetic {
     type Error = Infallible;
 
-    fn section(
+    async fn section(
         &mut self,
         select: u8,
         subsel: u8,
@@ -75,11 +75,12 @@ impl Config for Synthetic {
         for code in codes {
             destination[usize::from(code / 8)] |= 1 << (code % 8);
         }
+
         let length = codes.iter().max().map_or(0, |code| code / 8 + 1);
         Ok(usize::from(length))
     }
 
-    fn abs_info(&mut self, axis: u8) -> Result<Option<AbsInfo>, Infallible> {
+    async fn abs_info(&mut self, axis: u8) -> Result<Option<AbsInfo>, Infallible> {
         let max = if u16::from(axis) == abs::MT_SLOT {
             self.slots - 1
         } else {
@@ -98,7 +99,9 @@ fn device(name: &'static [u8], keys: &'static [u16], absolute: &'static [u16]) -
         absolute,
         slots: 0,
     };
-    Device::describe(config).unwrap_or_else(|never| match never {})
+    crate::executor::executor()
+        .block_on(Device::describe(config))
+        .unwrap_or_else(|never| match never {})
 }
 
 fn touchscreen(slots: i32) -> Device {
@@ -116,7 +119,9 @@ fn touchscreen(slots: i32) -> Device {
         ],
         slots,
     };
-    Device::describe(config).unwrap_or_else(|never| match never {})
+    crate::executor::executor()
+        .block_on(Device::describe(config))
+        .unwrap_or_else(|never| match never {})
 }
 
 fn slot(index: i32) -> Event {
@@ -385,16 +390,17 @@ fn qemu_input_devices_are_added_with_their_keys_and_axes() {
     let consumer = consumer(&session).with_wait(DEVICE_WAIT);
     let mut layouts: Vec<DeviceLayout> = Vec::new();
     while layouts.len() < QEMU_INPUT_DEVICES
-        && let Ok(records) = consumer.next()
+        && let Ok(records) = consumer.next().wait()
     {
         let added = records
             .records()
             .filter(|record| record.kind == Kind::DeviceAdded);
-        layouts.extend(added.filter_map(|record| consumer.describe(record.device?).ok()));
+
+        layouts.extend(added.filter_map(|record| consumer.describe(record.device?).wait().ok()));
     }
-    let bus = bus_session(&importer);
-    if layouts.is_empty() && open_slot(&bus, DeviceType::Input).err() == Some(NO_DEVICE) {
-        drop((consumer, session, bus, importer));
+
+    if layouts.is_empty() && open_transport(&importer, DeviceType::Input).err() == Some(NO_DEVICE) {
+        drop((consumer, session, importer));
         finish(composition);
         test_harness::skip!("no virtio-input transport");
     }
@@ -436,9 +442,9 @@ fn qemu_input_devices_are_added_with_their_keys_and_axes() {
     composition.terminate(DRIVER, 0);
     let released = (0..POLL_ATTEMPTS).find_map(|_| {
         pause(POLL_INTERVAL);
-        open_slot(&bus, DeviceType::Input).ok()
+        open_transport(&importer, DeviceType::Input).ok()
     });
     test_harness::check!(released.is_some());
-    drop((consumer, session, released, bus, importer));
+    drop((consumer, session, released, importer));
     finish(composition);
 }

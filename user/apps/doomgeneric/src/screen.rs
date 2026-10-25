@@ -58,7 +58,7 @@ impl fmt::Display for ScreenError {
 impl Screen {
     pub(crate) fn open(session: Session<display::Protocol>) -> Result<Self, ScreenError> {
         let client = session.client();
-        let dimension = client.dimension().map_err(ScreenError::Dimension)?;
+        let dimension = client.dimension().wait().map_err(ScreenError::Dimension)?;
 
         let layout = Layout::new(dimension).ok_or(ScreenError::TooSmall(dimension))?;
         let area = layout.frame();
@@ -85,8 +85,10 @@ impl Screen {
         };
         let region = client
             .acquire_surface()
+            .wait()
             .map(MemoryRegion::from)
             .map_err(ScreenError::Surface)?;
+
         let surface = Mapping::full(region, UserMemFlags::ReadWrite)
             .map_err(|refused| ScreenError::Mapping(refused.error))?;
 
@@ -172,7 +174,7 @@ impl Screen {
     fn show(&mut self, written: kernel_objects::Result<()>, area: Area) {
         if let Err(error) = written {
             self.report(format_args!("frame not copied: {error:?}"));
-        } else if let Err(error) = self.client.present(area) {
+        } else if let Err(error) = self.client.present(area).wait() {
             self.report(format_args!("frame not presented: {error:?}"));
         }
     }

@@ -1,11 +1,12 @@
-use alloc::format;
+use alloc::{boxed::Box, format, rc::Rc, sync::Arc};
 
 use bootstrap_abi::bootstrap;
 use component_abi::{PROTOCOL_ID_MAX, decode_manifest};
+use executor::Executor;
 use kernel_objects::{MemoryRegion, ReadOnlyMapping, kind};
 use log_relay::{KernelLogSink, LogRelayThread};
 use managed_component::ImagePages;
-use runtime::{Mutex, PortTransport, Timeout};
+use runtime::{Mutex, PortTransport};
 use syscall::{Handle, ProcessName};
 use userland::{DecodedProgram, ProgramView};
 use userland_image::{
@@ -17,8 +18,8 @@ use crate::{
     AddFailure, BudgetFailure, Component, RootSystem, SEARCH_LIMITS, SearchLimits, Stopped,
     SystemImage,
     relay::{ComponentNames, LogSources},
+    serve,
     system::log_line,
-    turn,
 };
 
 /// Типы отказов при получении userland-образа и подготовке компонентов из плана загрузки.
@@ -58,6 +59,7 @@ impl BootFailure {
             Self::Budget(BudgetFailure::Root) => "root resource unavailable",
             Self::Budget(BudgetFailure::Reserve) => "component reserve not granted",
             Self::Budget(BudgetFailure::StartupPort) => "startup port not created",
+            Self::Budget(BudgetFailure::WakeSignal) => "composition signal not created",
             Self::Budget(BudgetFailure::Hardware) => "hardware session not granted",
             Self::Budget(BudgetFailure::SystemInfo) => "system info session not granted",
         }
@@ -70,8 +72,10 @@ impl SystemImage {
         let client = bootstrap::Client::new(PortTransport::new(kernel));
         let region = client
             .acquire_userland_image()
+            .wait()
             .map(MemoryRegion::from)
             .map_err(|_| BootFailure::BadImage)?;
+
         let mapping = ReadOnlyMapping::new(region).map_err(|_| BootFailure::BadImage)?;
         Ok(Self { mapping })
     }
@@ -171,10 +175,11 @@ impl<'a> RootSystem<'a> {
 /// Поднимает композицию загрузочного плана и служит её родителем. Возвращается только при
 /// отказе подъёма либо выходе из оборота.
 pub fn run(kernel: Handle<kind::Port>) -> Stopped {
-    let image = match SystemImage::acquire(kernel) {
-        Ok(image) => image,
+    let image: &'static SystemImage = match SystemImage::acquire(kernel) {
+        Ok(image) => Box::leak(Box::new(image)),
         Err(failure) => return refuse_boot(kernel, failure),
     };
+
     let plan = match image.plan(BOOT_PLAN_PATH) {
         Ok(plan) => plan,
         Err(failure) => return refuse_boot(kernel, failure),
@@ -188,15 +193,23 @@ pub fn run(kernel: Handle<kind::Port>) -> Stopped {
         log_line(kernel, format_args!("log relay not started"));
         return Stopped::Startup;
     };
+
     let sources = LogSources::new(names, relay);
-    let system = match RootSystem::bring_up(&image, plan, index, kernel, sources, SEARCH_LIMITS) {
-        Ok(system) => Mutex::new(system),
+    let system = match RootSystem::bring_up(image, plan, index, kernel, sources, SEARCH_LIMITS) {
+        Ok(system) => Arc::new(Mutex::new(system)),
         Err(failure) => return refuse_boot(kernel, failure),
     };
     log_line(kernel, format_args!("composition started"));
 
-    while turn(&system, Timeout::INFINITE).is_continue() {}
-    log_line(kernel, format_args!("startup port closed"));
+    let executor = match Executor::new() {
+        Ok(executor) => Rc::new(executor),
+        Err(error) => {
+            log_line(kernel, format_args!("executor not started: {error:?}"));
+            return Stopped::Startup;
+        }
+    };
+
+    executor.block_on(serve(&executor, system));
     Stopped::Subsystem
 }
 

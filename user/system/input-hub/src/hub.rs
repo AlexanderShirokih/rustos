@@ -8,7 +8,10 @@ use alloc::{
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
 };
-use core::cell::RefCell;
+use core::{
+    cell::RefCell,
+    task::{Poll, Waker},
+};
 
 use component_startup::{MintedSession, SessionError, SessionPort};
 use input_abi::{
@@ -16,8 +19,8 @@ use input_abi::{
     FocusNumber, FocusSession, MESSAGE_RECORDS_MAX, NextError, RECORD_SIZE, Record, RecordBuf,
     Tracker, UpdateError, input, input_focus, input_inject,
 };
-use ipc::IntoWireValue;
-use kernel_objects::{Delivery, IssuedHandle, Port, kind};
+use ipc::{Incoming, IntoWireValue, wire::IpcError};
+use kernel_objects::{Delivery, Port};
 use runtime::Instant;
 
 use crate::queue::{QUEUE_RECORDS_MAX, Queue};
@@ -26,7 +29,6 @@ const INPUT_SESSIONS_MAX: usize = 16;
 
 const START_RECORDS_LIMIT: usize = QUEUE_RECORDS_MAX - MESSAGE_RECORDS_MAX;
 
-type Debt = IssuedHandle<kind::Reply>;
 type Raw = [u8; RECORD_SIZE];
 type Devices = BTreeMap<DeviceNumber, Box<Device>>;
 
@@ -47,7 +49,13 @@ struct Device {
 
 struct Session {
     queue: Queue,
-    waiting: Option<input::next::Reply<Debt>>,
+    waiting: Option<Waker>,
+}
+
+struct NextWait<'a> {
+    consumer: &'a Consumer,
+    badge: u64,
+    registered: bool,
 }
 
 struct Holding {
@@ -72,7 +80,7 @@ pub(crate) struct Consumer {
 
 pub(crate) struct Holder {
     pub(crate) hub: Rc<RefCell<Hub>>,
-    pub(crate) consumers: &'static SessionPort,
+    pub(crate) consumers: Rc<SessionPort>,
 }
 
 impl Hub {
@@ -186,7 +194,8 @@ impl Session {
         } else {
             self.restart(devices, shows);
         }
-        self.answer();
+
+        self.wake_waiter();
     }
 
     fn restart(&mut self, devices: &Devices, shows: impl Fn(DeviceNumber) -> bool) {
@@ -203,13 +212,13 @@ impl Session {
         }
     }
 
-    fn answer(&mut self) {
+    fn wake_waiter(&mut self) {
         if self.queue.is_empty() {
             return;
         }
 
-        if let Some(reply) = self.waiting.take() {
-            let _ = reply.send(Ok::<_, NextError>(self.queue.take_message()));
+        if let Some(waker) = &self.waiting {
+            waker.wake_by_ref();
         }
     }
 }
@@ -237,14 +246,14 @@ impl Holding {
 
         if let Some(app) = previous.and_then(|previous| self.apps.get_mut(&previous)) {
             app.session.restart(devices, |_| false);
-            app.session.answer();
+            app.session.wake_waiter();
         }
 
         let reserved = &self.reserved;
         if let Some(app) = number.and_then(|number| self.apps.get_mut(&number)) {
             app.session
                 .restart(devices, |device| !reserved.contains(&device));
-            app.session.answer();
+            app.session.wake_waiter();
         }
     }
 
@@ -286,12 +295,61 @@ impl Source {
 }
 
 impl Consumer {
+    pub(crate) fn serve(
+        consumer: &Rc<Self>,
+        frame: Incoming<'_, Delivery>,
+    ) -> Result<Option<impl Future<Output = Result<(), IpcError>> + use<>>, IpcError> {
+        let badge = frame.resources.badge;
+        if consumer.hub.borrow_mut().session_mut(badge).is_none() {
+            return Err(IpcError::PeerClosed);
+        }
+
+        let Some(call) = input::serve(consumer, frame)? else {
+            return Ok(None);
+        };
+
+        let consumer = consumer.clone();
+
+        // Владелец фокуса может удалить сессию без ухода её клиентского значка. Её Drop
+        // будит ожидание, и проверка живости отменяет вызов с закрытием канала ответа.
+        Ok(Some(async move {
+            let mut call = core::pin::pin!(call);
+
+            core::future::poll_fn(|cx| {
+                if consumer.hub.borrow_mut().session_mut(badge).is_none() {
+                    return Poll::Ready(Err(IpcError::PeerClosed));
+                }
+
+                call.as_mut().poll(cx)
+            })
+            .await
+        }))
+    }
+
     pub(crate) fn gone(&self, badge: u64) {
         let mut hub = self.hub.borrow_mut();
         if hub.sessions.remove(&badge).is_none()
             && let Some(holding) = &mut hub.holding
         {
             holding.close(badge);
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(waker) = self.waiting.take() {
+            waker.wake();
+        }
+    }
+}
+
+impl Drop for NextWait<'_> {
+    fn drop(&mut self) {
+        if self.registered
+            && let Some(session) = self.consumer.hub.borrow_mut().session_mut(self.badge)
+        {
+            session.waiting = None;
         }
     }
 }
@@ -311,7 +369,7 @@ impl Holder {
 
 impl input_inject::Service<Delivery> for Source {
     fn declare(
-        &mut self,
+        &self,
         frame: &Delivery,
         descriptor: DeviceDescriptor<'_>,
     ) -> Result<DeviceNumber, DeclareError> {
@@ -338,7 +396,7 @@ impl input_inject::Service<Delivery> for Source {
     }
 
     fn update(
-        &mut self,
+        &self,
         frame: &Delivery,
         device: DeviceNumber,
         time: Option<u64>,
@@ -359,26 +417,40 @@ impl input_inject::Service<Delivery> for Source {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl input::Service<Delivery> for Consumer {
-    fn next(&mut self, frame: &Delivery, reply: input::next::Reply<Debt>) {
-        let mut hub = self.hub.borrow_mut();
-        // Без сессии долг разрушается, и вызыватель получает `PeerClosed`.
-        let Some(session) = hub.session_mut(frame.badge) else {
-            return;
+    async fn next(&self, frame: &Delivery) -> Result<RecordBuf, NextError> {
+        let mut wait = NextWait {
+            consumer: self,
+            badge: frame.badge,
+            registered: false,
         };
 
-        if session.waiting.is_some() {
-            drop(hub);
-            let _ = reply.send(Err::<RecordBuf, _>(NextError::Busy));
-            return;
-        }
+        core::future::poll_fn(|cx| {
+            let mut hub = self.hub.borrow_mut();
+            let Some(session) = hub.session_mut(frame.badge) else {
+                return Poll::Pending;
+            };
 
-        session.waiting = Some(reply);
-        session.answer();
+            if !wait.registered && session.waiting.is_some() {
+                return Poll::Ready(Err(NextError::Busy));
+            }
+
+            wait.registered = true;
+
+            if !session.queue.is_empty() {
+                session.waiting = None;
+                return Poll::Ready(Ok(session.queue.take_message()));
+            }
+
+            session.waiting = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
     }
 
     fn describe(
-        &mut self,
+        &self,
         frame: &Delivery,
         device: DeviceNumber,
     ) -> Result<DeviceLayout, DescribeError> {
@@ -396,7 +468,7 @@ impl input::Service<Delivery> for Consumer {
 
 impl input_focus::Service<Delivery> for Holder {
     fn open(
-        &mut self,
+        &self,
         frame: &Delivery,
     ) -> impl IntoWireValue<Delivery, Read = Result<FocusSession, FocusError>> {
         let mut hub = self.hub.borrow_mut();
@@ -434,7 +506,7 @@ impl input_focus::Service<Delivery> for Holder {
         })
     }
 
-    fn focus(&mut self, frame: &Delivery, session: Option<FocusNumber>) -> Result<(), FocusError> {
+    fn focus(&self, frame: &Delivery, session: Option<FocusNumber>) -> Result<(), FocusError> {
         let mut hub = self.hub.borrow_mut();
         let Hub {
             devices, holding, ..
@@ -451,7 +523,7 @@ impl input_focus::Service<Delivery> for Holder {
         Ok(())
     }
 
-    fn reserve(&mut self, frame: &Delivery, device: DeviceNumber) -> Result<(), FocusError> {
+    fn reserve(&self, frame: &Delivery, device: DeviceNumber) -> Result<(), FocusError> {
         let mut hub = self.hub.borrow_mut();
         let Hub {
             devices, holding, ..

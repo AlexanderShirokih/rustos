@@ -7,8 +7,9 @@
 use std::sync::mpsc;
 
 use component_startup::Import;
+use executor::{PortChannel, Reactor};
 use ipc::wire::IpcError;
-use kernel_objects::{LogConsumer, MemoryRegion, SessionTransport, Signal};
+use kernel_objects::{LogConsumer, MemoryRegion, Session, Signal};
 use log_abi::{Level, LogRing, journal};
 use slint::{Model, VecModel};
 use syscall::Timeout;
@@ -23,7 +24,7 @@ const BATCH_ENTRIES_MAX: usize = 64;
 const KERNEL_LINE_LATENCY: Timeout = Timeout::from_millis(500);
 
 pub(crate) struct Follower {
-    _session: journal::Client<SessionTransport>,
+    _session: Session<journal::Protocol>,
     consumer: LogConsumer,
 }
 
@@ -32,14 +33,20 @@ struct Batch {
     stopped: bool,
 }
 
-pub(crate) fn subscribe(journal: &Import<journal::Protocol>) -> Result<Follower, String> {
+pub(crate) async fn subscribe(
+    journal: &Import<journal::Protocol>,
+    reactor: &Reactor,
+) -> Result<Follower, String> {
     let session = journal
-        .open()
-        .map_err(|error| format!("journal unavailable: {error}"))?
-        .client();
-    let ring = session
+        .open_async(reactor)
+        .await
+        .map_err(|error| format!("journal unavailable: {error}"))?;
+
+    let ring = journal::Client::new(PortChannel::new(session.handle(), reactor.clone()))
         .subscribe()
+        .await
         .map_err(|error| format!("journal subscription refused: {error:?}"))?;
+
     let consumer = LogConsumer::new(LogRing {
         region: MemoryRegion::from(ring.region),
         signal: Signal::from(ring.signal),

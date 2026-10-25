@@ -27,11 +27,11 @@ test = false
 bench = false
 
 [dependencies]
+executor = { workspace = true }
 component-startup = { workspace = true }
 components = { workspace = true }
 ipc = { workspace = true }
 rtc-abi = { workspace = true }
-kernel-objects = { workspace = true }
 
 [build-dependencies]
 userland-build = { workspace = true }

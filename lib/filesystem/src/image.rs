@@ -12,7 +12,7 @@ use filesystem_abi::{DirCursor, DirEntry, FileSystemError, Listed, NodeKind, PAT
 use userland_image::{ImageDecodeError, decode};
 
 use crate::{
-    backend::{FileSystemBackend, NodeMetadata, kind_mismatch},
+    backend::{DirBatch, FileSystemBackend, NodeMetadata, kind_mismatch},
     node::{NodeId, Window},
     store::{ByteStore, StoreId},
 };
@@ -296,44 +296,27 @@ impl FileSystemBackend for ImageFileSystem {
         })
     }
 
-    fn read_at(
-        &self,
-        _stores: &dyn ByteStore,
-        node: NodeId,
-        offset: u64,
-        out: &mut [u8],
-    ) -> Result<usize, FileSystemError> {
-        let data = self.locate(node)?.data()?;
-        let Ok(start) = usize::try_from(offset) else {
-            return Ok(0);
-        };
-        let Some(tail) = data.get(start..) else {
-            return Ok(0);
-        };
-        let count = tail.len().min(out.len());
-        let (Some(target), Some(source)) = (out.get_mut(..count), tail.get(..count)) else {
-            return Ok(0);
-        };
-        target.copy_from_slice(source);
-        Ok(count)
+    fn read_window(&self, node: NodeId) -> Result<Window, FileSystemError> {
+        let node = self.locate(node)?;
+        let size = node.data()?.len() as u64;
+        Ok(Window {
+            store: StoreId::MOUNT,
+            offset: node.record.offset,
+            size,
+        })
     }
 
-    fn write_at(
+    fn prepare_write(
         &mut self,
         _stores: &mut dyn ByteStore,
         node: NodeId,
         _offset: u64,
-        _data: &[u8],
-    ) -> Result<usize, FileSystemError> {
+        _len: usize,
+    ) -> Result<Window, FileSystemError> {
         Err(self.refuse_change(node))
     }
 
-    fn append(
-        &mut self,
-        _stores: &mut dyn ByteStore,
-        node: NodeId,
-        _data: &[u8],
-    ) -> Result<u64, FileSystemError> {
+    fn commit_write(&mut self, node: NodeId, _end: u64) -> Result<(), FileSystemError> {
         Err(self.refuse_change(node))
     }
 
@@ -351,7 +334,7 @@ impl FileSystemBackend for ImageFileSystem {
         node: NodeId,
         from: DirCursor,
         out: &mut [u8],
-    ) -> Result<Listed, FileSystemError> {
+    ) -> Result<DirBatch, FileSystemError> {
         let node = self.locate(node)?;
         if node.is_file() {
             return Err(FileSystemError::NotADirectory);
@@ -367,17 +350,23 @@ impl FileSystemBackend for ImageFileSystem {
             // места: запись остаётся непросмотренной.
             let cursor = u32::try_from(index).map_err(|_| FileSystemError::NoSpace)?;
             let Some(rest) = out.get_mut(written..) else {
-                return Ok(Listed {
-                    count,
-                    next: DirCursor::from_raw(cursor),
-                    end: false,
+                return Ok(DirBatch {
+                    listed: Listed {
+                        count,
+                        next: DirCursor::from_raw(cursor),
+                        end: false,
+                    },
+                    len: written,
                 });
             };
             let Ok(len) = entry.encode(rest) else {
-                return Ok(Listed {
-                    count,
-                    next: DirCursor::from_raw(cursor),
-                    end: false,
+                return Ok(DirBatch {
+                    listed: Listed {
+                        count,
+                        next: DirCursor::from_raw(cursor),
+                        end: false,
+                    },
+                    len: written,
                 });
             };
             written += len;
@@ -385,27 +374,13 @@ impl FileSystemBackend for ImageFileSystem {
         }
         let end =
             u32::try_from(self.range_end(prefix, start)).map_err(|_| FileSystemError::NoSpace)?;
-        Ok(Listed {
-            count,
-            next: DirCursor::from_raw(end),
-            end: true,
-        })
-    }
-
-    fn backing(
-        &mut self,
-        _stores: &mut dyn ByteStore,
-        node: NodeId,
-    ) -> Result<Window, FileSystemError> {
-        let node = self.locate(node)?;
-        let size = node.data()?.len() as u64;
-        if size == 0 {
-            return Err(FileSystemError::NotSupported);
-        }
-        Ok(Window {
-            store: StoreId::MOUNT,
-            offset: node.record.offset,
-            size,
+        Ok(DirBatch {
+            listed: Listed {
+                count,
+                next: DirCursor::from_raw(end),
+                end: true,
+            },
+            len: written,
         })
     }
 
@@ -466,10 +441,11 @@ mod tests {
 
     impl ImageFileSystem {
         fn new(image: &'static [u8]) -> Result<Self, ImageFileSystemError> {
-            Ok(Self {
-                backend: Backend::new(image)?,
-                stores: HeapByteStore::new(),
-            })
+            let backend = Backend::new(image)?;
+            let mut stores = HeapByteStore::new();
+            let mount = crate::ByteStore::allocate(&mut stores, image.len()).expect("mount region");
+            crate::ByteStore::write(&mut stores, mount, 0, image).expect("mount bytes");
+            Ok(Self { backend, stores })
         }
     }
 
@@ -549,7 +525,7 @@ mod tests {
         capacity: usize,
     ) -> (Vec<(String, NodeKind)>, Listed) {
         let mut out = vec![0; capacity];
-        let listed = fs.list(node, from, &mut out).expect("list");
+        let listed = fs.list(node, from, &mut out).expect("list").listed;
         let mut entries = Vec::new();
         let mut offset = 0;
         for _ in 0..listed.count {

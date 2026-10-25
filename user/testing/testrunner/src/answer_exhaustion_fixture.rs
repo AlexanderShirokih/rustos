@@ -21,7 +21,8 @@ fn run(start: &Port) -> ExitCode {
     };
     let client =
         answer_exhaustion::Client::new(PortTransport::new(start.as_raw())).with_wait(SERVER_WAIT);
-    let code = match client.request() {
+
+    let code = match client.request().wait() {
         Ok(_) => ANSWERED_EXIT_CODE,
         Err(error) => exit_code_for(error),
     };

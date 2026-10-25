@@ -3,13 +3,14 @@
 //! кадр значка аренды прерывания либо сессии прерывания ушедшего устройства - протокол
 //! `SpmiInterrupt`, остальные кадры - протокол `Spmi`.
 
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
+use core::cell::{Ref, RefCell, RefMut};
 
-use component_startup::{SessionEvent, SessionPort};
-use ipc::IntoWireValue;
+use component_startup::SessionPort;
+use ipc::{Incoming, IntoWireValue, wire::IpcError};
 use kernel_objects::{Delivery, Port, Signal};
 use platform_abi::DeviceId;
-use runtime::{Mutex, log_fmt};
+use runtime::log_fmt;
 use spmi_abi::{DeviceError, SpmiError, Trigger, spmi, spmi_device, spmi_interrupt};
 use spmi_pmic_arb::{Arbiter, Interrupt, Peripheral};
 use syscall::{Rights, SIGNALED, WakeCount};
@@ -22,8 +23,8 @@ const SIGNAL_RIGHTS: Rights = Rights::READ
 
 pub(crate) struct Bus {
     pub(crate) arbiter: Option<Arbiter<Windows>>,
-    pub(crate) devices: Vec<Device>,
-    pub(crate) departed_interrupts: Vec<u64>,
+    pub(crate) devices: RefCell<Vec<Device>>,
+    pub(crate) departed_interrupts: RefCell<Vec<u64>>,
 }
 
 pub(crate) struct Device {
@@ -45,16 +46,19 @@ struct Lease {
 
 struct Opener<'a> {
     sessions: &'a SessionPort,
-    bus: &'a mut Bus,
+    bus: &'a Bus,
 }
 
 struct Held<'a> {
     sessions: &'a SessionPort,
-    arbiter: &'a Arbiter<Windows>,
-    holder: &'a mut Holder,
+    bus: &'a Bus,
+    badge: u64,
 }
 
-struct InterruptSession<'a>(Option<(&'a Arbiter<Windows>, &'a Lease)>);
+struct InterruptSession<'a> {
+    bus: &'a Bus,
+    badge: u64,
+}
 
 impl Bus {
     pub(crate) fn deliver(&self) {
@@ -63,7 +67,8 @@ impl Bus {
         };
 
         arbiter.drain(|ppid, bits| {
-            let fired = self.leases().filter(|lease| {
+            let devices = self.devices.borrow();
+            let fired = leases(&devices).filter(|lease| {
                 lease.interrupt.ppid == ppid && bits & (1 << lease.interrupt.bit) != 0
             });
             for lease in fired {
@@ -72,46 +77,85 @@ impl Bus {
         });
     }
 
-    fn release(&mut self, badge: u64) {
-        // Сброс аренды закрывает её `Signal` и отзывает его копии у клиентов.
-        if let Some(holder) = self
-            .devices
-            .iter_mut()
-            .find_map(|device| device.holder.take_if(|holder| holder.badge == badge))
-        {
-            self.departed_interrupts
-                .extend(holder.leases.iter().map(|lease| lease.badge));
-            self.revoke(&holder.leases);
-        } else if let Some(lease) = self.devices.iter_mut().find_map(|device| {
-            let leases = &mut device.holder.as_mut()?.leases;
-            let index = leases.iter().position(|lease| lease.badge == badge)?;
-            Some(leases.remove(index))
-        }) {
-            self.revoke(core::slice::from_ref(&lease));
-        } else {
-            self.departed_interrupts
-                .retain(|departed| *departed != badge);
-        }
-    }
+    pub(crate) fn release(&self, badge: u64) {
+        let revoked = {
+            let mut devices = self.devices.borrow_mut();
+            if let Some(holder) = devices
+                .iter_mut()
+                .find_map(|device| device.holder.take_if(|holder| holder.badge == badge))
+            {
+                self.departed_interrupts
+                    .borrow_mut()
+                    .extend(holder.leases.iter().map(|lease| lease.badge));
+                holder.leases
+            } else if let Some(lease) = devices.iter_mut().find_map(|device| {
+                let leases = &mut device.holder.as_mut()?.leases;
+                let index = leases.iter().position(|lease| lease.badge == badge)?;
+                Some(leases.remove(index))
+            }) {
+                vec![lease]
+            } else {
+                self.departed_interrupts
+                    .borrow_mut()
+                    .retain(|departed| *departed != badge);
+                Vec::new()
+            }
+        };
 
-    fn revoke(&self, revoked: &[Lease]) {
         if let Some(arbiter) = &self.arbiter {
-            revoke(arbiter, revoked, &leases(&self.devices));
+            revoke(arbiter, &revoked, &leases(&self.devices.borrow()));
         }
     }
 
-    fn lease(&self, badge: u64) -> Option<&Lease> {
-        self.leases().find(|lease| lease.badge == badge)
+    fn lease(&self, badge: u64) -> Option<Ref<'_, Lease>> {
+        Ref::filter_map(self.devices.borrow(), |devices| {
+            leases(devices).find(|lease| lease.badge == badge)
+        })
+        .ok()
     }
 
-    fn leases(&self) -> impl Iterator<Item = &Lease> {
-        leases(&self.devices)
+    pub(crate) fn dispatch(
+        &self,
+        sessions: &SessionPort,
+        frame: Incoming<'_, Delivery>,
+    ) -> Result<(), IpcError> {
+        let badge = frame.resources.badge;
+        let interrupt =
+            self.lease(badge).is_some() || self.departed_interrupts.borrow().contains(&badge);
+        if interrupt {
+            return spmi_interrupt::dispatch(&InterruptSession { bus: self, badge }, frame);
+        }
+
+        let held = self.devices.borrow().iter().any(|device| {
+            device
+                .holder
+                .as_ref()
+                .is_some_and(|holder| holder.badge == badge)
+        });
+        if held && self.arbiter.is_some() {
+            spmi_device::dispatch(
+                &Held {
+                    sessions,
+                    bus: self,
+                    badge,
+                },
+                frame,
+            )
+        } else {
+            spmi::dispatch(
+                &Opener {
+                    sessions,
+                    bus: self,
+                },
+                frame,
+            )
+        }
     }
 }
 
 impl Opener<'_> {
-    fn open(&mut self, device: &DeviceId, count: Option<u8>) -> Result<Port, SpmiError> {
-        let devices = &mut self.bus.devices;
+    fn open(&self, device: &DeviceId, count: Option<u8>) -> Result<Port, SpmiError> {
+        let mut devices = self.bus.devices.borrow_mut();
         let index = devices
             .iter()
             .position(|each| each.peripheral.id() == device)
@@ -146,7 +190,7 @@ impl Opener<'_> {
             ));
         }
 
-        if let Some(device) = self.bus.devices.get_mut(index) {
+        if let Some(device) = devices.get_mut(index) {
             device.holder = Some(Holder {
                 badge: minted.badge.get(),
                 peripheral,
@@ -158,9 +202,10 @@ impl Opener<'_> {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl spmi::Service<Delivery> for Opener<'_> {
     fn open(
-        &mut self,
+        &self,
         _frame: &Delivery,
         device: DeviceId,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<spmi_device::Protocol>, SpmiError>>
@@ -170,7 +215,7 @@ impl spmi::Service<Delivery> for Opener<'_> {
     }
 
     fn open_blocks(
-        &mut self,
+        &self,
         _frame: &Delivery,
         device: DeviceId,
         count: u8,
@@ -181,14 +226,25 @@ impl spmi::Service<Delivery> for Opener<'_> {
 }
 
 impl Held<'_> {
-    fn lease(&self, interrupt: Interrupt) -> Option<&Lease> {
-        self.holder.leases.iter().find(|lease| {
-            lease.interrupt.ppid == interrupt.ppid && lease.interrupt.bit == interrupt.bit
+    fn holder(&self) -> Result<RefMut<'_, Holder>, DeviceError> {
+        RefMut::filter_map(self.bus.devices.borrow_mut(), |devices| {
+            devices
+                .iter_mut()
+                .filter_map(|device| device.holder.as_mut())
+                .find(|holder| holder.badge == self.badge)
         })
+        .map_err(|_| DeviceError::Unavailable)
     }
 
-    fn grant(&mut self, interrupt: Interrupt) -> Result<Port, DeviceError> {
-        if self.lease(interrupt).is_some() {
+    fn arbiter(&self) -> Result<&Arbiter<Windows>, DeviceError> {
+        self.bus.arbiter.as_ref().ok_or(DeviceError::Unavailable)
+    }
+
+    fn grant(&self, interrupt: Interrupt) -> Result<Port, DeviceError> {
+        let mut holder = self.holder()?;
+        if holder.leases.iter().any(|lease| {
+            lease.interrupt.ppid == interrupt.ppid && lease.interrupt.bit == interrupt.bit
+        }) {
             return Err(DeviceError::Busy);
         }
 
@@ -197,58 +253,55 @@ impl Held<'_> {
             .sessions
             .create_session()
             .map_err(|_| DeviceError::Unavailable)?;
-
-        // Порт сессии, которой `arm` отказал, уходит без аренды, и шина пропускает её `Gone`.
-        self.arbiter.arm(&interrupt)?;
-        self.holder.leases.push(Lease {
+        self.arbiter()?.arm(&interrupt)?;
+        holder.leases.push(Lease {
             badge: minted.badge.get(),
             interrupt,
             signal,
         });
-
         Ok(minted.port)
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl spmi_device::Service<Delivery> for Held<'_> {
-    fn read(&mut self, _frame: &Delivery, address: u16, count: u8) -> Result<u64, DeviceError> {
-        let span = self.holder.peripheral.span(address, count)?;
-        self.arbiter.read(span.ppid, span.offset, count)
+    fn read(&self, _frame: &Delivery, address: u16, count: u8) -> Result<u64, DeviceError> {
+        let span = self.holder()?.peripheral.span(address, count)?;
+        self.arbiter()?.read(span.ppid, span.offset, count)
     }
 
     fn write(
-        &mut self,
+        &self,
         _frame: &Delivery,
         address: u16,
         count: u8,
         value: u64,
     ) -> Result<(), DeviceError> {
-        let span = self.holder.peripheral.span(address, count)?;
-        self.arbiter.write(span.ppid, span.offset, count, value)
+        let span = self.holder()?.peripheral.span(address, count)?;
+        self.arbiter()?.write(span.ppid, span.offset, count, value)
     }
 
     fn update(
-        &mut self,
+        &self,
         _frame: &Delivery,
         address: u16,
         mask: u8,
         value: u8,
     ) -> Result<(), DeviceError> {
-        // Кадр обслуживается под замком шины, и чтение с записью не перемежаются командами
-        // других сессий.
-        let span = self.holder.peripheral.span(address, 1)?;
-        self.arbiter.update(span.ppid, span.offset, mask, value)
+        // Чтение с записью выполняются в одном poll без уступки другим задачам.
+        let span = self.holder()?.peripheral.span(address, 1)?;
+        self.arbiter()?.update(span.ppid, span.offset, mask, value)
     }
 
     fn irq(
-        &mut self,
+        &self,
         _frame: &Delivery,
         resource: u16,
     ) -> impl IntoWireValue<
         Delivery,
         Read = Result<ipc::wire::Session<spmi_interrupt::Protocol>, DeviceError>,
     > {
-        let interrupt = self.holder.peripheral.interrupt(resource)?;
+        let interrupt = self.holder()?.peripheral.interrupt(resource)?;
         // Порт сессии прерывания выпускает эта шина, и она же обслуживает на нём
         // `SpmiInterrupt`.
         self.grant(interrupt)
@@ -256,7 +309,7 @@ impl spmi_device::Service<Delivery> for Held<'_> {
     }
 
     fn block_irq(
-        &mut self,
+        &self,
         _frame: &Delivery,
         block: u8,
         bit: u8,
@@ -266,7 +319,7 @@ impl spmi_device::Service<Delivery> for Held<'_> {
         Read = Result<ipc::wire::Session<spmi_interrupt::Protocol>, DeviceError>,
     > {
         let interrupt = self
-            .holder
+            .holder()?
             .peripheral
             .block_interrupt(block, bit, trigger)?;
         self.grant(interrupt)
@@ -274,21 +327,23 @@ impl spmi_device::Service<Delivery> for Held<'_> {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl spmi_interrupt::Service<Delivery> for InterruptSession<'_> {
     fn signal(
-        &mut self,
+        &self,
         _frame: &Delivery,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Cap<syscall::kind::Signal>, DeviceError>>
     {
-        let (_, lease) = self.0.ok_or(DeviceError::Unavailable)?;
+        let lease = self.bus.lease(self.badge).ok_or(DeviceError::Unavailable)?;
         lease
             .signal
             .duplicate(SIGNAL_RIGHTS, None)
             .map_err(|_| DeviceError::Unavailable)
     }
 
-    fn ack(&mut self, _frame: &Delivery) -> Result<(), DeviceError> {
-        let (arbiter, lease) = self.0.ok_or(DeviceError::Unavailable)?;
+    fn ack(&self, _frame: &Delivery) -> Result<(), DeviceError> {
+        let arbiter = self.bus.arbiter.as_ref().ok_or(DeviceError::Unavailable)?;
+        let lease = self.bus.lease(self.badge).ok_or(DeviceError::Unavailable)?;
 
         lease
             .signal
@@ -324,47 +379,4 @@ fn leases(devices: &[Device]) -> impl Iterator<Item = &Lease> + Clone {
         .iter()
         .filter_map(|device| device.holder.as_ref())
         .flat_map(|holder| holder.leases.iter())
-}
-
-pub(crate) fn serve(bus: &Mutex<Bus>, sessions: &SessionPort) {
-    let mut events = sessions.events();
-
-    while let Some(event) = events.recv() {
-        match event {
-            SessionEvent::Frame(frame) => {
-                let badge = frame.resources.badge;
-                let mut bus = bus.lock();
-
-                let lease = bus.arbiter.as_ref().zip(bus.lease(badge));
-                if lease.is_some() || bus.departed_interrupts.contains(&badge) {
-                    let _ = spmi_interrupt::dispatch(&mut InterruptSession(lease), frame);
-                    continue;
-                }
-
-                let Bus {
-                    arbiter, devices, ..
-                } = &mut *bus;
-                let holder = devices
-                    .iter_mut()
-                    .filter_map(|device| device.holder.as_mut())
-                    .find(|holder| holder.badge == badge);
-
-                if let Some((arbiter, holder)) = arbiter.as_ref().zip(holder) {
-                    let mut held = Held {
-                        sessions,
-                        arbiter,
-                        holder,
-                    };
-                    let _ = spmi_device::dispatch(&mut held, frame);
-                } else {
-                    let mut opener = Opener {
-                        sessions,
-                        bus: &mut bus,
-                    };
-                    let _ = spmi::dispatch(&mut opener, frame);
-                }
-            }
-            SessionEvent::Gone(badge) => bus.lock().release(badge),
-        }
-    }
 }

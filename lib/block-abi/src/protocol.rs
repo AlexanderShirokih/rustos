@@ -30,12 +30,12 @@ ipc::protocol! {
         /// - `BufferTooSmall` - `count` блоков длиннее `size`, с которым выделен буфер;
         /// - `OutOfRange` - `lba + count` больше числа блоков либо не помещается в `u64`;
         /// - `Device` - устройство ответило ошибкой, не ответило в срок либо диск в отказе.
-        call fn read(lba: u64, count: u32) -> Result<(), BlockError>;
+        call async fn read(lba: u64, count: u32) -> Result<(), BlockError>;
 
         /// Записывает на диск `count` блоков из начала буфера сессии начиная с блока `lba`.
         /// Нулевой `count` отвечает успехом без обращения к устройству.
         ///
         /// Отказы те же, что у `read`.
-        call fn write(lba: u64, count: u32) -> Result<(), BlockError>;
+        call async fn write(lba: u64, count: u32) -> Result<(), BlockError>;
     }
 }

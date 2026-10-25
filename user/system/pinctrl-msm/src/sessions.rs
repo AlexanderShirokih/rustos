@@ -2,115 +2,144 @@
 //! Кадр значка сессии узла обслуживает протокол `DevicePins`, остальные кадры - протокол
 //! `Pins`.
 
-use component_startup::{SessionEvent, SessionPort};
-use ipc::IntoWireValue;
+use alloc::rc::Rc;
+use core::cell::RefCell;
+
+use component_startup::SessionPort;
+use executor::{Either, TaskHandle};
+use ipc::{Incoming, IntoWireValue, ServiceOwner, wire::IpcError};
 use kernel_objects::{Delivery, Port};
 use pinctrl_msm::Line;
 use pins_abi::{Claims, Direction, Lines, PinsError, Record, device_pins, pins};
-use platform_abi::{Description, DeviceId};
-use runtime::Mutex;
+use platform_abi::{DeviceId, MappedDescription};
 
 use crate::hardware::Hardware;
 
-pub(crate) struct Controller<'d> {
-    pub(crate) description: &'d Description<'d>,
-    pub(crate) hardware: &'d Mutex<Hardware>,
-    pub(crate) claims: Claims,
-    pub(crate) lines: Lines<Line>,
+pub(crate) struct Controller {
+    pub(crate) description: MappedDescription,
+    pub(crate) hardware: Rc<RefCell<Hardware>>,
+    pub(crate) claims: RefCell<Claims>,
+    pub(crate) lines: RefCell<Lines<Line>>,
+    pub(crate) sessions: Rc<SessionPort>,
+    pub(crate) _interrupts: TaskHandle,
 }
 
-struct Opener<'a, 'd> {
-    sessions: &'a SessionPort,
-    controller: &'a mut Controller<'d>,
-}
-
-struct Held<'a, 'd> {
-    controller: &'a mut Controller<'d>,
+#[derive(Clone)]
+struct Held {
+    controller: Rc<Controller>,
     badge: u64,
 }
 
-impl Controller<'_> {
-    fn release(&mut self, badge: u64) {
-        self.hardware.lock().release(badge);
-        self.lines.release(badge);
-        self.claims.release(badge);
+impl ServiceOwner for Held {
+    type Service = Self;
+
+    fn service(&self) -> &Self {
+        self
     }
 }
 
-impl Opener<'_, '_> {
-    fn open(&mut self, device: DeviceId) -> Result<Port, PinsError> {
-        let plan = self.controller.hardware.lock().tlmm.plan(
-            self.controller.description,
-            &device,
-            &self.controller.claims,
-        )?;
+impl Controller {
+    pub(crate) fn release(&self, badge: u64) {
+        self.hardware.borrow_mut().release(badge);
+        self.lines.borrow_mut().release(badge);
+        self.claims.borrow_mut().release(badge);
+    }
+
+    pub(crate) fn serve(
+        controller: &Rc<Self>,
+        frame: Incoming<'_, Delivery>,
+    ) -> Result<Option<impl Future<Output = Result<(), IpcError>> + use<>>, IpcError> {
+        let badge = frame.resources.badge;
+        let call = if controller.lines.borrow().node(badge).is_some() {
+            let held = Held {
+                controller: controller.clone(),
+                badge,
+            };
+            device_pins::serve(&held, frame)?.map(Either::Left)
+        } else {
+            pins::serve(controller, frame)?.map(Either::Right)
+        };
+
+        Ok(call.map(Either::run))
+    }
+
+    fn open(&self, device: DeviceId) -> Result<Port, PinsError> {
+        let description = self
+            .description
+            .description()
+            .map_err(|_| PinsError::NoDevice)?;
+        let plan =
+            self.hardware
+                .borrow()
+                .tlmm
+                .plan(&description, &device, &self.claims.borrow())?;
         let minted = self
             .sessions
             .create_session()
             .map_err(|_| PinsError::NoSpace)?;
         let badge = minted.badge.get();
 
-        self.controller.hardware.lock().tlmm.apply(&plan);
-        plan.claim(&mut self.controller.claims, badge);
-        self.controller.lines.open(badge, device);
-
+        self.hardware.borrow().tlmm.apply(&plan);
+        plan.claim(&mut self.claims.borrow_mut(), badge);
+        self.lines.borrow_mut().open(badge, device);
         Ok(minted.port)
     }
 }
 
-impl pins::Service<Delivery> for Opener<'_, '_> {
-    fn open(
-        &mut self,
+#[allow(clippy::unused_async_trait_impl)]
+impl pins::Service<Delivery> for Controller {
+    async fn open(
+        &self,
         _frame: &Delivery,
         device: DeviceId,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<device_pins::Protocol>, PinsError>>
     {
         // Порт сессии выводов выпускает этот контроллер, и он же обслуживает на нём
         // `DevicePins`.
-        Opener::open(self, device).map(kernel_objects::Session::from_handle)
+        Controller::open(self, device).map(kernel_objects::Session::from_handle)
     }
 }
 
-impl Held<'_, '_> {
+impl Held {
     fn issue(
-        &mut self,
+        &self,
         node: DeviceId,
         record: Record<'_>,
         index: u8,
         direction: Direction,
         active: bool,
     ) -> Result<u8, PinsError> {
-        let controller = &mut *self.controller;
-        let issued = controller
-            .lines
-            .find(self.badge, &node, record, index, direction)?;
+        let controller = &self.controller;
+        let description = controller
+            .description
+            .description()
+            .map_err(|_| PinsError::NoDevice)?;
+        let mut lines = controller.lines.borrow_mut();
+        let mut claims = controller.claims.borrow_mut();
+        let hardware = controller.hardware.borrow();
+
+        let issued = lines.find(self.badge, &node, record, index, direction)?;
         if let Some(number) = issued {
             if direction == Direction::Output {
-                let line = controller.lines.get(self.badge, number)?;
-                controller.hardware.lock().tlmm.set(line, active);
+                let line = lines.get(self.badge, number)?;
+                hardware.tlmm.set(line, active);
             }
+
             return Ok(number);
         }
 
-        let session = controller
-            .lines
-            .node(self.badge)
-            .ok_or(PinsError::NotIssued)?;
-        let hardware = controller.hardware.lock();
+        let session = lines.node(self.badge).ok_or(PinsError::NotIssued)?;
+
         let line = match record {
-            Record::Line(name) => {
-                hardware
-                    .tlmm
-                    .line(controller.description, session, &node, name, index)?
-            }
-            Record::Interrupt => {
-                hardware
-                    .tlmm
-                    .interrupt(controller.description, session, &node, index)?
-            }
+            Record::Line(name) => hardware
+                .tlmm
+                .line(&description, session, &node, name, index)?,
+            Record::Interrupt => hardware
+                .tlmm
+                .interrupt(&description, session, &node, index)?,
         };
-        if controller
-            .claims
+
+        if claims
             .holder(&line.pin)
             .is_some_and(|holder| holder != self.badge)
         {
@@ -119,8 +148,7 @@ impl Held<'_, '_> {
 
         // Выход перенастроил бы вход и его прерывание на том же выводе, даже выданный по другой
         // записи узла.
-        let crossed = controller
-            .lines
+        let crossed = lines
             .issued(self.badge)
             .any(|issued| issued.line.pin == line.pin && issued.direction != direction);
         if crossed {
@@ -131,17 +159,16 @@ impl Held<'_, '_> {
             Direction::Input => hardware.tlmm.input(&line),
             Direction::Output => hardware.tlmm.output(&line, active),
         }
-        drop(hardware);
-        controller.claims.claim_pin(self.badge, line.pin.clone());
-        controller
-            .lines
-            .issue(self.badge, node, record, index, direction, line)
+
+        claims.claim_pin(self.badge, line.pin.clone());
+        lines.issue(self.badge, node, record, index, direction, line)
     }
 }
 
-impl device_pins::Service<Delivery> for Held<'_, '_> {
-    fn input(
-        &mut self,
+#[allow(clippy::unused_async_trait_impl)]
+impl device_pins::Service<Delivery> for Held {
+    async fn input(
+        &self,
         _frame: &Delivery,
         node: DeviceId,
         name: &str,
@@ -151,7 +178,7 @@ impl device_pins::Service<Delivery> for Held<'_, '_> {
     }
 
     fn output(
-        &mut self,
+        &self,
         _frame: &Delivery,
         node: DeviceId,
         name: &str,
@@ -161,56 +188,43 @@ impl device_pins::Service<Delivery> for Held<'_, '_> {
         self.issue(node, Record::Line(name), index, Direction::Output, active)
     }
 
-    fn interrupt(&mut self, _frame: &Delivery, node: DeviceId, index: u8) -> Result<u8, PinsError> {
+    fn interrupt(&self, _frame: &Delivery, node: DeviceId, index: u8) -> Result<u8, PinsError> {
         self.issue(node, Record::Interrupt, index, Direction::Input, false)
     }
 
-    fn active(&mut self, _frame: &Delivery, line: u8) -> Result<bool, PinsError> {
-        let line = self.controller.lines.get(self.badge, line)?;
-        Ok(self.controller.hardware.lock().tlmm.active(line))
+    async fn active(&self, _frame: &Delivery, line: u8) -> Result<bool, PinsError> {
+        let lines = self.controller.lines.borrow();
+        let line = lines.get(self.badge, line)?;
+        Ok(self.controller.hardware.borrow().tlmm.active(line))
     }
 
-    fn set(&mut self, _frame: &Delivery, line: u8, active: bool) -> Result<(), PinsError> {
-        let line = self.controller.lines.output(self.badge, line)?;
-        self.controller.hardware.lock().tlmm.set(line, active);
+    fn set(&self, _frame: &Delivery, line: u8, active: bool) -> Result<(), PinsError> {
+        let lines = self.controller.lines.borrow();
+        let line = lines.output(self.badge, line)?;
+        self.controller.hardware.borrow().tlmm.set(line, active);
         Ok(())
     }
 
-    fn irq(
-        &mut self,
+    async fn irq(
+        &self,
         _frame: &Delivery,
         line: u8,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Cap<syscall::kind::Signal>, PinsError>>
     {
-        let input = self.controller.lines.input(self.badge, line)?;
-        self.controller.hardware.lock().irq(self.badge, line, input)
+        let lines = self.controller.lines.borrow();
+        let input = lines.input(self.badge, line)?;
+        self.controller
+            .hardware
+            .borrow_mut()
+            .irq(self.badge, line, input)
     }
 
-    fn ack(&mut self, _frame: &Delivery, line: u8) -> Result<(), PinsError> {
-        let input = self.controller.lines.input(self.badge, line)?;
-        self.controller.hardware.lock().ack(self.badge, line, input)
-    }
-}
-
-pub(crate) fn serve(controller: &mut Controller<'_>, sessions: &SessionPort) {
-    let mut events = sessions.events();
-
-    while let Some(event) = events.recv() {
-        match event {
-            SessionEvent::Frame(frame) => {
-                let badge = frame.resources.badge;
-                if controller.lines.node(badge).is_some() {
-                    let mut held = Held { controller, badge };
-                    let _ = device_pins::dispatch(&mut held, frame);
-                } else {
-                    let mut opener = Opener {
-                        sessions,
-                        controller,
-                    };
-                    let _ = pins::dispatch(&mut opener, frame);
-                }
-            }
-            SessionEvent::Gone(badge) => controller.release(badge),
-        }
+    async fn ack(&self, _frame: &Delivery, line: u8) -> Result<(), PinsError> {
+        let lines = self.controller.lines.borrow();
+        let input = lines.input(self.badge, line)?;
+        self.controller
+            .hardware
+            .borrow()
+            .ack(self.badge, line, input)
     }
 }

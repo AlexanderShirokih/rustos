@@ -90,6 +90,7 @@ dependencies = [
  "application-abi",
  "component-startup",
  "display-abi",
+ "executor",
  "input-abi",
  "ipc",
  "kernel-objects",
@@ -484,8 +485,8 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "components",
+ "executor",
  "ipc",
- "kernel-objects",
  "rtc-abi",
  "userland-build",
 ]
@@ -597,11 +598,14 @@ version = "0.1.0"
 dependencies = [
  "clocks-abi",
  "component-startup",
+ "executor",
+ "ipc",
  "kernel-objects",
  "mmio",
  "platform-abi",
  "program-entry",
  "runtime",
+ "syscall",
  "userland-build",
 ]
 
@@ -953,6 +957,7 @@ dependencies = [
  "c-library",
  "component-startup",
  "display-abi",
+ "executor",
  "filesystem-abi",
  "input-abi",
  "ipc",
@@ -973,6 +978,7 @@ name = "driver-gpio-keys"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "input-abi",
  "ipc",
  "kernel-objects",
@@ -989,6 +995,7 @@ name = "driver-novatek-nvt-ts"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "i2c-abi",
  "input-abi",
  "ipc",
@@ -1006,6 +1013,7 @@ name = "driver-pl031"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "io",
  "ipc",
  "kernel-objects",
@@ -1013,6 +1021,7 @@ dependencies = [
  "program-entry",
  "rtc-abi",
  "runtime",
+ "syscall",
  "userland-build",
 ]
 
@@ -1021,6 +1030,7 @@ name = "driver-pm8941-pwrkey"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "input-abi",
  "ipc",
  "kernel-objects",
@@ -1037,6 +1047,7 @@ name = "driver-pm8941-rtc"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "ipc",
  "kernel-objects",
  "platform-abi",
@@ -1054,6 +1065,7 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "display-abi",
+ "executor",
  "ipc",
  "kernel-objects",
  "platform-abi",
@@ -1069,6 +1081,7 @@ version = "0.1.0"
 dependencies = [
  "block-abi",
  "component-startup",
+ "executor",
  "ipc",
  "kernel-objects",
  "program-entry",
@@ -1086,6 +1099,7 @@ version = "0.1.0"
 dependencies = [
  "component-startup",
  "display-abi",
+ "executor",
  "ipc",
  "kernel-objects",
  "program-entry",
@@ -1102,6 +1116,7 @@ name = "driver-virtio-input"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "input-abi",
  "ipc",
  "kernel-objects",
@@ -1314,6 +1329,7 @@ version = "0.1.0"
 dependencies = [
  "application-abi",
  "components",
+ "executor",
  "filesystem-abi",
  "slint",
  "slint-build",
@@ -1394,6 +1410,7 @@ version = "0.1.0"
 dependencies = [
  "component-abi",
  "component-startup",
+ "executor",
  "filesystem",
  "filesystem-abi",
  "ipc",
@@ -2236,6 +2253,7 @@ version = "0.1.0"
 dependencies = [
  "clocks-abi",
  "component-startup",
+ "executor",
  "i2c-abi",
  "ipc",
  "kernel-objects",
@@ -2672,6 +2690,7 @@ dependencies = [
  "application-abi",
  "component-startup",
  "components",
+ "executor",
  "ipc",
  "kernel-objects",
  "log-abi",
@@ -2743,6 +2762,7 @@ dependencies = [
  "component-startup",
  "components",
  "display-abi",
+ "executor",
  "input-abi",
  "ipc",
  "kernel-objects",
@@ -3023,6 +3043,7 @@ dependencies = [
  "bootstrap-abi",
  "component-abi",
  "component-startup",
+ "executor",
  "filesystem-abi",
  "ipc",
  "kernel-objects",
@@ -3716,6 +3737,7 @@ version = "0.1.0"
 dependencies = [
  "application-abi",
  "components",
+ "executor",
  "slint",
  "slint-build",
  "slint-display",
@@ -3771,6 +3793,7 @@ name = "pinctrl-msm"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "ipc",
  "kernel-objects",
  "mmio",
@@ -3787,6 +3810,7 @@ name = "pinctrl-spmi-gpio"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "ipc",
  "kernel-objects",
  "pins-abi",
@@ -3837,6 +3861,7 @@ dependencies = [
  "bootstrap-abi",
  "component-startup",
  "device-resolver",
+ "executor",
  "fdt",
  "ipc",
  "kernel-objects",
@@ -4167,6 +4192,7 @@ dependencies = [
  "bootstrap-abi",
  "component-abi",
  "component-startup",
+ "executor",
  "ipc",
  "kernel-objects",
  "log-abi",
@@ -4543,6 +4569,7 @@ dependencies = [
  "application-window",
  "component-startup",
  "display-abi",
+ "executor",
  "input-abi",
  "ipc",
  "kernel-objects",
@@ -4560,6 +4587,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "spin_on",
+]
+
+[[package]]
+name = "slint-selftest"
+version = "0.1.0"
+dependencies = [
+ "component-startup",
+ "components",
+ "display-abi",
+ "executor",
+ "input-abi",
+ "ipc",
+ "kernel-objects",
+ "slint",
+ "slint-build",
+ "slint-display",
+ "syscall",
+ "userland-build",
 ]
 
 [[package]]
@@ -4680,6 +4725,7 @@ name = "spmi-pmic-arb"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "ipc",
  "kernel-objects",
  "mmio",
@@ -5343,6 +5389,7 @@ version = "0.1.0"
 name = "virtio-driver"
 version = "0.1.0"
 dependencies = [
+ "executor",
  "ipc",
  "kernel-objects",
  "runtime",
@@ -5356,6 +5403,7 @@ name = "virtio-mmio"
 version = "0.1.0"
 dependencies = [
  "component-startup",
+ "executor",
  "ipc",
  "kernel-objects",
  "platform-abi",

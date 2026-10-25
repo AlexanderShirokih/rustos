@@ -9,11 +9,13 @@ extern crate alloc;
 mod boot;
 mod component;
 pub mod relay;
+mod server;
 mod system;
 
 pub use boot::{BootFailure, run};
 pub use component::{Component, ImporterRequirement};
+pub use server::serve;
 pub use system::{
     AddFailure, BUDGET_RETURN_TIMEOUT, BudgetFailure, ImporterRefusal, RecordState, RootSystem,
-    SEARCH_LIMITS, SearchLimits, Stopped, SystemImage, turn,
+    SEARCH_LIMITS, SearchLimits, Stopped, SystemImage,
 };

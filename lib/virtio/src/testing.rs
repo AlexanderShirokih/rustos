@@ -138,14 +138,16 @@ impl FakeRegisters {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl Registers for FakeRegisters {
     type Error = RegisterFailure;
 
-    fn read(&self, offset: usize) -> Result<u32, RegisterFailure> {
+    async fn read(&self, offset: usize) -> Result<u32, RegisterFailure> {
         self.log.push(Event::Read(offset));
         if self.read_refused == Some(offset) {
             return Err(RegisterFailure::Read(offset));
         }
+
         if offset == register::DEVICE_FEATURES {
             let select = self
                 .values
@@ -155,24 +157,27 @@ impl Registers for FakeRegisters {
             let half = (self.features >> (32 * select)) & u64::from(u32::MAX);
             return u32::try_from(half).map_err(|_| RegisterFailure::Read(offset));
         }
+
         Ok(self.values.get(&offset).copied().unwrap_or(0))
     }
 
-    fn write(&mut self, offset: usize, value: u32) -> Result<(), RegisterFailure> {
+    async fn write(&mut self, offset: usize, value: u32) -> Result<(), RegisterFailure> {
         self.log.push(Event::Write(offset, value));
         if self.write_refused == Some(offset) {
             return Err(RegisterFailure::Write(offset));
         }
+
         let stored = match offset {
             register::STATUS if value == 0 && !self.completes_reset => status::ACKNOWLEDGE,
             register::STATUS if !self.accepts_features => value & !status::FEATURES_OK,
             _ => value,
         };
+
         self.values.insert(offset, stored);
         Ok(())
     }
 
-    fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, RegisterFailure> {
+    async fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, RegisterFailure> {
         self.log.push(Event::ConfigRead(offset, width));
         let mut value = [0; 4];
         let field = self
@@ -183,7 +188,7 @@ impl Registers for FakeRegisters {
         Ok(u32::from_le_bytes(value))
     }
 
-    fn write_config(
+    async fn write_config(
         &mut self,
         offset: usize,
         width: AccessWidth,
@@ -257,5 +262,15 @@ fn bytes(width: AccessWidth) -> usize {
         AccessWidth::Byte => 1,
         AccessWidth::Half => 2,
         AccessWidth::Word => 4,
+    }
+}
+
+pub(crate) fn complete<F: core::future::Future>(future: F) -> F::Output {
+    let mut future = core::pin::pin!(future);
+    match future.as_mut().poll(&mut core::task::Context::from_waker(
+        core::task::Waker::noop(),
+    )) {
+        core::task::Poll::Ready(output) => output,
+        core::task::Poll::Pending => panic!("register model waited for an external event"),
     }
 }

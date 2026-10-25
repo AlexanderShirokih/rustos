@@ -21,7 +21,7 @@ fn system_info() -> SystemInfo {
 }
 
 fn snapshot(system_info: &SystemInfo) -> SystemSnapshot {
-    system_info.snapshot().expect("snapshot answered")
+    system_info.snapshot().wait().expect("snapshot answered")
 }
 
 fn settled_snapshot(system_info: &SystemInfo) -> SystemSnapshot {
@@ -49,7 +49,9 @@ fn available_cpu_nodes() -> u32 {
     let fdt = crate::hardware_session()
         .client()
         .acquire_boot_fdt()
+        .wait()
         .expect("boot fdt granted");
+
     let offset = usize::try_from(fdt.offset).expect("fdt offset fits usize");
     let region = MemoryRegion::from(fdt.region);
     let mapping = ReadOnlyMapping::new(region).expect("boot fdt maps read-only");

@@ -16,7 +16,7 @@ pub type Found = component_abi::Found<Session<component_startup::Protocol>>;
 
 /// Клиент стартовой сессии для задач `executor`. Ответ родителя задача ждёт через reactor
 /// канала.
-pub type AsyncStartup = component_startup::AsyncClient<PortChannel>;
+pub type AsyncStartup = component_startup::Client<PortChannel>;
 
 type ReceivedFound = component_abi::Found<IssuedHandle<kind::Port>>;
 
@@ -34,49 +34,57 @@ pub fn session<P: ipc::Protocol>(
     attributes: Attributes<'_>,
     wait: Timeout,
 ) -> Result<Session<P>, CallError<SessionError>> {
-    component_startup::Client::new(PortTransport::new(parent))
-        .with_wait(wait)
-        .session(query::<P>(requirement), attributes.as_bytes())
+    let parent = component_startup::Client::new(PortTransport::new(parent)).with_wait(wait);
+    session_request::<P, _>(&parent, requirement, attributes)
+        .wait()
+        .map(owned_session)
+}
+
+/// Запрашивает сессию экспорта как [`session`]. Ответ родителя задача ждёт через `reactor`.
+/// Срок покрывает приём заявки провайдером и его ответ.
+pub async fn session_async<P: ipc::Protocol>(
+    parent: Handle<kind::Port>,
+    reactor: &Reactor,
+    requirement: &str,
+    attributes: Attributes<'_>,
+    wait: Timeout,
+) -> Result<Session<P>, CallError<SessionError>> {
+    let parent = AsyncStartup::new(PortChannel::new(parent, reactor.clone())).with_wait(wait);
+    session_request::<P, _>(&parent, requirement, attributes)
+        .await
         .map(owned_session)
 }
 
 /// Запрашивает перечисление экспортов протокола `P`, совпавших с `attributes`, по требованию
-/// `requirement` вида `all`.
-pub fn all<P: ipc::Protocol>(
-    parent: &component_startup::Client<PortTransport>,
+/// `requirement` вида `all`. Ответ задача ждёт через reactor клиента `parent`.
+pub async fn all<P: ipc::Protocol>(
+    parent: &AsyncStartup,
     requirement: &str,
     attributes: Attributes<'_>,
 ) -> Result<Session<component_startup::Protocol>, CallError<SessionError>> {
     parent
         .all(query::<P>(requirement), attributes.as_bytes())
+        .await
         .map(owned_session)
 }
 
 /// Запрашивает наблюдение за экспортами протокола `P`, совпавшими с `attributes`, по требованию
-/// `requirement` вида `all`. Результаты наблюдения выдаёт [`next`].
-pub fn watch<P: ipc::Protocol>(
-    parent: &component_startup::Client<PortTransport>,
+/// `requirement` вида `all`. Результаты наблюдения выдаёт [`next`]. Ответ задача ждёт через
+/// reactor клиента `parent`.
+pub async fn watch<P: ipc::Protocol>(
+    parent: &AsyncStartup,
     requirement: &str,
     attributes: Attributes<'_>,
 ) -> Result<Session<component_startup::Protocol>, CallError<SessionError>> {
     parent
         .watch(query::<P>(requirement), attributes.as_bytes())
+        .await
         .map(owned_session)
 }
 
-/// Забирает следующий результат перечисления либо наблюдения `enumeration`, ожидая ответ не
-/// дольше `wait`. `None` - конец перечисления.
-pub fn next(
-    enumeration: &Session<component_startup::Protocol>,
-    wait: Timeout,
-) -> Result<Option<Found>, CallError<SessionError>> {
-    let enumeration =
-        component_startup::Client::new(PortTransport::new(enumeration.handle())).with_wait(wait);
-
-    Ok(enumeration.next()?.map(owned_found))
-}
-
-pub(crate) async fn next_async(
+/// Забирает следующий результат перечисления либо наблюдения, ожидая ответ через `reactor`
+/// не дольше `wait`. `None` - конец перечисления.
+pub async fn next(
     enumeration: &Session<component_startup::Protocol>,
     reactor: &Reactor,
     wait: Timeout,
@@ -87,22 +95,9 @@ pub(crate) async fn next_async(
     Ok(enumeration.next().await?.map(owned_found))
 }
 
-/// Открывает сессию экспорта протокола `P` по результату поиска `found`, ожидая ответ не дольше
-/// `wait`. Результат другого протокола получает `Remote(SessionError::Refused)` без обращения к
-/// родителю.
-pub fn open<P: ipc::Protocol>(
-    found: &Found,
-    wait: Timeout,
-) -> Result<Session<P>, CallError<SessionError>> {
-    refuse_foreign::<P>(found)?;
-
-    component_startup::Client::new(PortTransport::new(found.session.handle()))
-        .with_wait(wait)
-        .open()
-        .map(owned_session)
-}
-
-pub(crate) async fn open_async<P: ipc::Protocol>(
+/// Открывает сессию экспорта протокола `P` по результату поиска `found`, ожидая ответ через
+/// `reactor` не дольше `wait`. Другой протокол даёт `Remote(SessionError::Refused)`.
+pub async fn open<P: ipc::Protocol>(
     found: &Found,
     reactor: &Reactor,
     wait: Timeout,
@@ -117,18 +112,19 @@ pub(crate) async fn open_async<P: ipc::Protocol>(
 }
 
 /// Забирает у родителя следующую заявку импортёра на экспорт протокола `P`.
-pub fn accept<P: ipc::Protocol>(
-    parent: &component_startup::Client<PortTransport>,
-) -> Result<SessionRequest, CallError<AcceptError>> {
-    parent.accept(P::ID)
-}
-
-/// Забирает у родителя следующую заявку импортёра на экспорт протокола `P`, как [`accept`].
 /// Ответ задача ждёт через reactor клиента `parent`.
-pub async fn accept_async<P: ipc::Protocol>(
+pub async fn accept<P: ipc::Protocol>(
     parent: &AsyncStartup,
 ) -> Result<SessionRequest, CallError<AcceptError>> {
     parent.accept(P::ID).await
+}
+
+fn session_request<'a, P: ipc::Protocol, C: ipc::Channel<Resources = kernel_objects::Delivery>>(
+    parent: &'a component_startup::Client<C>,
+    requirement: &str,
+    attributes: Attributes<'_>,
+) -> ipc::Call<'a, C, IssuedHandle<kind::Port>, CallError<SessionError>> {
+    parent.session(query::<P>(requirement), attributes.as_bytes())
 }
 
 fn refuse_foreign<P: ipc::Protocol>(found: &Found) -> Result<(), CallError<SessionError>> {

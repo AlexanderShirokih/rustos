@@ -36,7 +36,9 @@ fn run(requirements: TwoRequirementsStartup) -> ExitCode {
         Err(StartupError {
             requirement: "second",
             failure: StartupFailure::Refused,
-        }) if first.ping(PING) == Ok(PING) => ExitCode::from(SECOND_SESSION_REFUSED_EXIT_CODE),
+        }) if first.ping(PING).wait() == Ok(PING) => {
+            ExitCode::from(SECOND_SESSION_REFUSED_EXIT_CODE)
+        }
         _ => ExitCode::new(FAILED_EXIT_CODE),
     }
 }

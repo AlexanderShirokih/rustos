@@ -48,14 +48,16 @@ fn shown(importer: &Importer) -> Session<application::Protocol> {
     let input = Session::<input::Protocol>::from_handle(Port::create().expect("input port"));
     client(&session)
         .show(window, input)
+        .wait()
         .expect("show is answered");
+
     session
 }
 
 fn wait_closed(session: &Session<application::Protocol>) -> JoinHandle {
     let application = client(session);
     spawn_owned(move || {
-        u32::from(application.closed() == Err(CallError::Ipc(IpcError::PeerClosed)))
+        u32::from(application.closed().wait() == Err(CallError::Ipc(IpcError::PeerClosed)))
     })
     .expect("closed waiter spawns")
 }

@@ -13,12 +13,18 @@
 
 extern crate alloc;
 
+mod either;
 mod executor;
+mod mutex;
 mod port_channel;
 mod reactor;
+mod task;
 mod yield_now;
 
+pub use either::Either;
 pub use executor::Executor;
+pub use mutex::{Mutex, MutexGuard};
 pub use port_channel::PortChannel;
 pub use reactor::{Reactor, Sleep, Timed, Wait};
+pub use task::{JoinHandle, TaskHandle};
 pub use yield_now::{YieldNow, yield_now};

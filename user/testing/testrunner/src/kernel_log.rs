@@ -16,7 +16,7 @@ const SPARE_LINES: u64 = 16;
 #[test_harness::test]
 fn a_reader_behind_the_ring_capacity_gets_a_gap_with_the_overwritten_count() {
     let kernel = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()));
-    let ring = kernel.acquire_log().expect("kernel log granted");
+    let ring = kernel.acquire_log().wait().expect("kernel log granted");
     let region = MemoryRegion::from(ring.region);
     let region_bytes = region.inspect().expect("log region inspected").size_bytes;
     let mut consumer = LogConsumer::new(LogRing {
@@ -40,7 +40,10 @@ fn a_reader_behind_the_ring_capacity_gets_a_gap_with_the_overwritten_count() {
     }
     // Bootstrap обслуживает кадры по порядку, и ответ вызова приходит после записи строк.
     drop(MemoryRegion::from(
-        kernel.acquire_userland_image().expect("barrier answered"),
+        kernel
+            .acquire_userland_image()
+            .wait()
+            .expect("barrier answered"),
     ));
 
     let lost = match consumer.try_next() {

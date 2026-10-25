@@ -41,11 +41,12 @@ impl<C: Channel> hardware::Client<C> {
         };
 
         for index in 0.. {
-            let region = match self.acquire_device_memory(index) {
+            let region = match self.acquire_device_memory(index).wait() {
                 Ok(region) => region,
                 Err(ipc::CallError::Remote(_)) => return Ok(None),
                 Err(ipc::CallError::Ipc(error)) => return Err(error),
             };
+
             let window = W::from(region);
             let offset = window
                 .physical_range()
@@ -78,7 +79,7 @@ mod tests {
 
     impl hardware::Service<MockResources> for Vendor {
         fn acquire_irq_control(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::IrqControl>, u32>>
         {
@@ -86,14 +87,14 @@ mod tests {
         }
 
         fn acquire_boot_fdt(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl ipc::IntoWireValue<MockResources, Read = Result<crate::BootFdt, u32>> {
             Err::<crate::BootFdt<MockHandle<kind::MemoryRegion>>, u32>(1)
         }
 
         fn acquire_device_memory(
-            &mut self,
+            &self,
             _frame: &MockResources,
             index: u32,
         ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, u32>>
@@ -130,8 +131,8 @@ mod tests {
         let client = hardware::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
-                let mut vendor = Vendor;
-                let _ = server_end.serve_all(|frame| hardware::dispatch(&mut vendor, frame));
+                let vendor = Vendor;
+                let _ = server_end.serve_all(|frame| hardware::dispatch(&vendor, frame));
             });
             let result = body(&client);
             drop(client);

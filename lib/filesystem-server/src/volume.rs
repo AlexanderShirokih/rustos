@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use component_abi::{AttributeSet, Attributes};
 use filesystem_abi::FileSystemError;
 
-use crate::service::FileSystemState;
+use crate::{io::Exchange, service::FileSystemState};
 
 pub(crate) struct Volume {
     attributes: AttributeSet,
@@ -58,9 +58,9 @@ impl Volumes {
         self.volumes.get_mut(volume).map(|volume| &mut volume.state)
     }
 
-    pub(crate) fn remove_session(&mut self, badge: u64) {
-        for volume in &mut self.volumes {
-            volume.state.remove_session(badge);
-        }
+    pub(crate) fn remove_session(&mut self, badge: u64) -> Option<Exchange> {
+        self.volumes
+            .iter_mut()
+            .find_map(|volume| volume.state.remove_session(badge))
     }
 }

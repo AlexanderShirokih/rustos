@@ -10,11 +10,11 @@ use core::{
     time::Duration,
 };
 
-use component_startup::{Polled, SessionEvent, SessionEvents};
+use component_startup::{SessionEvent, SessionEvents};
 use executor::{Executor, Reactor, yield_now};
 use kernel_objects::{Error, Port, Signal};
 use runtime::{Instant, Mutex, Timeout, port_send, sleep, spawn_owned};
-use syscall::{READABLE, Rights, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem};
+use syscall::{Rights, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem};
 
 use crate::{fixture::JOIN_TIMEOUT, ipc_raw};
 
@@ -61,11 +61,10 @@ fn send_frame(session: Port, result: &'static AtomicI64) -> runtime::JoinHandle 
 async fn first_frame(reactor: &Reactor, port: &Port) -> kernel_objects::Result<u64> {
     let mut events = SessionEvents::new(port);
     loop {
-        match events.try_recv() {
-            Polled::Event(SessionEvent::Frame(frame)) => return Ok(frame.resources.badge),
-            Polled::Event(SessionEvent::Gone(_)) => {}
-            Polled::Empty => reactor.wait(WaitItem::new(port.as_raw(), READABLE)).await?,
-            Polled::Closed => return Err(Error::Syscall(SyscallError::BadHandle)),
+        match events.recv(reactor).await? {
+            Some(SessionEvent::Frame(frame)) => return Ok(frame.resources.badge),
+            Some(SessionEvent::Gone(_)) => {}
+            None => return Err(Error::Syscall(SyscallError::BadHandle)),
         }
     }
 }
@@ -116,23 +115,6 @@ fn executor_wakes_a_task_from_another_thread() {
     test_harness::check_eq!(value, HANDOFF_VALUE);
     test_harness::check!(handoff.woken.load(SeqCst));
     setter.join(JOIN_TIMEOUT).expect("setter joins");
-}
-
-#[test_harness::test]
-fn executor_runs_spawned_tasks() {
-    let executor = executor();
-    let flags = Rc::new([Cell::new(false), Cell::new(false)]);
-    for index in 0..2 {
-        let flags = Rc::clone(&flags);
-        executor.spawn(async move {
-            if let Some(flag) = flags.get(index) {
-                flag.set(true);
-            }
-        });
-    }
-
-    executor.block_on(until(|| flags.iter().all(Cell::get)));
-    test_harness::check!(flags.iter().all(Cell::get));
 }
 
 static FIRST_SEND: AtomicI64 = AtomicI64::new(i64::MIN);
@@ -361,4 +343,199 @@ fn executor_timeout_drops_a_wait_without_a_signal() {
 
     test_harness::check!(waited.is_none());
     test_harness::check!(dropped.get());
+}
+
+#[test_harness::test]
+fn executor_cancels_an_owned_task_while_it_is_being_polled() {
+    let executor = executor();
+    let holder = Rc::new(RefCell::new(None::<executor::TaskHandle>));
+    let owned = holder.clone();
+    let marker = Rc::new(());
+    let held = marker.clone();
+    let task = executor
+        .spawn_now(async move {
+            yield_now().await;
+            drop(owned.borrow_mut().take());
+            core::future::pending::<()>().await;
+            drop(held);
+        })
+        .abort_on_drop();
+    *holder.borrow_mut() = Some(task);
+    let reactor = executor.reactor();
+    let completed =
+        executor.block_on(reactor.timeout(SEND_TIMEOUT, until(|| Rc::strong_count(&marker) == 1)));
+    test_harness::check!(completed.is_some());
+    test_harness::check_eq!(Rc::strong_count(&marker), 1);
+    test_harness::check!(holder.borrow().is_none());
+}
+
+#[test_harness::test]
+fn executor_mutex_waits_without_stopping_tasks_and_cancels_waiters() {
+    let executor = executor();
+    let mutex = Rc::new(executor::Mutex::new(0));
+    let entered = Rc::new(Cell::new(false));
+    let cancelled_entered = Rc::new(Cell::new(false));
+    let unrelated = Rc::new(Cell::new(false));
+
+    executor.block_on(async {
+        let mut guard = mutex.lock().await;
+
+        let waiting = mutex.clone();
+        let cancelled = cancelled_entered.clone();
+        let abandoned = executor
+            .spawn_now(async move {
+                let _guard = waiting.lock().await;
+                cancelled.set(true);
+            })
+            .abort_on_drop();
+
+        let waiting = mutex.clone();
+        let completed = entered.clone();
+        let survivor = executor
+            .spawn_now(async move {
+                let mut guard = waiting.lock().await;
+                test_harness::check_eq!(*guard, 7);
+                *guard = 8;
+                completed.set(true);
+            })
+            .abort_on_drop();
+
+        drop(abandoned);
+        let other = unrelated.clone();
+        executor.spawn(async move { other.set(true) });
+
+        until(|| unrelated.get()).await;
+        test_harness::check!(!entered.get());
+        *guard = 7;
+        drop(guard);
+
+        let completed = executor
+            .reactor()
+            .timeout(SEND_TIMEOUT, until(|| entered.get()))
+            .await;
+        test_harness::check!(completed.is_some());
+        test_harness::check_eq!(*mutex.lock().await, 8);
+        test_harness::check!(!cancelled_entered.get());
+        test_harness::check!(survivor.is_finished());
+    });
+}
+
+#[test_harness::test]
+fn executor_mutex_releases_the_value_when_its_owner_is_cancelled() {
+    let executor = executor();
+    let mutex = Rc::new(executor::Mutex::new(0));
+    let protected = mutex.clone();
+    let owner = executor
+        .spawn_now(async move {
+            let mut guard = protected.lock().await;
+            *guard = 7;
+            core::future::pending::<()>().await;
+            drop(guard);
+        })
+        .abort_on_drop();
+
+    let waiting = mutex.clone();
+    let entered = Rc::new(Cell::new(false));
+    let completed = entered.clone();
+    let survivor = executor
+        .spawn_now(async move {
+            let guard = waiting.lock().await;
+            test_harness::check_eq!(*guard, 7);
+            completed.set(true);
+        })
+        .abort_on_drop();
+
+    drop(owner);
+
+    let completed = executor.block_on(
+        executor
+            .reactor()
+            .timeout(SEND_TIMEOUT, until(|| entered.get())),
+    );
+    test_harness::check!(completed.is_some());
+    test_harness::check!(survivor.is_finished());
+}
+
+#[test_harness::test]
+fn executor_wait_any_returns_the_index_and_releases_cancelled_registrations() {
+    let executor = executor();
+    let first = Signal::create().expect("first signal");
+    let second = Signal::create().expect("second signal");
+    let items = [
+        WaitItem::new(first.as_raw(), SIGNALED),
+        WaitItem::new(second.as_raw(), SIGNALED),
+    ];
+    let reactor = executor.reactor();
+
+    executor.block_on(async {
+        for _ in 0..WAIT_MANY_MAX_COUNT {
+            test_harness::check!(
+                reactor
+                    .timeout(Timeout::POLL, reactor.wait_any(&items))
+                    .await
+                    .is_none()
+            );
+        }
+
+        second.notify_all().expect("second signal raised");
+        test_harness::check_eq!(reactor.wait_any(&items).await, Ok(1));
+
+        for _ in 0..WAIT_MANY_MAX_COUNT {
+            test_harness::check!(
+                reactor
+                    .timeout(Timeout::POLL, reactor.wait_any(&items))
+                    .await
+                    .is_none()
+            );
+        }
+
+        test_harness::check_eq!(reactor.wait_any(&items).await, Ok(1));
+    });
+}
+
+#[test_harness::test]
+fn executor_keeps_operation_resources_after_its_result_waiter_is_dropped() {
+    let executor = executor();
+    let result = executor.spawn(async { 7 });
+    test_harness::check_eq!(executor.block_on(result), Some(7));
+
+    let marker = Rc::new(());
+    let held = marker.clone();
+    let entered = Rc::new(Cell::new(false));
+    let started = entered.clone();
+    let released = Rc::new(Cell::new(false));
+    let release = released.clone();
+    let finished = Rc::new(Cell::new(false));
+    let completed = finished.clone();
+    let result = executor.spawn(async move {
+        started.set(true);
+        until(|| release.get()).await;
+        drop(held);
+        completed.set(true);
+    });
+
+    drop(result);
+    let reactor = executor.reactor();
+    let completed = executor.block_on(reactor.timeout(SEND_TIMEOUT, async {
+        until(|| entered.get()).await;
+        test_harness::check_eq!(Rc::strong_count(&marker), 2);
+
+        released.set(true);
+        until(|| finished.get()).await;
+    }));
+    test_harness::check!(completed.is_some());
+    test_harness::check_eq!(Rc::strong_count(&marker), 1);
+
+    let cancelled = {
+        let executor = crate::executor::executor();
+        executor.spawn(core::future::pending::<()>())
+    };
+
+    let mut cancelled = core::pin::pin!(cancelled);
+    test_harness::check_eq!(
+        cancelled
+            .as_mut()
+            .poll(&mut core::task::Context::from_waker(Waker::noop())),
+        Poll::Ready(None)
+    );
 }

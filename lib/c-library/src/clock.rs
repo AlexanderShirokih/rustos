@@ -99,6 +99,7 @@ pub fn install_realtime_clock(rtc: Session<rtc::Protocol>) -> Result<(), Realtim
     let seconds = rtc
         .client()
         .now()
+        .wait()
         .map_err(|_| RealtimeClockError::Unavailable)?;
 
     if runtime::install_realtime(seconds) {

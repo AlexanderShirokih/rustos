@@ -2,15 +2,19 @@
 //! маппингами.
 //!
 //! Страницы маппинга бывают отображены ещё и в чужом адресном пространстве, где их читают и
-//! пишут параллельно. Доступ к маппингу идёт volatile-операциями. Компилятор не вправе ни
-//! выбросить такую операцию, ни переупорядочить, ни склеить две соседние.
+//! пишут параллельно. Доступ к маппингу идёт volatile-операциями и ассемблерными вставками.
+//! Компилятор не вправе ни выбросить такое обращение, ни переупорядочить, ни склеить два
+//! соседних.
 //!
-//! Volatile-операция делит диапазон на три части. Голова до ближайшей границы слова и хвост
-//! за последним целым словом передаются побайтно, середина - словами по `u64`. Каждый байт
-//! при этом передаётся ровно один раз. Из другого адресного пространства середина наблюдается
-//! пословно, голова и хвост - побайтно. Порядок трёх частей между собой ничем не закреплён.
-//! Копия между маппингами передаётся словами, только если начала обоих диапазонов одинаково
-//! смещены относительно границы слова. Иначе она передаётся побайтно целиком.
+//! Операция делит диапазон маппинга на три части. Голова до ближайшей границы слова и хвост за
+//! последним целым словом передаются побайтно, середина - словами по `u64`, выровненными в
+//! маппинге. Каждый байт при этом передаётся ровно один раз. Из другого адресного пространства
+//! середина наблюдается пословно, голова и хвост - побайтно. Порядок трёх частей между собой
+//! ничем не закреплён. Копия между маппингами выравнивает слова приёмника. Источник с другим
+//! смещением начала она читает невыровненными словами, и параллельная запись в источник
+//! приходит в приёмник смесью старых и новых байтов внутри слова.
+//!
+//! Маппинг устройства ([`MmioMapping`]) передаёт середину volatile-словами `u64` по одному.
 //!
 //! Исключение - копия в маппинг профиля `WriteCombining` ([`WriteCombiningMapping::copy_from`]).
 //! Она идёт обычной копией памяти. Ширину и число обращений выбирает реализация копии, а
@@ -96,6 +100,82 @@ unsafe fn copy_bytes(source: *const u8, target: *mut u8, start: usize, len: usiz
             let byte = from.read_volatile();
             to.write_volatile(byte);
         }
+    }
+}
+
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
+unsafe fn copy_words(source: *const u8, target: *mut u8, words: usize) {
+    // SAFETY: вызывающий даёт `words` слов от `source` на чтение и от `target` на запись в обычной
+    // памяти, диапазоны не перекрываются. Невыровненные обращения к обычной памяти разрешены.
+    // Вставка обращается к памяти только в этих диапазонах и не трогает стек.
+    unsafe {
+        core::arch::asm!(
+            "lsr {pairs}, {words}, 1",
+            "cbz {pairs}, 2f",
+            "1:",
+            "ldp {first}, {second}, [{source}], 16",
+            "stp {first}, {second}, [{target}], 16",
+            "subs {pairs}, {pairs}, 1",
+            "b.ne 1b",
+            "2:",
+            "tbz {words}, 0, 3f",
+            "ldr {first}, [{source}]",
+            "str {first}, [{target}]",
+            "3:",
+            source = inout(reg) source => _,
+            target = inout(reg) target => _,
+            words = in(reg) words,
+            pairs = out(reg) _,
+            first = out(reg) _,
+            second = out(reg) _,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+unsafe fn copy_words(source: *const u8, target: *mut u8, words: usize) {
+    for index in 0..words {
+        let offset = index * WORD;
+        let from = source.wrapping_add(offset).cast::<[u8; WORD]>();
+        let to = target.wrapping_add(offset).cast::<[u8; WORD]>();
+        // SAFETY: вызывающий даёт `words` слов от `source` на чтение.
+        let word = unsafe { from.read() };
+        // SAFETY: вызывающий даёт `words` слов от `target` на запись.
+        unsafe { to.write(word) };
+    }
+}
+
+#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
+unsafe fn zero_words(target: *mut u8, words: usize) {
+    // SAFETY: вызывающий даёт `words` слов от `target` на запись в обычной памяти. Вставка
+    // обращается к памяти только в этом диапазоне и не трогает стек.
+    unsafe {
+        core::arch::asm!(
+            "lsr {pairs}, {words}, 1",
+            "cbz {pairs}, 2f",
+            "1:",
+            "stp xzr, xzr, [{target}], 16",
+            "subs {pairs}, {pairs}, 1",
+            "b.ne 1b",
+            "2:",
+            "tbz {words}, 0, 3f",
+            "str xzr, [{target}]",
+            "3:",
+            target = inout(reg) target => _,
+            words = in(reg) words,
+            pairs = out(reg) _,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
+unsafe fn zero_words(target: *mut u8, words: usize) {
+    for index in 0..words {
+        let to = target.wrapping_add(index * WORD).cast::<[u8; WORD]>();
+        // SAFETY: вызывающий даёт `words` слов от `target` на запись.
+        unsafe { to.write([0; WORD]) };
     }
 }
 
@@ -375,6 +455,23 @@ impl MappedPages {
         let len = dst.len();
         let base = self.range_ptr(offset, len)?;
         let head = head_len(base, len);
+        let words = (len - head) / WORD;
+        let (head_bytes, rest) = dst.split_at_mut(head);
+        let (middle, tail) = rest.split_at_mut(words * WORD);
+        // SAFETY: `[0, head)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { read_bytes(base, 0, head_bytes) };
+        // SAFETY: середина `[head, head + words * WORD)` лежит в диапазоне, проверенном
+        // `range_ptr`, и начинается на границе слова. `middle` - отдельный срез той же длины.
+        unsafe { copy_words(base.wrapping_add(head), middle.as_mut_ptr(), words) };
+        // SAFETY: хвост `[len - tail.len(), len)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { read_bytes(base, len - tail.len(), tail) };
+        Ok(())
+    }
+
+    fn copy_out_volatile_at(&self, offset: usize, dst: &mut [u8]) -> Result<()> {
+        let len = dst.len();
+        let base = self.range_ptr(offset, len)?;
+        let head = head_len(base, len);
         let (head_bytes, rest) = dst.split_at_mut(head);
         let (words, tail) = rest.as_chunks_mut::<WORD>();
         // SAFETY: `[0, head)` лежит в диапазоне, проверенном `range_ptr`.
@@ -401,6 +498,23 @@ impl MappedPages {
     /// Копирует `src` в маппинг со смещения `offset`. Диапазон сверх размера маппинга -
     /// `OutOfBounds`.
     pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
+        let len = src.len();
+        let base = self.range_ptr(offset, len)?;
+        let head = head_len(base, len);
+        let words = (len - head) / WORD;
+        let (head_bytes, rest) = src.split_at(head);
+        let (middle, tail) = rest.split_at(words * WORD);
+        // SAFETY: `[0, head)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { write_bytes(base, 0, head_bytes) };
+        // SAFETY: середина `[head, head + words * WORD)` лежит в диапазоне, проверенном
+        // `range_ptr`, и начинается на границе слова. `middle` - отдельный срез той же длины.
+        unsafe { copy_words(middle.as_ptr(), base.wrapping_add(head), words) };
+        // SAFETY: хвост `[len - tail.len(), len)` лежит в диапазоне, проверенном `range_ptr`.
+        unsafe { write_bytes(base, len - tail.len(), tail) };
+        Ok(())
+    }
+
+    fn copy_in_volatile_at(&self, offset: usize, src: &[u8]) -> Result<()> {
         let len = src.len();
         let base = self.range_ptr(offset, len)?;
         let head = head_len(base, len);
@@ -433,28 +547,14 @@ impl MappedPages {
     ) -> Result<()> {
         let source = self.range_ptr(offset, len)?;
         let target = destination.range_ptr(destination_offset, len)?;
-        let head = if source.addr() % WORD == target.addr() % WORD {
-            head_len(source, len)
-        } else {
-            len
-        };
+        let head = head_len(target, len);
         let words = (len - head) / WORD;
         let tail_start = head + words * WORD;
         // SAFETY: `[0, head)` лежит в диапазонах, проверенных `range_ptr`.
         unsafe { copy_bytes(source, target, 0, head) };
-        for number in 0..words {
-            let index = head + number * WORD;
-            // SAFETY: слово отстоит от `head` на `number` слов и лежит в диапазоне, проверенном
-            // `range_ptr`.
-            let from = unsafe { word_ptr(source, index) };
-            // SAFETY: слово лежит в диапазоне, проверенном `range_ptr`. Начала диапазонов
-            // одинаково смещены относительно границы слова, поэтому адрес выровнен на слово.
-            let to = unsafe { word_ptr(target, index) };
-            // SAFETY: слово лежит в маппинге, установленном ядром.
-            let word = unsafe { from.read_volatile() };
-            // SAFETY: слово лежит в маппинге, установленном ядром.
-            unsafe { to.write_volatile(word) };
-        }
+        // SAFETY: середина `[head, tail_start)` лежит в диапазонах, проверенных `range_ptr`, и в
+        // приёмнике начинается на границе слова. Диапазоны не перекрываются по контракту метода.
+        unsafe { copy_words(source.wrapping_add(head), target.wrapping_add(head), words) };
         // SAFETY: хвост `[tail_start, len)` лежит в диапазонах, проверенных `range_ptr`.
         unsafe { copy_bytes(source, target, tail_start, len - tail_start) };
         Ok(())
@@ -493,13 +593,9 @@ impl MappedPages {
         let tail_start = head + words * WORD;
         // SAFETY: `[0, head)` лежит в диапазоне, проверенном `range_ptr`.
         unsafe { zero_bytes(base, 0, head) };
-        for number in 0..words {
-            // SAFETY: слово отстоит от `head` на `number` слов и лежит в диапазоне, проверенном
-            // `range_ptr`.
-            let word = unsafe { word_ptr(base, head + number * WORD) };
-            // SAFETY: слово лежит в маппинге, установленном ядром.
-            unsafe { word.write_volatile(0) };
-        }
+        // SAFETY: середина `[head, head + words * WORD)` лежит в диапазоне, проверенном
+        // `range_ptr`, и начинается на границе слова.
+        unsafe { zero_words(base.wrapping_add(head), words) };
         // SAFETY: хвост `[tail_start, len)` лежит в диапазоне, проверенном `range_ptr`.
         unsafe { zero_bytes(base, tail_start, len - tail_start) };
         Ok(())
@@ -710,20 +806,20 @@ impl MmioMapping {
         Mmio::new(self.start)
     }
 
-    /// Копирует в `dst` байты устройства со смещения `offset` от его начала операциями
-    /// [`MappedPages::copy_out_at`]. Если диапазон выходит за границы области, выданной устройству,
-    /// возвращает ошибку `OutOfBounds`.
+    /// Копирует в `dst` байты устройства со смещения `offset` от его начала: голову и хвост
+    /// побайтно, середину volatile-словами `u64` по одному. Если диапазон выходит за границы
+    /// области, выданной устройству, возвращает ошибку `OutOfBounds`.
     pub fn copy_out_at(&self, offset: usize, dst: &mut [u8]) -> Result<()> {
         let offset = self.device_offset(offset, dst.len())?;
-        self.mapping.copy_out_at(offset, dst)
+        self.mapping.copy_out_volatile_at(offset, dst)
     }
 
-    /// Копирует `src` в устройство со смещения `offset` от его начала операциями
-    /// [`MappedPages::copy_in_at`]. Если диапазон выходит за границы области, выданной устройству,
-    /// возвращает ошибку `OutOfBounds`.
+    /// Копирует `src` в устройство со смещения `offset` от его начала: голову и хвост побайтно,
+    /// середину volatile-словами `u64` по одному. Если диапазон выходит за границы области,
+    /// выданной устройству, возвращает ошибку `OutOfBounds`.
     pub fn copy_in_at(&self, offset: usize, src: &[u8]) -> Result<()> {
         let offset = self.device_offset(offset, src.len())?;
-        self.mapping.copy_in_at(offset, src)
+        self.mapping.copy_in_volatile_at(offset, src)
     }
 
     fn device_offset(&self, offset: usize, len: usize) -> Result<usize> {

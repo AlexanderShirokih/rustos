@@ -8,7 +8,7 @@ use kbase::{LockCell, MutexCell};
 
 use crate::{
     memory_mapper::{MemoryMapper, MemoryUnmappingError},
-    user_vm_allocator::UserVmAllocator,
+    user_vm_allocator::{MappingTag, UserVmAllocator},
     virtual_address::PageAlignedVirtualAddress,
 };
 
@@ -42,23 +42,53 @@ impl UserVmContext {
         &self.allocator
     }
 
-    /// Единый teardown маппинга. Снимает PTE и возвращает range в аллокатор.
-    /// Зовётся из `memory_free` и из отзыва капы. Идемпотентен: `NotMapped`/
-    /// `NotFound` трактуются как успех (двойной close / гонка close-vs-free).
+    /// Снимает страницы и освобождает VA. Повторное освобождение отсутствующего
+    /// диапазона проходит без последствий.
     pub fn unmap_range(&self, base: PageAlignedVirtualAddress, size: NonZeroUsize) {
+        self.allocator.with_lock(|allocator| {
+            if allocator.lookup(base, size).is_ok() {
+                self.unmap_pages(base, size);
+                let _ = allocator.free(base, size);
+            }
+        });
+    }
+
+    /// Отзывает доступ к страницам, сохраняя VA до явного освобождения.
+    /// Проверка владельца и снятие страниц атомарны относительно освобождения
+    /// и повторного выделения того же VA другим потоком процесса.
+    pub fn revoke_range(
+        &self,
+        base: PageAlignedVirtualAddress,
+        size: NonZeroUsize,
+        belongs: impl FnOnce(&MappingTag) -> bool,
+    ) {
+        self.allocator.with_lock(|allocator| {
+            let Ok(range) = allocator.lookup(base, size) else {
+                return;
+            };
+
+            if !belongs(range.tag()) {
+                return;
+            }
+
+            let revoked = MappingTag {
+                flags: range.tag().flags,
+                backing: None,
+                grant: range.tag().grant,
+            };
+
+            self.unmap_pages(base, size);
+            let _ = allocator.set_tag(base, size, revoked);
+        });
+    }
+
+    fn unmap_pages(&self, base: PageAlignedVirtualAddress, size: NonZeroUsize) {
         match self.mapper.unmap(base, size.get()) {
             Ok(()) | Err(MemoryUnmappingError::NotMapped) => {}
-            Err(e) => {
-                // Выровненный range из аллокатора не бывает misaligned/block-mapped.
-                // В release это no-op: range всё равно возвращаем в аллокатор -
-                // держать его занятым (а с ним и `Arc` региона) бессмысленно, раз
-                // PTE в желаемое состояние уже не вернуть.
-                debug_assert!(false, "unmap_range: unexpected unmap error: {e:?}");
+            Err(error) => {
+                debug_assert!(false, "unexpected unmap error: {error:?}");
             }
         }
-        self.allocator.with_lock(|alloc| {
-            let _ = alloc.free(base, size);
-        });
     }
 
     /// Снимает все зарегистрированные маппинги и освобождает их теги.

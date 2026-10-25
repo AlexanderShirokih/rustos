@@ -1,53 +1,50 @@
-//! Обслуживание сервисного порта: трансляция операций контракта `FileSystem` в модель
-//! `lib/filesystem` поверх состояния, разделённого с потоками экспорта и монтирования.
+//! Состояние тома и операции над деревом имён. Заём состояния заканчивается до ожидания
+//! клиента либо захвата узла асинхронным обработчиком.
 
-use alloc::{boxed::Box, string::String};
+use alloc::{boxed::Box, collections::BTreeMap, rc::Weak, string::String};
 
 use component_startup::{MintedSession, SessionPort};
 use filesystem::{
     ByteStore, ClientId, FileSystemBackend, NodeId, NodeMetadata, OpenNode, Session, SessionTable,
 };
 use filesystem_abi::{
-    AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
-    Opened, PATH_MAX, Path, Written, file_system, rebase,
+    AccessMode, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened, PATH_MAX,
+    Path, file_system, rebase,
 };
-use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{
     Delivery, IssuedHandle, MemoryRegion, OwnedHandle, Port, ReadOnlyMapping, Resource, kind,
 };
 use runtime::{MemoryAccess, random};
 
-use crate::{buffer::DataBuffer, error::no_space, store::StoreTable};
+use crate::{error::no_space, io::Exchange, store::StoreTable};
 
 const DONE: u32 = 0;
 
-const APPEND: u64 = u64::MAX;
-
 #[derive(Default)]
 pub(crate) struct Attachment {
-    buffer: Option<DataBuffer>,
-    scope: String,
+    pub(crate) io: Option<Exchange>,
+    pub(crate) scope: String,
 }
 
 pub(crate) struct FileSystemState {
-    backend: Box<dyn FileSystemBackend + Send>,
+    pub(crate) backend: Box<dyn FileSystemBackend + Send>,
     volume: u64,
-    sessions: SessionTable<Attachment>,
-    stores: StoreTable,
+    pub(crate) sessions: SessionTable<Attachment>,
+    pub(crate) stores: StoreTable,
+    pub(crate) locks: BTreeMap<NodeId, Weak<executor::Mutex<()>>>,
 }
 
-#[derive(Default)]
-pub(crate) struct Frame {
-    pending_pin: Option<NodeId>,
+pub(crate) struct Backing {
+    pub(crate) region: MemoryRegion,
+    pub(crate) node: NodeId,
 }
 
 pub(crate) struct Serving<'a> {
     pub(crate) state: &'a mut FileSystemState,
-    pub(crate) frame: &'a mut Frame,
     pub(crate) service: &'a SessionPort,
 }
 
-fn scoped<'a>(
+pub(crate) fn scoped<'a>(
     scope: &str,
     tail: &'a str,
     out: &'a mut [u8; PATH_MAX],
@@ -83,6 +80,7 @@ impl FileSystemState {
             volume: volume_number(),
             sessions: SessionTable::new(),
             stores: StoreTable::new(resource, backing),
+            locks: BTreeMap::new(),
         }
     }
 
@@ -100,17 +98,18 @@ impl FileSystemState {
         Ok(())
     }
 
-    pub(crate) fn remove_session(&mut self, badge: u64) {
+    pub(crate) fn remove_session(&mut self, badge: u64) -> Option<Exchange> {
         // Нулевой значок ядро выдаёт кадру без значка. За ним сессия отсутствует.
         if badge == 0 {
-            return;
+            return None;
         }
-        let Some(session) = self.sessions.remove(ClientId::from_raw(badge)) else {
-            return;
-        };
+
+        let mut session = self.sessions.remove(ClientId::from_raw(badge))?;
+        let exchange = session.attachment_mut().io.take();
         for open_node in session.into_open_nodes() {
             self.backend.release(&mut self.stores, open_node.node);
         }
+        exchange
     }
 
     fn open_node(
@@ -140,23 +139,11 @@ impl FileSystemState {
     }
 }
 
-impl Frame {
-    pub(crate) fn end(&mut self, delivered: bool, state: &mut FileSystemState) {
-        if delivered {
-            if let Some(node) = self.pending_pin.take() {
-                let pinned = state.backend.pin(node);
-                debug_assert!(pinned.is_ok());
-            }
-        } else {
-            self.pending_pin = None;
-        }
-    }
-}
-
-fn client_of(delivery: &Delivery) -> Result<ClientId, FileSystemError> {
+pub(crate) fn client_of(delivery: &Delivery) -> Result<ClientId, FileSystemError> {
     if delivery.badge == 0 {
         return Err(FileSystemError::NoSession);
     }
+
     Ok(ClientId::from_raw(delivery.badge))
 }
 
@@ -181,45 +168,22 @@ impl Serving<'_> {
         Ok((backend.as_mut(), stores, sessions.get_mut(client)?))
     }
 
-    fn buffer(session: &mut Session<Attachment>) -> Result<&mut DataBuffer, FileSystemError> {
-        session
-            .attachment_mut()
-            .buffer
-            .as_mut()
-            .ok_or(FileSystemError::NoBuffer)
-    }
-
-    fn share_buffer(
-        &mut self,
-        client: ClientId,
-        size: u32,
-    ) -> Result<MemoryRegion, FileSystemError> {
-        let FileSystemState {
-            stores, sessions, ..
-        } = &mut *self.state;
-        let session = sessions.get_mut(client)?;
-        // Буфер создаётся один раз за сессию. Раскладка под уже выданной клиенту капой
-        // сохраняется при любом вызове.
-        if session.attachment().buffer.is_some() {
-            return Err(FileSystemError::AlreadyExists);
-        }
-        let buffer = DataBuffer::create(stores.resource(), size)?;
-        let shared = buffer.share()?;
-        session.attachment_mut().buffer = Some(buffer);
-        Ok(shared)
-    }
-
     fn backing_slice(
         &mut self,
         client: ClientId,
         fd: NodeDescriptor,
-    ) -> Result<MemoryRegion, FileSystemError> {
+    ) -> Result<Backing, FileSystemError> {
         let (backend, stores, session) = self.backend_stores_session(client)?;
         let open_node = readable(session.get(fd)?)?;
-        let window = backend.backing(stores, open_node.node)?;
-        let slice = stores.slice(window, open_node.mode)?;
-        self.frame.pending_pin = Some(open_node.node);
-        Ok(slice)
+        let window = backend.read_window(open_node.node)?;
+        if backend.metadata(open_node.node)?.size == 0 {
+            return Err(FileSystemError::NotSupported);
+        }
+
+        Ok(Backing {
+            region: stores.slice(window, open_node.mode, false)?,
+            node: open_node.node,
+        })
     }
 
     fn mint_root(&mut self, client: ClientId, path: &str) -> Result<Port, FileSystemError> {
@@ -236,16 +200,8 @@ impl Serving<'_> {
     }
 }
 
-impl file_system::Service<Delivery> for Serving<'_> {
-    fn acquire_buffer(
-        &mut self,
-        delivery: &Delivery,
-        size: u32,
-    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
-        client_of(delivery).and_then(|client| self.share_buffer(client, size))
-    }
-
-    fn open(
+impl Serving<'_> {
+    pub(crate) fn open(
         &mut self,
         delivery: &Delivery,
         path: &str,
@@ -288,53 +244,17 @@ impl file_system::Service<Delivery> for Serving<'_> {
         })
     }
 
-    fn close(&mut self, delivery: &Delivery, fd: NodeDescriptor) -> Result<u32, FileSystemError> {
+    pub(crate) fn close(
+        &mut self,
+        delivery: &Delivery,
+        fd: NodeDescriptor,
+    ) -> Result<u32, FileSystemError> {
         let client = client_of(delivery)?;
         self.state.close_node(client, fd)?;
         Ok(DONE)
     }
 
-    fn read(
-        &mut self,
-        delivery: &Delivery,
-        fd: NodeDescriptor,
-        offset: u64,
-        len: u32,
-    ) -> Result<u32, FileSystemError> {
-        let (backend, stores, session) = self.backend_stores_session(client_of(delivery)?)?;
-        let open_node = readable(session.get(fd)?)?;
-        let count = Self::buffer(session)?.publish(len as usize, |out| {
-            backend.read_at(stores, open_node.node, offset, out)
-        })?;
-        u32::try_from(count).map_err(|_| FileSystemError::BufferTooSmall)
-    }
-
-    fn write(
-        &mut self,
-        delivery: &Delivery,
-        fd: NodeDescriptor,
-        offset: u64,
-        len: u32,
-    ) -> Result<Written, FileSystemError> {
-        let (backend, stores, session) = self.backend_stores_session(client_of(delivery)?)?;
-        let open_node = writable(session.get(fd)?)?;
-        Self::buffer(session)?.snapshot(len as usize, |data| {
-            if offset == APPEND {
-                let at = backend.append(stores, open_node.node, data)?;
-                // Бекенд определяет число уложенных байт. Дозапись отдаёт только их смещение, а
-                // длину даёт выросшая длина узла.
-                let size = backend.metadata(open_node.node)?.size;
-                let count = u32::try_from(size.saturating_sub(at))
-                    .map_err(|_| FileSystemError::BufferTooSmall)?;
-                return Ok(Written { count, offset: at });
-            }
-            let written = backend.write_at(stores, open_node.node, offset, data)?;
-            let count = u32::try_from(written).map_err(|_| FileSystemError::BufferTooSmall)?;
-            Ok(Written { count, offset })
-        })
-    }
-
-    fn set_size(
+    pub(crate) fn set_size(
         &mut self,
         delivery: &Delivery,
         fd: NodeDescriptor,
@@ -346,7 +266,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         Ok(DONE)
     }
 
-    fn stat(
+    pub(crate) fn stat(
         &mut self,
         delivery: &Delivery,
         fd: NodeDescriptor,
@@ -359,21 +279,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         Ok(node_info(volume, open_node.node, metadata))
     }
 
-    fn list(
-        &mut self,
-        delivery: &Delivery,
-        fd: NodeDescriptor,
-        from: DirCursor,
-    ) -> Result<Listed, FileSystemError> {
-        let (backend, _, session) = self.backend_stores_session(client_of(delivery)?)?;
-        let open_node = readable(session.get(fd)?)?;
-        let buffer = Self::buffer(session)?;
-        // Пачка записей занимает буфер целиком. Сколько их уместилось, решает перечисление.
-        let room = buffer.size();
-        buffer.publish(room, |out| backend.list(open_node.node, from, out))
-    }
-
-    fn rename(
+    pub(crate) fn rename(
         &mut self,
         delivery: &Delivery,
         from: &str,
@@ -388,7 +294,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         Ok(DONE)
     }
 
-    fn unlink(
+    pub(crate) fn unlink(
         &mut self,
         delivery: &Delivery,
         path: &str,
@@ -401,7 +307,7 @@ impl file_system::Service<Delivery> for Serving<'_> {
         Ok(DONE)
     }
 
-    fn create_backed(
+    pub(crate) fn create_backed(
         &mut self,
         delivery: &Delivery,
         path: &str,
@@ -432,25 +338,23 @@ impl file_system::Service<Delivery> for Serving<'_> {
             stores.release(store);
             return Err(error);
         }
+
         Ok(DONE)
     }
 
-    fn backing_memory(
+    pub(crate) fn backing_memory(
         &mut self,
         delivery: &Delivery,
         fd: NodeDescriptor,
-    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+    ) -> Result<Backing, FileSystemError> {
         client_of(delivery).and_then(|client| self.backing_slice(client, fd))
     }
 
-    fn open_root(
+    pub(crate) fn open_root(
         &mut self,
         delivery: &Delivery,
         path: &str,
-    ) -> impl IntoWireValue<
-        Delivery,
-        Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
-    > {
+    ) -> Result<kernel_objects::Session<file_system::Protocol>, FileSystemError> {
         // Порт сессии создаёт этот сервер, и он же обслуживает на нём `file_system`.
         client_of(delivery)
             .and_then(|client| self.mint_root(client, path))

@@ -1,29 +1,37 @@
 //! Источник ввода `InputSource` узла `gpio-keys`: объявляет устройство кнопок узла, передаёт
 //! начальное состояние клавиш и нажатия по прерываниям линий.
 
-use alloc::{sync::Arc, vec::Vec};
-use core::{convert::Infallible, fmt};
+use alloc::{
+    rc::{Rc, Weak},
+    vec::Vec,
+};
+use core::{
+    cell::{Cell, RefCell},
+    convert::Infallible,
+    fmt,
+};
 
 use component_startup::{
-    AnyOf, Import, Providers, SessionEvent, SessionPort, StartupError,
-    component_startup as startup_contract, serve_export, whole_export,
+    AnyOf, AsyncStartup, Import, Providers, SessionPort, StartupError, serve_component,
+    whole_export,
 };
 use driver_gpio_keys::{Edge, Key, KeysError, Window, keys};
+use executor::{Executor, Mutex, PortChannel, Reactor};
 use input_abi::{
     AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, DeviceNumber, KeyList,
     UpdateError, input_inject, input_source,
 };
 use ipc::CallError;
-use kernel_objects::{Delivery, ReceivedSession, Session, SessionTransport, Signal, wait_any};
+use kernel_objects::{Delivery, ReceivedSession, Session, SessionTransport, Signal};
 use pins_abi::{PinsError, controllers, device_pins, pins};
 use platform_abi::{
     CONTROLLER_KEY, Description, DescriptionError, DeviceId, MappedDescription, PlatformError,
     platform,
 };
-use runtime::{
-    FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_bound, spawn_owned,
-};
-use syscall::{SIGNALED, SyscallError, WaitItem};
+use runtime::{FAILED_EXIT_CODE, Instant, Timeout, exit, log_fmt};
+use syscall::{Handle, SIGNALED, WaitItem, kind};
+
+type Channel = PortChannel<SessionTransport>;
 
 const COMPATIBLE: &str = "gpio-keys";
 const UNNAMED_LINE: &str = "";
@@ -32,16 +40,18 @@ const UNNAMED_LINE: &str = "";
 pub(crate) enum Stopped {
     Startup(StartupError),
     ExportPort,
-    ExportThread,
+    Executor,
     ExportPortClosed,
 }
 
 struct Source {
     pins: Providers<pins::Protocol>,
-    platform: platform::Client<SessionTransport>,
-    node: Option<DeviceId>,
-    attached: bool,
-    refused: bool,
+    platform: platform::Client<Channel>,
+    node: RefCell<Option<DeviceId>>,
+    attached: Mutex<bool>,
+    refused: Cell<bool>,
+    executor: Weak<Executor>,
+    reactor: Reactor,
 }
 
 struct Line {
@@ -52,14 +62,14 @@ struct Line {
 }
 
 struct Reporter {
-    pins: device_pins::Client<SessionTransport>,
-    inject: input_inject::Client<SessionTransport>,
+    pins: device_pins::Client<Channel>,
+    inject: input_inject::Client<Channel>,
     device: DeviceNumber,
     held: Vec<usize>,
 }
 
 struct Buttons {
-    _provider: pins::Client<SessionTransport>,
+    _provider: pins::Client<Channel>,
     reporter: Reporter,
     lines: Vec<Line>,
 }
@@ -81,7 +91,7 @@ enum Failure {
     Declare(CallError<DeclareError>),
     Update(CallError<UpdateError>),
     Wait(kernel_objects::Error),
-    Thread,
+    Executor,
 }
 
 impl fmt::Display for Stopped {
@@ -89,15 +99,20 @@ impl fmt::Display for Stopped {
         match self {
             Self::Startup(error) => error.fmt(formatter),
             Self::ExportPort => formatter.write_str("export port refused"),
-            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::Executor => formatter.write_str("executor refused"),
             Self::ExportPortClosed => formatter.write_str("export port closed"),
         }
     }
 }
 
 impl Source {
-    fn bind(&mut self, inject: input_inject::Client<SessionTransport>) -> Result<(), Failure> {
-        let description = self.platform.description().map_err(Failure::Platform)?;
+    async fn bind(&self, inject: input_inject::Client<Channel>) -> Result<(), Failure> {
+        let description = self
+            .platform
+            .description()
+            .await
+            .map_err(Failure::Platform)?;
+
         let mapped = MappedDescription::new(description)
             .map_err(|refused| Failure::Mapping(refused.error))?;
         let description = mapped.description().map_err(Failure::Description)?;
@@ -107,38 +122,45 @@ impl Source {
             .next()
             .map(|device| device.id().clone())
             .ok_or(Failure::NoNode)?;
-        let node = self.node.insert(node);
+        *self.node.borrow_mut() = Some(node.clone());
 
-        let buttons = Buttons::bind(&description, node, &self.pins, inject)?;
-        spawn_owned(move || buttons.watch())
-            .map(drop)
-            .map_err(|_| Failure::Thread)
+        let buttons = Buttons::bind(&description, &node, &self.pins, inject, &self.reactor).await?;
+
+        self.executor
+            .upgrade()
+            .ok_or(Failure::Executor)?
+            .spawn(buttons.watch(self.reactor.clone()));
+
+        Ok(())
     }
 }
 
 impl input_source::Service<Delivery> for Source {
-    fn attach(
-        &mut self,
+    async fn attach(
+        &self,
         _frame: &Delivery,
         inject: ReceivedSession<input_inject::Protocol>,
     ) -> Result<(), AttachError> {
-        if self.attached {
+        let mut attached = self.attached.lock().await;
+        if *attached {
             return Err(AttachError::Busy);
         }
 
-        let inject = Session::from_session(inject).client();
+        let inject = PortChannel::client(Session::from_session(inject), self.reactor.clone());
 
-        let bound = self.bind(inject);
-        let node = self.node.as_ref().map_or(COMPATIBLE, DeviceId::as_str);
+        let bound = self.bind(inject).await;
+        let node = self.node.borrow();
+        let node = node.as_ref().map_or(COMPATIBLE, DeviceId::as_str);
         match bound {
             Ok(()) => {
                 log_fmt(format_args!("{node} bound"));
-                self.attached = true;
+                *attached = true;
                 Ok(())
             }
+
             Err(failure) => {
                 log_fmt(format_args!("{node} not bound: {failure:?}"));
-                self.refused = true;
+                self.refused.set(true);
                 Err(AttachError::Refused)
             }
         }
@@ -146,11 +168,12 @@ impl input_source::Service<Delivery> for Source {
 }
 
 impl Buttons {
-    fn bind(
+    async fn bind(
         description: &Description<'_>,
         node: &DeviceId,
         pins: &Providers<pins::Protocol>,
-        inject: input_inject::Client<SessionTransport>,
+        inject: input_inject::Client<Channel>,
+        reactor: &Reactor,
     ) -> Result<Self, Failure> {
         let states = controllers(description, node.as_str()).ok_or(Failure::State)?;
         let [controller] = states.as_slice() else {
@@ -163,30 +186,34 @@ impl Buttons {
 
         let keys = keys(description, node).map_err(Failure::Keys)?;
 
-        let found = pins
-            .all(AnyOf::new(CONTROLLER_KEY, compatible))
+        let session = pins
+            .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+            .await
             .map_err(Failure::Startup)?
-            .next()
-            .ok_or(Failure::NoProvider)?
-            .map_err(Failure::Startup)?;
-        let provider = pins.open(&found).map_err(Failure::Startup)?.client();
-        let device =
-            Session::<device_pins::Protocol>::from_session(provider.open(node.clone())?).client();
+            .ok_or(Failure::NoProvider)?;
 
-        let lines = keys
-            .keys
-            .iter()
-            .map(|key| Line::bind(&device, key))
-            .collect::<Result<Vec<_>, _>>()?;
+        let provider = PortChannel::client(session, reactor.clone());
+
+        let device = PortChannel::client(
+            Session::<device_pins::Protocol>::from_session(provider.open(node.clone()).await?),
+            reactor.clone(),
+        );
+
+        let mut lines = Vec::new();
+        for key in &keys.keys {
+            lines.push(Line::bind(&device, key).await?);
+        }
 
         let mut usages = KeyList::new();
         for usage in &keys.usages {
             usages.push(*usage).map_err(|_| Failure::Descriptor)?;
         }
+
         let axes = AxisList::new();
         let descriptor = DeviceDescriptor::new(keys.name, Binding::None, &usages, &axes, 0, &axes)
             .ok_or(Failure::Descriptor)?;
-        let number = inject.declare(descriptor).map_err(Failure::Declare)?;
+
+        let number = inject.declare(descriptor).await.map_err(Failure::Declare)?;
 
         Ok(Self {
             _provider: provider,
@@ -200,16 +227,16 @@ impl Buttons {
         })
     }
 
-    fn watch(mut self) -> u32 {
-        match self.serve() {
+    async fn watch(mut self, reactor: Reactor) {
+        match self.serve(&reactor).await {
             Ok(never) => match never {},
             Err(failure) => stop(&failure),
         }
     }
 
-    fn serve(&mut self) -> Result<Infallible, Failure> {
+    async fn serve(&mut self, reactor: &Reactor) -> Result<Infallible, Failure> {
         for line in &mut self.lines {
-            self.reporter.settle(line)?;
+            self.reporter.settle(line).await?;
         }
 
         let items: Vec<WaitItem> = self
@@ -226,7 +253,7 @@ impl Buttons {
                     .deadline()
                     .is_some_and(|deadline| deadline <= now)
                 {
-                    self.reporter.settle(line)?;
+                    self.reporter.settle(line).await?;
                 }
             }
 
@@ -239,25 +266,25 @@ impl Buttons {
                     Timeout::from_ns(deadline.saturating_sub(Instant::now().as_nanos()))
                 });
 
-            match wait_any(&items, timeout) {
-                Ok(index) => {
+            match reactor.timeout(timeout, reactor.wait_any(&items)).await {
+                Some(Ok(index)) => {
                     let now = Instant::now().as_nanos();
                     if let Some(line) = self.lines.get_mut(index) {
-                        self.reporter.pins.ack(line.number)?;
+                        self.reporter.pins.ack(line.number).await?;
                         line.window.interrupt(now);
                     }
                 }
-                Err(kernel_objects::Error::Syscall(SyscallError::Timeout)) => {}
-                Err(error) => return Err(Failure::Wait(error)),
+                None => {}
+                Some(Err(error)) => return Err(Failure::Wait(error)),
             }
         }
     }
 }
 
 impl Line {
-    fn bind(device: &device_pins::Client<SessionTransport>, key: &Key) -> Result<Self, Failure> {
-        let number = device.input(key.node.clone(), UNNAMED_LINE, 0)?;
-        let signal = Signal::from(device.irq(number)?);
+    async fn bind(device: &device_pins::Client<Channel>, key: &Key) -> Result<Self, Failure> {
+        let number = device.input(key.node.clone(), UNNAMED_LINE, 0).await?;
+        let signal = Signal::from(device.irq(number).await?);
 
         Ok(Self {
             number,
@@ -269,8 +296,8 @@ impl Line {
 }
 
 impl Reporter {
-    fn settle(&mut self, line: &mut Line) -> Result<(), Failure> {
-        let active = self.pins.active(line.number)?;
+    async fn settle(&mut self, line: &mut Line) -> Result<(), Failure> {
+        let active = self.pins.active(line.number).await?;
         let time = Instant::now().as_nanos();
         let Some(edge) = line.window.settle(active) else {
             return Ok(());
@@ -297,10 +324,12 @@ impl Reporter {
                 command.release(line.key)
             }
         };
+
         built.map_err(|_| Failure::Descriptor)?;
 
         self.inject
             .update(self.device, Some(time), command.as_bytes())
+            .await
             .map_err(Failure::Update)
     }
 }
@@ -314,33 +343,46 @@ impl From<CallError<PinsError>> for Failure {
 pub(crate) fn run(
     pins: Providers<pins::Protocol>,
     platform: &Import<platform::Protocol>,
-    parent: startup_contract::Client<PortTransport>,
+    parent: Handle<kind::Port>,
 ) -> Result<(), Stopped> {
-    let platform = platform.open().map_err(Stopped::Startup)?.client();
+    let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
+    let reactor = executor.reactor();
 
-    let export = Arc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
-    let port = Arc::clone(&export);
-    spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(&port)))
-        .map_err(|_| Stopped::ExportThread)?;
+    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?, reactor.clone());
 
-    let mut source = Source {
+    let export = Rc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
+    let source = Rc::new(Source {
         pins,
         platform,
-        node: None,
-        attached: false,
-        refused: false,
-    };
-    let mut events = export.events();
+        node: RefCell::new(None),
+        attached: Mutex::new(false),
+        refused: Cell::new(false),
+        executor: Rc::downgrade(&executor),
+        reactor: reactor.clone(),
+    });
 
-    while let Some(event) = events.recv() {
-        if let SessionEvent::Frame(frame) = event {
-            let _ = input_source::dispatch(&mut source, frame);
-            if source.refused {
-                exit(FAILED_EXIT_CODE)
-            }
-        }
-    }
+    let opened = export.clone();
 
+    let served = serve_component::<input_source::Protocol, _>(
+        &executor,
+        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        export,
+        move |frame| {
+            let call = input_source::serve(&source, frame)?;
+            let source = source.clone();
+            Ok(call.map(|call| async move {
+                let outcome = call.await;
+                if source.refused.get() {
+                    exit(FAILED_EXIT_CODE);
+                }
+                outcome
+            }))
+        },
+        whole_export(opened),
+        |_| {},
+    );
+
+    let _ = executor.block_on(served);
     Err(Stopped::ExportPortClosed)
 }
 

@@ -1,9 +1,12 @@
 //! Обвязка тестов с планом: `RootSystem` плана под замком, поток оборота, импортёры и
 //! монтирования тестов.
 
-use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box, collections::BTreeMap, format, rc::Rc, string::String, sync::Arc, vec::Vec,
+};
 use core::{
-    ops::ControlFlow,
+    future::Future,
+    pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -12,14 +15,13 @@ use component_abi::{
     component_startup as startup_contract,
 };
 use component_startup::{AnyOf, Found, Providers};
+use executor::Executor;
 use filesystem_abi::{FileSystemError, file_system, file_system_mount, namespace};
 use ipc::{CallError, Protocol, wire::IpcError};
 use kernel_objects::{Error, Port, Resource, Session, Signal};
 use log_abi::log;
 use platform_abi::{CONTROLLER_KEY, DeviceId, Node};
-use rootkeeper::{
-    BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::LogSources, turn,
-};
+use rootkeeper::{BUDGET_RETURN_TIMEOUT, RootSystem, SearchLimits, SystemImage, relay::LogSources};
 use runtime::{JoinHandle, Mutex, MutexGuard, PortTransport, Timeout, spawn_owned};
 use spin::Once;
 use syscall::{Handle, SIGNALED, SyscallError, kind};
@@ -31,6 +33,8 @@ pub(crate) const BOOT_PLAN_ENTRY: &str = "/testrunner/plan";
 
 pub(crate) const ROUTER_NAME: &str = "mounts";
 
+type Serving = Pin<Box<dyn Future<Output = ()>>>;
+
 const IMPORTER_WAIT: Timeout = Timeout::from_secs(5);
 
 const TURN: Timeout = Timeout::from_millis(20);
@@ -39,6 +43,7 @@ const BUDGET_POLL: Timeout = Timeout::from_millis(10);
 
 const MOUNT_ENDED: u32 = 0;
 const MOUNT_FAILED: u32 = 1;
+const MOUNT_CANCELLED: u32 = 2;
 
 static IMAGE: Once<SystemImage> = Once::new();
 
@@ -119,7 +124,7 @@ impl Composition {
         let system = Arc::new(Mutex::new(system));
         let turned = Arc::clone(&system);
         Self {
-            _turn: TurnThread::start(move || turn(&turned, TURN)),
+            _turn: TurnThread::start(move |executor| Box::pin(rootkeeper::serve(executor, turned))),
             system,
         }
     }
@@ -171,12 +176,22 @@ impl Composition {
 }
 
 impl TurnThread {
-    pub(crate) fn start(mut turn: impl FnMut() -> ControlFlow<()> + Send + 'static) -> Self {
+    pub(crate) fn start(build: impl FnOnce(&Rc<Executor>) -> Serving + Send + 'static) -> Self {
         let turning = Arc::new(AtomicBool::new(true));
         let thread = {
             let turning = Arc::clone(&turning);
             spawn_owned(move || {
-                while turning.load(Ordering::Acquire) && turn().is_continue() {}
+                let executor = Rc::new(Executor::new().expect("turn executor"));
+                let reactor = executor.reactor();
+                let served = build(&executor);
+                executor.block_on(async {
+                    let mut served = core::pin::pin!(served);
+                    while turning.load(Ordering::Acquire) {
+                        if reactor.timeout(TURN, served.as_mut()).await.is_some() {
+                            break;
+                        }
+                    }
+                });
                 0
             })
             .expect("turn thread starts")
@@ -210,7 +225,7 @@ impl Importer {
             && let Some(root) = self.namespace_roots.get(requirement)
         {
             let client = namespace::Client::new(PortTransport::new(session.handle()));
-            let scoped = client.open_root(root).expect("view opened");
+            let scoped = client.open_root(root).wait().expect("view opened");
             return Session::from_handle(Port::from(scoped.into_handle()));
         }
         session
@@ -239,7 +254,9 @@ impl Importer {
         requirement: &str,
         attributes: Attributes<'_>,
     ) -> Result<Session<startup_contract::Protocol>, CallError<SessionError>> {
-        component_startup::all::<P>(&self.parent(), requirement, attributes)
+        self.search(async |parent| {
+            component_startup::all::<P>(&parent, requirement, attributes).await
+        })
     }
 
     pub(crate) fn watch<P: Protocol>(
@@ -247,7 +264,9 @@ impl Importer {
         requirement: &str,
         attributes: Attributes<'_>,
     ) -> Result<Session<startup_contract::Protocol>, CallError<SessionError>> {
-        component_startup::watch::<P>(&self.parent(), requirement, attributes)
+        self.search(async |parent| {
+            component_startup::watch::<P>(&parent, requirement, attributes).await
+        })
     }
 
     pub(crate) fn port<P: Protocol>(&self, requirement: &str) -> Port {
@@ -258,8 +277,23 @@ impl Importer {
         self.port.as_raw()
     }
 
-    fn parent(&self) -> startup_contract::Client<PortTransport> {
-        startup_contract::Client::new(PortTransport::new(self.handle())).with_wait(IMPORTER_WAIT)
+    fn search(
+        &self,
+        request: impl AsyncFnOnce(
+            component_startup::AsyncStartup,
+        ) -> Result<
+            Session<startup_contract::Protocol>,
+            CallError<SessionError>,
+        >,
+    ) -> Result<Session<startup_contract::Protocol>, CallError<SessionError>> {
+        let executor = crate::executor::executor();
+        let parent = component_startup::AsyncStartup::new(executor::PortChannel::new(
+            self.handle(),
+            executor.reactor(),
+        ))
+        .with_wait(IMPORTER_WAIT);
+
+        executor.block_on(request(parent))
     }
 }
 
@@ -281,17 +315,19 @@ impl Mounted {
         let thread = spawn_owned(move || {
             let ended = file_system_mount::Client::new(PortTransport::new(raw))
                 .with_wait(Timeout::INFINITE)
-                .mount(&mounted_path, filesystem);
-            if ended.is_ok() {
-                MOUNT_ENDED
-            } else {
-                MOUNT_FAILED
+                .mount(&mounted_path, filesystem)
+                .wait();
+            match ended {
+                Ok(_) => MOUNT_ENDED,
+                Err(CallError::Ipc(IpcError::PeerClosed)) => MOUNT_CANCELLED,
+                Err(_) => MOUNT_FAILED,
             }
         })
         .expect("mount thread starts");
         let resolved = namespace::Client::new(PortTransport::new(&view))
             .with_wait(IMPORTER_WAIT)
-            .resolve("/");
+            .resolve("/")
+            .wait();
         match resolved {
             Err(CallError::Ipc(IpcError::Timeout)) => expire(
                 format_args!("requirement={requirement}"),
@@ -317,12 +353,18 @@ impl Mounted {
         file_system_mount::Client::new(PortTransport::new(admin))
             .with_wait(IMPORTER_WAIT)
             .mount(&self.path, filesystem)
+            .wait()
             .map(drop)
     }
 
     pub(crate) fn ended(&self, wait: Timeout) -> bool {
         let thread = self.thread.as_ref().expect("mount thread is held");
         thread.wait(wait).is_ok() && thread.exit_code() == Ok(MOUNT_ENDED)
+    }
+
+    pub(crate) fn cancelled(&self, wait: Timeout) -> bool {
+        let thread = self.thread.as_ref().expect("mount thread is held");
+        thread.wait(wait).is_ok() && thread.exit_code() == Ok(MOUNT_CANCELLED)
     }
 
     pub(crate) fn close_admin(&mut self) {
@@ -352,17 +394,29 @@ pub(crate) fn controller_provider<P: Protocol>(
     requirement: &'static str,
     compatibles: &[String],
 ) -> Session<P> {
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
     let providers = Providers::<P>::new(importer, requirement);
-    let found = providers
-        .all(AnyOf::new(
-            CONTROLLER_KEY,
-            compatibles.iter().map(String::as_str),
-        ))
-        .expect("provider enumeration")
-        .next()
-        .expect("provider export")
-        .expect("provider export found");
-    providers.open(&found).expect("provider session")
+
+    executor.block_on(async {
+        let mut found = providers
+            .all(
+                &reactor,
+                AnyOf::new(CONTROLLER_KEY, compatibles.iter().map(String::as_str)),
+            )
+            .await
+            .expect("provider enumeration");
+
+        let found = found
+            .next(&reactor)
+            .await
+            .expect("provider export")
+            .expect("provider export found");
+        providers
+            .open(&reactor, &found)
+            .await
+            .expect("provider session")
+    })
 }
 
 pub(crate) fn compatibles<'a>(controllers: impl IntoIterator<Item = Node<'a>>) -> Vec<String> {
@@ -381,8 +435,15 @@ pub(crate) fn device(path: &str) -> DeviceId {
 
 pub(crate) fn drained(enumeration: &Session<startup_contract::Protocol>) -> Vec<Found> {
     let mut found = Vec::new();
-    while let Some(result) =
-        component_startup::next(enumeration, STARTUP_REQUEST_TIMEOUT).expect("next answered")
+    while let Some(result) = {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::next(
+            enumeration,
+            &executor.reactor(),
+            STARTUP_REQUEST_TIMEOUT,
+        ))
+    }
+    .expect("next answered")
     {
         found.push(result);
     }

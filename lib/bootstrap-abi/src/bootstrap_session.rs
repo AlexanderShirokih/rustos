@@ -37,6 +37,7 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
     use std::{format, string::String, thread};
 
     use ipc::{
@@ -56,16 +57,16 @@ mod tests {
 
     #[derive(Default)]
     struct Sink {
-        last_log: Option<String>,
+        last_log: RefCell<Option<String>>,
     }
 
     impl bootstrap::Service<MockResources> for Sink {
-        fn log(&mut self, _frame: &MockResources, tag: &str, message: &str) {
-            self.last_log = Some(format!("[{tag}] {message}"));
+        fn log(&self, _frame: &MockResources, tag: &str, message: &str) {
+            *self.last_log.borrow_mut() = Some(format!("[{tag}] {message}"));
         }
 
         fn acquire_userland_image(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, u32>>
         {
@@ -73,7 +74,7 @@ mod tests {
         }
 
         fn acquire_hardware(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<MockResources, Read = Result<Session<hardware::Protocol>, u32>>
         {
@@ -85,7 +86,7 @@ mod tests {
         }
 
         fn acquire_system_info(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<MockResources, Read = Result<Session<system_info::Protocol>, u32>>
         {
@@ -97,7 +98,7 @@ mod tests {
         }
 
         fn acquire_log(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<MockResources, Read = Result<LogRing, u32>> {
             Ok::<_, u32>(LogRing {
@@ -111,12 +112,19 @@ mod tests {
     fn log_round_trip() {
         let (client_end, server_end) = ipc_test::pair();
         let client = bootstrap::Client::new(client_end);
-        client.log("rootkeeper", "boot ok").expect("log write");
-        let mut sink = Sink::default();
+        client
+            .log("rootkeeper", "boot ok")
+            .wait()
+            .expect("log write");
+
+        let sink = Sink::default();
         server_end
-            .serve(|frame| bootstrap::dispatch(&mut sink, frame))
+            .serve(|frame| bootstrap::dispatch(&sink, frame))
             .expect("dispatch ok");
-        assert_eq!(sink.last_log.as_deref(), Some("[rootkeeper] boot ok"));
+        assert_eq!(
+            sink.last_log.borrow().as_deref(),
+            Some("[rootkeeper] boot ok")
+        );
     }
 
     #[test]
@@ -125,24 +133,27 @@ mod tests {
         let client = bootstrap::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
-                let mut sink = Sink::default();
+                let sink = Sink::default();
                 for _ in 0..4 {
                     server_end
-                        .serve(|frame| bootstrap::dispatch(&mut sink, frame))
+                        .serve(|frame| bootstrap::dispatch(&sink, frame))
                         .expect("dispatch ok");
                 }
             });
-            assert_eq!(client.acquire_userland_image(), Ok(cap(0x88)));
+            assert_eq!(client.acquire_userland_image().wait(), Ok(cap(0x88)));
             assert_eq!(
-                client.acquire_hardware().map(Session::into_handle),
+                client.acquire_hardware().wait().map(Session::into_handle),
                 Ok(cap(0x55))
             );
             assert_eq!(
-                client.acquire_system_info().map(Session::into_handle),
+                client
+                    .acquire_system_info()
+                    .wait()
+                    .map(Session::into_handle),
                 Ok(cap(0x66))
             );
             assert_eq!(
-                client.acquire_log(),
+                client.acquire_log().wait(),
                 Ok(LogRing {
                     region: cap(0x77),
                     signal: cap(0x78),

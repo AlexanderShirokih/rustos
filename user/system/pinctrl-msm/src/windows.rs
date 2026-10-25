@@ -1,5 +1,6 @@
 //! Окна плиток TLMM, отображённые в процесс контроллера.
 
+use executor::PortChannel;
 use kernel_objects::{MmioMapping, SessionTransport};
 use mmio::MappedWindows;
 use pinctrl_msm::Tile;
@@ -18,20 +19,23 @@ pub(crate) enum Refusal {
 }
 
 impl Windows {
-    pub(crate) fn take(
-        platform: &platform::Client<SessionTransport>,
+    pub(crate) async fn take(
+        platform: &platform::Client<PortChannel<SessionTransport>>,
         id: &DeviceId,
         node: &Node<'_>,
     ) -> Result<Self, Refusal> {
-        let region = |tile: Tile| {
+        let region = async |tile: Tile| {
             let resource = tile.resource(node).ok_or(Refusal::Unnamed(tile))?;
-            platform.map_mmio(id, resource).map_err(Refusal::Window)
+            platform
+                .map_mmio(id, resource)
+                .await
+                .map_err(Refusal::Window)
         };
 
         Ok(Self {
-            north: region(Tile::North)?,
-            center: region(Tile::Center)?,
-            south: region(Tile::South)?,
+            north: region(Tile::North).await?,
+            center: region(Tile::Center).await?,
+            south: region(Tile::South).await?,
         })
     }
 }

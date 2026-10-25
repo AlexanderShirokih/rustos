@@ -9,7 +9,7 @@ ipc::protocol! {
 
         /// Выдаёт сессию выводов узла `device` и применяет к выводам состояние `default` узла.
         /// Узел и выводы его состояния заняты до ухода клиента сессии.
-        call fn open(
+        call async fn open(
             device: platform_abi::DeviceId,
         ) -> own Result<ipc::wire::Session<crate::device_pins::Protocol>, PinsError>;
     }
@@ -35,7 +35,7 @@ ipc::protocol! {
         /// - `Denied` - контроллер запретил этой среде исполнения обращение к выводу;
         /// - `NoSpace` - сессии выдано 256 линий;
         /// - `Failed` - контроллер не выполнил чтение либо запись регистров.
-        call fn input(node: platform_abi::DeviceId, name: &str, index: u8) -> Result<u8, PinsError>;
+        call async fn input(node: platform_abi::DeviceId, name: &str, index: u8) -> Result<u8, PinsError>;
 
         /// Как `input`, но переводит вывод в выход с уровнем `active`, как у `set`. Уровень
         /// задаётся до включения выхода. Повторный вызов возвращает тот же номер и задаёт уровень.
@@ -70,7 +70,7 @@ ipc::protocol! {
         /// Отказы:
         /// - `NotIssued` - линия не выдана сессии;
         /// - `Denied`, `Failed` - как у `input`.
-        call fn active(line: u8) -> Result<bool, PinsError>;
+        call async fn active(line: u8) -> Result<bool, PinsError>;
 
         /// Выставляет выходу линии `line` активный уровень, если `active`, и неактивный иначе.
         ///
@@ -89,13 +89,13 @@ ipc::protocol! {
         /// - `Busy` - на выводе линии выдано прерывание другой линии сессии;
         /// - `NoSpace` - контроллеру не хватает ресурса на `Signal`;
         /// - `Denied`, `Failed` - как у `input`.
-        call fn irq(line: u8) -> own Result<ipc::wire::Cap<kind::Signal>, PinsError>;
+        call async fn irq(line: u8) -> own Result<ipc::wire::Cap<kind::Signal>, PinsError>;
 
         /// Опускает `SIGNALED` прерывания линии `line` и снова разрешает прерывание.
         ///
         /// Отказы:
         /// - `NotIssued` - линия либо её прерывание не выданы сессии;
         /// - `Denied`, `Failed` - как у `input`.
-        call fn ack(line: u8) -> Result<(), PinsError>;
+        call async fn ack(line: u8) -> Result<(), PinsError>;
     }
 }

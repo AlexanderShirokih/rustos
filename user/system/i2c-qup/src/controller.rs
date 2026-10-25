@@ -4,9 +4,7 @@
 use alloc::vec::Vec;
 
 use i2c_abi::{TransferBuf, TransferError};
-use kernel_objects::IrqLine;
 use mmio::Registers;
-use syscall::Timeout;
 
 use crate::registers::{
     CONFIG, ERROR_FLAGS, I2C_CLK_CTL, I2C_MASTER_GEN, I2C_STATUS, INPUT_FIFO, IO_MODE,
@@ -64,7 +62,6 @@ const READ_MAX: usize = 254;
 const WORD_BYTES: usize = 4;
 const BITS_PER_BYTE: usize = 8;
 
-const INTERRUPT_TIMEOUT: Timeout = Timeout::from_secs(2);
 const STATE_POLLS: usize = 10_000;
 const BUS_POLLS: usize = 100_000;
 
@@ -99,9 +96,10 @@ pub enum Operation<'a> {
 }
 
 /// Уровневая линия прерывания контроллера.
+#[allow(async_fn_in_trait)]
 pub trait Line {
     /// Ждёт срабатывания линии. Возвращает `false`, если срок истёк.
-    fn wait(&self) -> bool;
+    async fn wait(&self) -> bool;
 
     /// Снимает защёлку линии, когда контроллер погасил источник прерывания.
     fn ack(&self);
@@ -123,20 +121,17 @@ struct Input {
     position: usize,
 }
 
-impl Line for IrqLine {
-    fn wait(&self) -> bool {
-        IrqLine::wait(self, INTERRUPT_TIMEOUT).is_ok()
-    }
+struct CancelTransfer<'a, W: Registers<()>, L: Line> {
+    controller: &'a Controller<W>,
+    line: &'a L,
+    armed: bool,
+}
 
-    fn ack(&self) {
-        let _ = IrqLine::ack(self);
-    }
-
-    fn clear(&self) {
-        // Запись в режиме FIFO завершает любое прерывание без отказа, и защёлка, поднятая до
-        // сброса, завершает запись раньше шины. Сброшенный контроллер источник не держит.
-        if IrqLine::wait(self, Timeout::POLL).is_ok() {
-            let _ = IrqLine::ack(self);
+impl<W: Registers<()>, L: Line> Drop for CancelTransfer<'_, W, L> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.controller.store(SW_RESET, 1);
+            self.line.clear();
         }
     }
 }
@@ -186,7 +181,10 @@ impl<W: Registers<()>> Controller<W> {
     /// - `NoAck`, `Bus` - контроллер сообщил об отказе, и контроллер переведён в `RESET`;
     /// - `Timeout` - прерывание не пришло за срок либо контроллер не перешёл в нужное
     ///   состояние, и контроллер сброшен.
-    pub fn transfer(
+    ///
+    /// Отмена future сбрасывает контроллер и снимает оставшуюся защёлку линии. Вызывающий
+    /// обеспечивает исключительное владение контроллером до разрушения future.
+    pub async fn transfer(
         &self,
         line: &impl Line,
         address: u8,
@@ -204,6 +202,23 @@ impl<W: Registers<()>> Controller<W> {
             return Err(TransferError::Length);
         }
 
+        let mut cancelled = CancelTransfer {
+            controller: self,
+            line,
+            armed: true,
+        };
+
+        let outcome = self.perform(line, address, messages).await;
+        cancelled.armed = false;
+        outcome
+    }
+
+    async fn perform(
+        &self,
+        line: &impl Line,
+        address: u8,
+        messages: &[Message<'_>],
+    ) -> Result<TransferBuf, TransferError> {
         self.store(SW_RESET, 1);
         self.expect_state(STATE_RESET, STATE_MASK)?;
         line.clear();
@@ -222,7 +237,7 @@ impl<W: Registers<()>> Controller<W> {
 
             let mut input = Input::default();
             loop {
-                if !line.wait() {
+                if !line.wait().await {
                     return Err(self.timeout());
                 }
                 // Шаг гасит источник уровневой линии до снятия защёлки.

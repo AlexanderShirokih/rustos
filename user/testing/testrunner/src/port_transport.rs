@@ -3,6 +3,7 @@
 //! заклеймённую и незаклеймённую копии port-хэндла.
 
 use core::{
+    cell::RefCell,
     num::NonZeroU64,
     sync::atomic::{AtomicI64, Ordering::SeqCst},
 };
@@ -87,7 +88,7 @@ fn client_cast_timeout_when_receiver_stays_open_without_recv() {
     let client = cast_probe::Client::new(PortTransport::new(service.client.as_raw()))
         .with_wait(Timeout::POLL);
 
-    test_harness::check_eq!(client.hand(7), Err(IpcError::Timeout));
+    test_harness::check_eq!(client.hand(7).wait(), Err(IpcError::Timeout));
 }
 
 #[test_harness::test]
@@ -97,15 +98,12 @@ fn client_cast_reports_peer_close_when_receiver_closes_before_recv() {
         .with_wait(Timeout::POLL);
     drop(service.server);
 
-    test_harness::check_eq!(client.hand(7), Err(IpcError::PeerClosed));
+    test_harness::check_eq!(client.hand(7).wait(), Err(IpcError::PeerClosed));
 }
 
-impl answer_exhaustion::Service<Delivery> for Option<Port> {
-    fn request(
-        &mut self,
-        _frame: &Delivery,
-    ) -> impl IntoWireValue<Delivery, Read = Cap<kind::Port>> {
-        self.take().expect("capability of the answer")
+impl answer_exhaustion::Service<Delivery> for RefCell<Option<Port>> {
+    fn request(&self, _frame: &Delivery) -> impl IntoWireValue<Delivery, Read = Cap<kind::Port>> {
+        self.borrow_mut().take().expect("capability of the answer")
     }
 }
 
@@ -114,13 +112,13 @@ fn client_call_reports_resource_exhaustion_when_the_answer_does_not_fit() {
     let service = Port::create_service(None).expect("port create");
     let process = spawn_entry(ANSWER_EXHAUSTION_FIXTURE, service.client);
 
-    let mut answer = Some(Port::create().expect("capability of the answer"));
+    let answer = RefCell::new(Some(Port::create().expect("capability of the answer")));
     let transport = PortTransport::new(service.server.as_raw());
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
     let frame = transport
         .recv(&mut bytes, RECV_TIMEOUT)
         .expect("call of the fixture");
-    let _ = answer_exhaustion::dispatch(&mut answer, frame);
+    let _ = answer_exhaustion::dispatch(&answer, frame);
 
     process.join(JOIN_TIMEOUT).expect("fixture exits");
     test_harness::check_eq!(process.exit_code().expect("exit code"), EXHAUSTED_EXIT_CODE);

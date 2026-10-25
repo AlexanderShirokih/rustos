@@ -1,6 +1,9 @@
 //! Привязка GPU через слот шины.
 
+use alloc::rc::Weak;
+
 use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES};
+use executor::{PortChannel, Reactor};
 use ipc::wire::IpcError;
 use kernel_objects::{IrqLine, Mapping, SessionTransport};
 use runtime::{Timeout, log_fmt};
@@ -67,6 +70,7 @@ struct Device {
     commands: DmaRegion,
     transfer: Option<TransferBuffer>,
     edid: bool,
+    reactor: Reactor,
 }
 
 struct TransferBuffer {
@@ -118,11 +122,14 @@ impl From<kernel_objects::Error> for BindRefusal {
 }
 
 impl Gpu {
-    pub(crate) fn bind(bus: &virtio_mmio::Client<SessionTransport>) -> Result<Self, BindRefusal> {
-        let mut device = Device::open(bus)?;
-        match device.attach() {
+    pub(crate) async fn bind(
+        bus: &virtio_mmio::Client<PortChannel<SessionTransport>>,
+        reactor: Reactor,
+    ) -> Result<Self, BindRefusal> {
+        let mut device = Device::open(bus, reactor).await?;
+        match device.attach().await {
             Ok((scanout, dimension)) => {
-                let physical_size = device.physical_size(scanout);
+                let physical_size = device.physical_size(scanout).await;
                 Ok(Self {
                     device,
                     dimension,
@@ -130,8 +137,9 @@ impl Gpu {
                     scanout,
                 })
             }
+
             Err(refusal) => {
-                device.release();
+                device.release().await;
                 Err(refusal)
             }
         }
@@ -145,17 +153,23 @@ impl Gpu {
         self.physical_size
     }
 
-    pub(crate) fn present(&mut self, surface: &Mapping, area: Area) -> Result<(), DisplayError> {
-        self.dimension.check_area(area)?;
-
+    pub(crate) async fn present(
+        &mut self,
+        surface: &Weak<Mapping>,
+        area: Area,
+    ) -> Result<(), DisplayError> {
         let area = if self.device.queue.is_none() {
-            self.device
-                .initialize()
-                .and_then(|()| self.device.attach_resource(self.scanout, self.dimension))
-                .map_err(|refusal| {
-                    log_fmt(format_args!("gpu recovery refused: {refusal:?}"));
-                    DisplayError::Hardware
-                })?;
+            let recovery = async {
+                self.device.initialize().await?;
+                self.device
+                    .attach_resource(self.scanout, self.dimension)
+                    .await
+            }
+            .await;
+            recovery.map_err(|refusal| {
+                log_fmt(format_args!("gpu recovery refused: {refusal:?}"));
+                DisplayError::Hardware
+            })?;
             Area {
                 x: 0,
                 y: 0,
@@ -180,34 +194,45 @@ impl Gpu {
                 ..area
             };
 
-            let offset = transfer
-                .stage(surface, chunk, stride)
-                .ok_or(DisplayError::OutOfBounds)?;
+            let offset = {
+                let surface = surface.upgrade().ok_or(DisplayError::NoSurface)?;
+                transfer
+                    .stage(&surface, chunk, stride)
+                    .ok_or(DisplayError::OutOfBounds)?
+            };
+
             self.device
                 .transfer_to_host(chunk, offset)
+                .await
                 .map_err(refused)?;
 
             top += chunk.height;
         }
 
-        self.device.flush(area).map_err(refused)
+        self.device.flush(area).await.map_err(refused)
     }
 
-    pub(crate) fn release(self) {
-        self.device.release();
+    pub(crate) async fn release(self) {
+        self.device.release().await;
     }
 }
 
 impl Device {
-    fn open(bus: &virtio_mmio::Client<SessionTransport>) -> Result<Self, BindRefusal> {
-        let slot = open_slot(bus, DeviceType::Gpu)
-            .map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Bus))?
-            .client()
-            .with_wait(SLOT_CALL_TIMEOUT);
+    async fn open(
+        bus: &virtio_mmio::Client<PortChannel<SessionTransport>>,
+        reactor: Reactor,
+    ) -> Result<Self, BindRefusal> {
+        let session = open_slot(bus, &reactor, DeviceType::Gpu)
+            .await
+            .map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Bus))?;
+        let slot = PortChannel::client(session, reactor.clone()).with_wait(SLOT_CALL_TIMEOUT);
         let line = slot
             .irq()
+            .await
             .map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Line))?;
+
         let transport = Transport::probe(SlotRegisters::new(slot), DeviceType::Gpu)
+            .await
             .map_err(BindRefusal::Transport)?;
         let queue_memory = DmaRegion::new(QUEUE_REGION_BYTES as u64)?;
         let commands = DmaRegion::new(COMMANDS_REGION_BYTES)?;
@@ -219,19 +244,23 @@ impl Device {
             commands,
             transfer: None,
             edid: false,
+            reactor,
         };
-        if let Err(refusal) = device.initialize() {
-            device.release();
+
+        if let Err(refusal) = device.initialize().await {
+            device.release().await;
             return Err(refusal);
         }
+
         Ok(device)
     }
 
-    fn initialize(&mut self) -> Result<(), BindRefusal> {
+    async fn initialize(&mut self) -> Result<(), BindRefusal> {
         self.queue = None;
         let accepted = self
             .transport
             .negotiate(FEATURE_EDID)
+            .await
             .map_err(BindRefusal::Transport)?;
         self.edid = accepted & FEATURE_EDID != 0;
         let queue = SplitQueue::new(
@@ -240,24 +269,26 @@ impl Device {
             CONTROL_QUEUE,
             CONTROL_QUEUE_SIZE,
         )
+        .await
         .map_err(CommandFailure::from)?;
-        self.transport.start().map_err(CommandFailure::from)?;
+        self.transport.start().await.map_err(CommandFailure::from)?;
         self.queue = Some(queue);
         Ok(())
     }
 
-    fn attach(&mut self) -> Result<(u32, DisplayDimension), BindRefusal> {
-        let (scanout, rect) = self.first_scanout()?;
+    async fn attach(&mut self) -> Result<(u32, DisplayDimension), BindRefusal> {
+        let (scanout, rect) = self.first_scanout().await?;
         let dimension = DisplayDimension {
             width: rect.width,
             height: rect.height,
         };
+
         self.transfer = Some(TransferBuffer::new(dimension)?);
-        self.attach_resource(scanout, dimension)?;
+        self.attach_resource(scanout, dimension).await?;
         Ok((scanout, dimension))
     }
 
-    fn attach_resource(
+    async fn attach_resource(
         &mut self,
         scanout: u32,
         dimension: DisplayDimension,
@@ -272,11 +303,13 @@ impl Device {
             format: Format::B8G8R8X8Unorm,
             width: dimension.width,
             height: dimension.height,
-        })?;
+        })
+        .await?;
         self.execute(Command::ResourceAttachBacking {
             resource_id: RESOURCE_ID,
             backing: &backing,
-        })?;
+        })
+        .await?;
         self.execute(Command::SetScanout {
             scanout_id: scanout,
             resource_id: RESOURCE_ID,
@@ -286,20 +319,21 @@ impl Device {
                 width: dimension.width,
                 height: dimension.height,
             },
-        })?;
+        })
+        .await?;
         Ok(())
     }
 
-    fn release(mut self) {
-        if let Err(refusal) = self.transport.reset() {
+    async fn release(mut self) {
+        if let Err(refusal) = self.transport.reset().await {
             // Устройство может обращаться к DMA-регионам до подтверждённого сброса.
             log_fmt(format_args!("reset failed: {refusal:?}"));
             core::mem::forget((self.queue_memory, self.commands, self.transfer));
         }
     }
 
-    fn first_scanout(&mut self) -> Result<(u32, Rect), BindRefusal> {
-        let response = self.execute(Command::GetDisplayInfo)?;
+    async fn first_scanout(&mut self) -> Result<(u32, Rect), BindRefusal> {
+        let response = self.execute(Command::GetDisplayInfo).await?;
         let info = DisplayInfo::parse(&response).map_err(CommandFailure::Gpu)?;
         (0u32..)
             .zip(info.scanouts)
@@ -308,7 +342,7 @@ impl Device {
             .ok_or(BindRefusal::NoScanout)
     }
 
-    fn physical_size(&mut self, scanout: u32) -> Option<PhysicalSize> {
+    async fn physical_size(&mut self, scanout: u32) -> Option<PhysicalSize> {
         if !self.edid {
             return None;
         }
@@ -317,6 +351,7 @@ impl Device {
             .execute(Command::GetEdid {
                 scanout_id: scanout,
             })
+            .await
             .and_then(|response| {
                 ImageSize::from_edid_response(&response).map_err(CommandFailure::Gpu)
             });
@@ -333,7 +368,7 @@ impl Device {
         }
     }
 
-    fn transfer_to_host(&mut self, area: Area, offset: u64) -> Result<(), CommandFailure> {
+    async fn transfer_to_host(&mut self, area: Area, offset: u64) -> Result<(), CommandFailure> {
         self.execute(Command::TransferToHost2d {
             resource_id: RESOURCE_ID,
             rect: Rect {
@@ -343,11 +378,12 @@ impl Device {
                 height: area.height,
             },
             offset,
-        })?;
+        })
+        .await?;
         Ok(())
     }
 
-    fn flush(&mut self, area: Area) -> Result<(), CommandFailure> {
+    async fn flush(&mut self, area: Area) -> Result<(), CommandFailure> {
         self.execute(Command::ResourceFlush {
             resource_id: RESOURCE_ID,
             rect: Rect {
@@ -356,12 +392,16 @@ impl Device {
                 width: area.width,
                 height: area.height,
             },
-        })?;
+        })
+        .await?;
         Ok(())
     }
 
-    fn execute(&mut self, command: Command<'_>) -> Result<[u8; RESPONSE_BYTES], CommandFailure> {
-        let result = self.exchange(command);
+    async fn execute(
+        &mut self,
+        command: Command<'_>,
+    ) -> Result<[u8; RESPONSE_BYTES], CommandFailure> {
+        let result = self.exchange(command).await;
         if result.is_err() {
             // Очередь и командные буферы переиспользуются только после подтверждённого сброса.
             self.queue = None;
@@ -369,7 +409,10 @@ impl Device {
         result
     }
 
-    fn exchange(&mut self, command: Command<'_>) -> Result<[u8; RESPONSE_BYTES], CommandFailure> {
+    async fn exchange(
+        &mut self,
+        command: Command<'_>,
+    ) -> Result<[u8; RESPONSE_BYTES], CommandFailure> {
         let queue = self.queue.as_mut().ok_or(CommandFailure::NotReady)?;
         let mut request = [0u8; RESPONSE_OFFSET];
         let length = command.encode(&mut request)?;
@@ -381,20 +424,25 @@ impl Device {
             address: base,
             length: u32::try_from(length).map_err(|_| CommandFailure::Memory)?,
         };
+
         let response = Buffer {
             address: base + RESPONSE_OFFSET as u64,
             length: u32::try_from(command.response_bytes()).map_err(|_| CommandFailure::Memory)?,
         };
-        let token = queue.submit(
-            &mut self.transport,
-            &mut self.queue_memory,
-            &[request],
-            &[response],
-        )?;
-        let completion = self.await_completion()?;
+
+        let token = queue
+            .submit(
+                &mut self.transport,
+                &mut self.queue_memory,
+                &[request],
+                &[response],
+            )
+            .await?;
+        let completion = self.await_completion().await?;
         if completion.token != token {
             return Err(CommandFailure::UnexpectedCompletion);
         }
+
         let length = usize::try_from(completion.written).map_err(|_| CommandFailure::Memory)?;
         let mut response = [0u8; RESPONSE_BYTES];
         let written = response.get_mut(..length).ok_or(CommandFailure::Memory)?;
@@ -403,15 +451,17 @@ impl Device {
         Ok(response)
     }
 
-    fn await_completion(&mut self) -> Result<Completion, CommandFailure> {
+    async fn await_completion(&mut self) -> Result<Completion, CommandFailure> {
         let queue = self.queue.as_mut().ok_or(CommandFailure::NotReady)?;
         Ok(await_completion(
             queue,
             &mut self.transport,
             &mut self.queue_memory,
             &self.line,
+            &self.reactor,
             COMPLETION_TIMEOUT,
-        )?)
+        )
+        .await?)
     }
 }
 

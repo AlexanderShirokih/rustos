@@ -1,73 +1,148 @@
-//! Сессии `Pins` и сессии выводов узлов выпускаются на одном порту из общего счётчика значков.
-//! Кадр значка сессии узла обслуживает протокол `DevicePins`, остальные кадры - протокол `Pins`.
+//! Сессии Pins и DevicePins на общем порту контроллера.
 
-use alloc::vec::Vec;
+use alloc::{rc::Rc, vec::Vec};
+use core::cell::RefCell;
 
-use component_startup::{Providers, SessionEvent, SessionPort};
-use ipc::IntoWireValue;
+use component_startup::{Providers, SessionPort};
+use executor::{Either, Mutex, MutexGuard, PortChannel, Reactor};
+use ipc::{Incoming, IntoWireValue, ServiceOwner, wire::IpcError};
 use kernel_objects::{Delivery, Port, SessionTransport, Signal};
 use pinctrl_spmi_gpio::{ControllerNode, Gpio, Line, line, plan};
 use pins_abi::{Claims, Direction, Lines, PinsError, Record, device_pins, pins};
-use platform_abi::{Description, DeviceId};
-use runtime::Mutex;
+use platform_abi::{DeviceId, MappedDescription};
 use spmi_abi::{spmi, spmi_interrupt};
 
 use crate::device::{Device, irq_refused};
 
-pub(crate) struct Driver<'d> {
-    pub(crate) description: &'d Description<'d>,
-    pub(crate) spmi: &'d Providers<spmi::Protocol>,
-    pub(crate) gpios: Vec<(DeviceId, Gpio<Device>)>,
-    pub(crate) claims: Claims,
-    pub(crate) lines: Lines<Input>,
+type Interrupt = spmi_interrupt::Client<PortChannel<SessionTransport>>;
+
+pub(crate) struct Driver {
+    description: MappedDescription,
+    spmi: Providers<spmi::Protocol>,
+    sessions: Rc<SessionPort>,
+    reactor: Reactor,
+    gpios: RefCell<Vec<Rc<Slot>>>,
+    claims: RefCell<Claims>,
+    lines: RefCell<Lines<Rc<Input>>>,
 }
 
-pub(crate) struct Input {
+struct Slot {
+    controller: ControllerNode,
+    gpio: Mutex<Option<Gpio<Device>>>,
+}
+
+struct Input {
     line: Line,
-    irq: Option<spmi_interrupt::Client<SessionTransport>>,
+    irq: Mutex<Option<Rc<Interrupt>>>,
 }
 
-struct Opener<'a, 'd> {
-    sessions: &'a SessionPort,
-    driver: &'a mut Driver<'d>,
-}
-
-struct Held<'a, 'd> {
-    driver: &'a mut Driver<'d>,
+#[derive(Clone)]
+struct Held {
+    driver: Rc<Driver>,
     badge: u64,
 }
 
-impl Driver<'_> {
-    fn gpio(&mut self, controller: &ControllerNode) -> Result<&mut Gpio<Device>, PinsError> {
-        let index = if let Some(index) = self.gpios.iter().position(|(id, _)| *id == controller.id)
-        {
-            index
-        } else {
-            let device = Device::bind(self.description, self.spmi, controller)?;
-            self.gpios.push((controller.id.clone(), Gpio::new(device)));
-            self.gpios.len().saturating_sub(1)
-        };
+impl ServiceOwner for Held {
+    type Service = Self;
 
-        self.gpios
-            .get_mut(index)
-            .map(|(_, gpio)| gpio)
-            .ok_or(PinsError::Failed)
-    }
-
-    fn release(&mut self, badge: u64) {
-        // Сброс линий закрывает сессии их прерываний, и шина отзывает их `Signal`.
-        self.lines.release(badge);
-        self.claims.release(badge);
+    fn service(&self) -> &Self {
+        self
     }
 }
 
-impl Opener<'_, '_> {
-    fn open(&mut self, device: DeviceId) -> Result<Port, PinsError> {
-        let driver = &mut *self.driver;
-        let plan = plan(driver.description, &device, &driver.claims)?;
-        for controller in plan.controllers() {
-            let settings = plan.settings(&controller.id);
-            driver.gpio(controller)?.apply(&settings)?;
+impl Driver {
+    pub(crate) fn new(
+        description: MappedDescription,
+        spmi: Providers<spmi::Protocol>,
+        sessions: Rc<SessionPort>,
+        reactor: Reactor,
+    ) -> Self {
+        Self {
+            description,
+            spmi,
+            sessions,
+            reactor,
+            gpios: RefCell::new(Vec::new()),
+            claims: RefCell::new(Claims::new()),
+            lines: RefCell::new(Lines::new()),
+        }
+    }
+
+    fn slot(&self, controller: &ControllerNode) -> Rc<Slot> {
+        let mut gpios = self.gpios.borrow_mut();
+        if let Some(slot) = gpios
+            .iter()
+            .find(|slot| slot.controller.id == controller.id)
+        {
+            return slot.clone();
+        }
+
+        let slot = Rc::new(Slot {
+            controller: controller.clone(),
+            gpio: Mutex::new(None),
+        });
+        gpios.push(slot.clone());
+        slot
+    }
+
+    pub(crate) fn release(&self, badge: u64) {
+        self.lines.borrow_mut().release(badge);
+        self.claims.borrow_mut().release(badge);
+    }
+
+    pub(crate) fn serve(
+        driver: &Rc<Self>,
+        frame: Incoming<'_, Delivery>,
+    ) -> Result<Option<impl Future<Output = Result<(), IpcError>> + use<>>, IpcError> {
+        let badge = frame.resources.badge;
+        let held = driver.lines.borrow().node(badge).is_some();
+        let call = if held {
+            let held = Held {
+                driver: driver.clone(),
+                badge,
+            };
+            device_pins::serve(&held, frame)?.map(Either::Left)
+        } else {
+            pins::serve(driver, frame)?.map(Either::Right)
+        };
+
+        Ok(call.map(Either::run))
+    }
+
+    async fn open(&self, device: DeviceId) -> Result<Port, PinsError> {
+        let description = self
+            .description
+            .description()
+            .map_err(|_| PinsError::NoDevice)?;
+        let checked = plan(&description, &device, &self.claims.borrow())?;
+        let mut slots: Vec<_> = checked
+            .controllers()
+            .iter()
+            .map(|controller| self.slot(controller))
+            .collect();
+        slots.sort_by(|left, right| {
+            left.controller
+                .id
+                .as_str()
+                .cmp(right.controller.id.as_str())
+        });
+
+        let mut locked = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            locked.push((&slot.controller.id, slot.lock(self).await?));
+        }
+
+        let checked = plan(&description, &device, &self.claims.borrow())?;
+        for controller in checked.controllers() {
+            let settings = checked.settings(&controller.id);
+            let (_, gpio) = locked
+                .iter_mut()
+                .find(|(id, _)| **id == controller.id)
+                .ok_or(PinsError::Failed)?;
+            gpio.as_mut()
+                .ok_or(PinsError::Failed)?
+                .apply(&settings)
+                .await?;
         }
 
         let minted = self
@@ -75,174 +150,216 @@ impl Opener<'_, '_> {
             .create_session()
             .map_err(|_| PinsError::NoSpace)?;
         let badge = minted.badge.get();
-
-        plan.claim(&mut driver.claims, badge);
-        driver.lines.open(badge, device);
+        checked.claim(&mut self.claims.borrow_mut(), badge);
+        self.lines.borrow_mut().open(badge, device);
         Ok(minted.port)
     }
 }
 
-impl pins::Service<Delivery> for Opener<'_, '_> {
-    fn open(
-        &mut self,
-        _frame: &Delivery,
-        device: DeviceId,
-    ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<device_pins::Protocol>, PinsError>>
-    {
-        // Порт сессии выводов выпускает этот контроллер, и он же обслуживает на нём
-        // `DevicePins`.
-        Opener::open(self, device).map(kernel_objects::Session::from_handle)
+impl Slot {
+    async fn lock<'a>(
+        &'a self,
+        driver: &Driver,
+    ) -> Result<MutexGuard<'a, Option<Gpio<Device>>>, PinsError> {
+        let mut gpio = self.gpio.lock().await;
+        if gpio.is_none() {
+            let description = driver
+                .description
+                .description()
+                .map_err(|_| PinsError::NoDevice)?;
+            let device = Device::bind(
+                &description,
+                &driver.spmi,
+                &self.controller,
+                &driver.reactor,
+            )
+            .await?;
+            *gpio = Some(Gpio::new(device));
+        }
+
+        Ok(gpio)
     }
 }
 
-impl Held<'_, '_> {
+impl Held {
     fn line(&self, node: &DeviceId, name: &str, index: u8) -> Result<Line, PinsError> {
-        let session = self
+        let lines = self.driver.lines.borrow();
+        let session = lines.node(self.badge).ok_or(PinsError::NotIssued)?;
+        let description = self
             .driver
-            .lines
-            .node(self.badge)
-            .ok_or(PinsError::NotIssued)?;
-        let line = line(self.driver.description, session, node, name, index)?;
+            .description
+            .description()
+            .map_err(|_| PinsError::NoDevice)?;
+        let line = line(&description, session, node, name, index)?;
         if self
             .driver
             .claims
+            .borrow()
             .holder(&line.pin())
             .is_some_and(|holder| holder != self.badge)
         {
             return Err(PinsError::Busy);
         }
+
         Ok(line)
     }
 
-    fn issue(&mut self, node: DeviceId, name: &str, index: u8) -> Result<u8, PinsError> {
-        let lines = &self.driver.lines;
+    async fn issue(&self, node: DeviceId, name: &str, index: u8) -> Result<u8, PinsError> {
         let record = Record::Line(name);
-        if let Some(number) = lines.find(self.badge, &node, record, index, Direction::Input)? {
+        if let Some(number) =
+            self.driver
+                .lines
+                .borrow()
+                .find(self.badge, &node, record, index, Direction::Input)?
+        {
             return Ok(number);
         }
 
         let line = self.line(&node, name, index)?;
-        self.driver.gpio(&line.controller)?.input(line.block)?;
-        self.driver.claims.claim_pin(self.badge, line.pin());
-        self.driver.lines.issue(
+        let slot = self.driver.slot(&line.controller);
+        let mut gpio = slot.lock(&self.driver).await?;
+        if let Some(number) =
+            self.driver
+                .lines
+                .borrow()
+                .find(self.badge, &node, record, index, Direction::Input)?
+        {
+            return Ok(number);
+        }
+
+        let line = self.line(&node, name, index)?;
+        gpio.as_mut()
+            .ok_or(PinsError::Failed)?
+            .input(line.block)
+            .await?;
+        self.driver
+            .claims
+            .borrow_mut()
+            .claim_pin(self.badge, line.pin());
+        self.driver.lines.borrow_mut().issue(
             self.badge,
             node,
             record,
             index,
             Direction::Input,
-            Input { line, irq: None },
+            Rc::new(Input {
+                line,
+                irq: Mutex::new(None),
+            }),
         )
     }
 
-    fn issued(&self, line: u8) -> Result<&Input, PinsError> {
-        self.driver.lines.get(self.badge, line)
+    fn issued(&self, number: u8) -> Result<Rc<Input>, PinsError> {
+        self.driver.lines.borrow().get(self.badge, number).cloned()
     }
 
-    fn signal(&mut self, line: u8) -> Result<Signal, PinsError> {
-        let input = self.issued(line)?;
-        if input.irq.is_none() {
-            let (controller, block) = (input.line.controller.clone(), input.line.block);
-            let interrupt = self.driver.gpio(&controller)?.registers().irq(block)?;
-            self.driver.lines.get_mut(self.badge, line)?.irq = Some(interrupt);
-        }
+    async fn signal(&self, number: u8) -> Result<Signal, PinsError> {
+        let input = self.issued(number)?;
+        let irq = {
+            let mut irq = input.irq.lock().await;
+            if irq.is_none() {
+                let slot = self.driver.slot(&input.line.controller);
+                let gpio = slot.lock(&self.driver).await?;
+                let gpio = gpio.as_ref().ok_or(PinsError::Failed)?;
+                let interrupt = gpio
+                    .registers()
+                    .irq(input.line.block, &self.driver.reactor)
+                    .await?;
 
-        self.irq_session(line)?
-            .signal()
-            .map(Signal::from)
-            .map_err(irq_refused)
-    }
+                *irq = Some(Rc::new(interrupt));
+            }
 
-    fn irq_session(
-        &self,
-        line: u8,
-    ) -> Result<&spmi_interrupt::Client<SessionTransport>, PinsError> {
-        self.issued(line)?.irq.as_ref().ok_or(PinsError::NotIssued)
+            irq.as_ref().cloned().ok_or(PinsError::NotIssued)?
+        };
+
+        irq.signal().await.map(Signal::from).map_err(irq_refused)
     }
 }
 
-impl device_pins::Service<Delivery> for Held<'_, '_> {
-    fn input(
-        &mut self,
+impl pins::Service<Delivery> for Driver {
+    async fn open(
+        &self,
+        _frame: &Delivery,
+        device: DeviceId,
+    ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<device_pins::Protocol>, PinsError>>
+    {
+        Driver::open(self, device)
+            .await
+            .map(kernel_objects::Session::from_handle)
+    }
+}
+
+#[allow(clippy::unused_async_trait_impl)]
+impl device_pins::Service<Delivery> for Held {
+    async fn input(
+        &self,
         _frame: &Delivery,
         node: DeviceId,
         name: &str,
         index: u8,
     ) -> Result<u8, PinsError> {
-        self.issue(node, name, index)
+        self.issue(node, name, index).await
     }
 
     fn output(
-        &mut self,
+        &self,
         _frame: &Delivery,
         node: DeviceId,
         name: &str,
         index: u8,
         _active: bool,
     ) -> Result<u8, PinsError> {
-        // Выход линии PMIC не выдаётся, это текущее ограничение.
         self.line(&node, name, index)?;
         Err(PinsError::Unsupported)
     }
 
-    fn interrupt(&mut self, _frame: &Delivery, node: DeviceId, index: u8) -> Result<u8, PinsError> {
-        // Линия по записи прерывания PMIC не выдаётся, это текущее ограничение.
-        let session = self
+    fn interrupt(&self, _frame: &Delivery, node: DeviceId, index: u8) -> Result<u8, PinsError> {
+        let lines = self.driver.lines.borrow();
+        let session = lines.node(self.badge).ok_or(PinsError::NotIssued)?;
+        let description = self
             .driver
-            .lines
-            .node(self.badge)
-            .ok_or(PinsError::NotIssued)?;
-        pins_abi::interrupt(self.driver.description, session, &node, index)
-            .ok_or(PinsError::NoDevice)?;
+            .description
+            .description()
+            .map_err(|_| PinsError::NoDevice)?;
+        pins_abi::interrupt(&description, session, &node, index).ok_or(PinsError::NoDevice)?;
         Err(PinsError::Unsupported)
     }
 
-    fn active(&mut self, _frame: &Delivery, line: u8) -> Result<bool, PinsError> {
-        let line = self.issued(line)?.line.clone();
-        let high = self.driver.gpio(&line.controller)?.level(line.block)?;
-        Ok(line.active(high))
+    async fn active(&self, _frame: &Delivery, number: u8) -> Result<bool, PinsError> {
+        let input = self.issued(number)?;
+        let slot = self.driver.slot(&input.line.controller);
+        let gpio = slot.lock(&self.driver).await?;
+        let high = gpio
+            .as_ref()
+            .ok_or(PinsError::Failed)?
+            .level(input.line.block)
+            .await?;
+        Ok(input.line.active(high))
     }
 
-    fn set(&mut self, _frame: &Delivery, _line: u8, _active: bool) -> Result<(), PinsError> {
+    fn set(&self, _frame: &Delivery, _line: u8, _active: bool) -> Result<(), PinsError> {
         Err(PinsError::NotIssued)
     }
 
-    fn irq(
-        &mut self,
+    async fn irq(
+        &self,
         _frame: &Delivery,
-        line: u8,
+        number: u8,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Cap<syscall::kind::Signal>, PinsError>>
     {
-        self.signal(line)
+        self.signal(number).await
     }
 
-    fn ack(&mut self, _frame: &Delivery, line: u8) -> Result<(), PinsError> {
-        self.irq_session(line)?.ack().map_err(irq_refused)
-    }
-}
+    async fn ack(&self, _frame: &Delivery, number: u8) -> Result<(), PinsError> {
+        let input = self.issued(number)?;
+        let irq = input
+            .irq
+            .lock()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or(PinsError::NotIssued)?;
 
-pub(crate) fn serve(driver: &Mutex<Driver<'_>>, sessions: &SessionPort) {
-    let mut events = sessions.events();
-
-    while let Some(event) = events.recv() {
-        let mut driver = driver.lock();
-        match event {
-            SessionEvent::Frame(frame) => {
-                let badge = frame.resources.badge;
-                if driver.lines.node(badge).is_some() {
-                    let mut held = Held {
-                        driver: &mut driver,
-                        badge,
-                    };
-                    let _ = device_pins::dispatch(&mut held, frame);
-                } else {
-                    let mut opener = Opener {
-                        sessions,
-                        driver: &mut driver,
-                    };
-                    let _ = pins::dispatch(&mut opener, frame);
-                }
-            }
-            SessionEvent::Gone(badge) => driver.release(badge),
-        }
+        irq.ack().await.map_err(irq_refused)
     }
 }

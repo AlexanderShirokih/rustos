@@ -200,7 +200,7 @@ ipc::protocol! {
 
         /// Выдаёт заявку импортёра на экспорт `export`. Импортёр получает ответ на заявку как
         /// ответ своей операции `session` либо `open`.
-        call(defer) fn accept(
+        call(defer) async fn accept(
             export: &str,
         ) -> own Result<SessionRequest, AcceptError>;
 
@@ -230,7 +230,7 @@ ipc::protocol! {
         /// такой экспорт появится. Наблюдение держит один
         /// ожидающий `next`: новый вызов заменяет его, и заменённый получает `Refused`. Экспорт,
         /// ответ с которым не доставлен импортёру, остаётся невыданным.
-        call(defer) fn next() -> own Result<Option<Found>, SessionError>;
+        call(defer) async fn next() -> own Result<Option<Found>, SessionError>;
 
         /// Открывает сессию найденного экспорта и ждёт ответа провайдера. Окончательно удалённый
         /// провайдер даёт `Unavailable`, другой экспорт не подставляется.
@@ -240,10 +240,11 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
     use std::{string::String, vec::Vec};
 
     use ipc::wire::{Cap, IpcError};
-    use ipc_test::{MockHandle, MockReply, MockResources};
+    use ipc_test::{MockHandle, MockReply, MockResources, complete};
     use syscall::kind;
 
     use super::{
@@ -269,57 +270,56 @@ mod tests {
 
     #[derive(Default)]
     struct Parent {
-        requirements: Vec<RequestedSession>,
-        exports: Vec<String>,
-        waiting: Option<(component_startup::session::Reply<MockReply>, AttributeSet)>,
+        requirements: RefCell<Vec<RequestedSession>>,
+        exports: RefCell<Vec<String>>,
+        waiting: RefCell<Option<(component_startup::session::Reply<MockReply>, AttributeSet)>>,
         filter: Vec<u8>,
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl component_startup::Service<MockResources> for Parent {
         fn session(
-            &mut self,
+            &self,
             _frame: &MockResources,
             requirement: SessionRequirement<'_>,
             attributes: QueryAttributes<'_>,
             reply: component_startup::session::Reply<MockReply>,
         ) {
-            self.requirements.push(RequestedSession {
+            self.requirements.borrow_mut().push(RequestedSession {
                 name: requirement.name.into(),
                 protocol: requirement.protocol.into(),
                 attributes: attributes.into(),
             });
             match Attributes::decode(attributes) {
-                Some(attributes) => self.waiting = Some((reply, AttributeSet::new(attributes))),
+                Some(attributes) => {
+                    *self.waiting.borrow_mut() = Some((reply, AttributeSet::new(attributes)));
+                }
                 None => {
                     let _ = reply.send(Err::<MockHandle<kind::Port>, _>(SessionError::Refused));
                 }
             }
         }
 
-        fn accept(
-            &mut self,
+        async fn accept(
+            &self,
             _frame: &MockResources,
             export: &str,
             reply: component_startup::accept::Reply<MockReply>,
         ) {
-            self.exports.push(export.into());
-            let Some((debt, attributes)) = self.waiting.take() else {
-                let _ = reply.send(Err::<
-                    SessionRequest<component_startup::session::Reply<MockReply>>,
-                    _,
-                >(AcceptError::Refused));
-                return;
-            };
-            reply
-                .send(Ok::<_, AcceptError>(SessionRequest {
+            self.exports.borrow_mut().push(export.into());
+            let request = self
+                .waiting
+                .take()
+                .map(|(debt, attributes)| SessionRequest {
                     reply: debt,
                     attributes,
-                }))
-                .expect("the parent answers accept");
+                })
+                .ok_or(AcceptError::Refused);
+            let _ = reply.send(request);
         }
 
         fn all(
-            &mut self,
+            &self,
             _frame: &MockResources,
             _requirement: SessionRequirement<'_>,
             _attributes: QueryAttributes<'_>,
@@ -329,7 +329,7 @@ mod tests {
         }
 
         fn watch(
-            &mut self,
+            &self,
             _frame: &MockResources,
             _requirement: SessionRequirement<'_>,
             _attributes: QueryAttributes<'_>,
@@ -338,28 +338,21 @@ mod tests {
             Err::<MockHandle<kind::Port>, _>(SessionError::Refused)
         }
 
-        fn next(
-            &mut self,
+        async fn next(
+            &self,
             _frame: &MockResources,
             reply: component_startup::next::Reply<MockReply>,
         ) {
             let filter = Attributes::decode(&self.filter).expect("filter decodes");
             let protocol = "P".repeat(PROTOCOL_ID_MAX);
-
-            reply
-                .send(Ok::<_, SessionError>(Some(Found {
-                    session: FOUND_CAP,
-                    protocol: ProtocolName::new(&protocol).expect("protocol at the bound"),
-                    filter: AttributeSet::new(filter),
-                })))
-                .expect("the parent answers next");
+            let _ = reply.send(Ok::<_, SessionError>(Some(Found {
+                session: FOUND_CAP,
+                protocol: ProtocolName::new(&protocol).expect("protocol at the bound"),
+                filter: AttributeSet::new(filter),
+            })));
         }
 
-        fn open(
-            &mut self,
-            _frame: &MockResources,
-            reply: component_startup::open::Reply<MockReply>,
-        ) {
+        fn open(&self, _frame: &MockResources, reply: component_startup::open::Reply<MockReply>) {
             let _ = reply.send(Err::<MockHandle<kind::Port>, _>(SessionError::Unavailable));
         }
     }
@@ -401,7 +394,7 @@ mod tests {
     fn an_accept_response_carries_the_reply_and_attributes_of_the_request() {
         let (importer_end, importer_listener) = ipc_test::pair();
         let (provider_end, provider_listener) = ipc_test::pair();
-        let mut parent = Parent::default();
+        let parent = Parent::default();
         let attributes = maximal_attributes();
         let name = "n".repeat(64);
         let protocol = "p".repeat(PROTOCOL_ID_MAX);
@@ -412,16 +405,31 @@ mod tests {
                     name: &name,
                     protocol: &protocol,
                 };
-                component_startup::Client::new(importer_end).session(requirement, &attributes)
+                component_startup::Client::new(importer_end)
+                    .session(requirement, &attributes)
+                    .wait()
             });
             importer_listener
-                .serve(|frame| component_startup::dispatch(&mut parent, frame))
+                .serve(|frame| {
+                    complete(component_startup::dispatch(
+                        &parent,
+                        ipc::OwnedIncoming::new(frame).expect("frame fits"),
+                    ))
+                })
                 .expect("dispatch ok");
 
-            let provider =
-                scope.spawn(|| component_startup::Client::new(provider_end).accept(EXPORT));
+            let provider = scope.spawn(|| {
+                component_startup::Client::new(provider_end)
+                    .accept(EXPORT)
+                    .wait()
+            });
             provider_listener
-                .serve(|frame| component_startup::dispatch(&mut parent, frame))
+                .serve(|frame| {
+                    complete(component_startup::dispatch(
+                        &parent,
+                        ipc::OwnedIncoming::new(frame).expect("frame fits"),
+                    ))
+                })
                 .expect("dispatch ok");
 
             let request = provider
@@ -438,28 +446,33 @@ mod tests {
 
         assert_eq!(answer, Ok(SESSION_CAP));
         assert_eq!(
-            parent.requirements,
+            parent.requirements.into_inner(),
             [RequestedSession {
                 name,
                 protocol,
                 attributes,
             }]
         );
-        assert_eq!(parent.exports, [String::from(EXPORT)]);
+        assert_eq!(parent.exports.into_inner(), [String::from(EXPORT)]);
     }
 
     #[test]
     fn a_found_result_carries_a_maximal_filter_and_protocol() {
         let (end, listener) = ipc_test::pair();
-        let mut parent = Parent {
+        let parent = Parent {
             filter: maximal_attributes(),
             ..Parent::default()
         };
 
         let found = std::thread::scope(|scope| {
-            let enumeration = scope.spawn(|| component_startup::Client::new(end).next());
+            let enumeration = scope.spawn(|| component_startup::Client::new(end).next().wait());
             listener
-                .serve(|frame| component_startup::dispatch(&mut parent, frame))
+                .serve(|frame| {
+                    complete(component_startup::dispatch(
+                        &parent,
+                        ipc::OwnedIncoming::new(frame).expect("frame fits"),
+                    ))
+                })
                 .expect("dispatch ok");
             enumeration.join().expect("client joins")
         });
@@ -475,25 +488,31 @@ mod tests {
     fn a_session_frame_with_an_index_instead_of_attributes_is_refused() {
         for index in [0, 7] {
             let (end, listener) = ipc_test::pair();
-            let mut parent = Parent::default();
+            let parent = Parent::default();
 
             let answer = std::thread::scope(|scope| {
                 let importer = scope.spawn(|| {
-                    indexed_startup::Client::new(end).session(IndexedRequirement {
-                        name: REQUIREMENT,
-                        protocol: EXPORT,
-                        index,
-                    })
+                    indexed_startup::Client::new(end)
+                        .session(IndexedRequirement {
+                            name: REQUIREMENT,
+                            protocol: EXPORT,
+                            index,
+                        })
+                        .wait()
                 });
 
-                let dispatched =
-                    listener.serve(|frame| component_startup::dispatch(&mut parent, frame));
+                let dispatched = listener.serve(|frame| {
+                    complete(component_startup::dispatch(
+                        &parent,
+                        ipc::OwnedIncoming::new(frame).expect("frame fits"),
+                    ))
+                });
                 assert!(dispatched.is_err());
                 importer.join().expect("importer joins")
             });
 
             assert_eq!(answer, Err(ipc::CallError::Ipc(IpcError::PeerClosed)));
-            assert!(parent.requirements.is_empty());
+            assert!(parent.requirements.borrow().is_empty());
         }
     }
 }

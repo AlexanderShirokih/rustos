@@ -9,18 +9,17 @@
 use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
 
 use filesystem_abi::{
-    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, NodeDescriptor, NodeKind,
-    OpenFlags, file_system,
+    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, IO_TRANSFER_MAX,
+    NodeDescriptor, NodeKind, OpenFlags,
 };
 use ipc::{CallError, wire::IpcError};
-use kernel_objects::{Mapping, MemoryRegion, SessionTransport};
-use runtime::UserMemFlags;
 
 use crate::{
     filesystem::{
         FILE_SYSTEM_REPLY_TIMEOUT, STRESS_VIEW, connect, mount_ram_window, remove_ram_directory,
         session_for,
     },
+    filesystem_io::IoClient,
     stress::{SplitMix64, StressPlan, expire, log_pass, log_seed},
 };
 
@@ -53,8 +52,7 @@ enum Mismatch {
 }
 
 struct Session {
-    client: file_system::Client<SessionTransport>,
-    buffer: Mapping,
+    client: IoClient,
 }
 
 struct Descriptor {
@@ -95,40 +93,21 @@ impl core::fmt::Display for Mismatch {
 }
 
 impl Session {
-    fn open() -> Result<Self, Mismatch> {
+    fn open() -> Self {
         let client = connect(session_for(STRESS_MOUNT));
-        let granted = client
-            .acquire_buffer(BUFFER_SIZE)
-            .map_err(Mismatch::refused("acquire_buffer"))?;
-        let region = MemoryRegion::from(granted);
-        let buffer = Mapping::full(region, UserMemFlags::ReadWrite)
-            .map_err(|_| Mismatch::Model("data buffer is not mapped"))?;
-        Ok(Self { client, buffer })
-    }
-
-    fn put(&self, bytes: &[u8]) -> Step {
-        self.buffer
-            .copy_in(bytes)
-            .map_err(|_| Mismatch::Model("payload does not fit the buffer"))
-    }
-
-    fn take(&self, len: usize) -> Result<Vec<u8>, Mismatch> {
-        let mut bytes = vec![0; len];
-        self.buffer
-            .copy_out(&mut bytes)
-            .map_err(|_| Mismatch::Model("buffer head is not readable"))?;
-        Ok(bytes)
+        Self { client }
     }
 }
 
 impl Run {
     fn new(seed: u64) -> Result<Self, Mismatch> {
         let run = Self {
-            session: Session::open()?,
+            session: Session::open(),
             files: BTreeMap::new(),
             descriptors: Vec::new(),
             random: SplitMix64::new(seed),
         };
+
         for directory in DIRECTORIES {
             run.session
                 .client
@@ -137,6 +116,7 @@ impl Run {
                     AccessMode::Read,
                     OpenFlags::CREATE | OpenFlags::DIRECTORY,
                 )
+                .wait()
                 .map_err(Mismatch::refused("open of a directory"))?;
         }
         Ok(run)
@@ -161,7 +141,7 @@ impl Run {
                 "write_through_a_read_only",
                 self.write_through_a_read_only(),
             ),
-            _ => ("read_over_the_buffer", self.read_over_the_buffer()),
+            _ => ("read_over_transfer_limit", self.read_over_transfer_limit()),
         }
     }
 
@@ -172,6 +152,7 @@ impl Run {
             .session
             .client
             .open(&text, AccessMode::ReadWrite, OpenFlags::CREATE)
+            .wait()
             .map_err(Mismatch::refused("open with CREATE"))?;
         expect(
             opened.info.kind == NodeKind::File,
@@ -193,11 +174,15 @@ impl Run {
     fn open_exclusive(&mut self) -> Step {
         let text = self.file_path();
         let known = self.files.contains_key(&text);
-        let opened = self.session.client.open(
-            &text,
-            AccessMode::ReadWrite,
-            OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
-        );
+        let opened = self
+            .session
+            .client
+            .open(
+                &text,
+                AccessMode::ReadWrite,
+                OpenFlags::CREATE | OpenFlags::EXCLUSIVE,
+            )
+            .wait();
         if known {
             return expect(
                 opened == Err(CallError::Remote(FileSystemError::AlreadyExists)),
@@ -221,7 +206,8 @@ impl Run {
         let opened = self
             .session
             .client
-            .open(&text, AccessMode::Read, OpenFlags::NONE);
+            .open(&text, AccessMode::Read, OpenFlags::NONE)
+            .wait();
         let Some(size) = expected else {
             return expect(
                 opened == Err(CallError::Remote(FileSystemError::NotFound)),
@@ -245,15 +231,15 @@ impl Run {
         let Some(index) = self.writable_descriptor() else {
             return Ok(());
         };
+
         let fd = self.descriptors[index].fd;
         let text = self.named_path(index)?;
         let payload = self.payload();
         let offset = self.random.next() % (OFFSET_MAX + 1);
-        self.session.put(&payload)?;
         let written = self
             .session
             .client
-            .write(fd, offset, payload.len() as u32)
+            .write(fd, offset, &payload)
             .map_err(Mismatch::refused("write"))?;
         expect(written.offset == offset, "write landed at another offset")?;
         expect(
@@ -269,15 +255,15 @@ impl Run {
         let Some(index) = self.writable_descriptor() else {
             return Ok(());
         };
+
         let fd = self.descriptors[index].fd;
         let text = self.named_path(index)?;
         let payload = self.payload();
         let end = self.file_mut(&text)?.len() as u64;
-        self.session.put(&payload)?;
         let written = self
             .session
             .client
-            .write(fd, APPEND_OFFSET, payload.len() as u32)
+            .write(fd, APPEND_OFFSET, &payload)
             .map_err(Mismatch::refused("append"))?;
         expect(written.offset == end, "append landed before the end")?;
         expect(
@@ -293,19 +279,21 @@ impl Run {
         let Some(index) = self.any_descriptor() else {
             return Ok(());
         };
+
         let fd = self.descriptors[index].fd;
         let content = self.content(index);
         let offset = self.random.next() % (OFFSET_MAX + 1);
         let len = self.choice(PAYLOAD_MAX + 1);
+        let mut bytes = vec![0; len];
         let count = self
             .session
             .client
-            .read(fd, offset, len as u32)
+            .read(fd, offset, &mut bytes)
             .map_err(Mismatch::refused("read"))?;
         let tail = content.get(offset as usize..).unwrap_or_default();
         let expected = tail.len().min(len);
         expect(count as usize == expected, "read took another byte count")?;
-        let bytes = self.session.take(expected)?;
+        bytes.truncate(expected);
         expect(
             bytes == tail[..expected],
             "read bytes differ from the model",
@@ -322,6 +310,7 @@ impl Run {
         self.session
             .client
             .set_size(fd, size)
+            .wait()
             .map_err(Mismatch::refused("set_size"))?;
         self.file_mut(&text)?.resize(size as usize, 0);
         Ok(())
@@ -337,7 +326,9 @@ impl Run {
             .session
             .client
             .stat(fd)
+            .wait()
             .map_err(Mismatch::refused("stat"))?;
+
         expect(
             info.kind == NodeKind::File,
             "node under the descriptor is not a file",
@@ -351,7 +342,7 @@ impl Run {
     fn unlink(&mut self) -> Step {
         let text = self.file_path();
         let known = self.files.remove(&text);
-        let removed = self.session.client.unlink(&text, NodeKind::File);
+        let removed = self.session.client.unlink(&text, NodeKind::File).wait();
         let Some(content) = known else {
             return expect(
                 removed == Err(CallError::Remote(FileSystemError::NotFound)),
@@ -366,7 +357,7 @@ impl Run {
     fn rename(&mut self) -> Step {
         let from = self.file_path();
         let to = self.file_path();
-        let renamed = self.session.client.rename(&from, &to);
+        let renamed = self.session.client.rename(&from, &to).wait();
         let Some(content) = self.files.remove(&from) else {
             return expect(
                 renamed == Err(CallError::Remote(FileSystemError::NotFound)),
@@ -404,8 +395,10 @@ impl Run {
         self.session
             .client
             .close(descriptor.fd)
+            .wait()
             .map_err(Mismatch::refused("close"))?;
-        let stale = self.session.client.stat(descriptor.fd);
+
+        let stale = self.session.client.stat(descriptor.fd).wait();
         expect(
             stale == Err(CallError::Remote(FileSystemError::BadDescriptor)),
             "closed descriptor still reaches its node",
@@ -414,7 +407,7 @@ impl Run {
 
     fn renew_session(&mut self) -> Step {
         self.descriptors.clear();
-        self.session = Session::open()?;
+        self.session = Session::open();
         let known: Vec<String> = self.files.keys().cloned().collect();
         for text in known {
             let size = self.files.get(&text).map_or(0, Vec::len) as u64;
@@ -422,6 +415,7 @@ impl Run {
                 .session
                 .client
                 .open(&text, AccessMode::Read, OpenFlags::NONE)
+                .wait()
                 .map_err(Mismatch::refused(
                     "open of a node that outlived the session",
                 ))?;
@@ -429,6 +423,7 @@ impl Run {
             self.session
                 .client
                 .close(opened.fd)
+                .wait()
                 .map_err(Mismatch::refused("close"))?;
         }
         Ok(())
@@ -438,23 +433,28 @@ impl Run {
         let Some(index) = self.descriptor_matching(|mode| !mode.writable()) else {
             return Ok(());
         };
+
         let fd = self.descriptors[index].fd;
-        let refused = self.session.client.write(fd, 0, 1);
+        let refused = self.session.client.write(fd, 0, b"x");
         expect(
             refused == Err(CallError::Remote(FileSystemError::WrongMode)),
             "read-only descriptor takes a write",
         )
     }
 
-    fn read_over_the_buffer(&mut self) -> Step {
+    fn read_over_transfer_limit(&mut self) -> Step {
         let Some(index) = self.any_descriptor() else {
             return Ok(());
         };
+
         let fd = self.descriptors[index].fd;
-        let refused = self.session.client.read(fd, 0, BUFFER_SIZE + 1);
+        let refused = self
+            .session
+            .client
+            .read(fd, 0, &mut vec![0; IO_TRANSFER_MAX as usize + 1]);
         expect(
             refused == Err(CallError::Remote(FileSystemError::BufferTooSmall)),
-            "read past the buffer is served",
+            "oversized transfer is served",
         )
     }
 
@@ -470,25 +470,27 @@ impl Run {
                 .session
                 .client
                 .open(&text, AccessMode::Read, OpenFlags::NONE)
+                .wait()
                 .map_err(Mismatch::refused("open of a node of the tree"))?;
             expect(
                 opened.info.size == content.len() as u64,
                 "size differs from the model",
             )?;
+            let mut bytes = vec![0; content.len()];
             let count = self
                 .session
                 .client
-                .read(opened.fd, 0, content.len() as u32)
+                .read(opened.fd, 0, &mut bytes)
                 .map_err(Mismatch::refused("read"))?;
             expect(
                 count as usize == content.len(),
                 "read took another byte count",
             )?;
-            let bytes = self.session.take(content.len())?;
             expect(bytes == content, "bytes differ from the model")?;
             self.session
                 .client
                 .close(opened.fd)
+                .wait()
                 .map_err(Mismatch::refused("close"))?;
         }
         self.assert_listing("/")?;
@@ -508,6 +510,7 @@ impl Run {
             self.session
                 .client
                 .unlink(text, expected)
+                .wait()
                 .map_err(Mismatch::refused("unlink of the window"))?;
         }
         Ok(())
@@ -518,12 +521,15 @@ impl Run {
             .session
             .client
             .open(text, AccessMode::Read, OpenFlags::DIRECTORY)
+            .wait()
             .map_err(Mismatch::refused("open of a directory"))?;
         let mut listed = self.walk(opened.fd)?;
         self.session
             .client
             .close(opened.fd)
+            .wait()
             .map_err(Mismatch::refused("close"))?;
+
         let mut expected = self.children(text);
         listed.sort_unstable();
         expected.sort_unstable();
@@ -534,12 +540,12 @@ impl Run {
         let mut names = Vec::new();
         let mut from = DirCursor::START;
         for _ in 0..LIST_BATCHES_MAX {
+            let mut bytes = vec![0; BUFFER_SIZE as usize];
             let listed = self
                 .session
                 .client
-                .list(fd, from)
+                .list(fd, from, &mut bytes)
                 .map_err(Mismatch::refused("list"))?;
-            let bytes = self.session.take(BUFFER_SIZE as usize)?;
             let mut offset = 0;
             for _ in 0..listed.count {
                 let decoded = DirEntry::decode(&bytes[offset..])
@@ -615,6 +621,7 @@ impl Run {
             self.session
                 .client
                 .close(oldest.fd)
+                .wait()
                 .map_err(Mismatch::refused("close"))?;
         }
         self.descriptors.push(descriptor);

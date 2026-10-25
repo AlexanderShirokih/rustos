@@ -1,8 +1,10 @@
-//! Устройства за контроллерами QUP: поиск устройства по пути, подготовка контроллера по первому
-//! открытию и занятость устройств сессиями.
+//! Устройства за контроллерами QUP: подготовка контроллера по первому открытию и занятость
+//! устройств сессиями. Каждый контроллер сериализует свои передачи независимо от остальных.
 
-use alloc::vec::Vec;
+use alloc::{rc::Rc, vec::Vec};
+use core::cell::RefCell;
 
+use executor::Mutex;
 use i2c_abi::{I2cError, TransferBuf, TransferError};
 use mmio::Registers;
 use platform_abi::{Description, DescriptionError, DeviceClaims, DeviceId};
@@ -14,8 +16,8 @@ const BUS_FREQUENCY: &str = "clock-frequency";
 const DEFAULT_BUS_HZ: u32 = 100_000;
 const SEVEN_BIT_ADDRESS_MAX: u32 = 0x7f;
 
-/// Ресурсы контроллера, которые шина берёт у поставщиков при подготовке. Узел контроллера
-/// называет `controller`.
+/// Ресурсы контроллера, которые шина берёт у поставщиков при подготовке.
+#[allow(async_fn_in_trait)]
 pub trait Resources {
     /// Окно регистров контроллера.
     type Window: Registers<()>;
@@ -24,20 +26,20 @@ pub trait Resources {
     /// Отказ поставщика ресурса.
     type Error;
 
-    /// Применяет состояние `default` выводов узла контроллера, включает его такты, задаёт
-    /// такту `core` частоту `core_hz` и отображает окно регистров.
-    fn enable(
-        &mut self,
+    /// Применяет состояние `default` выводов узла, включает его такты, задаёт такту `core`
+    /// частоту `core_hz` и отображает окно регистров.
+    async fn enable(
+        &self,
         description: &Description<'_>,
         controller: &DeviceId,
         core_hz: u32,
     ) -> Result<Self::Window, Self::Error>;
 
     /// Выдаёт линию прерывания контроллера.
-    fn line(&mut self, controller: &DeviceId) -> Result<Self::Line, Self::Error>;
+    async fn line(&self, controller: &DeviceId) -> Result<Self::Line, Self::Error>;
 
-    /// Сообщает об отказе подготовки контроллера. Отказ закреплён до конца процесса.
-    fn refused(&mut self, controller: &DeviceId, failure: &Failure<Self::Error>);
+    /// Сообщает об отказе подготовки, закреплённом до конца процесса.
+    fn refused(&self, controller: &DeviceId, failure: &Failure<Self::Error>);
 }
 
 /// Причина отказа подготовки контроллера.
@@ -53,101 +55,166 @@ pub enum Failure<E> {
     Controller(Refusal),
 }
 
-/// Устройство сессии: подготовленный контроллер, его линия и адрес устройства.
-pub struct Device<'b, W, L> {
-    controller: &'b Controller<W>,
-    line: &'b L,
+/// Устройство сессии, удерживающее ресурсы подготовленного контроллера.
+pub struct Device<W, L> {
+    prepared: Rc<Prepared<W, L>>,
     address: u8,
 }
 
-/// Устройства за контроллерами QUP описания, их занятость сессиями и состояние подготовки
-/// контроллеров.
-pub struct Bus<'d, R: Resources> {
-    description: &'d Description<'d>,
+/// Занятость устройств сессиями и состояние подготовки контроллеров.
+pub struct Bus<R: Resources> {
     resources: R,
-    controllers: Vec<(DeviceId, Option<Prepared<R>>)>,
-    claims: DeviceClaims,
+    controllers: RefCell<Vec<(DeviceId, Rc<Slot<R>>)>>,
+    claims: RefCell<DeviceClaims>,
 }
 
-type Prepared<R> = (Controller<<R as Resources>::Window>, <R as Resources>::Line);
+struct Prepared<W, L> {
+    controller: Mutex<Controller<W>>,
+    line: L,
+}
 
-impl<W: Registers<()>, L: Line> Device<'_, W, L> {
+struct Slot<R: Resources> {
+    preparing: Mutex<()>,
+    state: RefCell<Preparation<R>>,
+}
+
+enum Preparation<R: Resources> {
+    New,
+    Ready(Rc<Prepared<R::Window, R::Line>>),
+    Refused,
+}
+
+impl<W, L> Clone for Device<W, L> {
+    fn clone(&self) -> Self {
+        Self {
+            prepared: self.prepared.clone(),
+            address: self.address,
+        }
+    }
+}
+
+impl<W: Registers<()>, L: Line> Device<W, L> {
     /// Адрес устройства на шине.
     pub fn address(&self) -> u8 {
         self.address
     }
 
-    /// Выполняет передачу `operation` устройству, как [`Controller::transfer`].
-    pub fn transfer(&self, operation: Operation<'_>) -> Result<TransferBuf, TransferError> {
-        self.controller.transfer(self.line, self.address, operation)
+    /// Выполняет передачу с исключительным доступом к контроллеру до её завершения или
+    /// отмены. Отмена сбрасывает контроллер до снятия mutex.
+    pub async fn transfer(&self, operation: Operation<'_>) -> Result<TransferBuf, TransferError> {
+        let controller = self.prepared.controller.lock().await;
+        controller
+            .transfer(&self.prepared.line, self.address, operation)
+            .await
     }
 }
 
-impl<'d, R: Resources> Bus<'d, R> {
-    /// Шина устройств описания `description` без подготовленных контроллеров и занятых
-    /// устройств.
-    pub fn new(description: &'d Description<'d>, resources: R) -> Self {
+impl<R: Resources> Bus<R> {
+    /// Шина без подготовленных контроллеров и занятых устройств.
+    pub fn new(resources: R) -> Self {
         Self {
-            description,
             resources,
-            controllers: Vec::new(),
-            claims: DeviceClaims::new(),
+            controllers: RefCell::new(Vec::new()),
+            claims: RefCell::new(DeviceClaims::new()),
         }
     }
 
-    /// Проверяет, что устройство с узлом `device` можно открыть, и готовит его контроллер по
-    /// первому открытию. Устройство занимает [`claim`](Self::claim).
+    /// Проверяет устройство и готовит его контроллер по первому открытию. Устройство занимает
+    /// [`claim`](Self::claim) без ожиданий после успешного возврата.
     ///
     /// Отказы:
-    /// - `NoDevice` - путь не называет устройство за контроллером QUP либо подготовка его
-    ///   контроллера отказала сейчас или раньше;
-    /// - `Busy` - устройство занято сессией;
+    /// - `NoDevice` - устройство или контроллер недоступны;
+    /// - `Busy` - устройство занято;
     /// - `Unsupported` - адрес выше 0x7f либо с флагами.
-    pub fn prepare(&mut self, device: &DeviceId) -> Result<(), I2cError> {
-        let (controller, _) = locate(self.description, device)?;
-        if self.claims.holds_device(device) {
+    pub async fn prepare(
+        &self,
+        description: &Description<'_>,
+        device: &DeviceId,
+    ) -> Result<(), I2cError> {
+        let (controller, _) = locate(description, device)?;
+
+        if self.claims.borrow().holds_device(device) {
             return Err(I2cError::Busy);
         }
 
-        if let Some((_, prepared)) = self.controllers.iter().find(|(id, _)| *id == controller) {
-            return prepared.as_ref().map(drop).ok_or(I2cError::NoDevice);
+        let slot = {
+            let mut controllers = self.controllers.borrow_mut();
+            if let Some((_, slot)) = controllers.iter().find(|(id, _)| *id == controller) {
+                slot.clone()
+            } else {
+                let slot = Rc::new(Slot {
+                    preparing: Mutex::new(()),
+                    state: RefCell::new(Preparation::New),
+                });
+                controllers.push((controller.clone(), slot.clone()));
+                slot
+            }
+        };
+
+        let _preparing = slot.preparing.lock().await;
+
+        let unprepared = matches!(*slot.state.borrow(), Preparation::New);
+        if unprepared {
+            let prepared = self.ready(description, &controller).await;
+            *slot.state.borrow_mut() = match prepared {
+                Ok(prepared) => Preparation::Ready(Rc::new(prepared)),
+                Err(failure) => {
+                    self.resources.refused(&controller, &failure);
+                    Preparation::Refused
+                }
+            };
         }
 
-        let prepared = self
-            .ready(&controller)
-            .inspect_err(|failure| self.resources.refused(&controller, failure))
-            .ok();
-        let result = prepared.as_ref().map(drop).ok_or(I2cError::NoDevice);
-        self.controllers.push((controller, prepared));
-        result
+        if matches!(*slot.state.borrow(), Preparation::Refused) {
+            return Err(I2cError::NoDevice);
+        }
+
+        if self.claims.borrow().holds_device(device) {
+            return Err(I2cError::Busy);
+        }
+
+        Ok(())
     }
 
     /// Занимает устройство `device` сессией со значком `badge`.
-    pub fn claim(&mut self, badge: u64, device: DeviceId) {
-        self.claims.claim(badge, device);
+    pub fn claim(&self, badge: u64, device: DeviceId) {
+        self.claims.borrow_mut().claim(badge, device);
     }
 
     /// Освобождает устройство сессии со значком `badge`.
-    pub fn release(&mut self, badge: u64) {
-        self.claims.release(badge);
+    pub fn release(&self, badge: u64) {
+        self.claims.borrow_mut().release(badge);
     }
 
-    /// Устройство сессии со значком `badge` либо `None`, если сессия не держит устройство.
-    pub fn device(&self, badge: u64) -> Option<Device<'_, R::Window, R::Line>> {
-        let device = self.claims.devices(badge).next()?;
-        let (controller, address) = locate(self.description, device).ok()?;
-        let (_, prepared) = self.controllers.iter().find(|(id, _)| *id == controller)?;
-        let (controller, line) = prepared.as_ref()?;
+    /// Устройство сессии либо `None`, если сессия не держит подготовленное устройство.
+    pub fn device(
+        &self,
+        description: &Description<'_>,
+        badge: u64,
+    ) -> Option<Device<R::Window, R::Line>> {
+        let claims = self.claims.borrow();
+        let device = claims.devices(badge).next()?;
+        let (controller, address) = locate(description, device).ok()?;
+
+        let controllers = self.controllers.borrow();
+        let (_, slot) = controllers.iter().find(|(id, _)| *id == controller)?;
+        let state = slot.state.borrow();
+        let Preparation::Ready(prepared) = &*state else {
+            return None;
+        };
+
         Some(Device {
-            controller,
-            line,
+            prepared: prepared.clone(),
             address,
         })
     }
 
-    fn ready(&mut self, controller: &DeviceId) -> Result<Prepared<R>, Failure<R::Error>> {
-        let bus_hz = self
-            .description
+    async fn ready(
+        &self,
+        description: &Description<'_>,
+        controller: &DeviceId,
+    ) -> Result<Prepared<R::Window, R::Line>, Failure<R::Error>> {
+        let bus_hz = description
             .node(controller)
             .map(|node| node.u32(BUS_FREQUENCY))
             .transpose()
@@ -158,14 +225,21 @@ impl<'d, R: Resources> Bus<'d, R> {
 
         let window = self
             .resources
-            .enable(self.description, controller, CORE_HZ)
+            .enable(description, controller, CORE_HZ)
+            .await
             .map_err(Failure::Resources)?;
+
         let registers = Controller::new(window, clock_control).map_err(Failure::Controller)?;
         let line = self
             .resources
             .line(controller)
+            .await
             .map_err(Failure::Resources)?;
-        Ok((registers, line))
+
+        Ok(Prepared {
+            controller: Mutex::new(registers),
+            line,
+        })
     }
 }
 

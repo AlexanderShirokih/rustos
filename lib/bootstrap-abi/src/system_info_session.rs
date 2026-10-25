@@ -42,7 +42,7 @@ mod tests {
     struct Sink;
 
     impl system_info::Service<MockResources> for Sink {
-        fn snapshot(&mut self, _frame: &MockResources) -> SystemSnapshot {
+        fn snapshot(&self, _frame: &MockResources) -> SystemSnapshot {
             SNAPSHOT
         }
     }
@@ -54,10 +54,10 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 server_end
-                    .serve(|frame| system_info::dispatch(&mut Sink, frame))
+                    .serve(|frame| system_info::dispatch(&Sink, frame))
                     .expect("dispatch ok");
             });
-            assert_eq!(client.snapshot(), Ok(SNAPSHOT));
+            assert_eq!(client.snapshot().wait(), Ok(SNAPSHOT));
         });
     }
 }

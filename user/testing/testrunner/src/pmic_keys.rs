@@ -88,7 +88,7 @@ fn added(consumer: &Consumer, layouts: &[DeviceLayout]) -> Vec<Option<DeviceNumb
     let mut numbers = alloc::vec![None; layouts.len()];
 
     while numbers.iter().any(Option::is_none) {
-        let Ok(records) = consumer.next() else {
+        let Ok(records) = consumer.next().wait() else {
             break;
         };
 
@@ -97,7 +97,7 @@ fn added(consumer: &Consumer, layouts: &[DeviceLayout]) -> Vec<Option<DeviceNumb
             .filter(|record| record.kind == Kind::DeviceAdded)
             .filter_map(|record| record.device)
         {
-            let described = consumer.describe(device);
+            let described = consumer.describe(device).wait();
             let found = layouts
                 .iter()
                 .position(|layout| described.as_ref() == Ok(layout));
@@ -116,7 +116,7 @@ fn pull_up_bits(
 ) -> Result<u8, CallError<DeviceError>> {
     let bus = spmi_bus(importer, controller);
     let pon = open(&bus, pon).expect("pon session");
-    let value = pon.read(PON_PULL_CTL, 1)?;
+    let value = pon.read(PON_PULL_CTL, 1).wait()?;
     Ok(u8::try_from(value).unwrap_or_default() & (PWRKEY.pull_up_bit | RESIN.pull_up_bit))
 }
 
@@ -172,11 +172,20 @@ fn the_board_buttons_are_attached_input_sources_with_their_keys() {
     let reattached: Vec<_> = sources
         .iter()
         .map(|found| {
-            let source = component_startup::open::<input_source::Protocol>(found, REPLY_TIMEOUT)
-                .expect("source opens")
-                .client()
-                .with_wait(REPLY_TIMEOUT);
-            source.attach(importer.session::<input_inject::Protocol>(INJECT))
+            let source = {
+                let executor = crate::executor::executor();
+                executor.block_on(component_startup::open::<input_source::Protocol>(
+                    found,
+                    &executor.reactor(),
+                    REPLY_TIMEOUT,
+                ))
+            }
+            .expect("source opens")
+            .client()
+            .with_wait(REPLY_TIMEOUT);
+            source
+                .attach(importer.session::<input_inject::Protocol>(INJECT))
+                .wait()
         })
         .collect();
 

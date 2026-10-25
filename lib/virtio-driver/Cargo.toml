@@ -13,6 +13,7 @@ bench = false
 doctest = false
 
 [dependencies]
+executor = { workspace = true }
 ipc = { workspace = true }
 kernel-objects = { workspace = true }
 runtime = { workspace = true }

@@ -6,10 +6,11 @@ use alloc::{string::String, vec::Vec};
 use component_abi::{RequirementDeclaration, SessionError};
 use fdt_test::Token;
 use ipc::{CallError, Protocol};
+use kernel_objects::{Session, SessionTransport};
 use mmio::Registers;
 use pinctrl_msm::{Line, PinGroup, Tile, Tlmm};
-use pins_abi::{Claims, PinsError, pins};
-use platform_abi::Description;
+use pins_abi::{Claims, PinsError, device_pins, pins};
+use platform_abi::{Description, DeviceId};
 use runtime::Timeout;
 
 use crate::{
@@ -794,6 +795,17 @@ pub(crate) fn controller_compatibles(description: &Description<'_>, path: &str) 
     compatibles(pins_abi::controllers(description, path).unwrap_or_default())
 }
 
+pub(crate) fn open_device(
+    pins: &pins::Client<SessionTransport>,
+    device: DeviceId,
+) -> Result<device_pins::Client<SessionTransport>, CallError<PinsError>> {
+    pins.open(device).wait().map(|session| {
+        Session::<device_pins::Protocol>::from_session(session)
+            .client()
+            .with_wait(PINS_REPLY_TIMEOUT)
+    })
+}
+
 #[test_harness::test]
 fn the_board_controller_refuses_sdc_groups_and_nodes_without_state() {
     if !platform_describes(BOARD_CONTROLLER) {
@@ -814,8 +826,8 @@ fn the_board_controller_refuses_sdc_groups_and_nodes_without_state() {
             .client()
             .with_wait(PINS_REPLY_TIMEOUT);
 
-    let sdc = client.open(device(BOARD_SDC_HOST)).map(drop);
-    let no_state = client.open(device(BOARD_NO_STATE)).map(drop);
+    let sdc = client.open(device(BOARD_SDC_HOST)).wait().map(drop);
+    let no_state = client.open(device(BOARD_NO_STATE)).wait().map(drop);
 
     test_harness::check_eq!(unfiltered, Err(CallError::Remote(SessionError::Unbound)));
     test_harness::check_eq!(sdc, Err(CallError::Remote(PinsError::Unsupported)));

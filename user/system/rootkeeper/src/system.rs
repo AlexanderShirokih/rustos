@@ -1,10 +1,11 @@
 //! Записи компонентов и обслуживание их требований родителем.
 
-use alloc::{collections::VecDeque, string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, sync::Arc, vec::Vec};
 use core::{
     fmt::{Arguments, Write as _},
     mem::size_of,
     ops::ControlFlow,
+    task::{Context, Poll, Waker},
 };
 
 use bootstrap_abi::{
@@ -14,21 +15,18 @@ use bootstrap_abi::{
 use component_abi::{
     AcceptError, AttributeSet, Attributes, ComponentManifest, Found, LOG_REQUIREMENT,
     ManifestExport, PROTOCOL_ID_MAX, ProtocolName, QueryAttributes, REQUIREMENT_NAME_MAX,
-    RequirementDeclaration, RequirementMode, SessionError, SessionRequest, SessionRequirement,
-    component_startup, decode_manifest, match_filters,
+    RequirementDeclaration, RequirementMode, SessionError, SessionRequirement, component_startup,
+    decode_manifest, match_filters,
 };
-use ipc::{
-    IntoWireValue, Listener as _, Protocol as _, RecvError,
-    wire::{Cap, MESSAGE_INLINE_MAX},
-};
+use ipc::{IntoWireValue, Protocol as _, wire::Cap};
 use kernel_objects::{
     Delivery, Error, IssuedHandle, MemoryRegion, Port, ReadOnlyMapping, Resource, Session, Signal,
     kind,
 };
 use log_abi::{JournalError, LogBuffer, LogRing, journal, log};
-use managed_component::{Children, Departure, GrantError, Held, Outcome, Purpose, Status};
-use runtime::{Mutex, PortTransport, Termination, Timeout};
-use syscall::{Handle, ProcessName, Rights, SyscallError};
+use managed_component::{Accept, Children, Departure, GrantError, Held, Outcome, Purpose, Status};
+use runtime::{PortTransport, Termination, Timeout};
+use syscall::{Handle, ProcessName, Rights, SIGNALED, SyscallError, WaitItem, WakeCount};
 use userland::{DecodedProgram, ProgramView};
 use userland_image::{ExportIndex, IndexedExport, PlanComponent};
 
@@ -66,6 +64,10 @@ const NO_MEMORY: Error = Error::Syscall(SyscallError::OutOfMemory);
 
 type Debt = IssuedHandle<kind::Reply>;
 type Records<'a> = Children<'a, Holder, DecodedProgram<'a>>;
+type NextAnswer<'a> = (
+    Result<Option<Found<Port>>, SessionError>,
+    Option<NextReceipt<'a>>,
+);
 
 /// Код, с которым завершается процесс rootkeeper. Паника завершает его кодом
 /// `runtime::FAILED_EXIT_CODE`, равным коду [`Stopped::Startup`].
@@ -90,6 +92,8 @@ pub enum BudgetFailure {
     Reserve,
     /// Порт `ComponentStartup` не создан.
     StartupPort,
+    /// Сигнал изменений композиции не создан.
+    WakeSignal,
     /// Ядро не выдало сессию `Hardware`.
     Hardware,
     /// Ядро не выдало сессию `SystemInfo`.
@@ -148,7 +152,7 @@ pub struct SystemImage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Holder {
+pub(crate) enum Holder {
     Record(u16),
     Importer(usize),
     Image(u64),
@@ -169,7 +173,7 @@ struct ImporterBinding {
 }
 
 #[derive(Clone, Copy)]
-struct Export<'a> {
+pub(crate) struct Export<'a> {
     provider: Provider<'a>,
     protocol: &'a str,
     filter: Attributes<'a>,
@@ -207,18 +211,29 @@ enum SearchState<'a> {
 struct Watch<'a> {
     protocol: String,
     delivered: Vec<ExportKey<'a>>,
-    waiting: Option<component_startup::next::Reply<Debt>>,
+    waiting: Option<NextWaiter>,
+}
+
+struct NextWaiter {
+    key: Arc<()>,
+    waker: Option<Waker>,
+}
+
+pub(crate) enum NextReceipt<'a> {
+    Enumeration { search: u64, export: Export<'a> },
+    Watch { search: u64, key: ExportKey<'a> },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ExportKey<'a> {
+pub(crate) enum ExportKey<'a> {
     Record { record: u16, incarnation: u32 },
     Program(&'a str),
 }
 
-/// Родитель зарегистрированных компонентов. Поток обслуживает записи повтором [`turn`].
+/// Родитель зарегистрированных компонентов. [`crate::serve`] обслуживает сессии и сроки записей.
 pub struct RootSystem<'a> {
     children: Records<'a>,
+    changed: Signal,
     records: Vec<Record<'a>>,
     logs: Vec<Session<log::Protocol>>,
     pub(crate) log_sources: LogSources,
@@ -260,17 +275,21 @@ impl<'a> RootSystem<'a> {
         let bootstrap = bootstrap::Client::new(PortTransport::new(kernel));
         let hardware = bootstrap
             .acquire_hardware()
+            .wait()
             .ok()
             .map(Session::from_session)
             .ok_or(BudgetFailure::Hardware)?;
+
         let system_info = bootstrap
             .acquire_system_info()
+            .wait()
             .ok()
             .map(Session::from_session)
             .ok_or(BudgetFailure::SystemInfo)?;
 
         Ok(Self {
             children,
+            changed: Signal::create().map_err(|_| BudgetFailure::WakeSignal)?,
             records: alloc::vec![Record {
                 name: String::from(boot.name()),
                 executable: boot.executable(),
@@ -377,12 +396,13 @@ impl<'a> RootSystem<'a> {
         self.restarts_used.push(0);
         self.incarnations.push(0);
         self.features_closed.push(false);
+        self.notify();
         Ok(record)
     }
 
     /// Создаёт клиентскую capability импортёра с требованиями `requirements`. Родитель отвечает
-    /// по ней на `session` и `all` требования из `requirements`. Поток, который зовёт
-    /// [`turn`], не вызывает по ней.
+    /// по ней на `session` и `all` требования из `requirements`. Поток обслуживания
+    /// [`crate::serve`] не вызывает по ней.
     pub fn importer(
         &mut self,
         requirements: &[ImporterRequirement],
@@ -401,8 +421,8 @@ impl<'a> RootSystem<'a> {
         Ok(port)
     }
 
-    /// Завершает процесс работающей записи `name` кодом `code`. Следующий [`turn`] решает,
-    /// что делать с записью.
+    /// Завершает процесс работающей записи `name` кодом `code`. Обслуживание
+    /// [`crate::serve`] решает, что делать с записью, по событию ухода процесса.
     pub fn terminate(&mut self, name: &str, code: u32) {
         if let Some((record, _)) = self.record_named(name) {
             self.children.terminate(Holder::Record(record), code);
@@ -830,81 +850,23 @@ impl<'a> RootSystem<'a> {
         first
     }
 
-    fn answer_watch(&mut self, index: usize) {
-        let Some(Search {
-            owner,
-            requirement,
-            attributes,
-            state: SearchState::Watch(watch),
-            ..
-        }) = self.searches.get(index)
-        else {
-            return;
-        };
-        if watch.waiting.is_none() {
-            return;
-        }
-        let Some(export) = self.undelivered(watch, attributes.as_attributes()) else {
-            return;
-        };
-        let key = self.key(&export);
-        let admitted = self.admit(
-            *owner,
-            Self::enumeration_bytes(requirement, 0) + size_of::<ExportKey<'_>>(),
-        );
-
-        let Some(Search {
-            state: SearchState::Watch(watch),
-            ..
-        }) = self.searches.get_mut(index)
-        else {
-            return;
-        };
-        let Some(reply) = watch.waiting.take() else {
-            return;
-        };
-        let reserved = admitted.and_then(|()| {
-            watch
-                .delivered
-                .try_reserve_exact(1)
-                .map_err(|_| SessionError::NoSpace)
-        });
-        if let Err(error) = reserved {
-            let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
-            return;
-        }
-
-        let delivered = match self.found(index, export) {
-            Ok(found) => reply.send(Ok::<_, SessionError>(Some(found))).is_ok(),
-            Err(error) => {
-                let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
-                false
-            }
-        };
-
-        // Недоставленный результат закрыт вместе с кадром, и экспорт остаётся невыданным.
-        if delivered
-            && let Some(Search {
-                state: SearchState::Watch(watch),
-                ..
-            }) = self.searches.get_mut(index)
-        {
-            watch.delivered.push(key);
-        }
-    }
-
-    fn answer_watches(&mut self) {
-        for index in 0..self.searches.len() {
-            if let Some(Search {
-                state:
-                    SearchState::Watch(Watch {
-                        waiting: Some(_), ..
-                    }),
-                ..
-            }) = self.searches.get(index)
-            {
-                self.answer_watch(index);
-            }
+    pub(crate) fn wake_watches(&mut self) {
+        let wakers: Vec<_> = self
+            .searches
+            .iter_mut()
+            .filter_map(|search| {
+                if let SearchState::Watch(watch) = &mut search.state {
+                    watch
+                        .waiting
+                        .as_mut()
+                        .and_then(|waiting| waiting.waker.take())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for waker in wakers {
+            waker.wake();
         }
     }
 
@@ -928,45 +890,6 @@ impl<'a> RootSystem<'a> {
             protocol: ProtocolName::new(export.protocol).ok_or(SessionError::Refused)?,
             filter: AttributeSet::new(export.filter),
         })
-    }
-
-    fn enumerate(&mut self, index: usize, reply: component_startup::next::Reply<Debt>) {
-        let export = loop {
-            let Some(Search {
-                state: SearchState::Enumeration(snapshot),
-                ..
-            }) = self.searches.get_mut(index)
-            else {
-                let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
-                return;
-            };
-            let Some(export) = snapshot.pop_front() else {
-                *snapshot = VecDeque::new();
-                let _ = reply.send(Ok::<Option<Found<Port>>, SessionError>(None));
-                return;
-            };
-            if self.reachable(&export) {
-                break export;
-            }
-        };
-
-        let delivered = match self.found(index, export) {
-            Ok(found) => reply.send(Ok::<_, SessionError>(Some(found))).is_ok(),
-            Err(error) => {
-                let _ = reply.send(Err::<Option<Found<Port>>, _>(error));
-                false
-            }
-        };
-
-        // Недоставленная выдача закрыта вместе с кадром, и позиция snapshot возвращается.
-        if !delivered
-            && let Some(Search {
-                state: SearchState::Enumeration(snapshot),
-                ..
-            }) = self.searches.get_mut(index)
-        {
-            snapshot.push_front(export);
-        }
     }
 
     fn search(&self, holder: Option<Holder>) -> Option<usize> {
@@ -1133,6 +1056,7 @@ impl<'a> RootSystem<'a> {
             }
             _ => return Err(SessionError::Refused),
         };
+
         session.map_err(SessionError::from)
     }
 
@@ -1164,13 +1088,13 @@ impl<'a> RootSystem<'a> {
         })
     }
 
-    fn log(&self, line: Arguments<'_>) {
+    pub(crate) fn log(&self, line: Arguments<'_>) {
         log_line(self.kernel, line);
     }
 }
 
-impl component_startup::Service<Delivery> for RootSystem<'_> {
-    fn session(
+impl RootSystem<'_> {
+    pub(crate) fn request_session(
         &mut self,
         frame: &Delivery,
         requirement: SessionRequirement<'_>,
@@ -1209,38 +1133,12 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         }
     }
 
-    fn accept(
-        &mut self,
-        frame: &Delivery,
-        export: &str,
-        reply: component_startup::accept::Reply<Debt>,
-    ) {
-        let provider = match self.children.caller(frame.badge) {
-            Some(Holder::Record(record))
-                if self
-                    .records
-                    .get(usize::from(record))
-                    .is_some_and(|component| component.export(export).is_some()) =>
-            {
-                Holder::Record(record)
-            }
-            _ => {
-                let _ = reply.send(Err::<
-                    SessionRequest<component_startup::session::Reply<Debt>>,
-                    _,
-                >(AcceptError::Refused));
-                return;
-            }
-        };
-        self.children.accept(provider, frame.badge, export, reply);
-    }
-
-    fn all(
+    pub(crate) fn all_exports(
         &mut self,
         frame: &Delivery,
         requirement: SessionRequirement<'_>,
         attributes: QueryAttributes<'_>,
-    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
+    ) -> Result<Port, SessionError> {
         let attributes = self.all_query(frame.badge, requirement, attributes)?;
 
         let mut count = 0usize;
@@ -1275,12 +1173,12 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         )
     }
 
-    fn watch(
+    pub(crate) fn watch_exports(
         &mut self,
         frame: &Delivery,
         requirement: SessionRequirement<'_>,
         attributes: QueryAttributes<'_>,
-    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::Port>, SessionError>> {
+    ) -> Result<Port, SessionError> {
         let attributes = self.all_query(frame.badge, requirement, attributes)?;
         self.admit(
             frame.badge,
@@ -1300,23 +1198,11 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
         )
     }
 
-    fn next(&mut self, frame: &Delivery, reply: component_startup::next::Reply<Debt>) {
-        let index = self.search(self.children.caller(frame.badge));
-        match index.and_then(|index| Some((index, &mut self.searches.get_mut(index)?.state))) {
-            Some((index, SearchState::Watch(watch))) => {
-                if let Some(replaced) = watch.waiting.replace(reply) {
-                    let _ = replaced.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
-                }
-                self.answer_watch(index);
-            }
-            Some((index, SearchState::Enumeration(_))) => self.enumerate(index, reply),
-            _ => {
-                let _ = reply.send(Err::<Option<Found<Port>>, _>(SessionError::Refused));
-            }
-        }
-    }
-
-    fn open(&mut self, frame: &Delivery, reply: component_startup::open::Reply<Debt>) {
+    pub(crate) fn open_found(
+        &mut self,
+        frame: &Delivery,
+        reply: component_startup::open::Reply<Debt>,
+    ) {
         let Some(Search {
             owner,
             requirement,
@@ -1346,8 +1232,271 @@ impl component_startup::Service<Delivery> for RootSystem<'_> {
     }
 }
 
-impl features::Service<Delivery> for RootSystem<'_> {
-    fn publish(&mut self, frame: &Delivery, feature: &str) -> Result<(), FeaturesError> {
+impl<'a> RootSystem<'a> {
+    pub(crate) fn sessions(&self) -> Arc<::component_startup::SessionPort> {
+        self.children.sessions()
+    }
+
+    pub(crate) fn notify(&self) {
+        let _ = self.changed.notify_all();
+    }
+
+    pub(crate) fn maintenance(&mut self) -> Result<(WaitItem, Timeout), Error> {
+        self.launch_due();
+        self.wake_watches();
+
+        self.changed.set(0, SIGNALED, WakeCount::None)?;
+        Ok((
+            WaitItem::new(self.changed.as_raw(), SIGNALED),
+            self.next_launch(),
+        ))
+    }
+
+    pub(crate) fn caller(&self, badge: u64) -> Option<Holder> {
+        self.children.caller(badge)
+    }
+
+    pub(crate) fn gone(&mut self, badge: u64) {
+        let holder = self.children.caller(badge);
+        if let Some(departure) = self.children.depart(badge) {
+            self.decide(departure);
+        }
+
+        self.forget(badge, holder);
+        self.wake_watches();
+        self.notify();
+    }
+
+    pub(crate) fn has_owner(&self, badge: u64) -> bool {
+        self.children.caller(badge).is_some()
+    }
+
+    pub(crate) fn begin_accept(
+        &mut self,
+        badge: u64,
+        export: &str,
+    ) -> Result<Accept<Holder>, AcceptError> {
+        let provider = match self.children.caller(badge) {
+            Some(Holder::Record(record))
+                if self
+                    .records
+                    .get(usize::from(record))
+                    .is_some_and(|component| component.export(export).is_some()) =>
+            {
+                Holder::Record(record)
+            }
+            _ => return Err(AcceptError::Refused),
+        };
+
+        self.children.accept(provider, badge, export)
+    }
+
+    pub(crate) fn begin_next(&mut self, badge: u64, key: Arc<()>) -> Result<(), SessionError> {
+        let index = self
+            .search(self.children.caller(badge))
+            .ok_or(SessionError::Refused)?;
+
+        match &mut self
+            .searches
+            .get_mut(index)
+            .ok_or(SessionError::Refused)?
+            .state
+        {
+            SearchState::Watch(watch) => {
+                let replaced = watch.waiting.replace(NextWaiter { key, waker: None });
+                if let Some(waker) = replaced.and_then(|waiting| waiting.waker) {
+                    waker.wake();
+                }
+
+                Ok(())
+            }
+            SearchState::Enumeration(_) => Ok(()),
+            SearchState::Found(_) => Err(SessionError::Refused),
+        }
+    }
+
+    pub(crate) fn cancel_next(&mut self, badge: u64, key: &Arc<()>) {
+        if let Some(index) = self.search(self.children.caller(badge))
+            && let Some(Search {
+                state: SearchState::Watch(watch),
+                ..
+            }) = self.searches.get_mut(index)
+            && watch
+                .waiting
+                .as_ref()
+                .is_some_and(|waiting| Arc::ptr_eq(&waiting.key, key))
+        {
+            watch.waiting = None;
+        }
+    }
+
+    pub(crate) fn poll_next(
+        &mut self,
+        badge: u64,
+        key: &Arc<()>,
+        cx: &Context<'_>,
+    ) -> Poll<NextAnswer<'a>> {
+        let Some(index) = self.search(self.children.caller(badge)) else {
+            return Poll::Ready((Err(SessionError::Refused), None));
+        };
+
+        let Some(search) = self.searches.get(index) else {
+            return Poll::Ready((Err(SessionError::Refused), None));
+        };
+
+        let search_id = search.id;
+        let watched = matches!(&search.state, SearchState::Watch(_));
+        let export = if watched {
+            match self.poll_watch(index, key, cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(export)) => export,
+                Poll::Ready(Err(error)) => return Poll::Ready((Err(error), None)),
+            }
+        } else {
+            match self.next_enumerated(index) {
+                Ok(Some(export)) => export,
+                Ok(None) => return Poll::Ready((Ok(None), None)),
+                Err(error) => return Poll::Ready((Err(error), None)),
+            }
+        };
+
+        let receipt = if watched {
+            NextReceipt::Watch {
+                search: search_id,
+                key: self.key(&export),
+            }
+        } else {
+            NextReceipt::Enumeration {
+                search: search_id,
+                export,
+            }
+        };
+
+        let value = self.found(index, export).map(Some);
+        if value.is_err() {
+            self.finish_next(&receipt, false);
+            return Poll::Ready((value, None));
+        }
+
+        Poll::Ready((value, Some(receipt)))
+    }
+
+    fn poll_watch(
+        &mut self,
+        index: usize,
+        key: &Arc<()>,
+        cx: &Context<'_>,
+    ) -> Poll<Result<Export<'a>, SessionError>> {
+        let Some(Search {
+            owner,
+            requirement,
+            attributes,
+            state: SearchState::Watch(watch),
+            ..
+        }) = self.searches.get(index)
+        else {
+            return Poll::Ready(Err(SessionError::Refused));
+        };
+
+        if !watch
+            .waiting
+            .as_ref()
+            .is_some_and(|waiting| Arc::ptr_eq(&waiting.key, key))
+        {
+            return Poll::Ready(Err(SessionError::Refused));
+        }
+
+        let Some(export) = self.undelivered(watch, attributes.as_attributes()) else {
+            if let Some(Search {
+                state: SearchState::Watch(watch),
+                ..
+            }) = self.searches.get_mut(index)
+                && let Some(waiting) = &mut watch.waiting
+            {
+                waiting.waker = Some(cx.waker().clone());
+            }
+
+            return Poll::Pending;
+        };
+
+        let reserved = self.admit(
+            *owner,
+            Self::enumeration_bytes(requirement, 0) + size_of::<ExportKey<'_>>(),
+        );
+        let Some(Search {
+            state: SearchState::Watch(watch),
+            ..
+        }) = self.searches.get_mut(index)
+        else {
+            return Poll::Ready(Err(SessionError::Refused));
+        };
+
+        watch.waiting = None;
+
+        let reserved = reserved.and_then(|()| {
+            watch
+                .delivered
+                .try_reserve_exact(1)
+                .map_err(|_| SessionError::NoSpace)
+        });
+
+        Poll::Ready(reserved.map(|()| export))
+    }
+
+    fn next_enumerated(&mut self, index: usize) -> Result<Option<Export<'a>>, SessionError> {
+        loop {
+            let Some(Search {
+                state: SearchState::Enumeration(snapshot),
+                ..
+            }) = self.searches.get_mut(index)
+            else {
+                return Err(SessionError::Refused);
+            };
+
+            let Some(export) = snapshot.pop_front() else {
+                *snapshot = VecDeque::new();
+                return Ok(None);
+            };
+
+            if self.reachable(&export) {
+                return Ok(Some(export));
+            }
+        }
+    }
+
+    pub(crate) fn finish_next(&mut self, receipt: &NextReceipt<'a>, delivered: bool) {
+        match receipt {
+            NextReceipt::Enumeration { search, export } if !delivered => {
+                if let Some(Search {
+                    state: SearchState::Enumeration(snapshot),
+                    ..
+                }) = self
+                    .searches
+                    .iter_mut()
+                    .find(|candidate| candidate.id == *search)
+                {
+                    snapshot.push_front(*export);
+                }
+            }
+            NextReceipt::Watch { search, key } if delivered => {
+                if let Some(Search {
+                    state: SearchState::Watch(watch),
+                    ..
+                }) = self
+                    .searches
+                    .iter_mut()
+                    .find(|candidate| candidate.id == *search)
+                {
+                    watch.delivered.push(*key);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl RootSystem<'_> {
+    pub(crate) fn publish(&mut self, frame: &Delivery, feature: &str) -> Result<(), FeaturesError> {
         let Some(Holder::Features(publisher)) = self.children.caller(frame.badge) else {
             return Err(FeaturesError::Invalid);
         };
@@ -1374,13 +1523,12 @@ impl features::Service<Delivery> for RootSystem<'_> {
         });
         Ok(())
     }
-}
 
-impl image::Service<Delivery> for RootSystem<'_> {
-    fn region(
+    pub(crate) fn region(
         &mut self,
         frame: &Delivery,
-    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, ImageError>> {
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, ImageError>> + use<>
+    {
         let Some(Holder::Image(incarnation)) = self.children.caller(frame.badge) else {
             return Err(ImageError::Refused);
         };
@@ -1397,13 +1545,11 @@ impl image::Service<Delivery> for RootSystem<'_> {
                 GrantError::Kernel(_) => ImageError::NoSpace,
             })
     }
-}
 
-impl journal::Service<Delivery> for RootSystem<'_> {
-    fn subscribe(
+    pub(crate) fn subscribe(
         &mut self,
         frame: &Delivery,
-    ) -> impl IntoWireValue<Delivery, Read = Result<LogRing, JournalError>> {
+    ) -> impl IntoWireValue<Delivery, Read = Result<LogRing, JournalError>> + use<> {
         let Some(Holder::Journal(incarnation)) = self.children.caller(frame.badge) else {
             return Err(JournalError::Refused);
         };
@@ -1420,7 +1566,9 @@ impl journal::Service<Delivery> for RootSystem<'_> {
 
         let ring = bootstrap::Client::new(PortTransport::new(self.kernel))
             .acquire_log()
+            .wait()
             .map_err(|_| JournalError::Refused)?;
+
         let ring = LogRing {
             region: MemoryRegion::from(ring.region),
             signal: Signal::from(ring.signal),
@@ -1435,45 +1583,6 @@ impl journal::Service<Delivery> for RootSystem<'_> {
         });
         granted.map_err(|_| JournalError::Refused)
     }
-}
-
-/// Обслуживает один кадр композиции `system`, ожидая его не дольше `timeout`. На время ожидания
-/// замок `system` свободен. `Break` - порт закрыт.
-pub fn turn(system: &Mutex<RootSystem<'_>>, timeout: Timeout) -> ControlFlow<()> {
-    let (port, wait) = {
-        let mut guard = system.lock();
-        guard.launch_due();
-        let next = guard.next_launch();
-        (guard.children.port().as_raw(), next.min(timeout))
-    };
-
-    let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-    match PortTransport::new(port).recv(&mut bytes, wait) {
-        Ok(incoming) => {
-            let mut guard = system.lock();
-            // `dispatch` забирает кадр и разрушает кадр чужой операции, поэтому протокол
-            // выбирается по значку до разбора.
-            let _ = match guard.children.caller(incoming.resources.badge) {
-                Some(Holder::Image(_)) => image::dispatch(&mut *guard, incoming),
-                Some(Holder::Features(_)) => features::dispatch(&mut *guard, incoming),
-                Some(Holder::Journal(_)) => journal::dispatch(&mut *guard, incoming),
-                _ => component_startup::dispatch(&mut *guard, incoming),
-            };
-        }
-        Err(RecvError::SenderGone(badge)) => {
-            let mut guard = system.lock();
-            let holder = guard.children.caller(badge);
-            if let Some(departure) = guard.children.depart(badge) {
-                guard.decide(departure);
-            }
-            guard.forget(badge, holder);
-        }
-        Err(RecvError::Timeout | RecvError::Discarded) => {}
-        Err(RecvError::Closed) => return ControlFlow::Break(()),
-    }
-    // Видимость меняют кадры, уходы и записи, добавленные другими потоками.
-    system.lock().answer_watches();
-    ControlFlow::Continue(())
 }
 
 fn add_search(mut held: Held, search: &Search<'_>) -> Held {

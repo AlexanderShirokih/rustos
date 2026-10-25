@@ -7,9 +7,9 @@ use core::cell::Cell;
 use component_abi::SessionError;
 use fdt_test::Token;
 use ipc::CallError;
-use kernel_objects::{Session, Signal};
+use kernel_objects::Signal;
 use pinctrl_spmi_gpio::{Gpio, Registers, line, plan};
-use pins_abi::{Claims, PinsError, device_pins, pins};
+use pins_abi::{Claims, PinsError, pins};
 use platform_abi::Description;
 use runtime::Timeout;
 use spmi_abi::DeviceError;
@@ -17,7 +17,9 @@ use syscall::SIGNALED;
 
 use crate::{
     composition::{controller_provider, device, pause, request},
-    pins::{PINS_IMPORTS, PINS_REPLY_TIMEOUT, PINS_REQUIREMENT, controller_compatibles},
+    pins::{
+        PINS_IMPORTS, PINS_REPLY_TIMEOUT, PINS_REQUIREMENT, controller_compatibles, open_device,
+    },
     register_model::{Access, RegisterFile},
     rootkeeper_system::{
         POLL_ATTEMPTS, POLL_INTERVAL, await_revoked, finish, platform_describes, with_description,
@@ -194,16 +196,18 @@ impl Model {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl Registers for &Model {
-    fn read(&self, address: u16) -> Result<u8, DeviceError> {
+    async fn read(&self, address: u16) -> Result<u8, DeviceError> {
         let value = self.registers.load(BUS, usize::from(address));
         Ok(u8::try_from(value).expect("byte register"))
     }
 
-    fn update(&self, address: u16, mask: u8, value: u8) -> Result<(), DeviceError> {
+    async fn update(&self, address: u16, mask: u8, value: u8) -> Result<(), DeviceError> {
         if let Some(refusal) = self.refusal.get() {
             return Err(refusal);
         }
+
         let current = self.registers.load(BUS, usize::from(address));
         let updated = current & !u32::from(mask) | u32::from(value & mask);
         self.registers.store(BUS, usize::from(address), updated);
@@ -221,8 +225,9 @@ fn open(blob: &[u8], model: &Model, path: &str) -> Result<(), PinsError> {
     let plan = plan(&description, &device, &Claims::new())?;
     let mut gpio = Gpio::new(model);
     for controller in plan.controllers() {
-        gpio.apply(&plan.settings(&controller.id))?;
+        crate::executor::executor().block_on(gpio.apply(&plan.settings(&controller.id)))?;
     }
+
     Ok(())
 }
 
@@ -370,21 +375,21 @@ fn a_line_becomes_an_input_and_reads_its_level_through_the_polarity() {
     let low = line(&description, &session, &up, "", 0).expect("active-low line");
     let high = line(&description, &session, &down, "", 0).expect("active-high line");
     let blocks = [low.block, high.block];
-    let input = gpio.input(low.block);
+    let input = crate::executor::executor().block_on(gpio.input(low.block));
     let mode = model.get(0xC6, MODE);
     let enable = model.get(0xC6, ENABLE);
 
     model.set(0xC6, STATUS, 0);
     model.set(0xC9, STATUS, 0);
     let released = [
-        low.active(gpio.level(0xC6) == Ok(true)),
-        high.active(gpio.level(0xC9) == Ok(true)),
+        low.active(crate::executor::executor().block_on(gpio.level(0xC6)) == Ok(true)),
+        high.active(crate::executor::executor().block_on(gpio.level(0xC9)) == Ok(true)),
     ];
     model.set(0xC6, STATUS, 1);
     model.set(0xC9, STATUS, 1);
     let raised = [
-        low.active(gpio.level(0xC6) == Ok(true)),
-        high.active(gpio.level(0xC9) == Ok(true)),
+        low.active(crate::executor::executor().block_on(gpio.level(0xC6)) == Ok(true)),
+        high.active(crate::executor::executor().block_on(gpio.level(0xC9)) == Ok(true)),
     ];
 
     test_harness::check_eq!(blocks, [0xC6, 0xC9]);
@@ -403,7 +408,7 @@ fn a_refused_bus_write_is_denied_or_failed() {
 
     let outcomes = [DeviceError::Denied, DeviceError::Failed].map(|refusal| {
         model.refusal.set(Some(refusal));
-        gpio.input(0xC6)
+        crate::executor::executor().block_on(gpio.input(0xC6))
     });
 
     test_harness::check_eq!(outcomes, [Err(PinsError::Denied), Err(PinsError::Failed)]);
@@ -428,23 +433,16 @@ fn the_board_volume_up_line_reads_released_and_its_signal_ends_with_the_session(
             .client()
             .with_wait(PINS_REPLY_TIMEOUT);
 
-    let keys = client
-        .open(device(BOARD_KEYS))
-        .map(|session| {
-            Session::<device_pins::Protocol>::from_session(session)
-                .client()
-                .with_wait(PINS_REPLY_TIMEOUT)
-        })
-        .expect("gpio-keys session");
-    let line = keys.input(device(BOARD_VOLUME_UP), "", 0);
-    let active = line.as_ref().map(|line| keys.active(*line));
-    let output = keys.output(device(BOARD_VOLUME_UP), "", 0, false);
-    let outside = keys.input(device(BOARD_OUTSIDE), "id", 0);
-    let interrupt = keys.interrupt(device(BOARD_VOLUME_UP), 0);
+    let keys = open_device(&client, device(BOARD_KEYS)).expect("gpio-keys session");
+    let line = keys.input(device(BOARD_VOLUME_UP), "", 0).wait();
+    let active = line.as_ref().map(|line| keys.active(*line).wait());
+    let output = keys.output(device(BOARD_VOLUME_UP), "", 0, false).wait();
+    let outside = keys.input(device(BOARD_OUTSIDE), "id", 0).wait();
+    let interrupt = keys.interrupt(device(BOARD_VOLUME_UP), 0).wait();
     let signal = line
         .as_ref()
         .ok()
-        .and_then(|line| keys.irq(*line).ok())
+        .and_then(|line| keys.irq(*line).wait().ok())
         .map(Signal::from);
 
     drop(keys);
@@ -452,7 +450,7 @@ fn the_board_volume_up_line_reads_released_and_its_signal_ends_with_the_session(
     let revoked = signal
         .as_ref()
         .is_some_and(|signal| await_revoked(|| signal.wait(SIGNALED, Timeout::from_millis(0))));
-    let reopened = (0..POLL_ATTEMPTS).any(|_| match client.open(device(BOARD_KEYS)) {
+    let reopened = (0..POLL_ATTEMPTS).any(|_| match client.open(device(BOARD_KEYS)).wait() {
         Err(CallError::Remote(PinsError::Busy)) => {
             pause(POLL_INTERVAL);
             false

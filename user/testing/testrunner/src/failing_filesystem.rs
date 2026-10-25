@@ -9,10 +9,10 @@ use core::num::NonZeroU64;
 
 use component_startup::{SessionEvent, SessionEvents};
 use filesystem_abi::{
-    AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
-    Opened, Written, file_system,
+    AccessMode, FileSystemError, IoBootstrap, NodeDescriptor, NodeInfo, NodeKind, OpenFlags,
+    Opened, file_system,
 };
-use ipc::{IntoWireValue, wire::Cap};
+use ipc::{IntoWireValue, OwnedIncoming, wire::Cap};
 use kernel_objects::{Delivery, IssuedHandle, Port, Session, kind};
 use runtime::{JoinHandle, spawn_owned};
 use syscall::Rights;
@@ -73,17 +73,36 @@ impl Failing<'_> {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl file_system::Service<Delivery> for Failing<'_> {
-    fn acquire_buffer(
-        &mut self,
+    fn start_io(
+        &self,
         frame: &Delivery,
-        _size: u32,
+        reply: file_system::start_io::Reply<IssuedHandle<kind::Reply>>,
+    ) {
+        let _ = reply.send(Err::<
+            IoBootstrap<IssuedHandle<kind::MemoryRegion>, IssuedHandle<kind::Signal>>,
+            _,
+        >(error_of(frame)));
+    }
+
+    fn take_io_region(
+        &self,
+        frame: &Delivery,
+        _region: u64,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
         Err::<IssuedHandle<kind::MemoryRegion>, _>(error_of(frame))
     }
 
-    fn open(
-        &mut self,
+    fn take_io_scratch(
+        &self,
+        frame: &Delivery,
+    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
+        Err::<IssuedHandle<kind::MemoryRegion>, _>(error_of(frame))
+    }
+
+    async fn open(
+        &self,
         frame: &Delivery,
         _path: &str,
         _mode: AccessMode,
@@ -92,32 +111,12 @@ impl file_system::Service<Delivery> for Failing<'_> {
         Err(error_of(frame))
     }
 
-    fn close(&mut self, frame: &Delivery, _fd: NodeDescriptor) -> Result<u32, FileSystemError> {
+    fn close(&self, frame: &Delivery, _fd: NodeDescriptor) -> Result<u32, FileSystemError> {
         Err(error_of(frame))
     }
 
-    fn read(
-        &mut self,
-        frame: &Delivery,
-        _fd: NodeDescriptor,
-        _offset: u64,
-        _len: u32,
-    ) -> Result<u32, FileSystemError> {
-        Err(error_of(frame))
-    }
-
-    fn write(
-        &mut self,
-        frame: &Delivery,
-        _fd: NodeDescriptor,
-        _offset: u64,
-        _len: u32,
-    ) -> Result<Written, FileSystemError> {
-        Err(error_of(frame))
-    }
-
-    fn set_size(
-        &mut self,
+    async fn set_size(
+        &self,
         frame: &Delivery,
         _fd: NodeDescriptor,
         _size: u64,
@@ -125,25 +124,16 @@ impl file_system::Service<Delivery> for Failing<'_> {
         Err(error_of(frame))
     }
 
-    fn stat(&mut self, frame: &Delivery, _fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
+    fn stat(&self, frame: &Delivery, _fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
         Err(error_of(frame))
     }
 
-    fn list(
-        &mut self,
-        frame: &Delivery,
-        _fd: NodeDescriptor,
-        _from: DirCursor,
-    ) -> Result<Listed, FileSystemError> {
-        Err(error_of(frame))
-    }
-
-    fn rename(&mut self, frame: &Delivery, _from: &str, _to: &str) -> Result<u32, FileSystemError> {
+    fn rename(&self, frame: &Delivery, _from: &str, _to: &str) -> Result<u32, FileSystemError> {
         Err(error_of(frame))
     }
 
     fn unlink(
-        &mut self,
+        &self,
         frame: &Delivery,
         _path: &str,
         _expected: NodeKind,
@@ -152,7 +142,7 @@ impl file_system::Service<Delivery> for Failing<'_> {
     }
 
     fn create_backed(
-        &mut self,
+        &self,
         frame: &Delivery,
         _path: &str,
         _region: IssuedHandle<kind::MemoryRegion>,
@@ -161,22 +151,27 @@ impl file_system::Service<Delivery> for Failing<'_> {
         Err(error_of(frame))
     }
 
-    fn backing_memory(
-        &mut self,
+    async fn backing_memory(
+        &self,
         frame: &Delivery,
         _fd: NodeDescriptor,
-    ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>> {
-        Err::<IssuedHandle<kind::MemoryRegion>, _>(error_of(frame))
+        reply: file_system::backing_memory::Reply<IssuedHandle<kind::Reply>>,
+    ) {
+        let _ = reply.send(Err::<IssuedHandle<kind::MemoryRegion>, _>(error_of(frame)));
     }
 
     fn open_root(
-        &mut self,
-        _frame: &Delivery,
+        &self,
+        frame: &Delivery,
         path: &str,
     ) -> impl IntoWireValue<
         Delivery,
         Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
     > {
+        if frame.badge != MOUNT_BADGE {
+            return Err(error_of(frame));
+        }
+
         self.window(path).map(Session::from_handle)
     }
 }
@@ -205,20 +200,28 @@ pub(crate) fn mount_failing() -> FailingMount {
 }
 
 fn serve_failing(server: &Port) -> u32 {
-    let mut failing = Failing { server };
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
+    let failing = Failing { server };
     let mut events = SessionEvents::new(server);
 
-    while let Some(event) = events.recv() {
-        match event {
-            SessionEvent::Frame(frame) => {
-                let _ = file_system::dispatch(&mut failing, frame);
+    executor.block_on(async {
+        while let Some(event) = events.recv(&reactor).await.expect("failing receive") {
+            match event {
+                SessionEvent::Frame(frame) => {
+                    let _ = file_system::dispatch(
+                        &failing,
+                        OwnedIncoming::new(frame).expect("frame fits"),
+                    )
+                    .await;
+                }
+                SessionEvent::Gone(MOUNT_BADGE) => return 0,
+                SessionEvent::Gone(_) => {}
             }
-            SessionEvent::Gone(MOUNT_BADGE) => return 0,
-            SessionEvent::Gone(_) => {}
         }
-    }
 
-    0
+        0
+    })
 }
 
 fn error_of(frame: &Delivery) -> FileSystemError {

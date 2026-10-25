@@ -43,15 +43,19 @@ pub(crate) const CXX_EXIT_BADGE: NonZeroU64 =
 pub(crate) const SQLITE_SELFTEST_BADGE: NonZeroU64 =
     NonZeroU64::new(0x0400_0005).expect("badge is non-zero");
 
+pub(crate) const SLINT_SELFTEST_BADGE: NonZeroU64 =
+    NonZeroU64::new(0x0400_0006).expect("badge is non-zero");
+
 pub(crate) const STEPS_SOURCE: &str = "child-steps";
 
-const SHARED_SOURCES: [(NonZeroU64, &str); 6] = [
+const SHARED_SOURCES: [(NonZeroU64, &str); 7] = [
     (SELFTEST_BADGE, "std-selftest"),
     (C_SELFTEST_BADGE, "c-selftest"),
     (STEPS_BADGE, STEPS_SOURCE),
     (CXX_SELFTEST_BADGE, "cxx-selftest"),
     (CXX_EXIT_BADGE, "cxx-exit"),
     (SQLITE_SELFTEST_BADGE, "sqlite-selftest"),
+    (SLINT_SELFTEST_BADGE, "slint-selftest"),
 ];
 
 pub(crate) struct SharedSourceNames;
@@ -196,7 +200,7 @@ impl LogSink for ScenarioSink {
         let forwarded = kernel.log_str(source, message);
         // Двусторонний вызов ядра перезаписывает значок в IPC-буфере потока.
         // Выданный образ закрывает ответ: значок буфера здесь важнее самой capability.
-        let _ = kernel.acquire_userland_image();
+        let _ = kernel.acquire_userland_image().wait();
         if SINK_REFUSES.load(SeqCst) {
             return Err(IpcError::PeerClosed);
         }

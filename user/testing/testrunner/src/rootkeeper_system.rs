@@ -37,7 +37,7 @@ use crate::{
         BOOT_PLAN_ENTRY, Composition, Importer, Mounted, ROUTER_NAME, admin, device, drained,
         encoded, image, pause, request, view,
     },
-    filesystem::{IMAGE_FILE, LEAK_ROUNDS, connect, open},
+    filesystem::{IMAGE_FILE, LEAK_ROUNDS, open},
     journal_fixture_protocol::{
         END_LINE, END_SOURCE, GAP_MARK, KERNEL_MARK, READY_LINE, REPORT_SEPARATOR, TIME_MARK,
         WATCHED_SOURCE,
@@ -261,7 +261,9 @@ pub(crate) fn with_drivers() -> Composition {
     let importer = composition.importer(&[platform_of(PLATFORM_REQUIREMENT)]);
     platform_session(&importer, PLATFORM_REQUIREMENT)
         .description()
+        .wait()
         .expect("platform description");
+
     composition
 }
 
@@ -328,13 +330,22 @@ fn ping(importer: &Importer, requirement: &str) -> Result<u64, IpcError> {
         .session::<probe::Protocol>(requirement)
         .client()
         .ping(PING)
+        .wait()
 }
 
 fn ping_found(found: &Found) -> Result<u64, IpcError> {
-    component_startup::open::<probe::Protocol>(found, COMPONENT_REPLY_TIMEOUT)
-        .map_err(|_| IpcError::PeerClosed)?
-        .client()
-        .ping(PING)
+    {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::open::<probe::Protocol>(
+            found,
+            &executor.reactor(),
+            COMPONENT_REPLY_TIMEOUT,
+        ))
+    }
+    .map_err(|_| IpcError::PeerClosed)?
+    .client()
+    .ping(PING)
+    .wait()
 }
 
 fn first_found<P: Protocol>(importer: &Importer, requirement: &str) -> Found {
@@ -445,7 +456,7 @@ fn featured_session(
         wait,
     )?;
 
-    Ok(session.client().ping(PING)?)
+    Ok(session.client().ping(PING).wait()?)
 }
 
 fn await_featured(importer: &Importer, count: usize) -> usize {
@@ -480,14 +491,14 @@ fn line(
     session: &platform::Client<SessionTransport>,
     path: &str,
 ) -> Result<IrqLine, CallError<PlatformError>> {
-    session.irq(device(path), 0).map(IrqLine::from)
+    session.irq(device(path), 0).wait().map(IrqLine::from)
 }
 
 fn window(
     session: &platform::Client<SessionTransport>,
     path: &str,
 ) -> Result<MmioWindow, CallError<PlatformError>> {
-    session.mmio(device(path), 0).map(MmioWindow::from)
+    session.mmio(device(path), 0).wait().map(MmioWindow::from)
 }
 
 fn description(
@@ -495,6 +506,7 @@ fn description(
 ) -> Result<(MemoryRegion, u64), CallError<PlatformError>> {
     session
         .description()
+        .wait()
         .map(|description| (MemoryRegion::from(description.region), description.offset))
 }
 
@@ -573,14 +585,19 @@ pub(crate) fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
 }
 
 fn held_request(found: Found, wait: Timeout) -> JoinHandle {
-    spawn_owned(
-        move || match component_startup::open::<probe::Protocol>(&found, wait) {
+    spawn_owned(move || {
+        let executor = crate::executor::executor();
+        match executor.block_on(component_startup::open::<probe::Protocol>(
+            &found,
+            &executor.reactor(),
+            wait,
+        )) {
             Ok(_) => GRANTED,
             Err(CallError::Remote(SessionError::Unavailable)) => UNAVAILABLE,
             Err(CallError::Ipc(IpcError::Timeout)) => TIMED_OUT,
             _ => OTHER,
-        },
-    )
+        }
+    })
     .expect("request thread starts")
 }
 
@@ -596,7 +613,8 @@ fn held_next(watch: &Session<startup_contract::Protocol>) -> JoinHandle {
     let thread = spawn_owned(move || {
         let answer = startup_contract::Client::new(PortTransport::new(raw))
             .with_wait(HELD_REQUEST_TIMEOUT)
-            .next();
+            .next()
+            .wait();
         match answer {
             Ok(Some(_)) => GRANTED,
             Err(CallError::Remote(SessionError::Refused)) => REFUSED,
@@ -610,7 +628,8 @@ fn held_next(watch: &Session<startup_contract::Protocol>) -> JoinHandle {
 }
 
 fn watch_next(watch: &Session<startup_contract::Protocol>, wait: Timeout) -> Option<Found> {
-    match component_startup::next(watch, wait) {
+    let executor = crate::executor::executor();
+    match executor.block_on(component_startup::next(watch, &executor.reactor(), wait)) {
         Ok(found) => found,
         Err(CallError::Ipc(IpcError::Timeout)) => None,
         Err(error) => panic!("watch next answers: {error:?}"),
@@ -647,11 +666,14 @@ fn resolve(
     namespace::Client::new(PortTransport::new(view))
         .with_wait(wait)
         .resolve(text)
+        .wait()
         .map(Session::from_session)
 }
 
 fn resolved(view: &Port, text: &str) -> file_system::Client<SessionTransport> {
-    connect(resolve(view, text, RESOLVE_TIMEOUT).expect("path is covered by a mount"))
+    resolve(view, text, RESOLVE_TIMEOUT)
+        .expect("path is covered by a mount")
+        .client()
 }
 
 fn write(client: &file_system::Client<SessionTransport>) {
@@ -672,12 +694,14 @@ fn written(
 ) -> Result<NodeKind, CallError<FileSystemError>> {
     client
         .open(WRITTEN_PATH, AccessMode::Read, OpenFlags::NONE)
+        .wait()
         .map(|opened| opened.info.kind)
 }
 
 fn root_volume(client: &file_system::Client<SessionTransport>) -> u64 {
     client
         .open("/", AccessMode::Read, OpenFlags::DIRECTORY)
+        .wait()
         .expect("the volume root opens")
         .info
         .volume
@@ -830,7 +854,15 @@ fn an_importer_cannot_take_the_requests_of_a_child_export() {
     let parent = startup_contract::Client::new(PortTransport::new(importer.handle()))
         .with_wait(PARENT_REFUSAL_TIMEOUT);
 
-    let taken = accept::<probe::Protocol>(&parent).map(drop);
+    let executor = crate::executor::executor();
+    let parent = component_startup::AsyncStartup::new(executor::PortChannel::from_transport(
+        parent.into_channel(),
+        executor.reactor(),
+    ))
+    .with_wait(PARENT_REFUSAL_TIMEOUT);
+    let taken = executor
+        .block_on(accept::<probe::Protocol>(&parent))
+        .map(drop);
     let log = session::<log::Protocol>(
         importer.handle(),
         LOG_REQUIREMENT,
@@ -1063,10 +1095,20 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
 
     let found = importer.found::<probe::Protocol>(PROBE);
     let served = found.get(1).map(|found| {
-        component_startup::open::<probe::Protocol>(found, SERVED_CHILD_REPLY_TIMEOUT).map(drop)
+        {
+            let executor = crate::executor::executor();
+            executor.block_on(component_startup::open::<probe::Protocol>(
+                found,
+                &executor.reactor(),
+                SERVED_CHILD_REPLY_TIMEOUT,
+            ))
+        }
+        .map(drop)
     });
     let removed = resolved(&importer.port::<namespace::Protocol>(TMP_VIEW), "/")
-        .unlink(HELD_PATH, NodeKind::File);
+        .unlink(HELD_PATH, NodeKind::File)
+        .wait();
+
     let pinged = ping_found(&first_found::<probe::Protocol>(&importer, HELD));
 
     test_harness::check_eq!(served, Some(Ok(())));
@@ -1079,10 +1121,14 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
 fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
     let (composition, importer) = budget_scenario();
 
-    let held = component_startup::open::<probe::Protocol>(
-        &first_found::<probe::Protocol>(&importer, HELD),
-        BUDGET_RETURN_TIMEOUT,
-    )
+    let held = {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::open::<probe::Protocol>(
+            &first_found::<probe::Protocol>(&importer, HELD),
+            &executor.reactor(),
+            BUDGET_RETURN_TIMEOUT,
+        ))
+    }
     .map(drop);
     let pinged = ping(&importer, PROBE);
 
@@ -1123,11 +1169,11 @@ fn a_clock_driver_serves_time_from_its_described_device() {
     let importer = composition.importer(&[rtc_of(RTC_REQUIREMENT)]);
     let clock = rtc_session(&importer).expect("rtc session");
 
-    let now = clock.now().expect("rtc answers the time");
-    let ticked = clock.tick().expect("rtc alarm fires");
+    let now = clock.now().wait().expect("rtc answers the time");
+    let ticked = clock.tick().wait().expect("rtc alarm fires");
     drop(clock);
     let renewed = rtc_session(&importer).expect("rtc session after the last one closed");
-    let again = renewed.now();
+    let again = renewed.now().wait();
     drop(renewed);
     let lines = binding_lines(driver, 2);
 
@@ -1468,7 +1514,12 @@ fn the_image_region_of_an_image_file_system_incarnation_is_revoked_when_it_ends(
         IMAGE_MOUNT,
     );
     let opened = open(&files, IMAGE_FILE, AccessMode::Read, OpenFlags::NONE);
-    let window = MemoryRegion::from(files.backing_memory(opened.fd).expect("window granted"));
+    let window = MemoryRegion::from(
+        files
+            .backing_memory(opened.fd)
+            .wait()
+            .expect("window granted"),
+    );
     let granted = window.inspect().is_ok();
 
     composition.terminate(IMAGE_FS.name, TERMINATE_EXIT_CODE);
@@ -1516,7 +1567,7 @@ fn a_component_that_faults_is_restarted() {
     let faulting = resolved(&filesystem, "/");
     write(&faulting);
 
-    let renamed = faulting.rename(WRITTEN_PATH, RENAMED_PATH);
+    let renamed = faulting.rename(WRITTEN_PATH, RENAMED_PATH).wait();
     let restarted = resolved(&filesystem, "/");
     let rewritten = written(&restarted);
 
@@ -1989,7 +2040,15 @@ fn a_second_next_of_a_watch_refuses_the_waiting_one() {
     let watch = watched(&importer, &[]);
 
     let pending = held_next(&watch);
-    let second = component_startup::next(&watch, WATCH_WAIT_TIMEOUT).map(|found| found.is_some());
+    let second = {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::next(
+            &watch,
+            &executor.reactor(),
+            WATCH_WAIT_TIMEOUT,
+        ))
+    }
+    .map(|found| found.is_some());
 
     test_harness::check_eq!(answered(pending), REFUSED);
     test_harness::check_eq!(second, Err(CallError::Ipc(IpcError::Timeout)));
@@ -2099,7 +2158,15 @@ fn a_found_export_opens_only_as_its_protocol() {
     let importer = composition.importer(&[probe_of(PROBE)]);
     let found = first_found::<probe::Protocol>(&importer, PROBE);
 
-    let other = component_startup::open::<rtc::Protocol>(&found, STARTUP_REQUEST_TIMEOUT).map(drop);
+    let other = {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::open::<rtc::Protocol>(
+            &found,
+            &executor.reactor(),
+            STARTUP_REQUEST_TIMEOUT,
+        ))
+    }
+    .map(drop);
     let all = importer
         .enumeration::<rtc::Protocol>(PROBE, Attributes::empty())
         .map(drop);
@@ -2153,7 +2220,8 @@ fn a_filtered_export_answers_with_the_first_matching_filter() {
     )
     .expect("one export matches")
     .client()
-    .ping(PING);
+    .ping(PING)
+    .wait();
 
     test_harness::check_eq!(unfiltered, [""]);
     test_harness::check_eq!(first_matching, ["kind=a"]);
@@ -2170,24 +2238,52 @@ fn an_enumeration_of_alternatives_walks_the_values_in_order() {
     let importer = composition.importer(&[probe_of(PROBE)]);
     let providers = Providers::<probe::Protocol>::new(importer.handle(), PROBE);
 
-    let found: Vec<String> = providers
-        .all(AnyOf::new("kind", ["absent", "b", "a", "b"]))
-        .expect("enumeration granted")
-        .map(|found| found.map(|found| format!("{}", Pairs(found.filter.as_attributes()))))
-        .collect::<Result<_, _>>()
-        .expect("results answered");
-    let pinged = providers
-        .all(AnyOf::new("kind", ["absent", "a"]))
-        .expect("enumeration granted")
-        .next()
-        .map(|found| {
-            let opened = providers.open(&found.expect("result answered"));
-            opened.map(|opened| opened.client().ping(PING))
-        });
-    let unmatched = providers
-        .all(AnyOf::new("kind", ["absent"]))
-        .expect("enumeration granted")
-        .count();
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
+    let (found, pinged, unmatched) = executor.block_on(async {
+        let mut sessions = providers
+            .all(&reactor, AnyOf::new("kind", ["absent", "b", "a", "b"]))
+            .await
+            .expect("enumeration granted");
+
+        let mut found = Vec::new();
+        while let Some(result) = sessions.next(&reactor).await {
+            let result = result.expect("results answered");
+            found.push(format!("{}", Pairs(result.filter.as_attributes())));
+        }
+
+        let mut sessions = providers
+            .all(&reactor, AnyOf::new("kind", ["absent", "a"]))
+            .await
+            .expect("enumeration granted");
+
+        let pinged = match sessions.next(&reactor).await {
+            Some(found) => {
+                let opened = providers
+                    .open(&reactor, &found.expect("result answered"))
+                    .await;
+
+                match opened {
+                    Ok(opened) => Some(Ok(executor::PortChannel::client(opened, reactor.clone())
+                        .ping(PING)
+                        .await)),
+                    Err(error) => Some(Err(error)),
+                }
+            }
+            None => None,
+        };
+
+        let mut sessions = providers
+            .all(&reactor, AnyOf::new("kind", ["absent"]))
+            .await
+            .expect("enumeration granted");
+
+        let mut unmatched = 0;
+        while sessions.next(&reactor).await.is_some() {
+            unmatched += 1;
+        }
+        (found, pinged, unmatched)
+    });
 
     test_harness::check_eq!(found, ["kind=a"]);
     test_harness::check_eq!(pinged, Some(Ok(Ok(PING))));
@@ -2209,7 +2305,8 @@ fn a_session_request_carries_pairs_outside_the_matched_filter() {
     )
     .expect("the filter kind=a matches")
     .client()
-    .ping(PING);
+    .ping(PING)
+    .wait();
     let lines = await_component_lines(FILTERED.name, 2);
 
     test_harness::check_eq!(pinged, Ok(PING));
@@ -2245,6 +2342,7 @@ fn a_query_with_a_repeated_key_is_refused_and_the_next_one_is_served() {
     let answer = startup_contract::Client::new(PortTransport::new(importer.handle()))
         .with_wait(COMPONENT_REPLY_TIMEOUT)
         .session(requirement, &bytes)
+        .wait()
         .map(drop);
     let pinged = ping(&importer, PROBE);
 
@@ -2263,7 +2361,15 @@ fn an_importer_finds_a_root_export_but_cannot_open_it() {
 
     let found = importer.found::<hardware::Protocol>(HARDWARE_REQUIREMENT);
     let opened = found.first().map(|found| {
-        component_startup::open::<hardware::Protocol>(found, STARTUP_REQUEST_TIMEOUT).map(drop)
+        {
+            let executor = crate::executor::executor();
+            executor.block_on(component_startup::open::<hardware::Protocol>(
+                found,
+                &executor.reactor(),
+                STARTUP_REQUEST_TIMEOUT,
+            ))
+        }
+        .map(drop)
     });
     let direct =
         requested::<hardware::Protocol>(&importer, HARDWARE_REQUIREMENT, COMPONENT_REPLY_TIMEOUT);
@@ -2281,8 +2387,15 @@ fn a_finished_enumeration_keeps_the_results_it_gave() {
     let enumeration = enumerated(&importer, PROBE);
 
     let found = drained(&enumeration);
-    let after =
-        component_startup::next(&enumeration, STARTUP_REQUEST_TIMEOUT).map(|next| next.is_none());
+    let after = {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::next(
+            &enumeration,
+            &executor.reactor(),
+            STARTUP_REQUEST_TIMEOUT,
+        ))
+    }
+    .map(|next| next.is_none());
     drop(enumeration);
     let pinged = found.iter().all(|found| ping_found(found) == Ok(PING));
 
@@ -2353,9 +2466,16 @@ fn repeated_searches_release_their_grants() {
 
     let pinged = (0..SEARCH_CYCLES).all(|_| {
         let enumeration = enumerated(&importer, PROBE);
-        let found = component_startup::next(&enumeration, STARTUP_REQUEST_TIMEOUT)
-            .expect("next answered")
-            .expect("a provider is found");
+        let found = {
+            let executor = crate::executor::executor();
+            executor.block_on(component_startup::next(
+                &enumeration,
+                &executor.reactor(),
+                STARTUP_REQUEST_TIMEOUT,
+            ))
+        }
+        .expect("next answered")
+        .expect("a provider is found");
         ping_found(&found) == Ok(PING)
     });
     let found_count = importer.found::<probe::Protocol>(PROBE).len();

@@ -6,7 +6,10 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::cell::{Cell, RefCell};
+use core::{
+    cell::{Cell, RefCell},
+    task::{Context, Poll, Waker},
+};
 
 use component_abi::{RequirementDeclaration, SessionError};
 use driver_novatek_nvt_ts::{PARAMETERS_ADDRESS, PARAMETERS_LENGTH, Parameters};
@@ -16,14 +19,14 @@ use i2c_qup::{Bus, Failure, Line, Operation, Resources};
 use ipc::{CallError, Protocol};
 use kernel_objects::{Session, SessionTransport, Signal};
 use mmio::Registers;
-use pins_abi::{PinsError, device_pins, pins};
+use pins_abi::{PinsError, pins};
 use platform_abi::{Description, DeviceId};
 use runtime::Timeout;
 use syscall::SIGNALED;
 
 use crate::{
     composition::{Import, compatibles, controller_provider, pause, request},
-    pins::{PINS_REPLY_TIMEOUT, PINS_REQUIREMENT},
+    pins::{PINS_REPLY_TIMEOUT, PINS_REQUIREMENT, open_device},
     register_model::{Access, RegisterFile},
     rootkeeper_system::{
         POLL_ATTEMPTS, POLL_INTERVAL, await_revoked, finish, platform_describes, with_description,
@@ -149,6 +152,7 @@ enum Reply {
     Data(Vec<u8>),
     Status(u32),
     Silent,
+    Waiting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +169,7 @@ struct Qup {
     replies: RefCell<VecDeque<Reply>>,
     events: RefCell<Vec<Event>>,
     raised: Cell<bool>,
+    waiting: Cell<bool>,
 }
 
 struct Window<'a>(&'a Qup);
@@ -185,11 +190,12 @@ enum Supply {
 
 struct Supplies<'a> {
     qup: &'a Qup,
+    secondary: &'a Qup,
     calls: &'a RefCell<Vec<Call>>,
     clocks: Result<(), Supply>,
 }
 
-type ModelBus<'d, 'a> = Bus<'d, Supplies<'a>>;
+type ModelBus<'a> = Bus<Supplies<'a>>;
 
 impl Qup {
     fn new() -> Self {
@@ -202,6 +208,7 @@ impl Qup {
             replies: RefCell::new(VecDeque::new()),
             events: RefCell::new(Vec::new()),
             raised: Cell::new(false),
+            waiting: Cell::new(false),
         }
     }
 
@@ -240,6 +247,7 @@ impl Qup {
             }
             Reply::Status(bits) => self.raise(I2C_STATUS, bits),
             Reply::Silent => {}
+            Reply::Waiting => self.waiting.set(true),
         }
     }
 
@@ -293,8 +301,10 @@ impl Registers<()> for Window<'_> {
                 for register in [STATE, OPERATIONAL, I2C_STATUS, ERROR_FLAGS] {
                     qup.registers.set(WINDOW, register, 0);
                 }
+
                 qup.output.borrow_mut().clear();
                 qup.input.borrow_mut().clear();
+                qup.waiting.set(false);
                 qup.events.borrow_mut().push(Event::Reset);
             }
             STATE => {
@@ -314,8 +324,15 @@ impl Registers<()> for Window<'_> {
 }
 
 impl Line for ModelLine<'_> {
-    fn wait(&self) -> bool {
-        self.0.raised.take()
+    async fn wait(&self) -> bool {
+        core::future::poll_fn(|_| {
+            if self.0.waiting.get() {
+                Poll::Pending
+            } else {
+                Poll::Ready(self.0.raised.take())
+            }
+        })
+        .await
     }
 
     fn ack(&self) {}
@@ -323,13 +340,24 @@ impl Line for ModelLine<'_> {
     fn clear(&self) {}
 }
 
+impl<'a> Supplies<'a> {
+    fn model(&self, controller: &DeviceId) -> &'a Qup {
+        if controller.as_str() == "/soc@0/i2c@c176000" {
+            self.secondary
+        } else {
+            self.qup
+        }
+    }
+}
+
+#[allow(clippy::unused_async_trait_impl)]
 impl<'a> Resources for Supplies<'a> {
     type Window = Window<'a>;
     type Line = ModelLine<'a>;
     type Error = Supply;
 
-    fn enable(
-        &mut self,
+    async fn enable(
+        &self,
         _description: &Description<'_>,
         controller: &DeviceId,
         core_hz: u32,
@@ -338,14 +366,14 @@ impl<'a> Resources for Supplies<'a> {
         let mut calls = self.calls.borrow_mut();
         calls.push(Call::Pins(path.clone()));
         calls.push(Call::Clocks(path, core_hz));
-        self.clocks.map(|()| Window(self.qup))
+        self.clocks.map(|()| Window(self.model(controller)))
     }
 
-    fn line(&mut self, _controller: &DeviceId) -> Result<ModelLine<'a>, Supply> {
-        Ok(ModelLine(self.qup))
+    async fn line(&self, controller: &DeviceId) -> Result<ModelLine<'a>, Supply> {
+        Ok(ModelLine(self.model(controller)))
     }
 
-    fn refused(&mut self, controller: &DeviceId, failure: &Failure<Supply>) {
+    fn refused(&self, controller: &DeviceId, failure: &Failure<Supply>) {
         self.calls.borrow_mut().push(Call::Refused(
             controller.as_str().to_string(),
             failure.clone(),
@@ -359,48 +387,57 @@ fn id(path: &str) -> DeviceId {
 
 fn with_bus(
     clocks: Result<(), Supply>,
-    test: impl FnOnce(&Qup, &mut ModelBus<'_, '_>, &RefCell<Vec<Call>>),
+    test: impl FnOnce(&Qup, &Description<'_>, &ModelBus<'_>, &RefCell<Vec<Call>>),
 ) {
     let blob = fdt_test::build(TREE);
     let description = Description::new(&blob, 0).expect("tree parses");
     let qup = Qup::new();
     let calls = RefCell::new(Vec::new());
-    let mut bus = Bus::new(
-        &description,
-        Supplies {
-            qup: &qup,
-            calls: &calls,
-            clocks,
-        },
-    );
-    test(&qup, &mut bus, &calls);
+    let bus = Bus::new(Supplies {
+        qup: &qup,
+        secondary: &qup,
+        calls: &calls,
+        clocks,
+    });
+    test(&qup, &description, &bus, &calls);
 }
 
-fn open(bus: &mut ModelBus<'_, '_>, badge: u64, path: &str) -> Result<(), I2cError> {
-    bus.prepare(&id(path))?;
+fn open(
+    description: &Description<'_>,
+    bus: &ModelBus<'_>,
+    badge: u64,
+    path: &str,
+) -> Result<(), I2cError> {
+    crate::executor::executor().block_on(bus.prepare(description, &id(path)))?;
     bus.claim(badge, id(path));
     Ok(())
 }
 
-fn opened_touchscreen(qup: &Qup, bus: &mut ModelBus<'_, '_>) {
-    open(bus, 1, TOUCHSCREEN).expect("touchscreen");
+fn opened_touchscreen(qup: &Qup, description: &Description<'_>, bus: &ModelBus<'_>) {
+    open(description, bus, 1, TOUCHSCREEN).expect("touchscreen");
     qup.registers.take_accesses();
     qup.events.take();
 }
 
-fn transfer(bus: &ModelBus<'_, '_>, operation: Operation<'_>) -> Result<Vec<u8>, TransferError> {
-    let device = bus.device(1).expect("device of the session");
-    device.transfer(operation).map(|received| received.0)
+fn transfer(
+    description: &Description<'_>,
+    bus: &ModelBus<'_>,
+    operation: Operation<'_>,
+) -> Result<Vec<u8>, TransferError> {
+    let device = bus.device(description, 1).expect("device of the session");
+    crate::executor::executor()
+        .block_on(device.transfer(operation))
+        .map(|received| received.0)
 }
 
 #[test_harness::test]
 fn the_first_open_prepares_the_controller_once_and_the_device_is_held_until_release() {
-    with_bus(Ok(()), |_, bus, calls| {
-        let first = open(bus, 1, TOUCHSCREEN);
-        let address = bus.device(1).map(|device| device.address());
-        let busy = open(bus, 2, TOUCHSCREEN);
+    with_bus(Ok(()), |_, description, bus, calls| {
+        let first = open(description, bus, 1, TOUCHSCREEN);
+        let address = bus.device(description, 1).map(|device| device.address());
+        let busy = open(description, bus, 2, TOUCHSCREEN);
         bus.release(1);
-        let again = open(bus, 2, TOUCHSCREEN);
+        let again = open(description, bus, 2, TOUCHSCREEN);
 
         test_harness::check_eq!(first, Ok(()));
         test_harness::check_eq!(address, Some(TOUCHSCREEN_ADDRESS));
@@ -418,9 +455,12 @@ fn the_first_open_prepares_the_controller_once_and_the_device_is_held_until_rele
 
 #[test_harness::test]
 fn the_controller_node_and_a_ten_bit_address_are_refused_without_preparation() {
-    with_bus(Ok(()), |qup, bus, calls| {
-        test_harness::check_eq!(open(bus, 1, QUP), Err(I2cError::NoDevice));
-        test_harness::check_eq!(open(bus, 1, TEN_BIT), Err(I2cError::Unsupported));
+    with_bus(Ok(()), |qup, description, bus, calls| {
+        test_harness::check_eq!(open(description, bus, 1, QUP), Err(I2cError::NoDevice));
+        test_harness::check_eq!(
+            open(description, bus, 1, TEN_BIT),
+            Err(I2cError::Unsupported)
+        );
         test_harness::check_eq!(calls.take(), []);
         test_harness::check_eq!(qup.registers.take_accesses(), []);
     });
@@ -428,12 +468,12 @@ fn the_controller_node_and_a_ten_bit_address_are_refused_without_preparation() {
 
 #[test_harness::test]
 fn a_refused_preparation_is_reported_once_and_open_answers_no_device() {
-    with_bus(Err(Supply::Timeout), |qup, bus, calls| {
-        let first = open(bus, 1, TOUCHSCREEN);
+    with_bus(Err(Supply::Timeout), |qup, description, bus, calls| {
+        let first = open(description, bus, 1, TOUCHSCREEN);
         let first_calls = calls.take();
-        let second = open(bus, 2, TOUCHSCREEN);
-        let fast_plus = open(bus, 1, FAST_PLUS_DEVICE);
-        let slow = open(bus, 1, SLOW_DEVICE);
+        let second = open(description, bus, 2, TOUCHSCREEN);
+        let fast_plus = open(description, bus, 1, FAST_PLUS_DEVICE);
+        let slow = open(description, bus, 1, SLOW_DEVICE);
 
         test_harness::check_eq!(
             [first, second, fast_plus, slow],
@@ -461,11 +501,14 @@ fn a_refused_preparation_is_reported_once_and_open_answers_no_device() {
 #[test_harness::test]
 fn the_first_transfer_writes_the_divider_of_the_described_or_default_frequency() {
     for (device, divider) in [(TOUCHSCREEN, 0xE_031C), (DEFAULT_RATE_DEVICE, 0x35D)] {
-        with_bus(Ok(()), |qup, bus, _| {
-            open(bus, 1, device).expect("device");
+        with_bus(Ok(()), |qup, description, bus, _| {
+            open(description, bus, 1, device).expect("device");
             qup.registers.take_accesses();
 
-            test_harness::check_eq!(transfer(bus, Operation::Write(&[0])), Ok(vec![]));
+            test_harness::check_eq!(
+                transfer(description, bus, Operation::Write(&[0])),
+                Ok(vec![])
+            );
             test_harness::check_eq!(qup.stores(I2C_CLK_CTL), [divider]);
         });
     }
@@ -473,10 +516,10 @@ fn the_first_transfer_writes_the_divider_of_the_described_or_default_frequency()
 
 #[test_harness::test]
 fn a_write_sends_its_tags_and_data_and_answers_after_completion() {
-    with_bus(Ok(()), |qup, bus, _| {
-        opened_touchscreen(qup, bus);
+    with_bus(Ok(()), |qup, description, bus, _| {
+        opened_touchscreen(qup, description, bus);
 
-        let written = transfer(bus, Operation::Write(&[0xff, 0x01]));
+        let written = transfer(description, bus, Operation::Write(&[0xff, 0x01]));
 
         test_harness::check_eq!(written, Ok(vec![]));
         test_harness::check_eq!(
@@ -495,13 +538,14 @@ fn a_write_sends_its_tags_and_data_and_answers_after_completion() {
 
 #[test_harness::test]
 fn write_read_pauses_between_the_write_and_the_repeated_start() {
-    with_bus(Ok(()), |qup, bus, _| {
-        opened_touchscreen(qup, bus);
+    with_bus(Ok(()), |qup, description, bus, _| {
+        opened_touchscreen(qup, description, bus);
         let parameters: Vec<u8> = (1..=15).collect();
         qup.reply(Reply::Complete);
         qup.reply(Reply::Data(parameters.clone()));
 
         let read = transfer(
+            description,
             bus,
             Operation::WriteRead(&[PARAMETERS_ADDRESS], PARAMETERS_LENGTH),
         );
@@ -526,14 +570,14 @@ fn write_read_pauses_between_the_write_and_the_repeated_start() {
 
 #[test_harness::test]
 fn a_transfer_past_the_fifo_or_an_empty_write_is_refused_before_the_registers() {
-    with_bus(Ok(()), |qup, bus, _| {
-        opened_touchscreen(qup, bus);
+    with_bus(Ok(()), |qup, description, bus, _| {
+        opened_touchscreen(qup, description, bus);
 
-        let too_long = transfer(bus, Operation::Read(63));
-        let empty = transfer(bus, Operation::Write(&[]));
+        let too_long = transfer(description, bus, Operation::Read(63));
+        let empty = transfer(description, bus, Operation::Write(&[]));
         let refused_accesses = qup.registers.take_accesses();
         qup.reply(Reply::Data((0..62).collect()));
-        let fitting = transfer(bus, Operation::Read(62));
+        let fitting = transfer(description, bus, Operation::Read(62));
 
         test_harness::check_eq!(too_long, Err(TransferError::Length));
         test_harness::check_eq!(empty, Err(TransferError::Length));
@@ -558,14 +602,14 @@ fn a_failure_answers_by_its_cause_and_the_next_read_starts_with_a_reset() {
         (Reply::Silent, TransferError::Timeout, Event::Reset),
     ];
     for (reply, error, last) in failures {
-        with_bus(Ok(()), |qup, bus, _| {
-            opened_touchscreen(qup, bus);
+        with_bus(Ok(()), |qup, description, bus, _| {
+            opened_touchscreen(qup, description, bus);
             qup.reply(reply);
 
-            let refused = transfer(bus, Operation::Write(&[0]));
+            let refused = transfer(description, bus, Operation::Write(&[0]));
             let refused_last = qup.events.take().last().cloned();
             qup.reply(Reply::Data(vec![1, 2, 3, 4]));
-            let read = transfer(bus, Operation::Read(4));
+            let read = transfer(description, bus, Operation::Read(4));
 
             test_harness::check_eq!(refused, Err(error));
             test_harness::check_eq!(refused_last, Some(last));
@@ -573,6 +617,61 @@ fn a_failure_answers_by_its_cause_and_the_next_read_starts_with_a_reset() {
             test_harness::check_eq!(read, Ok(vec![1, 2, 3, 4]));
         });
     }
+}
+
+#[test_harness::test]
+fn i2c_transfers_wait_per_controller_and_cancel_before_the_next_transfer() {
+    let blob = fdt_test::build(TREE);
+    let description = Description::new(&blob, 0).expect("tree parses");
+    let first = Qup::new();
+    let second = Qup::new();
+    let calls = RefCell::new(Vec::new());
+    let bus = Bus::new(Supplies {
+        qup: &first,
+        secondary: &second,
+        calls: &calls,
+        clocks: Ok(()),
+    });
+    open(&description, &bus, 1, TOUCHSCREEN).expect("first controller");
+    let device = bus.device(&description, 1).expect("first device");
+    first.reply(Reply::Waiting);
+    let mut active = alloc::boxed::Box::pin(device.transfer(Operation::Write(&[1])));
+    test_harness::check!(
+        active
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let mut next = alloc::boxed::Box::pin(device.transfer(Operation::Write(&[2])));
+    test_harness::check!(
+        next.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    test_harness::check_eq!(
+        first
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, Event::Launch(_)))
+            .count(),
+        1
+    );
+
+    open(&description, &bus, 2, DEFAULT_RATE_DEVICE).expect("second controller");
+    let independent = bus.device(&description, 2).expect("second device");
+    test_harness::check!(
+        crate::executor::executor()
+            .block_on(independent.transfer(Operation::Write(&[3])))
+            .is_ok()
+    );
+    test_harness::check!(first.waiting.get());
+    first.events.take();
+    drop(active);
+    test_harness::check_eq!(first.events.take(), [Event::Reset]);
+    test_harness::check!(crate::executor::executor().block_on(next).is_ok());
+    test_harness::check!(!first.waiting.get());
+    test_harness::check_eq!(first.events.take().first().cloned(), Some(Event::Reset));
 }
 
 fn controller_compatibles(description: &Description<'_>, path: &str) -> Vec<String> {
@@ -610,25 +709,20 @@ fn the_board_touchscreen_out_of_reset_answers_its_parameters_and_lends_its_inter
     )
     .client()
     .with_wait(PINS_REPLY_TIMEOUT);
-    let reset = pins
-        .open(id(BOARD_TOUCHSCREEN))
-        .map(|session| {
-            Session::<device_pins::Protocol>::from_session(session)
-                .client()
-                .with_wait(PINS_REPLY_TIMEOUT)
-        })
-        .expect("touchscreen pins session");
+    let reset = open_device(&pins, id(BOARD_TOUCHSCREEN)).expect("touchscreen pins session");
     let line = reset
         .output(id(BOARD_TOUCHSCREEN), RESET_LINE, 0, false)
+        .wait()
         .expect("reset line");
-    let reset_irq = reset.irq(line).map(drop);
-    let released = reset.active(line);
+
+    let reset_irq = reset.irq(line).wait().map(drop);
+    let released = reset.active(line).wait();
     pause(NT36672A_RESET_DELAY);
 
     let bus = controller_provider::<i2c::Protocol>(importer.handle(), I2C_REQUIREMENT, &controller)
         .client()
         .with_wait(I2C_REPLY_TIMEOUT);
-    let touchscreen = bus.open(id(BOARD_TOUCHSCREEN)).map(|session| {
+    let touchscreen = bus.open(id(BOARD_TOUCHSCREEN)).wait().map(|session| {
         Session::<i2c_device::Protocol>::from_session(session)
             .client()
             .with_wait(I2C_REPLY_TIMEOUT)
@@ -639,6 +733,7 @@ fn the_board_touchscreen_out_of_reset_answers_its_parameters_and_lends_its_inter
         Ok(touchscreen) => {
             let read = touchscreen
                 .write_read(&[PARAMETERS_ADDRESS], PARAMETERS_LENGTH)
+                .wait()
                 .map(|buf| buf.0);
             match &read {
                 Ok(parameters) => check_touchscreen_parameters(parameters, trigger),
@@ -651,11 +746,11 @@ fn the_board_touchscreen_out_of_reset_answers_its_parameters_and_lends_its_inter
         Err(error) => test_harness::check_eq!(Some(error), None),
     }
 
-    let interrupt = reset.interrupt(id(BOARD_TOUCHSCREEN), 0);
+    let interrupt = reset.interrupt(id(BOARD_TOUCHSCREEN), 0).wait();
     let signal = interrupt
         .as_ref()
         .ok()
-        .and_then(|interrupt| reset.irq(*interrupt).ok())
+        .and_then(|interrupt| reset.irq(*interrupt).wait().ok())
         .map(Signal::from);
     if let Some(signal) = &signal {
         match signal.wait(SIGNALED, TOUCH_TIMEOUT) {
@@ -667,9 +762,15 @@ fn the_board_touchscreen_out_of_reset_answers_its_parameters_and_lends_its_inter
             }
         }
     }
-    let acked = interrupt.as_ref().map(|interrupt| reset.ack(*interrupt));
+    let acked = interrupt
+        .as_ref()
+        .map(|interrupt| reset.ack(*interrupt).wait());
 
-    let asserted = reset.set(line, true).and_then(|()| reset.active(line));
+    let asserted = reset
+        .set(line, true)
+        .wait()
+        .and_then(|()| reset.active(line).wait());
+
     drop(reset);
 
     let revoked = signal
@@ -722,8 +823,8 @@ fn check_touchscreen_parameters(parameters: &[u8], trigger: Option<u32>) {
 fn reissued_interrupt(
     pins: &pins::Client<SessionTransport>,
 ) -> Option<Result<(), CallError<PinsError>>> {
-    let session = (0..POLL_ATTEMPTS)
-        .find_map(|_| match pins.open(id(BOARD_TOUCHSCREEN)) {
+    let reopened = (0..POLL_ATTEMPTS)
+        .find_map(|_| match open_device(pins, id(BOARD_TOUCHSCREEN)) {
             Err(CallError::Remote(PinsError::Busy)) => {
                 pause(POLL_INTERVAL);
                 None
@@ -731,13 +832,12 @@ fn reissued_interrupt(
             opened => Some(opened),
         })?
         .ok()?;
-    let reopened = Session::<device_pins::Protocol>::from_session(session)
-        .client()
-        .with_wait(PINS_REPLY_TIMEOUT);
+
     Some(
         reopened
             .interrupt(id(BOARD_TOUCHSCREEN), 0)
-            .and_then(|interrupt| reopened.irq(interrupt))
+            .wait()
+            .and_then(|interrupt| reopened.irq(interrupt).wait())
             .map(drop),
     )
 }

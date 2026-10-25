@@ -1,43 +1,47 @@
-//! Сессия файловой системы. Клиент контракта и отображённый регион её данных.
+//! Сессия владеет управляющим клиентом, обменом и отображением зарегистрированного региона.
 
-use filesystem_abi::file_system;
-use ipc::Timeout;
-use syscall::kind;
+use core::cell::RefCell;
+
+use filesystem_abi::{
+    APPEND_OFFSET, DirCursor, IO_TRANSFER_MAX, IoPhase, IoRecord, Listed, NodeDescriptor, Written,
+    file_system, fits_scratch, scratch_room,
+};
+use ipc::{Timeout, wire::IpcError};
 
 use crate::{
-    environment::{Environment, SharedRegion},
-    error::Result,
+    environment::{Environment, IoContext, SharedRegion},
+    error::{Failure, Result},
 };
-
-const BUFFER_SIZE: u32 = 4096;
 
 pub(crate) struct Session<E: Environment> {
     client: file_system::Client<E::Transport>,
-    region: E::Region,
-    capacity: u32,
+    io: RefCell<State<E>>,
+    wait: Timeout,
+}
+
+struct State<E: Environment> {
+    context: E::Io,
+    binding: Option<(u64, E::Region)>,
+    sequence: u64,
+    failed: bool,
 }
 
 impl<E: Environment> Session<E> {
     pub(crate) fn establish(
         environment: &E,
-        session: ipc::wire::Session<file_system::Protocol, E::Handle<kind::Port>>,
+        session: ipc::wire::Session<file_system::Protocol, E::Handle<syscall::kind::Port>>,
         wait: Timeout,
     ) -> Result<Self> {
-        Self::over(environment, environment.connect(session)?, wait)
-    }
-
-    pub(crate) fn over(environment: &E, transport: E::Transport, wait: Timeout) -> Result<Self> {
-        let client = file_system::Client::new(transport).with_wait(wait);
-        let received = client.acquire_buffer(BUFFER_SIZE)?;
-        let region = environment.map(received)?;
-        let capacity = u32::try_from(region.size())
-            .unwrap_or(u32::MAX)
-            .min(BUFFER_SIZE);
-
+        let transport = environment.connect(session)?;
         Ok(Self {
-            client,
-            region,
-            capacity,
+            client: file_system::Client::new(transport).with_wait(wait),
+            io: RefCell::new(State {
+                context: environment.io(),
+                binding: None,
+                sequence: 0,
+                failed: false,
+            }),
+            wait,
         })
     }
 
@@ -45,32 +49,245 @@ impl<E: Environment> Session<E> {
         &self.client
     }
 
-    pub(crate) fn region(&self) -> &E::Region {
-        &self.region
+    pub(crate) fn read(&self, fd: NodeDescriptor, offset: u64, dst: &mut [u8]) -> Result<usize> {
+        let request = Self::request(IoPhase::Read, fd, offset, dst.len());
+        let completed = if fits_scratch(dst.len()) {
+            self.staged(request, &[], dst)?
+        } else {
+            self.transfer(request, false, |region, start, count| {
+                region.read_at(start, dst.get_mut(..count).ok_or(IpcError::InvalidValue)?)?;
+                Ok(())
+            })?
+        };
+        Ok(usize::try_from(completed.result?).map_err(|_| IpcError::InvalidValue)?)
     }
 
-    pub(crate) fn capacity(&self) -> usize {
-        usize::try_from(self.capacity).unwrap_or(usize::MAX)
+    pub(crate) fn write(&self, fd: NodeDescriptor, offset: u64, src: &[u8]) -> Result<Written> {
+        let request = Self::request(IoPhase::Write, fd, offset, src.len());
+        let completed = if fits_scratch(src.len()) {
+            self.staged(request, src, &mut [])?
+        } else {
+            self.transfer(request, true, |region, start, count| {
+                region.write_at(start, src.get(..count).ok_or(IpcError::InvalidValue)?)?;
+                Ok(())
+            })?
+        };
+        Ok(Written {
+            count: completed.result?,
+            offset: completed.offset,
+        })
     }
 
-    pub(crate) fn wire_len(&self, len: usize) -> u32 {
-        u32::try_from(len).unwrap_or(u32::MAX).min(self.capacity)
+    pub(crate) fn list(
+        &self,
+        fd: NodeDescriptor,
+        cursor: DirCursor,
+        dst: &mut [u8],
+    ) -> Result<(Listed, usize)> {
+        let room = scratch_room(dst.len());
+        let request = Self::request(IoPhase::List, fd, u64::from(cursor.raw()), room);
+        let completed = self.staged(request, &[], dst)?;
+        let count = usize::try_from(completed.result?).map_err(|_| IpcError::InvalidValue)?;
+        Ok((completed.listed, count))
+    }
+
+    fn request(phase: IoPhase, fd: NodeDescriptor, offset: u64, len: usize) -> IoRecord {
+        let size = u32::try_from(len).unwrap_or(u32::MAX).min(IO_TRANSFER_MAX);
+        IoRecord::request(0, phase, fd, offset, size)
+    }
+
+    fn transfer(
+        &self,
+        request: IoRecord,
+        writable: bool,
+        copy: impl FnOnce(&E::Region, usize, usize) -> Result<()>,
+    ) -> Result<IoRecord> {
+        self.operate(request, |state, request| {
+            state.transfer(&self.client, request, self.wait, writable, copy)
+        })
+    }
+
+    fn staged(&self, request: IoRecord, src: &[u8], dst: &mut [u8]) -> Result<IoRecord> {
+        self.operate(request, |state, request| {
+            staged::<E>(
+                &mut state.context,
+                &self.client,
+                request,
+                self.wait,
+                src,
+                dst,
+            )
+        })
+    }
+
+    fn operate(
+        &self,
+        mut request: IoRecord,
+        run: impl FnOnce(&mut State<E>, IoRecord) -> Result<IoRecord>,
+    ) -> Result<IoRecord> {
+        let mut state = self
+            .io
+            .try_borrow_mut()
+            .map_err(|_| IpcError::ResourceExhausted)?;
+        if state.failed {
+            return Err(IpcError::PeerClosed.into());
+        }
+
+        state.sequence = state
+            .sequence
+            .checked_add(1)
+            .ok_or(IpcError::ResourceExhausted)?;
+        request.id = state.sequence;
+
+        let outcome = run(&mut state, request);
+
+        if matches!(outcome, Err(Failure::Transport(_))) {
+            state.failed = true;
+            state.binding = None;
+        }
+
+        outcome
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use filesystem_abi::{ENTRY_HEADER_SIZE, NAME_MAX};
+impl<E: Environment> State<E> {
+    fn transfer(
+        &mut self,
+        client: &file_system::Client<E::Transport>,
+        request: IoRecord,
+        wait: Timeout,
+        writable: bool,
+        copy: impl FnOnce(&E::Region, usize, usize) -> Result<()>,
+    ) -> Result<IoRecord> {
+        let mut ready = exchange::<E>(&mut self.context, client, request, wait)?;
 
-    use super::BUFFER_SIZE;
+        if ready.phase == IoPhase::Register {
+            // Прежнее поколение освобождает свой VA до отображения нового.
+            self.binding = None;
 
-    // Буфер короче одной записи каталога останавливает обход: `list` отвечает `BufferTooSmall`,
-    // не продвинув позицию.
-    #[test]
-    fn the_buffer_holds_a_directory_entry_of_any_name() {
-        let entry = ENTRY_HEADER_SIZE + NAME_MAX;
-        let buffer = usize::try_from(BUFFER_SIZE).unwrap_or(0);
+            let mapped = client
+                .take_io_region(ready.region)
+                .wait()
+                .map_err(Failure::from)
+                .and_then(|cap| self.context.map(cap, ready.writable).map_err(Failure::from));
 
-        assert!(buffer > entry);
+            match mapped {
+                Ok(region) => self.binding = Some((ready.region, region)),
+                Err(error) => {
+                    let mut abort = ready;
+                    abort.phase = IoPhase::Abort;
+                    exchange::<E>(&mut self.context, client, abort, wait)?;
+                    return Err(error);
+                }
+            }
+
+            ready.phase = IoPhase::Registered;
+            ready = exchange::<E>(&mut self.context, client, ready, wait)?;
+        }
+
+        if ready.phase == IoPhase::Done {
+            if ready.result? != 0 {
+                return Err(IpcError::InvalidValue.into());
+            }
+
+            return Ok(ready);
+        }
+
+        if ready.phase != IoPhase::Ready {
+            return Err(IpcError::InvalidValue.into());
+        }
+
+        let transfer: Result<usize> = (|| {
+            let count = usize::try_from(ready.result?).map_err(|_| IpcError::InvalidValue)?;
+            let start = usize::try_from(ready.start).map_err(|_| IpcError::InvalidValue)?;
+            let (generation, region) = self.binding.as_ref().ok_or(IpcError::InvalidValue)?;
+            if (request.offset != APPEND_OFFSET && ready.offset != request.offset)
+                || ready
+                    .offset
+                    .checked_add(u64::try_from(count).map_err(|_| IpcError::InvalidValue)?)
+                    .is_none()
+                || (writable && !ready.writable)
+                || *generation != ready.region
+                || ready.region == 0
+                || count > request.size as usize
+                || start
+                    .checked_add(count)
+                    .is_none_or(|end| end > region.size())
+            {
+                return Err(IpcError::InvalidValue.into());
+            }
+
+            copy(region, start, count)?;
+            Ok(count)
+        })();
+
+        let mut finish = ready;
+        if let Ok(count) = transfer {
+            finish.phase = IoPhase::Finish;
+            finish.size = u32::try_from(count).map_err(|_| IpcError::InvalidValue)?;
+        } else {
+            finish.phase = IoPhase::Abort;
+            finish.size = 0;
+        }
+
+        let done = exchange::<E>(&mut self.context, client, finish, wait)?;
+        if done.phase != IoPhase::Done {
+            return Err(IpcError::InvalidValue.into());
+        }
+
+        transfer?;
+        if done.result? != finish.size
+            || done.region != finish.region
+            || done.offset != finish.offset
+        {
+            return Err(IpcError::InvalidValue.into());
+        }
+
+        Ok(done)
     }
+}
+
+/// Операция `request` через scratch сессии за один обмен: `src` ложится в scratch до запроса,
+/// перенесённые байты чтения и перечисления копируются в `dst`.
+pub fn staged<E: Environment>(
+    context: &mut E::Io,
+    client: &file_system::Client<E::Transport>,
+    mut request: IoRecord,
+    wait: Timeout,
+    src: &[u8],
+    dst: &mut [u8],
+) -> Result<IoRecord> {
+    request.scratch = true;
+    context.scratch(client)?.write_at(0, src)?;
+
+    let done = exchange::<E>(context, client, request, wait)?;
+    if done.phase != IoPhase::Done {
+        return Err(IpcError::InvalidValue.into());
+    }
+
+    let count = usize::try_from(done.result?).map_err(|_| IpcError::InvalidValue)?;
+    if count > request.size as usize {
+        return Err(IpcError::InvalidValue.into());
+    }
+
+    if request.phase != IoPhase::Write {
+        let received = dst.get_mut(..count).ok_or(IpcError::InvalidValue)?;
+        context.scratch(client)?.read_at(0, received)?;
+    }
+
+    Ok(done)
+}
+
+fn exchange<E: Environment>(
+    context: &mut E::Io,
+    client: &file_system::Client<E::Transport>,
+    request: IoRecord,
+    wait: Timeout,
+) -> Result<IoRecord> {
+    let response = context.exchange(client, request, wait)?;
+    if response.id != request.id || response.fd != request.fd {
+        return Err(IpcError::InvalidValue.into());
+    }
+
+    Ok(response)
 }

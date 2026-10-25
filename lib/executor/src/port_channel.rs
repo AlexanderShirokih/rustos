@@ -1,18 +1,20 @@
-use ipc::{AsyncChannel, Incoming, Outgoing, Unsent, wire::IpcError};
+use ipc::{AsyncChannel, Channel, Incoming, Outgoing, Unsent, wire::IpcError};
+use kernel_objects::{Session, SessionTransport};
 use syscall::{Handle, SIGNALED, Timeout, WaitItem, kind};
 use syscall_user::{Delivery, IssuedHandle, PortTransport, take_call, take_send};
 
 use crate::Reactor;
 
-/// Асинхронный канал IPC-контракта поверх хендла порта. Запускает отложенную операцию порта
-/// и ожидает её завершения через [`Reactor`].
+/// Канал IPC-контракта поверх хендла порта. [`Channel`] использует синхронное рандеву,
+/// [`AsyncChannel`] запускает отложенную операцию и ждёт её через [`Reactor`].
 ///
-/// Канал заимствует хендл порта, который остаётся у его владельца. По истечении срока
-/// канал закрывает отложенную операцию. Ответ сервера после срока получает `PeerClosed`.
+/// `new` заимствует хендл порта. `client` удерживает сессию до конца операций.
+/// По истечении срока канал закрывает отложенную операцию. Ответ сервера после срока
+/// получает `PeerClosed`.
 /// Односторонний кадр, не принятый до срока, возвращается без capability: их закрывает ядро
 /// вместе с операцией.
-pub struct PortChannel {
-    transport: PortTransport,
+pub struct PortChannel<T = PortTransport> {
+    transport: T,
     reactor: Reactor,
 }
 
@@ -24,6 +26,24 @@ impl PortChannel {
             transport: PortTransport::new(port),
             reactor,
         }
+    }
+}
+
+impl PortChannel<SessionTransport> {
+    /// Клиент протокола `P` поверх канала, владеющего сессией `session`. Разрушение канала
+    /// закрывает её capability.
+    pub fn client<P: ipc::Protocol>(session: Session<P>, reactor: Reactor) -> P::Client<Self> {
+        P::client(Self {
+            transport: SessionTransport::new(session.into_handle()),
+            reactor,
+        })
+    }
+}
+
+impl<T: AsRef<PortTransport>> PortChannel<T> {
+    /// Канал поверх существующего транспорта. `transport` задаёт владение сессией.
+    pub fn from_transport(transport: T, reactor: Reactor) -> Self {
+        Self { transport, reactor }
     }
 
     async fn settle(
@@ -40,15 +60,33 @@ impl PortChannel {
     }
 }
 
-impl AsyncChannel for PortChannel {
+impl<T: AsRef<PortTransport>> Channel for PortChannel<T> {
     type Resources = Delivery;
 
+    fn send<'b>(
+        &self,
+        frame: Outgoing<'b, Delivery>,
+        wait: Timeout,
+    ) -> Result<(), Unsent<'b, Delivery>> {
+        Channel::send(self.transport.as_ref(), frame, wait)
+    }
+
+    fn call<'b>(
+        &self,
+        frame: Outgoing<'b, Delivery>,
+        wait: Timeout,
+    ) -> Result<Incoming<'b, Delivery>, IpcError> {
+        Channel::call(self.transport.as_ref(), frame, wait)
+    }
+}
+
+impl<T: AsRef<PortTransport>> AsyncChannel for PortChannel<T> {
     async fn send<'b>(
         &'b self,
         mut frame: Outgoing<'b, Delivery>,
         wait: Timeout,
     ) -> Result<(), Unsent<'b, Delivery>> {
-        let pending = match self.transport.post_send(&mut frame) {
+        let pending = match self.transport.as_ref().post_send(&mut frame) {
             Ok(pending) => pending,
             Err(error) => return Err((error, frame)),
         };
@@ -64,7 +102,7 @@ impl AsyncChannel for PortChannel {
         mut frame: Outgoing<'b, Delivery>,
         wait: Timeout,
     ) -> Result<Incoming<'b, Delivery>, IpcError> {
-        let pending = self.transport.post_call(&mut frame)?;
+        let pending = self.transport.as_ref().post_call(&mut frame)?;
         self.settle(&pending, wait).await?;
         take_call(pending, frame)
     }

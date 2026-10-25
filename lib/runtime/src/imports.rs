@@ -30,5 +30,6 @@ fn import<P: ipc::Protocol>(
         .with_wait(STARTUP_REQUEST_TIMEOUT);
     requests
         .session(requirement, Attributes::empty().as_bytes())
+        .wait()
         .ok()
 }

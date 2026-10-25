@@ -1,6 +1,7 @@
 //! AArch64-специфичные kernel-тесты.
 
 mod address_space;
+mod alignment;
 mod asid;
 mod cpu_identity;
 mod exception;

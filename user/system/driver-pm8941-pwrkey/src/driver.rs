@@ -1,13 +1,14 @@
 //! Источник ввода `InputSource` одной кнопки PON: подключение по описанию платформы и передача
 //! нажатий хабу по прерыванию кнопки.
 
-use alloc::sync::Arc;
-use core::fmt;
+use alloc::rc::{Rc, Weak};
+use core::{cell::Cell, fmt};
 
 use component_startup::{
-    AnyOf, Import, Providers, SessionEvent, SessionPort, StartupError,
-    component_startup as startup_contract, serve_export, whole_export,
+    AnyOf, AsyncStartup, Import, Providers, SessionPort, StartupError, serve_component,
+    whole_export,
 };
+use executor::{Executor, Mutex, PortChannel, Reactor};
 use input_abi::{
     AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, DeviceNumber, KeyList,
     UpdateError, Usage, input_inject, input_source,
@@ -15,13 +16,13 @@ use input_abi::{
 use ipc::CallError;
 use kernel_objects::{Delivery, ReceivedSession, Session, SessionTransport, Signal};
 use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
-use runtime::{
-    FAILED_EXIT_CODE, Instant, PortTransport, Timeout, exit, log_fmt, spawn_bound, spawn_owned,
-};
+use runtime::{FAILED_EXIT_CODE, Instant, Timeout, exit, log_fmt};
 use spmi_abi::{DeviceError, SpmiError, spmi, spmi_device, spmi_interrupt};
-use syscall::SIGNALED;
+use syscall::{Handle, SIGNALED, WaitItem, kind};
 
 use crate::key::{DEBOUNCE_DEFAULT_US, Generation, Key, Transition, transition, usage};
+
+type Channel = PortChannel<SessionTransport>;
 
 const SUBTYPE: u16 = 0x05;
 const RT_STS: u16 = 0x10;
@@ -40,8 +41,8 @@ pub enum Stopped {
     Startup(StartupError),
     /// Порт экспорта не создан.
     ExportPort,
-    /// Поток экспорта не запущен.
-    ExportThread,
+    /// Executor не создан.
+    Executor,
     /// Порт экспорта закрыт.
     ExportPortClosed,
 }
@@ -49,14 +50,16 @@ pub enum Stopped {
 struct Source {
     key: &'static Key,
     spmi: Providers<spmi::Protocol>,
-    platform: platform::Client<SessionTransport>,
-    attached: bool,
-    refused: bool,
+    platform: platform::Client<Channel>,
+    attached: Mutex<bool>,
+    refused: Cell<bool>,
+    executor: Weak<Executor>,
+    reactor: Reactor,
 }
 
 struct Node {
-    bus: spmi::Client<SessionTransport>,
-    device: spmi_device::Client<SessionTransport>,
+    bus: spmi::Client<Channel>,
+    device: spmi_device::Client<Channel>,
     base: u16,
     usage: Usage,
     debounce: u32,
@@ -64,11 +67,11 @@ struct Node {
 }
 
 struct Button {
-    _bus: spmi::Client<SessionTransport>,
-    device: spmi_device::Client<SessionTransport>,
-    inject: input_inject::Client<SessionTransport>,
+    _bus: spmi::Client<Channel>,
+    device: spmi_device::Client<Channel>,
+    inject: input_inject::Client<Channel>,
     number: DeviceNumber,
-    interrupt: spmi_interrupt::Client<SessionTransport>,
+    interrupt: spmi_interrupt::Client<Channel>,
     signal: Signal,
     status: u16,
     status_bit: u8,
@@ -93,7 +96,7 @@ enum Failure {
     Declare(CallError<DeclareError>),
     Update(CallError<UpdateError>),
     Signal(kernel_objects::Error),
-    Thread,
+    Executor,
 }
 
 impl fmt::Display for Stopped {
@@ -101,49 +104,53 @@ impl fmt::Display for Stopped {
         match self {
             Self::Startup(error) => error.fmt(formatter),
             Self::ExportPort => formatter.write_str("export port refused"),
-            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::Executor => formatter.write_str("executor refused"),
             Self::ExportPortClosed => formatter.write_str("export port closed"),
         }
     }
 }
 
 impl Source {
-    fn bind(&self, inject: input_inject::Client<SessionTransport>) -> Result<(), Failure> {
-        let node = Node::find(self.key, &self.platform, &self.spmi)?;
-        let button = Button::bind(self.key, node, inject)?;
+    async fn bind(&self, inject: input_inject::Client<Channel>) -> Result<(), Failure> {
+        let node = Node::find(self.key, &self.platform, &self.spmi, &self.reactor).await?;
+        let button = Button::bind(self.key, node, inject, &self.reactor).await?;
 
-        spawn_owned(move || button.watch())
-            .map(drop)
-            .map_err(|_| Failure::Thread)
+        self.executor
+            .upgrade()
+            .ok_or(Failure::Executor)?
+            .spawn(button.watch(self.reactor.clone()));
+
+        Ok(())
     }
 }
 
 impl input_source::Service<Delivery> for Source {
-    fn attach(
-        &mut self,
+    async fn attach(
+        &self,
         _frame: &Delivery,
         inject: ReceivedSession<input_inject::Protocol>,
     ) -> Result<(), AttachError> {
-        if self.attached {
+        let mut attached = self.attached.lock().await;
+        if *attached {
             return Err(AttachError::Busy);
         }
 
-        let inject = Session::from_session(inject)
-            .client()
+        let inject = PortChannel::client(Session::from_session(inject), self.reactor.clone())
             .with_wait(CALL_TIMEOUT);
 
-        match self.bind(inject) {
+        match self.bind(inject).await {
             Ok(()) => {
                 log_fmt(format_args!("{} bound", self.key.compatible));
-                self.attached = true;
+                *attached = true;
                 Ok(())
             }
+
             Err(failure) => {
                 log_fmt(format_args!(
                     "{} not bound: {failure:?}",
                     self.key.compatible
                 ));
-                self.refused = true;
+                self.refused.set(true);
                 Err(AttachError::Refused)
             }
         }
@@ -151,12 +158,13 @@ impl input_source::Service<Delivery> for Source {
 }
 
 impl Node {
-    fn find(
+    async fn find(
         key: &Key,
-        platform: &platform::Client<SessionTransport>,
+        platform: &platform::Client<Channel>,
         spmi: &Providers<spmi::Protocol>,
+        reactor: &Reactor,
     ) -> Result<Self, Failure> {
-        let description = platform.description().map_err(Failure::Platform)?;
+        let description = platform.description().await.map_err(Failure::Platform)?;
         let mapped = MappedDescription::new(description)
             .map_err(|refused| Failure::Mapping(refused.error))?;
         let description = mapped.description().map_err(Failure::Description)?;
@@ -172,21 +180,21 @@ impl Node {
             .strings("compatible")
             .map_err(Failure::Description)?
             .ok_or(Failure::NoController)?;
-        let found = spmi
-            .all(AnyOf::new(CONTROLLER_KEY, compatible))
+
+        let session = spmi
+            .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+            .await
             .map_err(Failure::Startup)?
-            .next()
-            .ok_or(Failure::NoBus)?
-            .map_err(Failure::Startup)?;
-        let bus = spmi
-            .open(&found)
-            .map_err(Failure::Startup)?
-            .client()
-            .with_wait(CALL_TIMEOUT);
-        let device = Session::<spmi_device::Protocol>::from_session(
-            bus.open(id.clone()).map_err(Failure::Bus)?,
+            .ok_or(Failure::NoBus)?;
+
+        let bus = PortChannel::client(session, reactor.clone()).with_wait(CALL_TIMEOUT);
+
+        let device = PortChannel::client(
+            Session::<spmi_device::Protocol>::from_session(
+                bus.open(id.clone()).await.map_err(Failure::Bus)?,
+            ),
+            reactor.clone(),
         )
-        .client()
         .with_wait(CALL_TIMEOUT);
 
         // База блока PON - первая ячейка `reg` узла, а без него - родителя, как в Linux.
@@ -224,10 +232,11 @@ impl Node {
 }
 
 impl Button {
-    fn bind(
+    async fn bind(
         key: &Key,
         node: Node,
-        inject: input_inject::Client<SessionTransport>,
+        inject: input_inject::Client<Channel>,
+        reactor: &Reactor,
     ) -> Result<Self, Failure> {
         let Node {
             bus,
@@ -239,33 +248,39 @@ impl Button {
         } = node;
         let register = |offset: u16| base.wrapping_add(offset);
 
-        let subtype = device.read(register(SUBTYPE), 1)?;
+        let subtype = device.read(register(SUBTYPE), 1).await?;
         let generation = Generation::of(u8::try_from(subtype).unwrap_or_default());
         let mask = generation.mask();
         let field = generation
             .debounce_field(debounce)
             .ok_or(Failure::Debounce(debounce))?;
 
-        device.update(register(DBC_CTL), mask, field)?;
+        device.update(register(DBC_CTL), mask, field).await?;
         let pull_up = if pull_up { key.pull_up_bit } else { 0 };
-        device.update(register(PULL_CTL), key.pull_up_bit, pull_up)?;
+        device
+            .update(register(PULL_CTL), key.pull_up_bit, pull_up)
+            .await?;
 
         // Поле общее для кнопок блока, и окно считается по записанному последним значению.
-        let configured = device.read(register(DBC_CTL), 1)?;
+        let configured = device.read(register(DBC_CTL), 1).await?;
         let window = generation.debounce_window(u8::try_from(configured).unwrap_or_default());
 
-        let interrupt =
-            Session::<spmi_interrupt::Protocol>::from_session(device.irq(KEY_INTERRUPT)?)
-                .client()
-                .with_wait(CALL_TIMEOUT);
-        let signal = Signal::from(interrupt.signal()?);
+        let line = device.irq(KEY_INTERRUPT).await?;
+        let interrupt = PortChannel::client(
+            Session::<spmi_interrupt::Protocol>::from_session(line),
+            reactor.clone(),
+        )
+        .with_wait(CALL_TIMEOUT);
+
+        let signal = Signal::from(interrupt.signal().await?);
 
         let mut keys = KeyList::new();
         keys.push(usage).map_err(|_| Failure::Descriptor)?;
         let axes = AxisList::new();
         let descriptor = DeviceDescriptor::new(key.name, Binding::None, &keys, &axes, 0, &axes)
             .ok_or(Failure::Descriptor)?;
-        let number = inject.declare(descriptor).map_err(Failure::Declare)?;
+
+        let number = inject.declare(descriptor).await.map_err(Failure::Declare)?;
 
         Ok(Self {
             _bus: bus,
@@ -280,35 +295,39 @@ impl Button {
         })
     }
 
-    fn watch(self) -> u32 {
+    async fn watch(self, reactor: Reactor) {
         let mut pressed = false;
         let mut quiet_until = 0;
 
         loop {
-            if let Err(error) = self.signal.wait(SIGNALED, Timeout::INFINITE) {
+            if let Err(error) = reactor
+                .wait(WaitItem::new(self.signal.as_raw(), SIGNALED))
+                .await
+            {
                 stop(&Failure::Signal(error));
             }
 
             if Instant::now().as_nanos() >= quiet_until {
-                match self.report(pressed) {
+                match self.report(pressed).await {
                     Ok((set, time)) => {
                         pressed = set;
                         if !set {
                             quiet_until = time.saturating_add(self.window);
                         }
                     }
+
                     Err(failure) => stop(&failure),
                 }
             }
 
-            if let Err(error) = self.interrupt.ack() {
+            if let Err(error) = self.interrupt.ack().await {
                 stop(&Failure::Device(error));
             }
         }
     }
 
-    fn report(&self, pressed: bool) -> Result<(bool, u64), Failure> {
-        let status = self.device.read(self.status, 1)?;
+    async fn report(&self, pressed: bool) -> Result<(bool, u64), Failure> {
+        let status = self.device.read(self.status, 1).await?;
         let time = Instant::now().as_nanos();
         let set = status & u64::from(self.status_bit) != 0;
 
@@ -326,10 +345,12 @@ impl Button {
             } else {
                 command.release(KEY_INDEX)
             };
+
             built.map_err(|_| Failure::Descriptor)?;
 
             self.inject
                 .update(self.number, Some(time), command.as_bytes())
+                .await
                 .map_err(Failure::Update)?;
         }
 
@@ -349,37 +370,47 @@ pub fn run(
     key: &'static Key,
     spmi: Providers<spmi::Protocol>,
     platform: &Import<platform::Protocol>,
-    parent: startup_contract::Client<PortTransport>,
+    parent: Handle<kind::Port>,
 ) -> Result<(), Stopped> {
-    let platform = platform
-        .open()
-        .map_err(Stopped::Startup)?
-        .client()
+    let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
+    let reactor = executor.reactor();
+
+    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?, reactor.clone())
         .with_wait(CALL_TIMEOUT);
 
-    let export = Arc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
-    let port = Arc::clone(&export);
-    spawn_bound(move || serve_export::<input_source::Protocol>(parent, whole_export(&port)))
-        .map_err(|_| Stopped::ExportThread)?;
-
-    let mut source = Source {
+    let export = Rc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
+    let source = Rc::new(Source {
         key,
         spmi,
         platform,
-        attached: false,
-        refused: false,
-    };
-    let mut events = export.events();
+        attached: Mutex::new(false),
+        refused: Cell::new(false),
+        executor: Rc::downgrade(&executor),
+        reactor: reactor.clone(),
+    });
 
-    while let Some(event) = events.recv() {
-        if let SessionEvent::Frame(frame) = event {
-            let _ = input_source::dispatch(&mut source, frame);
-            if source.refused {
-                exit(FAILED_EXIT_CODE)
-            }
-        }
-    }
+    let opened = export.clone();
 
+    let served = serve_component::<input_source::Protocol, _>(
+        &executor,
+        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        export,
+        move |frame| {
+            let call = input_source::serve(&source, frame)?;
+            let source = source.clone();
+            Ok(call.map(|call| async move {
+                let outcome = call.await;
+                if source.refused.get() {
+                    exit(FAILED_EXIT_CODE);
+                }
+                outcome
+            }))
+        },
+        whole_export(opened),
+        |_| {},
+    );
+
+    let _ = executor.block_on(served);
     Err(Stopped::ExportPortClosed)
 }
 

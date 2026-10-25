@@ -1,4 +1,4 @@
-//! Поведение фасада на парном транспорте: разбор пути и кэш сессий, буфер данных, дескрипторы
+//! Поведение фасада на парном транспорте и модели окон: разбор пути, кэш сессий, дескрипторы
 //! с их позицией, обход каталога и операции над деревом.
 
 #![allow(
@@ -14,7 +14,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     string::String,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
     thread,
@@ -22,19 +22,19 @@ use std::{
 };
 
 use filesystem_abi::{
-    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, Listed, NAME_MAX,
-    NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened, PATH_MAX, Path, ResolvedPair, Written,
-    common_directory, file_system, namespace,
+    APPEND_OFFSET, AccessMode, DirCursor, DirEntry, FileSystemError, IO_SCRATCH_BYTES, IoBootstrap,
+    IoPhase, IoRecord, Listed, NAME_MAX, NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened,
+    PATH_MAX, Path, ResolvedPair, Written, common_directory, file_system, namespace,
 };
-use filesystem_client::{Environment, Failure, FileSystem, SharedRegion};
+use filesystem_client::{Environment, Failure, FileSystem, IoContext, SharedRegion};
 use ipc::{
     Channel, Incoming, Listener, Outgoing, Timeout, Unsent,
     wire::{Cap, HEADER_SIZE, IpcError, MESSAGE_INLINE_MAX},
 };
-use ipc_test::{MockChannel, MockHandle, MockListener, MockReply, MockResources};
+use ipc_test::{MockChannel, MockHandle, MockListener, MockReply, MockResources, complete};
 use syscall::{ObjectKind, kind};
 
-const BUFFER_SIZE: u32 = 4096;
+const BUFFER_SIZE: u32 = 64 * 1024;
 
 const ROOT: &str = "/";
 
@@ -64,12 +64,14 @@ struct Mount {
 struct World {
     mounts: Vec<Mount>,
     sessions: Mutex<BTreeMap<u32, MockChannel>>,
-    buffers: Mutex<BTreeMap<u32, Shared>>,
+    buffers: Mutex<BTreeMap<u32, TestBuffer>>,
+    io_sessions: Mutex<BTreeMap<u32, Weak<Mutex<SessionServer>>>>,
     resolved: Mutex<Vec<String>>,
     pair_root_len: Mutex<Option<u32>>,
     protected: Mutex<Option<String>>,
     swapped: Mutex<Option<(String, Node)>>,
     next_cap: AtomicU32,
+    bad_ready: AtomicU32,
     reads: AtomicUsize,
     live: AtomicUsize,
     transports: AtomicUsize,
@@ -114,11 +116,13 @@ impl World {
                 .collect(),
             sessions: Mutex::new(BTreeMap::new()),
             buffers: Mutex::new(BTreeMap::new()),
+            io_sessions: Mutex::new(BTreeMap::new()),
             resolved: Mutex::new(Vec::new()),
             pair_root_len: Mutex::new(None),
             protected: Mutex::new(None),
             swapped: Mutex::new(None),
             next_cap: AtomicU32::new(1),
+            bad_ready: AtomicU32::new(0),
             reads: AtomicUsize::new(0),
             live: AtomicUsize::new(0),
             transports: AtomicUsize::new(0),
@@ -277,8 +281,11 @@ struct SessionServer {
     world: Arc<World>,
     filesystem: Arc<Filesystem>,
     root: String,
-    buffer: Option<Shared>,
-    open: BTreeMap<u32, String>,
+    open: BTreeMap<u32, (String, AccessMode)>,
+    active: Option<(IoRecord, String, Option<Shared>, bool)>,
+    binding: Option<(String, usize, bool, u32)>,
+    io_started: bool,
+    scratch: Shared,
     next_descriptor: u32,
 }
 
@@ -293,25 +300,15 @@ impl SessionServer {
             Some(Node::File(_)) => return Err(FileSystemError::NotADirectory),
             None => return Err(FileSystemError::NotFound),
         }
-        Ok(self.world.session(Arc::clone(&self.filesystem), full))
-    }
 
-    fn buffer_capability(&mut self, size: u32) -> MockHandle<kind::MemoryRegion> {
-        let shared: Shared = Arc::new(Mutex::new(std::vec![0; size as usize]));
-        let cap = self.world.cap();
-        self.world
-            .buffers
-            .lock()
-            .expect("mutex not poisoned")
-            .insert(cap.raw(), Arc::clone(&shared));
-        self.buffer = Some(shared);
-        cap
+        Ok(self.world.session(Arc::clone(&self.filesystem), full))
     }
 
     fn full(&self, path: &str) -> String {
         if self.root == ROOT {
             return String::from(path);
         }
+
         if path == ROOT {
             return self.root.clone();
         }
@@ -323,7 +320,7 @@ impl SessionServer {
     fn path_of(&self, fd: NodeDescriptor) -> Result<String, FileSystemError> {
         self.open
             .get(&fd.raw())
-            .cloned()
+            .map(|(path, _)| path.clone())
             .ok_or(FileSystemError::BadDescriptor)
     }
 
@@ -337,34 +334,17 @@ impl SessionServer {
                 .transfers_allowed
                 .store(allowed - 1, Ordering::SeqCst);
         }
-        Ok(())
-    }
 
-    fn data(&self) -> Result<MutexGuard<'_, Vec<u8>>, FileSystemError> {
-        Ok(self
-            .buffer
-            .as_ref()
-            .ok_or(FileSystemError::NoBuffer)?
-            .lock()
-            .expect("mutex not poisoned"))
+        Ok(())
     }
 }
 
-impl file_system::Service<MockResources> for SessionServer {
-    fn acquire_buffer(
-        &mut self,
-        _frame: &MockResources,
-        size: u32,
-    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>>
-    {
-        Ok::<_, FileSystemError>(self.buffer_capability(size))
-    }
-
+impl SessionServer {
     fn open(
         &mut self,
         _frame: &MockResources,
         path: &str,
-        _mode: AccessMode,
+        mode: AccessMode,
         flags: OpenFlags,
     ) -> Result<Opened, FileSystemError> {
         let full = self.full(path);
@@ -397,11 +377,12 @@ impl file_system::Service<MockResources> for SessionServer {
             tree.insert(full.clone(), node.clone());
             node
         };
+
         let info = info_of(&tree, &full, &node);
         drop(tree);
         let raw = self.next_descriptor;
         self.next_descriptor += 1;
-        self.open.insert(raw, full);
+        self.open.insert(raw, (full, mode));
         self.world.live.fetch_add(1, Ordering::SeqCst);
         Ok(Opened {
             fd: NodeDescriptor::from_raw(raw),
@@ -419,68 +400,6 @@ impl file_system::Service<MockResources> for SessionServer {
             .ok_or(FileSystemError::BadDescriptor)?;
         self.world.live.fetch_sub(1, Ordering::SeqCst);
         Ok(0)
-    }
-
-    fn read(
-        &mut self,
-        _frame: &MockResources,
-        fd: NodeDescriptor,
-        offset: u64,
-        len: u32,
-    ) -> Result<u32, FileSystemError> {
-        self.world.reads.fetch_add(1, Ordering::SeqCst);
-        self.transfer()?;
-        let path = self.path_of(fd)?;
-        let tree = self.filesystem.tree();
-        let Some(Node::File(bytes)) = tree.get(&path) else {
-            return Err(FileSystemError::IsADirectory);
-        };
-        let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(bytes.len());
-        let end = start.saturating_add(len as usize).min(bytes.len());
-        let slice = bytes[start..end].to_vec();
-        drop(tree);
-        let mut data = self.data()?;
-        let head = data
-            .get_mut(..slice.len())
-            .ok_or(FileSystemError::BufferTooSmall)?;
-        head.copy_from_slice(&slice);
-        Ok(slice.len() as u32)
-    }
-
-    fn write(
-        &mut self,
-        _frame: &MockResources,
-        fd: NodeDescriptor,
-        offset: u64,
-        len: u32,
-    ) -> Result<Written, FileSystemError> {
-        self.transfer()?;
-        let path = self.path_of(fd)?;
-        let chunk = self
-            .data()?
-            .get(..len as usize)
-            .ok_or(FileSystemError::BufferTooSmall)?
-            .to_vec();
-        let mut tree = self.filesystem.tree();
-        let Some(Node::File(bytes)) = tree.get_mut(&path) else {
-            return Err(FileSystemError::IsADirectory);
-        };
-        let at = if offset == APPEND_OFFSET {
-            bytes.len()
-        } else {
-            usize::try_from(offset).unwrap_or(usize::MAX)
-        };
-        let end = at.saturating_add(chunk.len());
-        if bytes.len() < end {
-            bytes.resize(end, 0);
-        }
-        bytes[at..end].copy_from_slice(&chunk);
-        Ok(Written {
-            count: chunk.len() as u32,
-            offset: at as u64,
-        })
     }
 
     fn set_size(
@@ -512,11 +431,11 @@ impl file_system::Service<MockResources> for SessionServer {
         Ok(info_of(&tree, &path, &node))
     }
 
-    fn list(
+    fn list_bytes(
         &mut self,
-        _frame: &MockResources,
         fd: NodeDescriptor,
         from: DirCursor,
+        data: &mut [u8],
     ) -> Result<Listed, FileSystemError> {
         let path = self.path_of(fd)?;
         let tree = self.filesystem.tree();
@@ -535,7 +454,7 @@ impl file_system::Service<MockResources> for SessionServer {
         {
             self.filesystem.tree().insert(swapped, node);
         }
-        let mut data = self.data()?;
+
         data.fill(0);
         let start = from.raw() as usize;
         let mut used = 0;
@@ -604,12 +523,134 @@ impl file_system::Service<MockResources> for SessionServer {
         if node == Node::Directory && !children_of(&tree, &full).is_empty() {
             return Err(FileSystemError::NotEmpty);
         }
+
         tree.remove(&full);
         Ok(0)
     }
 
-    fn create_backed(
+    fn open_root(
         &mut self,
+        _frame: &MockResources,
+        path: &str,
+    ) -> Result<TestSession, FileSystemError> {
+        self.root_session(path)
+    }
+}
+
+struct SessionDispatch(Arc<Mutex<SessionServer>>);
+
+#[allow(clippy::unused_async_trait_impl)]
+impl file_system::Service<MockResources> for SessionDispatch {
+    fn start_io(&self, _frame: &MockResources, reply: file_system::start_io::Reply<MockReply>) {
+        let mut server = self.0.lock().expect("server");
+        if server.io_started {
+            let _ = reply.send(Err::<
+                IoBootstrap<MockHandle<kind::MemoryRegion>, MockHandle<kind::Signal>>,
+                _,
+            >(FileSystemError::AlreadyExists));
+            return;
+        }
+
+        server.io_started = true;
+        let cap = server.world.cap::<kind::MemoryRegion>();
+        server
+            .world
+            .io_sessions
+            .lock()
+            .expect("registry")
+            .insert(cap.raw(), Arc::downgrade(&self.0));
+        let _ = reply.send(Ok::<_, FileSystemError>(IoBootstrap {
+            requests: cap,
+            responses: server.world.cap(),
+            request_ready: server.world.cap(),
+            response_ready: server.world.cap(),
+        }));
+    }
+
+    fn take_io_region(
+        &self,
+        _frame: &MockResources,
+        region: u64,
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>>
+    {
+        let server = self.0.lock().expect("server");
+        if server
+            .active
+            .as_ref()
+            .is_none_or(|(ready, ..)| ready.region != region)
+        {
+            return Err(FileSystemError::NoBuffer);
+        }
+
+        Ok(MockHandle::<kind::MemoryRegion>::new(region as u32))
+    }
+
+    fn take_io_scratch(
+        &self,
+        _frame: &MockResources,
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>>
+    {
+        let server = self.0.lock().expect("server");
+        if !server.io_started {
+            return Err(FileSystemError::NoBuffer);
+        }
+
+        let scratch = server.world.cap::<kind::MemoryRegion>();
+        server.world.buffers.lock().expect("regions").insert(
+            scratch.raw(),
+            TestBuffer {
+                data: TestStorage::Bytes(Arc::clone(&server.scratch)),
+                writable: true,
+            },
+        );
+        Ok(scratch)
+    }
+
+    async fn open(
+        &self,
+        frame: &MockResources,
+        path: &str,
+        mode: AccessMode,
+        flags: OpenFlags,
+    ) -> Result<Opened, FileSystemError> {
+        self.0
+            .lock()
+            .expect("server")
+            .open(frame, path, mode, flags)
+    }
+
+    fn close(&self, frame: &MockResources, fd: NodeDescriptor) -> Result<u32, FileSystemError> {
+        self.0.lock().expect("server").close(frame, fd)
+    }
+
+    async fn set_size(
+        &self,
+        frame: &MockResources,
+        fd: NodeDescriptor,
+        size: u64,
+    ) -> Result<u32, FileSystemError> {
+        self.0.lock().expect("server").set_size(frame, fd, size)
+    }
+
+    fn stat(&self, frame: &MockResources, fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError> {
+        self.0.lock().expect("server").stat(frame, fd)
+    }
+
+    fn rename(&self, frame: &MockResources, from: &str, to: &str) -> Result<u32, FileSystemError> {
+        self.0.lock().expect("server").rename(frame, from, to)
+    }
+
+    fn unlink(
+        &self,
+        frame: &MockResources,
+        path: &str,
+        expected: NodeKind,
+    ) -> Result<u32, FileSystemError> {
+        self.0.lock().expect("server").unlink(frame, path, expected)
+    }
+
+    fn create_backed(
+        &self,
         _frame: &MockResources,
         _path: &str,
         _region: MockHandle<kind::MemoryRegion>,
@@ -618,24 +659,250 @@ impl file_system::Service<MockResources> for SessionServer {
         Err(FileSystemError::NotSupported)
     }
 
-    fn backing_memory(
-        &mut self,
+    async fn backing_memory(
+        &self,
         _frame: &MockResources,
         _fd: NodeDescriptor,
-    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, FileSystemError>>
-    {
-        Err::<MockHandle<kind::MemoryRegion>, _>(FileSystemError::NotSupported)
+        reply: file_system::backing_memory::Reply<MockReply>,
+    ) {
+        let _ = reply.send(Err::<MockHandle<kind::MemoryRegion>, _>(
+            FileSystemError::NotSupported,
+        ));
     }
 
     fn open_root(
-        &mut self,
-        _frame: &MockResources,
+        &self,
+        frame: &MockResources,
         path: &str,
     ) -> impl ipc::IntoWireValue<
         MockResources,
         Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
     > {
-        self.root_session(path)
+        self.0.lock().expect("server").open_root(frame, path)
+    }
+}
+
+impl SessionServer {
+    fn io_record(&mut self, request: IoRecord) -> IoRecord {
+        let mut done = request;
+        done.phase = IoPhase::Done;
+        match self.exchange_record(request) {
+            Ok(reply) => reply,
+            Err(error) => {
+                done.result = Err(error);
+                done
+            }
+        }
+    }
+
+    fn exchange_record(&mut self, request: IoRecord) -> Result<IoRecord, FileSystemError> {
+        if request.phase == IoPhase::Registered {
+            let mut ready = self.active.as_ref().ok_or(FileSystemError::NoBuffer)?.0;
+            ready.phase = IoPhase::Ready;
+            self.active.as_mut().expect("active").0.phase = IoPhase::Ready;
+            return Ok(ready);
+        }
+
+        if matches!(request.phase, IoPhase::Finish | IoPhase::Abort) {
+            let (mut ready, path, scratch, writing) =
+                self.active.take().ok_or(FileSystemError::NoBuffer)?;
+            if request.phase == IoPhase::Abort && ready.phase == IoPhase::Register {
+                self.binding = None;
+            }
+
+            if request.id != ready.id || request.region != ready.region {
+                return Err(FileSystemError::NotSupported);
+            }
+
+            if request.phase == IoPhase::Finish
+                && writing
+                && let Some(scratch) = scratch
+            {
+                let data = scratch.lock().expect("bytes");
+                let mut tree = self.filesystem.tree();
+                let Some(Node::File(bytes)) = tree.get_mut(&path) else {
+                    return Err(FileSystemError::NotFound);
+                };
+
+                let start = ready.offset as usize;
+                bytes.resize(bytes.len().max(start + request.size as usize), 0);
+                bytes[start..start + request.size as usize]
+                    .copy_from_slice(&data[..request.size as usize]);
+            }
+
+            ready.phase = IoPhase::Done;
+            ready.result = Ok(if request.phase == IoPhase::Finish {
+                request.size
+            } else {
+                0
+            });
+            return Ok(ready);
+        }
+
+        if request.phase == IoPhase::List || request.scratch {
+            return self.staged_record(request);
+        }
+
+        self.prepare_record(request)
+    }
+
+    fn staged_record(&mut self, request: IoRecord) -> Result<IoRecord, FileSystemError> {
+        self.transfer()?;
+        if request.size > IO_SCRATCH_BYTES {
+            return Err(FileSystemError::BufferTooSmall);
+        }
+
+        let fd = NodeDescriptor::from_raw(request.fd);
+        let (path, _) = self.io_descriptor(request)?;
+        let size = request.size as usize;
+        let shared = Arc::clone(&self.scratch);
+        let mut scratch = shared.lock().expect("scratch");
+        let mut done = request;
+        done.phase = IoPhase::Done;
+        done.writable = false;
+
+        if request.phase == IoPhase::List {
+            let listed = self.list_bytes(
+                fd,
+                DirCursor::from_raw(request.offset as u32),
+                &mut scratch[..size],
+            )?;
+            let mut used = 0;
+            for _ in 0..listed.count {
+                used += DirEntry::decode(&scratch[used..]).expect("entry").len;
+            }
+
+            done.listed = listed;
+            done.result = Ok(used as u32);
+            return Ok(done);
+        }
+
+        let mut tree = self.filesystem.tree();
+        let Some(Node::File(bytes)) = tree.get_mut(&path) else {
+            return Err(FileSystemError::IsADirectory);
+        };
+
+        if request.phase == IoPhase::Write {
+            let offset = if request.offset == APPEND_OFFSET {
+                bytes.len()
+            } else {
+                request.offset as usize
+            };
+            bytes.resize(bytes.len().max(offset + size), 0);
+            bytes[offset..offset + size].copy_from_slice(&scratch[..size]);
+            done.offset = offset as u64;
+            done.result = Ok(request.size);
+            return Ok(done);
+        }
+
+        let offset = request.offset as usize;
+        let count = bytes.len().saturating_sub(offset).min(size);
+        scratch[..count].copy_from_slice(&bytes[offset..offset + count]);
+        self.world.reads.fetch_add(1, Ordering::SeqCst);
+        done.result = Ok(count as u32);
+        Ok(done)
+    }
+
+    fn io_descriptor(&self, request: IoRecord) -> Result<(String, AccessMode), FileSystemError> {
+        let descriptor = self
+            .open
+            .get(&request.fd)
+            .cloned()
+            .ok_or(FileSystemError::BadDescriptor)?;
+        let writing = request.phase == IoPhase::Write;
+        if (writing && !descriptor.1.writable()) || (!writing && !descriptor.1.readable()) {
+            return Err(FileSystemError::WrongMode);
+        }
+
+        Ok(descriptor)
+    }
+
+    fn prepare_record(&mut self, request: IoRecord) -> Result<IoRecord, FileSystemError> {
+        self.transfer()?;
+        let (path, mode) = self.io_descriptor(request)?;
+        let writing = request.phase == IoPhase::Write;
+        let mut ready = request;
+        let tree = self.filesystem.tree();
+        let Some(Node::File(bytes)) = tree.get(&path) else {
+            return Err(FileSystemError::IsADirectory);
+        };
+
+        if writing && ready.offset == APPEND_OFFSET {
+            ready.offset = bytes.len() as u64;
+        }
+
+        let count = if writing {
+            request.size
+        } else {
+            bytes
+                .len()
+                .saturating_sub(ready.offset as usize)
+                .min(request.size as usize) as u32
+        };
+
+        if !writing {
+            self.world.reads.fetch_add(1, Ordering::SeqCst);
+        }
+
+        ready.result = Ok(count);
+        let capacity = bytes
+            .len()
+            .max(if writing {
+                ready.offset as usize + count as usize
+            } else {
+                0
+            })
+            .next_power_of_two()
+            .max(4096);
+        drop(tree);
+
+        ready.writable = mode.writable();
+        let mut scratch = None;
+        let data = if writing && !mode.readable() {
+            let bytes = Arc::new(Mutex::new(vec![0; capacity]));
+            scratch = Some(bytes.clone());
+            ready.start = 0;
+            TestStorage::Bytes(bytes)
+        } else {
+            ready.start = ready.offset;
+            TestStorage::File {
+                filesystem: self.filesystem.clone(),
+                path: path.clone(),
+                capacity,
+            }
+        };
+
+        if ready.result == Ok(0) {
+            ready.phase = IoPhase::Done;
+            return Ok(ready);
+        }
+
+        let key = (path.clone(), capacity, ready.writable);
+        let reuse = self
+            .binding
+            .as_ref()
+            .filter(|(path, capacity, writable, _)| {
+                (&key.0, key.1, key.2) == (path, *capacity, *writable) && scratch.is_none()
+            });
+        if let Some((_, _, _, cap)) = reuse {
+            ready.region = u64::from(*cap);
+            ready.phase = IoPhase::Ready;
+        } else {
+            let cap = self.world.cap::<kind::MemoryRegion>().raw();
+            self.world.buffers.lock().expect("regions").insert(
+                cap,
+                TestBuffer {
+                    data,
+                    writable: ready.writable,
+                },
+            );
+            self.binding = Some((key.0, key.1, key.2, cap));
+            ready.region = u64::from(cap);
+            ready.phase = IoPhase::Register;
+        }
+
+        self.active = Some((ready, path, scratch, writing));
+        Ok(ready)
     }
 }
 
@@ -645,7 +912,7 @@ struct Router {
 
 impl Router {
     fn resolved_pair(
-        &mut self,
+        &self,
         from: &str,
         to: &str,
     ) -> Result<ResolvedPair<TestSession>, FileSystemError> {
@@ -698,7 +965,7 @@ impl Router {
         })
     }
 
-    fn resolved_session(&mut self, path: &str) -> Result<TestSession, FileSystemError> {
+    fn resolved_session(&self, path: &str) -> Result<TestSession, FileSystemError> {
         self.world
             .resolved
             .lock()
@@ -716,9 +983,10 @@ impl Router {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)]
 impl namespace::Service<MockResources> for Router {
     fn open_root(
-        &mut self,
+        &self,
         _frame: &MockResources,
         _path: &str,
     ) -> impl ipc::IntoWireValue<
@@ -730,23 +998,24 @@ impl namespace::Service<MockResources> for Router {
         )
     }
 
-    fn resolve(
-        &mut self,
+    async fn resolve(
+        &self,
         _frame: &MockResources,
         path: &str,
-        reply: namespace::resolve::Reply<MockReply>,
-    ) {
-        let _ = reply.send(self.resolved_session(path));
+    ) -> impl ipc::IntoWireValue<
+        MockResources,
+        Read = Result<ipc::wire::Session<file_system::Protocol>, FileSystemError>,
+    > {
+        self.resolved_session(path)
     }
 
-    fn resolve_pair(
-        &mut self,
+    async fn resolve_pair(
+        &self,
         _frame: &MockResources,
         from: &str,
         to: &str,
-        reply: namespace::resolve_pair::Reply<MockReply>,
-    ) {
-        let _ = reply.send(self.resolved_pair(from, to));
+    ) -> impl ipc::IntoWireValue<MockResources, Read = Result<ResolvedPair, FileSystemError>> {
+        self.resolved_pair(from, to)
     }
 }
 
@@ -770,12 +1039,95 @@ impl Environment for TestEnvironment {
         Ok(TrackedEnd::new(&self.world, end))
     }
 
-    fn map(&self, region: MockHandle<kind::MemoryRegion>) -> Result<TestBuffer, FileSystemError> {
+    type Io = TestIo;
+    fn io(&self) -> TestIo {
+        TestIo {
+            world: Arc::clone(&self.world),
+            exchange: None,
+        }
+    }
+}
+
+struct TestIo {
+    world: Arc<World>,
+    exchange: Option<TestExchange>,
+}
+
+struct TestExchange {
+    server: Arc<Mutex<SessionServer>>,
+    scratch: TestBuffer,
+}
+
+fn started<'a>(
+    exchange: &'a mut Option<TestExchange>,
+    world: &World,
+    client: &file_system::Client<TrackedEnd>,
+) -> filesystem_client::Result<&'a TestExchange> {
+    if let Some(established) = exchange {
+        return Ok(established);
+    }
+
+    let ends = client.start_io().wait()?;
+    let server = world
+        .io_sessions
+        .lock()
+        .expect("registry")
+        .get(&ends.requests.raw())
+        .and_then(Weak::upgrade)
+        .ok_or(IpcError::PeerClosed)?;
+    let scratch = client.take_io_scratch().wait()?;
+    let scratch = world
+        .buffers
+        .lock()
+        .expect("regions")
+        .get(&scratch.raw())
+        .cloned()
+        .ok_or(IpcError::PeerClosed)?;
+    Ok(exchange.insert(TestExchange { server, scratch }))
+}
+
+impl IoContext<TestEnvironment> for TestIo {
+    fn exchange(
+        &mut self,
+        client: &file_system::Client<TrackedEnd>,
+        request: IoRecord,
+        _wait: Timeout,
+    ) -> filesystem_client::Result<IoRecord> {
+        let mut server = started(&mut self.exchange, &self.world, client)?
+            .server
+            .lock()
+            .expect("server");
+        let mut response = server.io_record(request);
+        if response.phase == IoPhase::Ready {
+            match self.world.bad_ready.swap(0, Ordering::SeqCst) {
+                1 => response.region += 1,
+                2 => response.result = Ok(request.size + 1),
+                3 => response.offset += 1,
+                _ => {}
+            }
+        }
+
+        Ok(response)
+    }
+
+    fn scratch(
+        &mut self,
+        client: &file_system::Client<TrackedEnd>,
+    ) -> filesystem_client::Result<&TestBuffer> {
+        Ok(&started(&mut self.exchange, &self.world, client)?.scratch)
+    }
+
+    fn map(
+        &self,
+        region: MockHandle<kind::MemoryRegion>,
+        writable: bool,
+    ) -> Result<TestBuffer, FileSystemError> {
         if self.world.mappings_allowed.load(Ordering::SeqCst) == 0 {
             return Err(FileSystemError::NoSpace);
         }
+
         self.world.mappings_allowed.fetch_sub(1, Ordering::SeqCst);
-        let bytes = self
+        let mut buffer = self
             .world
             .buffers
             .lock()
@@ -783,36 +1135,92 @@ impl Environment for TestEnvironment {
             .get(&region.raw())
             .cloned()
             .ok_or(FileSystemError::NoBuffer)?;
-        Ok(TestBuffer { bytes })
+        buffer.writable = writable;
+        Ok(buffer)
     }
 }
 
+#[derive(Clone)]
 struct TestBuffer {
-    bytes: Shared,
+    data: TestStorage,
+    writable: bool,
+}
+
+#[derive(Clone)]
+enum TestStorage {
+    File {
+        filesystem: Arc<Filesystem>,
+        path: String,
+        capacity: usize,
+    },
+    Bytes(Shared),
 }
 
 impl SharedRegion for TestBuffer {
     fn size(&self) -> usize {
-        self.bytes.lock().expect("mutex not poisoned").len()
+        match &self.data {
+            TestStorage::File { capacity, .. } => *capacity,
+            TestStorage::Bytes(bytes) => bytes.lock().expect("bytes").len(),
+        }
     }
 
     fn read_at(&self, offset: usize, dst: &mut [u8]) -> Result<(), FileSystemError> {
-        let bytes = self.bytes.lock().expect("mutex not poisoned");
-        let end = offset.saturating_add(dst.len());
-        let head = bytes
-            .get(offset..end)
+        let end = offset
+            .checked_add(dst.len())
             .ok_or(FileSystemError::BufferTooSmall)?;
-        dst.copy_from_slice(head);
+        match &self.data {
+            TestStorage::File {
+                filesystem, path, ..
+            } => {
+                let tree = filesystem.tree();
+                let Some(Node::File(bytes)) = tree.get(path) else {
+                    return Err(FileSystemError::NotFound);
+                };
+
+                dst.copy_from_slice(
+                    bytes
+                        .get(offset..end)
+                        .ok_or(FileSystemError::BufferTooSmall)?,
+                );
+            }
+            TestStorage::Bytes(bytes) => dst.copy_from_slice(
+                bytes
+                    .lock()
+                    .expect("bytes")
+                    .get(offset..end)
+                    .ok_or(FileSystemError::BufferTooSmall)?,
+            ),
+        }
+
         Ok(())
     }
 
     fn write_at(&self, offset: usize, src: &[u8]) -> Result<(), FileSystemError> {
-        let mut bytes = self.bytes.lock().expect("mutex not poisoned");
-        let end = offset.saturating_add(src.len());
-        let head = bytes
-            .get_mut(offset..end)
+        if !self.writable {
+            return Err(FileSystemError::WrongMode);
+        }
+
+        let end = offset
+            .checked_add(src.len())
+            .filter(|end| *end <= self.size())
             .ok_or(FileSystemError::BufferTooSmall)?;
-        head.copy_from_slice(src);
+        match &self.data {
+            TestStorage::File {
+                filesystem, path, ..
+            } => {
+                let mut tree = filesystem.tree();
+                let Some(Node::File(bytes)) = tree.get_mut(path) else {
+                    return Err(FileSystemError::NotFound);
+                };
+
+                bytes.resize(bytes.len().max(end), 0);
+                bytes[offset..end].copy_from_slice(src);
+            }
+            TestStorage::Bytes(bytes) => {
+                bytes.lock().expect("bytes")[offset..end].copy_from_slice(src);
+            }
+        }
+
         Ok(())
     }
 }
@@ -823,20 +1231,30 @@ fn serve_session(
     root: String,
     end: &MockListener,
 ) {
-    let mut server = SessionServer {
+    let server = Arc::new(Mutex::new(SessionServer {
         world: Arc::clone(world),
         filesystem,
         root,
-        buffer: None,
         open: BTreeMap::new(),
+        active: None,
+        binding: None,
+        io_started: false,
+        scratch: Arc::new(Mutex::new(vec![0; IO_SCRATCH_BYTES as usize])),
         next_descriptor: 1,
-    };
+    }));
+    let dispatch = SessionDispatch(server);
     let mut bytes = [0u8; MESSAGE_INLINE_MAX];
     while let Ok(frame) = end.recv(&mut bytes, Timeout::INFINITE) {
         if world.poison.swap(false, Ordering::SeqCst) {
             return;
         }
-        if file_system::dispatch(&mut server, frame).is_err() {
+
+        if complete(file_system::dispatch(
+            &dispatch,
+            ipc::OwnedIncoming::new(frame).expect("frame fits"),
+        ))
+        .is_err()
+        {
             return;
         }
     }
@@ -905,11 +1323,16 @@ fn file(text: &str) -> Node {
 
 fn routed(world: &Arc<World>) -> FileSystem<TestEnvironment> {
     let (client, server) = ipc_test::pair();
-    let mut router = Router {
+    let router = Router {
         world: Arc::clone(world),
     };
     thread::spawn(move || {
-        let _ = server.serve_all(|frame| namespace::dispatch(&mut router, frame));
+        let _ = server.serve_all(|frame| {
+            complete(namespace::dispatch(
+                &router,
+                ipc::OwnedIncoming::new(frame)?,
+            ))
+        });
     });
     FileSystem::with_environment(
         TestEnvironment {
@@ -1054,25 +1477,36 @@ fn descriptor_closes_with_the_node() {
 }
 
 #[test]
-fn a_mapping_failure_releases_the_session_transport() {
+fn a_mapping_failure_aborts_the_transfer_and_releases_the_closed_node() {
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     world.mappings_allowed.store(0, Ordering::SeqCst);
     let mut filesystem = routed(&world);
 
-    let outcome = filesystem.open(path("/data/first"), AccessMode::Read, OpenFlags::NONE);
+    let mut node = filesystem
+        .open(path("/data/first"), AccessMode::Read, OpenFlags::NONE)
+        .expect("metadata-only open");
+    let connected = world.transports();
+    let mut bytes = vec![0; IO_SCRATCH_BYTES as usize + 1];
+    let outcome = node.read(&mut bytes);
+    world.mappings_allowed.store(1, Ordering::SeqCst);
+    assert_eq!(
+        node.read(&mut bytes)
+            .expect("retry after releasing mapping budget"),
+        3
+    );
+    assert_eq!(&bytes[..3], b"one");
+    drop(node);
 
     assert!(matches!(
         outcome.err(),
         Some(Failure::FileSystem(FileSystemError::NoSpace))
     ));
-    // Буфер сессии не отобразился, поэтому её транспорт закрыт вместе с попыткой, а
-    // дескрипторов она не открыла.
-    assert_eq!(world.transports.load(Ordering::SeqCst), 1);
+    assert_eq!(world.transports(), connected - 1);
     assert_eq!(world.live.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn a_buffer_capability_the_reply_did_not_carry_is_refused() {
+fn a_resolved_session_capability_the_reply_did_not_carry_is_refused() {
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     world.claims_fail.store(true, Ordering::SeqCst);
     let mut filesystem = routed(&world);
@@ -1124,7 +1558,7 @@ fn sequential_reads_continue_from_the_position() {
 }
 
 #[test]
-fn read_beyond_the_buffer_goes_in_parts() {
+fn read_beyond_the_transfer_limit_goes_in_parts() {
     let body = "c".repeat(BUFFER_SIZE as usize * 3);
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file(&body))]);
     let mut filesystem = routed(&world);
@@ -1136,7 +1570,7 @@ fn read_beyond_the_buffer_goes_in_parts() {
 }
 
 #[test]
-fn write_beyond_the_buffer_goes_in_parts() {
+fn write_beyond_the_transfer_limit_goes_in_parts() {
     let body = "d".repeat(BUFFER_SIZE as usize * 3 + 7);
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file(""))]);
     let mut filesystem = routed(&world);
@@ -1229,7 +1663,7 @@ fn append_lands_at_the_end_of_the_node() {
 }
 
 #[test]
-fn append_beyond_the_buffer_writes_the_fitting_prefix() {
+fn append_beyond_the_transfer_limit_writes_the_fitting_prefix() {
     let body = "e".repeat(BUFFER_SIZE as usize + 1);
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     let mut filesystem = routed(&world);
@@ -1358,24 +1792,6 @@ fn a_refused_scope_leaves_no_session_behind() {
 }
 
 #[test]
-fn a_refused_buffer_of_the_scoped_session_leaves_no_session_behind() {
-    let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
-    let mut filesystem = routed(&world);
-    assert_eq!(read_all(&mut filesystem, "/data/first", 8), b"one");
-    let idle = world.transports();
-    world.mappings_allowed.store(0, Ordering::SeqCst);
-
-    let outcome = filesystem.open(path("/data/first"), AccessMode::Read, OpenFlags::NONE);
-
-    assert!(matches!(
-        outcome.err(),
-        Some(Failure::FileSystem(FileSystemError::NoSpace))
-    ));
-    assert_eq!(world.transports(), idle);
-    assert_eq!(world.descriptors(), 0);
-}
-
-#[test]
 fn a_refused_descriptor_of_the_scoped_session_leaves_no_session_behind() {
     let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
     let mut filesystem = routed(&world);
@@ -1413,7 +1829,7 @@ fn metadata_by_path_matches_the_open_node() {
 }
 
 #[test]
-fn listing_spans_several_buffer_fills() {
+fn listing_spans_several_batches() {
     const ENTRIES: usize = 500;
 
     let mut seed = std::vec![(String::from("/data"), Node::Directory)];
@@ -1939,4 +2355,33 @@ fn rename_refuses_a_pair_reply_that_does_not_decode() {
     assert_eq!(world.transports(), 1);
     assert!(world.holds("/data/first"));
     assert!(!world.holds("/data/second"));
+}
+
+#[test]
+fn malformed_ready_does_not_touch_the_destination_and_aborts_the_window() {
+    for defect in [1, 2, 3] {
+        let world = World::new(&[("/data", Node::Directory), ("/data/first", file("one"))]);
+        let mut filesystem = routed(&world);
+        let mut node = filesystem
+            .open(path("/data/first"), AccessMode::Read, OpenFlags::NONE)
+            .expect("open");
+        world.bad_ready.store(defect, Ordering::SeqCst);
+        let mut bytes = vec![0xA5; IO_SCRATCH_BYTES as usize + 1];
+        assert_eq!(
+            node.read(&mut bytes),
+            Err(Failure::Transport(IpcError::InvalidValue))
+        );
+        assert!(bytes.iter().all(|byte| *byte == 0xA5));
+        assert_eq!(node.position(), 0);
+        let server = world
+            .io_sessions
+            .lock()
+            .expect("registry")
+            .values()
+            .find_map(Weak::upgrade)
+            .expect("server");
+        assert!(server.lock().expect("server").active.is_none());
+        drop(node);
+        assert_eq!(world.descriptors(), 0);
+    }
 }

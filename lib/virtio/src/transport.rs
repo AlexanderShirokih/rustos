@@ -78,25 +78,34 @@ pub struct Transport<R> {
 
 impl<R: Registers> Transport<R> {
     /// Проверяет магическое число, версию и тип устройства, ни один регистр не записывая.
-    pub fn probe(registers: R, expected: DeviceType) -> Result<Self, TransportError<R::Error>> {
+    pub async fn probe(
+        registers: R,
+        expected: DeviceType,
+    ) -> Result<Self, TransportError<R::Error>> {
         let magic = registers
             .read(register::MAGIC_VALUE)
+            .await
             .map_err(TransportError::Register)?;
         if magic != TRANSPORT_MAGIC {
             return Err(TransportError::BadMagic(magic));
         }
+
         let version = registers
             .read(register::VERSION)
+            .await
             .map_err(TransportError::Register)?;
         if version != TRANSPORT_VERSION {
             return Err(TransportError::UnsupportedVersion(version));
         }
+
         let device_type = registers
             .read(register::DEVICE_ID)
+            .await
             .map_err(TransportError::Register)?;
         if device_type == 0 {
             return Err(TransportError::NoDevice);
         }
+
         if device_type != expected as u32 {
             return Err(TransportError::WrongDeviceType(device_type));
         }
@@ -108,47 +117,64 @@ impl<R: Registers> Transport<R> {
     ///
     /// Отклонение признаков оставляет устройству статус FAILED. Отказ доступа к регистру
     /// прекращает согласование и возвращает его причину.
-    pub fn negotiate(&mut self, driver_features: u64) -> Result<u64, TransportError<R::Error>> {
-        self.reset()?;
+    pub async fn negotiate(
+        &mut self,
+        driver_features: u64,
+    ) -> Result<u64, TransportError<R::Error>> {
+        self.reset().await?;
         self.set_status(status::ACKNOWLEDGE)
+            .await
             .map_err(TransportError::Register)?;
         self.set_status(status::ACKNOWLEDGE | status::DRIVER)
+            .await
             .map_err(TransportError::Register)?;
-        let offered = self.read_features().map_err(TransportError::Register)?;
+
+        let offered = self
+            .read_features()
+            .await
+            .map_err(TransportError::Register)?;
         if offered & FEATURE_VERSION_1 == 0 {
-            self.fail().map_err(TransportError::Register)?;
+            self.fail().await.map_err(TransportError::Register)?;
             return Err(TransportError::NoVersion1);
         }
+
         let accepted = offered & (FEATURE_VERSION_1 | driver_features);
         self.write_features(accepted)
+            .await
             .map_err(TransportError::Register)?;
+
         self.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK)
+            .await
             .map_err(TransportError::Register)?;
+
         if self
             .registers
             .read(register::STATUS)
+            .await
             .map_err(TransportError::Register)?
             & status::FEATURES_OK
             == 0
         {
-            self.fail().map_err(TransportError::Register)?;
+            self.fail().await.map_err(TransportError::Register)?;
             return Err(TransportError::FeaturesRejected);
         }
+
         Ok(accepted)
     }
 
     /// Выставляет DRIVER_OK после настройки очередей.
-    pub fn start(&mut self) -> Result<(), R::Error> {
-        let current = self.registers.read(register::STATUS)?;
-        self.set_status(current | status::DRIVER_OK)
+    pub async fn start(&mut self) -> Result<(), R::Error> {
+        let current = self.registers.read(register::STATUS).await?;
+        self.set_status(current | status::DRIVER_OK).await
     }
 
     /// Сбрасывает устройство. После успеха оно не обращается к очередям и их буферам.
-    pub fn reset(&mut self) -> Result<(), TransportError<R::Error>> {
-        self.set_status(0).map_err(TransportError::Register)?;
+    pub async fn reset(&mut self) -> Result<(), TransportError<R::Error>> {
+        self.set_status(0).await.map_err(TransportError::Register)?;
         match self
             .registers
             .read(register::STATUS)
+            .await
             .map_err(TransportError::Register)?
         {
             0 => Ok(()),
@@ -157,48 +183,50 @@ impl<R: Registers> Transport<R> {
     }
 
     /// Причины прерывания, ожидающие подтверждения.
-    pub fn interrupt_status(&self) -> Result<u32, R::Error> {
-        self.registers.read(register::INTERRUPT_STATUS)
+    pub async fn interrupt_status(&self) -> Result<u32, R::Error> {
+        self.registers.read(register::INTERRUPT_STATUS).await
     }
 
     /// Подтверждает причины прерывания из `causes`.
-    pub fn acknowledge_interrupt(&mut self, causes: u32) -> Result<(), R::Error> {
-        self.registers.write(register::INTERRUPT_ACK, causes)
+    pub async fn acknowledge_interrupt(&mut self, causes: u32) -> Result<(), R::Error> {
+        self.registers.write(register::INTERRUPT_ACK, causes).await
     }
 
     /// Читает поле конфигурации устройства одним обращением ширины `width` по смещению от
     /// начала конфигурации.
-    pub fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, R::Error> {
-        self.registers.read_config(offset, width)
+    pub async fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, R::Error> {
+        self.registers.read_config(offset, width).await
     }
 
     /// Записывает младшие байты `value` в поле конфигурации устройства одним обращением
     /// ширины `width` по смещению от начала конфигурации.
-    pub fn write_config(
+    pub async fn write_config(
         &mut self,
         offset: usize,
         width: AccessWidth,
         value: u32,
     ) -> Result<(), R::Error> {
-        self.registers.write_config(offset, width, value)
+        self.registers.write_config(offset, width, value).await
     }
 
-    pub(crate) fn select_queue(&mut self, index: u16) -> Result<(), R::Error> {
+    pub(crate) async fn select_queue(&mut self, index: u16) -> Result<(), R::Error> {
         self.registers
             .write(register::QUEUE_SELECT, u32::from(index))
+            .await
     }
 
-    pub(crate) fn queue_ready(&self) -> Result<bool, R::Error> {
+    pub(crate) async fn queue_ready(&self) -> Result<bool, R::Error> {
         self.registers
             .read(register::QUEUE_READY)
+            .await
             .map(|ready| ready != 0)
     }
 
-    pub(crate) fn queue_size_max(&self) -> Result<u32, R::Error> {
-        self.registers.read(register::QUEUE_SIZE_MAX)
+    pub(crate) async fn queue_size_max(&self) -> Result<u32, R::Error> {
+        self.registers.read(register::QUEUE_SIZE_MAX).await
     }
 
-    pub(crate) fn configure_queue(
+    pub(crate) async fn configure_queue(
         &mut self,
         size: u16,
         descriptors: u64,
@@ -206,51 +234,69 @@ impl<R: Registers> Transport<R> {
         device: u64,
     ) -> Result<(), R::Error> {
         self.registers
-            .write(register::QUEUE_SIZE, u32::from(size))?;
-        self.write_address(register::QUEUE_DESCRIPTORS_LOW, descriptors)?;
-        self.write_address(register::QUEUE_DRIVER_LOW, driver)?;
-        self.write_address(register::QUEUE_DEVICE_LOW, device)?;
-        self.registers.write(register::QUEUE_READY, 1)
+            .write(register::QUEUE_SIZE, u32::from(size))
+            .await?;
+
+        self.write_address(register::QUEUE_DESCRIPTORS_LOW, descriptors)
+            .await?;
+        self.write_address(register::QUEUE_DRIVER_LOW, driver)
+            .await?;
+        self.write_address(register::QUEUE_DEVICE_LOW, device)
+            .await?;
+
+        self.registers.write(register::QUEUE_READY, 1).await
     }
 
-    pub(crate) fn notify(&mut self, index: u16) -> Result<(), R::Error> {
+    pub(crate) async fn notify(&mut self, index: u16) -> Result<(), R::Error> {
         self.registers
             .write(register::QUEUE_NOTIFY, u32::from(index))
+            .await
     }
 
     pub(crate) fn barrier(&mut self) {
         self.registers.barrier();
     }
 
-    fn set_status(&mut self, value: u32) -> Result<(), R::Error> {
-        self.registers.write(register::STATUS, value)
+    async fn set_status(&mut self, value: u32) -> Result<(), R::Error> {
+        self.registers.write(register::STATUS, value).await
     }
 
-    fn fail(&mut self) -> Result<(), R::Error> {
-        let current = self.registers.read(register::STATUS)?;
-        self.set_status(current | status::FAILED)
+    async fn fail(&mut self) -> Result<(), R::Error> {
+        let current = self.registers.read(register::STATUS).await?;
+        self.set_status(current | status::FAILED).await
     }
 
-    fn read_features(&mut self) -> Result<u64, R::Error> {
-        self.registers.write(register::DEVICE_FEATURES_SELECT, 0)?;
-        let low = self.registers.read(register::DEVICE_FEATURES)?;
-        self.registers.write(register::DEVICE_FEATURES_SELECT, 1)?;
-        let high = self.registers.read(register::DEVICE_FEATURES)?;
+    async fn read_features(&mut self) -> Result<u64, R::Error> {
+        self.registers
+            .write(register::DEVICE_FEATURES_SELECT, 0)
+            .await?;
+        let low = self.registers.read(register::DEVICE_FEATURES).await?;
+        self.registers
+            .write(register::DEVICE_FEATURES_SELECT, 1)
+            .await?;
+
+        let high = self.registers.read(register::DEVICE_FEATURES).await?;
+
         Ok(u64::from(high) << 32 | u64::from(low))
     }
 
-    fn write_features(&mut self, features: u64) -> Result<(), R::Error> {
+    async fn write_features(&mut self, features: u64) -> Result<(), R::Error> {
         let (low, high) = split(features);
-        self.registers.write(register::DRIVER_FEATURES_SELECT, 0)?;
-        self.registers.write(register::DRIVER_FEATURES, low)?;
-        self.registers.write(register::DRIVER_FEATURES_SELECT, 1)?;
-        self.registers.write(register::DRIVER_FEATURES, high)
+        self.registers
+            .write(register::DRIVER_FEATURES_SELECT, 0)
+            .await?;
+        self.registers.write(register::DRIVER_FEATURES, low).await?;
+        self.registers
+            .write(register::DRIVER_FEATURES_SELECT, 1)
+            .await?;
+
+        self.registers.write(register::DRIVER_FEATURES, high).await
     }
 
-    fn write_address(&mut self, low_offset: usize, address: u64) -> Result<(), R::Error> {
+    async fn write_address(&mut self, low_offset: usize, address: u64) -> Result<(), R::Error> {
         let (low, high) = split(address);
-        self.registers.write(low_offset, low)?;
-        self.registers.write(low_offset + 4, high)
+        self.registers.write(low_offset, low).await?;
+        self.registers.write(low_offset + 4, high).await
     }
 }
 
@@ -265,7 +311,7 @@ fn split(value: u64) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Event, FakeRegisters, Log, RegisterFailure};
+    use crate::testing::{Event, FakeRegisters, Log, RegisterFailure, complete};
 
     fn status_writes(log: &Log) -> Vec<u32> {
         log.writes_to(register::STATUS)
@@ -289,7 +335,7 @@ mod tests {
             let mut registers = FakeRegisters::gpu(&log);
             registers.set(offset, value);
 
-            let result = Transport::probe(registers, DeviceType::Gpu);
+            let result = complete(Transport::probe(registers, DeviceType::Gpu));
 
             assert_eq!(result.err(), Some(expected));
             assert!(log.writes().is_empty());
@@ -307,7 +353,7 @@ mod tests {
             let log = Log::default();
             let registers = FakeRegisters::gpu(&log).refusing_read(offset);
 
-            let result = Transport::probe(registers, DeviceType::Gpu);
+            let result = complete(Transport::probe(registers, DeviceType::Gpu));
 
             assert_eq!(
                 result.err(),
@@ -328,10 +374,10 @@ mod tests {
     fn negotiate_preserves_write_failure_and_stops_access() {
         let log = Log::default();
         let registers = FakeRegisters::gpu(&log).refusing_write(register::DEVICE_FEATURES_SELECT);
-        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
         log.clear();
 
-        let result = transport.negotiate(0);
+        let result = complete(transport.negotiate(0));
 
         assert_eq!(
             result,
@@ -357,10 +403,11 @@ mod tests {
                 RegisterFailure::Read(offset) => FakeRegisters::gpu(&log).refusing_read(offset),
                 RegisterFailure::Write(offset) => FakeRegisters::gpu(&log).refusing_write(offset),
             };
-            let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+
+            let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
             log.clear();
 
-            let result = transport.reset();
+            let result = complete(transport.reset());
 
             assert_eq!(result, Err(TransportError::Register(failure)));
             let expected = match failure {
@@ -378,10 +425,10 @@ mod tests {
     fn negotiate_and_start_follow_status_sequence() {
         let log = Log::default();
         let registers = FakeRegisters::gpu(&log).with_features(FEATURE_VERSION_1 | 0b110);
-        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
 
-        let accepted = transport.negotiate(0b011).unwrap();
-        transport.start().unwrap();
+        let accepted = complete(transport.negotiate(0b011)).unwrap();
+        complete(transport.start()).unwrap();
 
         assert_eq!(accepted, FEATURE_VERSION_1 | 0b010);
         assert_eq!(log.writes_to(register::DRIVER_FEATURES), [0b010, 1]);
@@ -392,9 +439,9 @@ mod tests {
     fn negotiate_without_version_1_sets_failed() {
         let log = Log::default();
         let registers = FakeRegisters::gpu(&log).with_features(0b1);
-        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
 
-        let result = transport.negotiate(0);
+        let result = complete(transport.negotiate(0));
 
         assert_eq!(result, Err(TransportError::NoVersion1));
         assert_eq!(status_writes(&log).last(), Some(&(3 | status::FAILED)));
@@ -404,9 +451,9 @@ mod tests {
     fn negotiate_rejected_features_ok_sets_failed() {
         let log = Log::default();
         let registers = FakeRegisters::gpu(&log).rejecting_features();
-        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
 
-        let result = transport.negotiate(0);
+        let result = complete(transport.negotiate(0));
 
         assert_eq!(result, Err(TransportError::FeaturesRejected));
         assert_eq!(status_writes(&log).last(), Some(&(3 | status::FAILED)));
@@ -416,9 +463,9 @@ mod tests {
     fn negotiate_stops_when_reset_is_incomplete() {
         let log = Log::default();
         let registers = FakeRegisters::gpu(&log).holding_reset();
-        let mut transport = Transport::probe(registers, DeviceType::Gpu).unwrap();
+        let mut transport = complete(Transport::probe(registers, DeviceType::Gpu)).unwrap();
 
-        let result = transport.negotiate(0);
+        let result = complete(transport.negotiate(0));
 
         assert_eq!(result, Err(TransportError::ResetIncomplete));
         assert_eq!(status_writes(&log), [0]);

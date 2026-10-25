@@ -24,6 +24,7 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::Cell;
     use std::thread;
 
     use ipc::{CallError, IntoWireValue, wire::Cap};
@@ -34,21 +35,20 @@ mod tests {
     use crate::LogRing;
 
     struct Subscriptions {
-        granted: bool,
+        granted: Cell<bool>,
     }
 
     impl journal::Service<MockResources> for Subscriptions {
         fn subscribe(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<
             MockResources,
             Read = Result<LogRing<Cap<kind::MemoryRegion>, Cap<kind::Signal>>, JournalError>,
         > {
-            if self.granted {
+            if self.granted.replace(true) {
                 return Err(JournalError::Refused);
             }
-            self.granted = true;
             Ok(LogRing {
                 region: MockHandle::<kind::MemoryRegion>::new(0x41),
                 signal: MockHandle::<kind::Signal>::new(0x42),
@@ -60,22 +60,24 @@ mod tests {
     fn subscribe_round_trips_the_ring_and_the_refusal() {
         let (client_end, server_end) = ipc_test::pair();
         let client = journal::Client::new(client_end);
-        let mut service = Subscriptions { granted: false };
+        let service = Subscriptions {
+            granted: Cell::new(false),
+        };
         thread::scope(|scope| {
-            scope.spawn(|| {
+            scope.spawn(move || {
                 server_end
-                    .serve_all(|frame| journal::dispatch(&mut service, frame))
+                    .serve_all(|frame| journal::dispatch(&service, frame))
                     .expect("dispatch ok");
             });
             assert_eq!(
-                client.subscribe(),
+                client.subscribe().wait(),
                 Ok(LogRing {
                     region: MockHandle::new(0x41),
                     signal: MockHandle::new(0x42),
                 })
             );
             assert_eq!(
-                client.subscribe(),
+                client.subscribe().wait(),
                 Err(CallError::Remote(JournalError::Refused))
             );
             drop(client);

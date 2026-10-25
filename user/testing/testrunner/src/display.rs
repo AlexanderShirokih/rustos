@@ -73,14 +73,14 @@ fn found(importer: &Importer) -> Vec<Found> {
 fn surface(
     session: &display::Client<SessionTransport>,
 ) -> Result<MemoryRegion, CallError<DisplayError>> {
-    session.acquire_surface().map(MemoryRegion::from)
+    session.acquire_surface().wait().map(MemoryRegion::from)
 }
 
 fn present(
     session: &display::Client<SessionTransport>,
     area: Area,
 ) -> Result<(), CallError<DisplayError>> {
-    session.present(area)
+    session.present(area).wait()
 }
 
 #[test_harness::test]
@@ -89,8 +89,8 @@ fn a_display_session_gets_the_dimension_the_physical_size_and_a_surface_that_hol
     let importer = composition.importer(SCREEN_REQUIREMENTS);
     let screen = session(&importer);
 
-    let dimension = screen.dimension().expect("dimension call");
-    let physical_size = screen.physical_size().expect("physical size call");
+    let dimension = screen.dimension().wait().expect("dimension call");
+    let physical_size = screen.physical_size().wait().expect("physical size call");
     let region = surface(&screen).expect("surface granted");
 
     test_harness::check_eq!(dimension, DIMENSION);
@@ -210,7 +210,7 @@ fn a_session_starts_an_image_program_under_its_index_name() {
     let importer = composition.importer(SCREENS);
     let screen = session(&importer);
 
-    let dimension = screen.dimension().expect("dimension call");
+    let dimension = screen.dimension().wait().expect("dimension call");
     let lines = await_component_lines(DISPLAY.name, 1);
 
     test_harness::check_eq!(dimension, DIMENSION);
@@ -229,7 +229,7 @@ fn a_session_starts_an_image_program_again_after_its_exit() {
     composition.terminate(DISPLAY.name, 0);
     let departed = await_status(&composition, DISPLAY.name, Status::Departed).is_some();
     let screen = session(&importer);
-    let dimension = screen.dimension();
+    let dimension = screen.dimension().wait();
     let restarted = await_component_lines(DISPLAY.name, 2);
 
     test_harness::check_eq!(started, ["started"]);
@@ -261,7 +261,15 @@ fn an_open_after_the_session_reaches_the_started_image_program() {
     let screen = session(&importer);
 
     let opened = found.first().map(|found| {
-        component_startup::open::<display::Protocol>(found, DISPLAY_REPLY_TIMEOUT).map(drop)
+        {
+            let executor = crate::executor::executor();
+            executor.block_on(component_startup::open::<display::Protocol>(
+                found,
+                &executor.reactor(),
+                DISPLAY_REPLY_TIMEOUT,
+            ))
+        }
+        .map(drop)
     });
     let record = registered(
         &composition,
@@ -284,7 +292,10 @@ fn an_image_program_with_a_plan_record_is_found_once() {
     let importer = composition.importer(SCREENS);
 
     let found = found(&importer).len();
-    let dimension = session(&importer).dimension().expect("dimension call");
+    let dimension = session(&importer)
+        .dimension()
+        .wait()
+        .expect("dimension call");
 
     test_harness::check_eq!(found, 1);
     test_harness::check_eq!(dimension, DIMENSION);

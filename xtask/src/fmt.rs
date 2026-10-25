@@ -1,5 +1,5 @@
-//! Форматирование дерева целиком. `cargo fmt --all` охватывает только членов своего workspace, а
-//! часть дерева лежит вне корневого. Список отделённых берётся из `workspace.exclude`
+//! Форматирование дерева целиком. `cargo fmt --all` охватывает workspace и его path-зависимости.
+//! Часть дерева лежит вне корневого. Список отделённых берётся из `workspace.exclude`
 //! корневого манифеста, единственного реестра отделённых частей в дереве.
 
 use std::{
@@ -20,15 +20,22 @@ pub(crate) fn run(check: bool) -> Result<()> {
         manifests.push(workspace.join("Cargo.toml"));
     }
 
-    // Форматирование workspace выполняется параллельно, вывод накапливается по каждому
-    // манифесту и печатается в порядке списка.
-    let outputs: Vec<Result<Output>> = thread::scope(|scope| {
-        let handles: Vec<_> = manifests
+    // Path-зависимости входят в несколько проходов, поэтому запись общего файла
+    // не должна выполняться параллельно из разных workspace.
+    let outputs: Vec<Result<Output>> = if check {
+        thread::scope(|scope| {
+            let handles: Vec<_> = manifests
+                .iter()
+                .map(|manifest| scope.spawn(move || format_workspace(manifest, true)))
+                .collect();
+            handles.into_iter().map(join).collect()
+        })
+    } else {
+        manifests
             .iter()
-            .map(|manifest| scope.spawn(move || format_workspace(manifest, check)))
-            .collect();
-        handles.into_iter().map(join).collect()
-    });
+            .map(|manifest| format_workspace(manifest, false))
+            .collect()
+    };
 
     let mut unformatted = Vec::new();
     for (manifest, output) in manifests.iter().zip(outputs) {

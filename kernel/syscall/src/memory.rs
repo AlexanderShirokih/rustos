@@ -8,8 +8,8 @@ use core::num::NonZeroUsize;
 use capability::{Capability, IpcError, ResourceBudgetRefund, RevocationHook, Rights};
 use kbase::LockCell;
 use memory::{
-    AccessMask, MappingTag, MemoryRegion, PAGE_SIZE, RegionCreateError, RegionSliceError,
-    SliceProfile, UserVmContext, WeakUserVmContext,
+    AccessMask, MappingBacking, MappingTag, MemFlags, MemoryRegion, PAGE_SIZE, RegionCreateError,
+    RegionSliceError, SliceProfile, UserVmContext, WeakUserVmContext,
     memory_mapper::{MemoryMappingError, MemoryRemappingError},
     range_allocator::{AllocateError, RangeError},
     virtual_address::PageAlignedVirtualAddress,
@@ -75,7 +75,13 @@ impl RevocationHook for MemoryMapping {
     fn revoke(&self) {
         // None -> AS уже разрушено (процесс завершился), срывать нечего.
         if let Some(user_vm) = self.user_vm.upgrade() {
-            user_vm.unmap_range(self.base, self.size);
+            user_vm.revoke_range(self.base, self.size, |tag| {
+                tag.backing
+                    .as_ref()
+                    .and_then(|backing| backing.revocation.as_ref())
+                    .and_then(|hook| hook.downcast_ref::<Self>())
+                    .is_some_and(|mapping| core::ptr::eq(mapping, self))
+            });
         }
     }
 }
@@ -272,11 +278,13 @@ pub(crate) fn sys_memory_allocate(
                 guard_pages,
                 MappingTag {
                     flags: mem_flags,
-                    region: region.clone(),
+                    backing: Some(MappingBacking {
+                        region: region.clone(),
+                        // Анонимный fastpath без публичной капы. Отзывать нечего,
+                        // маппинг снимается только при memory_free/смерти AS.
+                        revocation: None,
+                    }),
                     grant,
-                    // Анонимный fastpath без публичной капы. Отзывать нечего,
-                    // маппинг снимается только при memory_free/смерти AS.
-                    revocation: None,
                 },
             )
         })
@@ -327,10 +335,12 @@ pub(crate) fn sys_memory_map(
                 size,
                 MappingTag {
                     flags: mem_flags,
-                    region: region.clone(),
+                    backing: Some(MappingBacking {
+                        region: region.clone(),
+                        // Заполняется ниже, когда известен base.
+                        revocation: None,
+                    }),
                     grant,
-                    // Заполняется ниже, когда известен base.
-                    revocation: None,
                 },
             )
         })
@@ -352,18 +362,7 @@ pub(crate) fn sys_memory_map(
     // его капа. Если капа отозвана в гонке после lookup, регистрация падает -
     // тогда маппинг снимается и syscall возвращает ошибку (а не живой VA на
     // отозванную капу).
-    register_mapping_revocation(
-        &user_vm,
-        base,
-        size,
-        id,
-        MappingTag {
-            flags: mem_flags,
-            region,
-            grant,
-            revocation: None,
-        },
-    )?;
+    register_mapping_revocation(&user_vm, base, size, id, mem_flags, grant, region)?;
 
     Ok(base.as_usize() as u64)
 }
@@ -373,10 +372,12 @@ fn register_mapping_revocation(
     base: PageAlignedVirtualAddress,
     size: NonZeroUsize,
     cap_id: capability::HandleId,
-    mut tag: MappingTag,
+    flags: MemFlags,
+    grant: AccessMask,
+    region: Arc<MemoryRegion>,
 ) -> Result<(), SyscallError> {
     // Снимок AS получателя держится слабым. Сильную ссылку на сам
-    // `MemoryMapping` хранит `MappingTag::revocation`, и weak-ссылка разрывает
+    // `MemoryMapping` хранит `MappingBacking::revocation`, и weak-ссылка разрывает
     // цикл `MappingTag -> MemoryMapping -> AS -> MappingTag`. Иначе AS не освобождается
     // после передачи капы, когда `HandleTable::Drop` процесса её уже не
     // отзывает.
@@ -387,7 +388,14 @@ fn register_mapping_revocation(
     });
     let hook: Arc<dyn RevocationHook> = mapping.clone();
     let weak = Arc::downgrade(&hook);
-    tag.revocation = Some(mapping as Arc<dyn core::any::Any + Send + Sync>);
+    let tag = MappingTag {
+        flags,
+        backing: Some(MappingBacking {
+            region,
+            revocation: Some(mapping as Arc<dyn core::any::Any + Send + Sync>),
+        }),
+        grant,
+    };
 
     user_vm.allocator().with_lock(|alloc| {
         let result = alloc.set_tag(base, size, tag);
@@ -423,47 +431,28 @@ pub(crate) fn sys_memory_remap(
 
     let user_vm = runtime().current_user_vm().ok_or(SyscallError::WrongType)?;
 
-    let (region, grant, revocation) = user_vm
-        .allocator()
-        .with_lock(|alloc| {
-            alloc.lookup(base, size).map(|range| {
-                (
-                    range.tag().region.clone(),
-                    range.tag().grant,
-                    // Сохраняем keep-alive отзыва: remap меняет только флаги,
-                    // маппинг (а значит и его отзываемость) остаётся тем же.
-                    range.tag().revocation.clone(),
-                )
-            })
-        })
-        .map_err(region_err_to_syscall)?;
+    user_vm.allocator().with_lock(|allocator| {
+        let mut tag = allocator
+            .lookup(base, size)
+            .map_err(region_err_to_syscall)?
+            .tag()
+            .clone();
+        let region = &tag.backing.as_ref().ok_or(SyscallError::Revoked)?.region;
+        if !tag.grant.allows(access_mask_for(flags)) {
+            return Err(SyscallError::InvalidArgument);
+        }
 
-    if !grant.allows(access_mask_for(flags)) {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    let mem_flags = mem_flags_for(region.profile(), flags);
-
-    user_vm
-        .mapper()
-        .remap(base, size.get(), mem_flags)
-        .map_err(|e| remap_err_to_syscall(&e))?;
-
-    user_vm.allocator().with_lock(|alloc| {
-        let result = alloc.set_tag(
-            base,
-            size,
-            MappingTag {
-                flags: mem_flags,
-                region,
-                grant,
-                revocation,
-            },
-        );
-        debug_assert!(result.is_ok(), "region must remain after successful remap");
-    });
-
-    Ok(0)
+        let mem_flags = mem_flags_for(region.profile(), flags);
+        user_vm
+            .mapper()
+            .remap(base, size.get(), mem_flags)
+            .map_err(|error| remap_err_to_syscall(&error))?;
+        tag.flags = mem_flags;
+        allocator
+            .set_tag(base, size, tag)
+            .map_err(region_err_to_syscall)?;
+        Ok(0)
+    })
 }
 
 pub(crate) fn sys_memory_free(va_raw: u64, size_bytes: u64) -> Result<u64, SyscallError> {
@@ -805,9 +794,11 @@ mod tests {
                     PAGE_SIZE,
                     MappingTag {
                         flags: MemFlags::user_rw(),
-                        region: region.clone(),
+                        backing: Some(MappingBacking {
+                            region: region.clone(),
+                            revocation: None,
+                        }),
                         grant: AccessMask::RW,
-                        revocation: None,
                     },
                 )
                 .unwrap();
@@ -819,6 +810,72 @@ mod tests {
             (ctx, mapper, base)
         }
 
+        fn attach_mapping(vm: &UserVmContext, mapping: &Arc<MemoryMapping>) {
+            vm.allocator().with_lock(|allocator| {
+                let mut tag = allocator
+                    .lookup(mapping.base, mapping.size)
+                    .unwrap()
+                    .tag()
+                    .clone();
+                tag.backing.as_mut().unwrap().revocation = Some(mapping.clone());
+                allocator.set_tag(mapping.base, mapping.size, tag).unwrap();
+            });
+        }
+
+        #[test]
+        fn delayed_revocation_preserves_a_reused_mapping() {
+            let (vm, mapper, base) = recipient_with_mapping();
+            let old = Arc::new(MemoryMapping {
+                user_vm: vm.downgrade(),
+                base,
+                size: PAGE_SIZE,
+            });
+            attach_mapping(&vm, &old);
+            vm.unmap_range(base, PAGE_SIZE);
+            let replacement = region();
+            let reused = vm
+                .allocator()
+                .with_lock(|allocator| {
+                    allocator.allocate(
+                        PAGE_SIZE,
+                        MappingTag {
+                            flags: MemFlags::user_rw(),
+                            backing: Some(MappingBacking {
+                                region: replacement.clone(),
+                                revocation: None,
+                            }),
+                            grant: AccessMask::RW,
+                        },
+                    )
+                })
+                .unwrap()
+                .base();
+            assert_eq!(reused, base);
+            replacement
+                .install(mapper.as_ref(), reused, MemFlags::user_rw())
+                .unwrap();
+            let current = Arc::new(MemoryMapping {
+                user_vm: vm.downgrade(),
+                base: reused,
+                size: PAGE_SIZE,
+            });
+            attach_mapping(&vm, &current);
+            old.revoke();
+            assert_eq!(mapper.unmaps().len(), 1);
+            vm.allocator().with_lock(|allocator| {
+                assert!(
+                    allocator
+                        .lookup(reused, PAGE_SIZE)
+                        .unwrap()
+                        .tag()
+                        .backing
+                        .is_some()
+                );
+            });
+            current.revoke();
+            assert_eq!(mapper.unmaps().len(), 2);
+        }
+
         #[test]
         fn closing_grantor_cap_unmaps_recipient_mapping() {
             let (recipient_vm, mapper, base) = recipient_with_mapping();
@@ -828,6 +885,7 @@ mod tests {
                 base,
                 size: PAGE_SIZE,
             });
+            attach_mapping(&recipient_vm, &mapping);
             let hook: Arc<dyn RevocationHook> = mapping.clone();
             let weak: Weak<dyn RevocationHook> = Arc::downgrade(&hook);
 

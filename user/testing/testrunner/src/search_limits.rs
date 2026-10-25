@@ -130,24 +130,31 @@ fn a_result_beyond_the_owner_limit_keeps_its_place_in_the_enumeration() {
 fn provider_sessions_continue_after_no_space() {
     let composition = limited(&[EXPORT, NEIGHBOUR], OWNER_STATES);
     let importer = composition.importer(&[probe_of(PROBE)]);
-    let mut sessions = Providers::<probe::Protocol>::new(importer.handle(), PROBE)
-        .all(Attributes::empty())
-        .expect("enumeration granted");
-    let first = sessions
-        .next()
-        .and_then(Result::ok)
-        .expect("a provider is found");
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
+    let (refused, second) = executor.block_on(async {
+        let mut sessions = Providers::<probe::Protocol>::new(importer.handle(), PROBE)
+            .all(&reactor, Attributes::empty())
+            .await
+            .expect("enumeration granted");
 
-    let refused = (0..REFUSAL_REPEATS).all(
-        |_| matches!(sessions.next(), Some(Err(error)) if error.failure == StartupFailure::NoSpace),
-    );
-    drop(first);
-    let second = (0..POLL_ATTEMPTS).find_map(|_| {
-        let found = sessions.next().and_then(Result::ok);
-        if found.is_none() {
-            pause(POLL_INTERVAL);
+        let first = sessions.next(&reactor).await.and_then(Result::ok).expect("a provider is found");
+
+        let mut refused = true;
+        for _ in 0..REFUSAL_REPEATS {
+            refused &= matches!(sessions.next(&reactor).await, Some(Err(error)) if error.failure == StartupFailure::NoSpace);
         }
-        found
+
+        drop(first);
+
+        let mut second = None;
+        for _ in 0..POLL_ATTEMPTS {
+            second = sessions.next(&reactor).await.and_then(Result::ok);
+            if second.is_some() { break; }
+            reactor.sleep(POLL_INTERVAL).await;
+        }
+
+        (refused, second)
     });
 
     test_harness::check!(refused);
@@ -162,17 +169,25 @@ fn the_next_set_of_alternatives_is_requested_after_the_exhausted_one_is_released
     let composition = limited(&[EXPORT], OWNER_STATES);
     let importer = composition.importer(&[probe_of(PROBE)]);
     let _held = all(&importer).expect("held enumeration granted");
-    let mut sessions = Providers::<probe::Protocol>::new(importer.handle(), PROBE)
-        .all(AnyOf::new("kind", ["absent", "missing"]))
-        .expect("first set granted");
+    let executor = crate::executor::executor();
+    let reactor = executor.reactor();
+    let ended = executor.block_on(async {
+        let mut sessions = Providers::<probe::Protocol>::new(importer.handle(), PROBE)
+            .all(&reactor, AnyOf::new("kind", ["absent", "missing"]))
+            .await
+            .expect("first set granted");
 
-    let ended = (0..POLL_ATTEMPTS).any(|_| match sessions.next() {
-        None => true,
-        Some(Err(error)) if error.failure == StartupFailure::NoSpace => {
-            pause(POLL_INTERVAL);
-            false
+        for _ in 0..POLL_ATTEMPTS {
+            match sessions.next(&reactor).await {
+                None => return true,
+                Some(Err(error)) if error.failure == StartupFailure::NoSpace => {
+                    reactor.sleep(POLL_INTERVAL).await;
+                }
+                Some(_) => return false,
+            }
         }
-        Some(_) => false,
+
+        false
     });
 
     test_harness::check!(ended);
@@ -239,7 +254,15 @@ fn an_undelivered_result_keeps_its_export_and_returns_its_state() {
 
     let undelivered = (0..REFUSAL_REPEATS).all(|_| {
         let held = composition.hold();
-        let answer = component_startup::next(&enumeration, UNDELIVERED_TIMEOUT).map(drop);
+        let answer = {
+            let executor = crate::executor::executor();
+            executor.block_on(component_startup::next(
+                &enumeration,
+                &executor.reactor(),
+                UNDELIVERED_TIMEOUT,
+            ))
+        }
+        .map(drop);
         drop(held);
         answer == Err(CallError::Ipc(IpcError::Timeout))
     });
@@ -285,11 +308,26 @@ fn watch(
 fn next(
     enumeration: &Session<startup_contract::Protocol>,
 ) -> Result<Option<Found>, CallError<SessionError>> {
-    component_startup::next(enumeration, STARTUP_REQUEST_TIMEOUT)
+    {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::next(
+            enumeration,
+            &executor.reactor(),
+            STARTUP_REQUEST_TIMEOUT,
+        ))
+    }
 }
 
 fn opened(found: &Found) -> Result<(), CallError<SessionError>> {
-    component_startup::open::<probe::Protocol>(found, COMPONENT_REPLY_TIMEOUT).map(drop)
+    {
+        let executor = crate::executor::executor();
+        executor.block_on(component_startup::open::<probe::Protocol>(
+            found,
+            &executor.reactor(),
+            COMPONENT_REPLY_TIMEOUT,
+        ))
+    }
+    .map(drop)
 }
 
 fn await_all(importer: &Importer) -> Option<Session<startup_contract::Protocol>> {

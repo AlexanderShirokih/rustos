@@ -15,6 +15,7 @@ dependencies = [
 name = "ipc"
 version = "0.1.0"
 dependencies = [
+ "rustc-std-workspace-alloc",
  "rustc-std-workspace-core",
  "syscall",
 ]

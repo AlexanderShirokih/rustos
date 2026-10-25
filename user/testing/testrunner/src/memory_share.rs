@@ -1,6 +1,4 @@
-//! E2E разделяемой памяти между двумя адресными пространствами из EL0:
-//! регион передаётся потомку по порту отдельной capability и виден там как тот же
-//! физический фрейм, но по своему VA.
+//! Передача capability разделяемой памяти между процессами и жизнь её отображений.
 
 use kernel_objects::{Mapping, Resource};
 use runtime::{MemoryAccess, UserMemFlags, signal_set};
@@ -51,4 +49,33 @@ fn memory_region_shared_with_child() {
     unsafe {
         test_harness::check_eq!(slot.read_volatile(), !PATTERN);
     }
+}
+
+#[test_harness::test]
+fn mapping_drop_after_revocation_preserves_another_mapping() {
+    let resource = Resource::self_resource().expect("resource");
+    let source = resource
+        .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+        .expect("source");
+    let lease = source
+        .duplicate(Rights::READ | Rights::WRITE, None)
+        .expect("lease");
+    let revoked = Mapping::full(lease, UserMemFlags::ReadWrite).expect("first mapping");
+    drop(source);
+    test_harness::check_eq!(
+        revoked.remap(UserMemFlags::ReadOnly),
+        Err(kernel_objects::Error::Syscall(SyscallError::Revoked))
+    );
+    let replacement = resource
+        .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+        .expect("replacement");
+    let replacement =
+        Mapping::full(replacement, UserMemFlags::ReadWrite).expect("replacement mapping");
+    replacement.copy_in(b"live").expect("write replacement");
+    drop(revoked);
+    let mut bytes = [0; 4];
+    replacement
+        .copy_out(&mut bytes)
+        .expect("read replacement after stale drop");
+    test_harness::check_eq!(&bytes, b"live");
 }

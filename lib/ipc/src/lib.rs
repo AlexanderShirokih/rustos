@@ -11,9 +11,9 @@
 //! принимает кадры из [`Listener`]. Прочитанное значение владеет capability, которые называют
 //! его поля, а capability, не названные ни одним полем, закрываются вместе с кадром.
 //!
-//! Сервер отвечает на `call` в одной из двух форм, и форму выбирает объявление операции.
+//! Сервер отвечает на `call` в одной из двух форм, выбранной объявлением операции.
 //! Обработчик либо возвращает значение ответа, и ответ отправляет диспетчер, либо получает
-//! долг ответа [`Reply`] и отвечает им сам - сразу либо позже. Ответ уходит каналом
+//! долг ответа [`Reply`] для делегирования. Ответ уходит каналом
 //! [`ReplyChannel`], который транспорт доставляет вместе с кадром вызова.
 //!
 //! Тип записи поля читается [`WireValue`], пишется [`IntoWireValue`] и описывается в схеме
@@ -24,8 +24,10 @@
 //! зависимостей стандартной библиотеки, где не собирается ни то ни другое.
 
 #![cfg_attr(not(test), no_std)]
+#![feature(impl_trait_in_assoc_type)]
 #![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 
+extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
@@ -33,25 +35,30 @@ mod aggregate;
 mod call_error;
 mod codec;
 mod enumeration;
+mod operation;
 mod ordinal;
+mod owned_incoming;
 mod protocol;
 mod reply;
 mod resources;
 pub mod schema;
+mod service_owner;
 pub mod transport;
 pub mod wire;
 
 pub use call_error::CallError;
 pub use codec::{IntoWireValue, WireTyped, WireValue};
+pub use operation::{Call, Send};
 pub use ordinal::ordinal_of;
+pub use owned_incoming::OwnedIncoming;
 #[doc(hidden)]
-pub use protocol::{
-    __protocol_answer, __protocol_call, __protocol_call_async, __protocol_outcome, __protocol_send,
-    __protocol_send_async,
-};
+pub use protocol::{__protocol_answer, __protocol_outcome};
 pub use protocol::{DEFAULT_OPERATION_TIMEOUT, Protocol};
 pub use reply::Reply;
 pub use resources::{Received, ReceivedResources};
+#[doc(hidden)]
+pub use service_owner::__Owned;
+pub use service_owner::ServiceOwner;
 #[doc(hidden)]
 pub use syscall as __syscall;
 pub use syscall::Timeout;

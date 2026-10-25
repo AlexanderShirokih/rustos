@@ -1,9 +1,12 @@
 //! Выполнение запросов диска и состояние его отказа.
 
+use alloc::rc::Rc;
+
 use block_abi::{BlockError, BlockInfo};
 use virtio::block::{RequestKind, SECTOR_BYTES, Status};
 
 /// Обмен запросами с устройством.
+#[allow(async_fn_in_trait)]
 pub trait Channel {
     /// Регион памяти, доступный устройству.
     type Region;
@@ -11,7 +14,7 @@ pub trait Channel {
     /// Отправляет устройству запрос `kind` к сектору `sector` с данными в первых `bytes` байтах
     /// `region` и возвращает байт статуса, который записало устройство, либо `None`, если
     /// устройство не ответило в срок или отказал транспорт.
-    fn transfer(
+    async fn transfer(
         &mut self,
         kind: RequestKind,
         sector: u64,
@@ -21,7 +24,7 @@ pub trait Channel {
 
     /// Сбрасывает устройство и возвращает `true` при успехе. После успеха устройство не
     /// обращается к регионам запросов.
-    fn reset(&mut self) -> bool;
+    async fn reset(&mut self) -> bool;
 }
 
 /// Буфер данных сессии: регион и размер, с которым его запросил клиент.
@@ -71,7 +74,7 @@ impl<C: Channel> Disk<C> {
     /// - `BufferTooSmall` - блоки длиннее буфера;
     /// - `OutOfRange` - `lba + count` больше числа блоков либо не помещается в `u64`;
     /// - `Device` - устройство ответило ошибкой, не ответило либо диск в отказе.
-    pub fn serve(
+    pub async fn serve(
         &mut self,
         kind: RequestKind,
         lba: u64,
@@ -98,25 +101,38 @@ impl<C: Channel> Disk<C> {
 
         // Блок `lba` лежит на диске, поэтому его сектор не превышает ёмкость устройства.
         let sector = lba * u64::from(self.info.block_size / SECTOR_BYTES);
-        match self.channel.transfer(kind, sector, region, bytes) {
+        match self.channel.transfer(kind, sector, region, bytes).await {
             Some(byte) if Status::parse(byte) == Ok(Status::Ok) => Ok(()),
             Some(_) => Err(BlockError::Device),
             None => {
-                self.health = if self.channel.reset() {
+                self.health = if self.channel.reset().await {
                     Health::Failed
                 } else {
                     Health::Unreset
                 };
+
                 Err(BlockError::Device)
             }
         }
     }
 
+    /// Прекращает обращения устройства к очередям перед остановкой обслуживания.
+    /// При отказе владелец сохраняет диск и его DMA-регионы занятыми.
+    pub async fn stop(&mut self) -> bool {
+        let stopped = self.channel.reset().await;
+        self.health = if stopped {
+            Health::Failed
+        } else {
+            Health::Unreset
+        };
+        stopped
+    }
+
     /// Освобождает регион буфера ушедшей сессии. Если устройство не удалось сбросить после
     /// отказа, регион остаётся занятым до конца процесса.
-    pub fn release(&self, region: C::Region) {
+    pub fn release(&self, buffer: Rc<SessionBuffer<C::Region>>) {
         if self.health == Health::Unreset {
-            core::mem::forget(region);
+            core::mem::forget(buffer);
         }
     }
 }

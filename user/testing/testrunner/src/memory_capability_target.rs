@@ -79,7 +79,11 @@ fn a_write_combining_mapping_refuses_a_cached_region_and_returns_the_window() {
 // атрибуты этого отображения.
 #[test_harness::test]
 fn a_syscall_buffer_in_a_device_mapping_is_an_invalid_argument() {
-    let Ok(window) = crate::hardware_session().client().acquire_device_memory(0) else {
+    let Ok(window) = crate::hardware_session()
+        .client()
+        .acquire_device_memory(0)
+        .wait()
+    else {
         test_harness::skip!("the platform grants no device window");
     };
     let window = MemoryRegion::from(window);

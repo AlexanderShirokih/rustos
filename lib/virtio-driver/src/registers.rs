@@ -2,6 +2,7 @@
 
 use core::sync::atomic::{Ordering, fence};
 
+use executor::PortChannel;
 use ipc::{CallError, wire::IpcError};
 use kernel_objects::SessionTransport;
 use virtio::{AccessWidth, Registers};
@@ -20,12 +21,12 @@ pub enum SlotFailure {
 
 /// Регистры транспорта, доступные через сессию слота.
 pub struct SlotRegisters {
-    slot: virtio_slot::Client<SessionTransport>,
+    slot: virtio_slot::Client<PortChannel<SessionTransport>>,
 }
 
 impl SlotRegisters {
     /// Обращается к регистрам транспорта слота `slot`.
-    pub fn new(slot: virtio_slot::Client<SessionTransport>) -> Self {
+    pub fn new(slot: virtio_slot::Client<PortChannel<SessionTransport>>) -> Self {
         Self { slot }
     }
 }
@@ -33,22 +34,25 @@ impl SlotRegisters {
 impl Registers for SlotRegisters {
     type Error = SlotFailure;
 
-    fn read(&self, offset: usize) -> Result<u32, SlotFailure> {
+    async fn read(&self, offset: usize) -> Result<u32, SlotFailure> {
         let offset = wire_offset(offset)?;
-        self.slot.read(offset).map_err(failure)
+        self.slot.read(offset).await.map_err(failure)
     }
 
-    fn write(&mut self, offset: usize, value: u32) -> Result<(), SlotFailure> {
+    async fn write(&mut self, offset: usize, value: u32) -> Result<(), SlotFailure> {
         let offset = wire_offset(offset)?;
-        self.slot.write(offset, value).map_err(failure)
+        self.slot.write(offset, value).await.map_err(failure)
     }
 
-    fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, SlotFailure> {
+    async fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, SlotFailure> {
         let offset = wire_offset(offset)?;
-        self.slot.config_read(offset, wire(width)).map_err(failure)
+        self.slot
+            .config_read(offset, wire(width))
+            .await
+            .map_err(failure)
     }
 
-    fn write_config(
+    async fn write_config(
         &mut self,
         offset: usize,
         width: AccessWidth,
@@ -57,6 +61,7 @@ impl Registers for SlotRegisters {
         let offset = wire_offset(offset)?;
         self.slot
             .config_write(offset, wire(width), value)
+            .await
             .map_err(failure)
     }
 

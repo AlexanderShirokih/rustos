@@ -81,6 +81,12 @@ impl PortTransport {
     }
 }
 
+impl AsRef<PortTransport> for PortTransport {
+    fn as_ref(&self) -> &PortTransport {
+        self
+    }
+}
+
 impl Channel for PortTransport {
     type Resources = Delivery;
 

@@ -7,7 +7,7 @@
 //! вызовами `pop` выгребает `FRAMES` кадров, producer шлёт те же `FRAMES`
 //! (повтор на `Full`). Проверяем, что все кадры получены по порядку.
 
-use io::RingError;
+use ipc::wire::IpcError;
 use kernel_objects::{Resource, RingConsumer, RingProducer, Signal};
 use runtime::{MemoryAccess, Timeout, spawn_owned};
 use syscall::Rights;
@@ -56,7 +56,7 @@ fn ring_transport_round_trip() {
     while sent < FRAMES {
         match producer.push(&sent.to_le_bytes()) {
             Ok(()) => sent += 1,
-            Err(RingError::Full) => core::hint::spin_loop(),
+            Err(IpcError::ResourceExhausted) => core::hint::spin_loop(),
             Err(_) => test_harness::check!(false),
         }
     }
@@ -66,4 +66,29 @@ fn ring_transport_round_trip() {
         .expect("consumer finishes before timeout");
     test_harness::check_eq!(thread.exit_code().expect("consumer exit code"), 0);
     thread.join(JOIN_TIMEOUT).expect("consumer joins");
+}
+
+#[test_harness::test]
+fn ring_transport_reports_failed_notification_after_publication() {
+    let resource = Resource::self_resource().expect("resource");
+    let region = resource
+        .create_virtual(PAGE_SIZE, MemoryAccess::RW)
+        .expect("region");
+    let other = region
+        .duplicate(Rights::READ | Rights::WRITE, None)
+        .expect("receiver region");
+    let signal = Signal::create().expect("signal");
+    let read_only = signal
+        .duplicate(Rights::READ, None)
+        .expect("read-only signal");
+    let consumer = RingConsumer::new(other, SLOT_PAYLOAD, signal).expect("consumer");
+    let producer = RingProducer::new(region, SLOT_PAYLOAD, read_only).expect("producer");
+    test_harness::check_eq!(
+        producer.push(&42u32.to_le_bytes()),
+        Err(IpcError::PeerClosed)
+    );
+    let mut bytes = [0; SLOT_PAYLOAD];
+    test_harness::check_eq!(consumer.try_pop(&mut bytes), Ok(Some(SLOT_PAYLOAD)));
+    test_harness::check_eq!(u32::from_le_bytes(bytes), 42);
+    test_harness::check_eq!(consumer.try_pop(&mut bytes), Ok(None));
 }

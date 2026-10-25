@@ -1,17 +1,19 @@
 //! Обслуживание экспорта провайдером и создание портов сессий.
 
 use core::{
+    borrow::Borrow,
     fmt,
     num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use component_abi::{AcceptError, Attributes, SessionError, component_startup};
+use component_abi::{AcceptError, Attributes, SessionError};
+use executor::Reactor;
 use ipc::{CallError, FrameBytes, Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Error, Port, PortTransport};
-use syscall::{Rights, Timeout};
+use syscall::{READABLE, Rights, Timeout, WaitItem};
 
-use crate::request::{AsyncStartup, accept, accept_async};
+use crate::request::{AsyncStartup, accept};
 
 /// Порт сессий экспорта и счётчик его значков. Значок не повторяется и после отказа.
 #[derive(Debug)]
@@ -27,7 +29,7 @@ pub struct MintedSession {
     pub port: Port,
 }
 
-/// Отказ `accept`, которым остановился [`serve_export`] либо [`serve_export_async`].
+/// Отказ `accept`, которым остановился [`serve_export`].
 #[derive(Debug)]
 pub struct ExportStopped(CallError<AcceptError>);
 
@@ -40,18 +42,7 @@ pub enum SessionEvent<'b> {
     Gone(u64),
 }
 
-/// Результат опроса [`SessionEvents::try_recv`].
-pub enum Polled<'b> {
-    /// Кадр сессии либо уход значка.
-    Event(SessionEvent<'b>),
-    /// На порту нет ни кадра, ни ухода значка.
-    Empty,
-    /// Приём через эту capability порта закончен.
-    Closed,
-}
-
-/// Приём порта сессий экспорта в собственный буфер кадра: бессрочный [`Self::recv`] либо
-/// опрос [`Self::try_recv`].
+/// Асинхронный приём порта сессий экспорта в собственный буфер кадра.
 ///
 /// Кадр, отброшенный ядром из-за нехватки места под его capability, пропускается.
 pub struct SessionEvents<'p> {
@@ -91,6 +82,13 @@ impl SessionPort {
         Ok(MintedSession { badge, port })
     }
 
+    /// Выдаёт порт сессии экспорта под новым значком в ответ на заявку импортёра.
+    pub fn open_session(&self) -> Result<Port, SessionError> {
+        self.create_session()
+            .map(|minted| minted.port)
+            .map_err(|_| SessionError::NoSpace)
+    }
+
     /// Приём кадров порта, как [`SessionEvents::new`].
     #[must_use]
     pub const fn events(&self) -> SessionEvents<'_> {
@@ -113,91 +111,58 @@ impl<'p> SessionEvents<'p> {
         }
     }
 
-    /// Ждёт следующий кадр сессии либо уход значка. `None` означает, что приём через эту
-    /// capability порта закончен.
-    pub fn recv(&mut self) -> Option<SessionEvent<'_>> {
-        match self.receive(Timeout::INFINITE) {
-            Polled::Event(event) => Some(event),
-            Polled::Empty | Polled::Closed => None,
-        }
-    }
-
-    /// Выдаёт кадр сессии либо уход значка, если они уже есть на порту, не ожидая их.
-    pub fn try_recv(&mut self) -> Polled<'_> {
-        self.receive(Timeout::POLL)
-    }
-
-    fn receive(&mut self, wait: Timeout) -> Polled<'_> {
+    /// Ждёт следующий кадр сессии либо уход значка, уступая поток executor.
+    /// `None` означает конец приёма, ошибка - отказ ожидания порта.
+    pub async fn recv(&mut self, reactor: &Reactor) -> Result<Option<SessionEvent<'_>>, Error> {
         let transport = PortTransport::new(self.port.borrow());
-
-        // Из цикла выходят длина и ресурсы кадра, поэтому заём буфера не переходит на следующий
-        // приём.
         let (len, resources) = loop {
-            match transport.recv(&mut self.bytes, wait) {
+            match transport.recv(&mut self.bytes, Timeout::POLL) {
                 Ok(frame) => break (frame.bytes.len(), frame.resources),
-                Err(RecvError::SenderGone(badge)) => {
-                    return Polled::Event(SessionEvent::Gone(badge));
+                Err(RecvError::SenderGone(badge)) => return Ok(Some(SessionEvent::Gone(badge))),
+                Err(RecvError::Timeout) => {
+                    reactor
+                        .wait(WaitItem::new(self.port.as_raw(), READABLE))
+                        .await?;
                 }
-                // Бессрочный приём после пробуждения без кадра ждёт снова.
-                Err(RecvError::Timeout) if wait != Timeout::INFINITE => return Polled::Empty,
-                Err(RecvError::Discarded | RecvError::Timeout) => {}
-                Err(RecvError::Closed) => return Polled::Closed,
+                Err(RecvError::Discarded) => {}
+                Err(RecvError::Closed) => return Ok(None),
             }
         };
 
-        Polled::Event(SessionEvent::Frame(Incoming {
+        Ok(Some(self.frame(len, resources)))
+    }
+
+    fn frame(&self, len: usize, resources: Delivery) -> SessionEvent<'_> {
+        SessionEvent::Frame(Incoming {
             bytes: self.bytes.get(..len).unwrap_or_default(),
             resources,
-        }))
+        })
     }
 }
 
-/// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`. `open`
-/// строит порт сессии по атрибутам запроса импортёра либо отказывает. Цикл ждёт заявку
-/// бессрочно.
-pub fn serve_export<P: ipc::Protocol>(
-    parent: component_startup::Client<PortTransport>,
-    mut open: impl FnMut(Attributes<'_>) -> Result<Port, SessionError>,
-) -> ExportStopped {
-    let parent = parent.with_wait(Timeout::INFINITE);
-    loop {
-        match accept::<P>(&parent) {
-            Ok(request) => {
-                let session = open(request.attributes.as_attributes());
-                let _ = request.reply.send(session);
-            }
-            Err(error) => return ExportStopped(error),
-        }
-    }
-}
-
-/// Отвечает на заявки импортёров, как [`serve_export`]. Заявку задача ждёт через reactor
-/// канала `parent`.
-pub async fn serve_export_async<P: ipc::Protocol>(
+/// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`.
+/// Заявку задача ждёт через reactor канала `parent`, а сессию строит асинхронный `open`.
+pub async fn serve_export<P: ipc::Protocol>(
     parent: AsyncStartup,
-    mut open: impl FnMut(Attributes<'_>) -> Result<Port, SessionError>,
+    mut open: impl AsyncFnMut(Attributes<'_>) -> Result<Port, SessionError>,
 ) -> ExportStopped {
     let parent = parent.with_wait(Timeout::INFINITE);
     loop {
-        match accept_async::<P>(&parent).await {
+        match accept::<P>(&parent).await {
             Ok(request) => {
-                let session = open(request.attributes.as_attributes());
+                let session = open(request.attributes.as_attributes()).await;
                 let _ = request.reply.send(session);
             }
+
             Err(error) => return ExportStopped(error),
         }
     }
 }
 
-/// Обработчик [`serve_export`], выдающий сессию `export` под новым значком при любых атрибутах
-/// запроса.
+/// Выдаёт сессию `export` из [`SessionPort::open_session`] при любых атрибутах запроса
+/// из [`serve_export`].
 pub fn whole_export(
-    export: &SessionPort,
-) -> impl FnMut(Attributes<'_>) -> Result<Port, SessionError> + '_ {
-    move |_| {
-        export
-            .create_session()
-            .map(|minted| minted.port)
-            .map_err(|_| SessionError::NoSpace)
-    }
+    export: impl Borrow<SessionPort>,
+) -> impl AsyncFnMut(Attributes<'_>) -> Result<Port, SessionError> {
+    async move |_| export.borrow().open_session()
 }

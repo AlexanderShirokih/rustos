@@ -6,7 +6,7 @@ use alloc::{
 };
 use core::{
     cell::{Cell, RefCell},
-    future::Future,
+    future::{Future, IntoFuture},
     pin::Pin,
     sync::atomic::Ordering::SeqCst,
     task::{Context, Poll, Waker},
@@ -52,6 +52,7 @@ type TimerKey = (Instant, u64);
 
 struct ReactorState {
     records: RefCell<Vec<Option<Registration>>>,
+    pending: RefCell<Pending>,
     start: Cell<usize>,
     timers: RefCell<BTreeMap<TimerKey, Waker>>,
     next_timer: Cell<u64>,
@@ -63,6 +64,12 @@ struct Registration {
     outcome: Option<kernel_objects::Result<()>>,
 }
 
+#[derive(Default)]
+struct Pending {
+    slots: Vec<Slot>,
+    items: Vec<WaitItem>,
+}
+
 enum Slot {
     Notify,
     Record(usize),
@@ -72,6 +79,7 @@ impl Reactor {
     pub(crate) fn new() -> Self {
         Self(Rc::new(ReactorState {
             records: RefCell::new(Vec::new()),
+            pending: RefCell::new(Pending::default()),
             start: Cell::new(0),
             timers: RefCell::new(BTreeMap::new()),
             next_timer: Cell::new(0),
@@ -89,6 +97,23 @@ impl Reactor {
         }
     }
 
+    /// Ждёт готовности одного из `items` и возвращает его индекс. Каждая запись входит в
+    /// предел [`Self::wait`]. Пустой набор остаётся в ожидании до отмены future.
+    pub async fn wait_any(&self, items: &[WaitItem]) -> kernel_objects::Result<usize> {
+        let mut waits: Vec<_> = items.iter().map(|item| self.wait(*item)).collect();
+
+        core::future::poll_fn(|cx| {
+            for (index, wait) in waits.iter_mut().enumerate() {
+                if let Poll::Ready(outcome) = Pin::new(wait).poll(cx) {
+                    return Poll::Ready(outcome.map(|()| index));
+                }
+            }
+
+            Poll::Pending
+        })
+        .await
+    }
+
     /// Готов по истечении срока `after`. С [`Timeout::INFINITE`] future не готов никогда. Сроки
     /// не входят в предел ожиданий [`Self::wait`].
     pub fn sleep(&self, after: Timeout) -> Sleep {
@@ -100,9 +125,9 @@ impl Reactor {
     }
 
     /// Ограничивает операцию `future` сроком `after`.
-    pub fn timeout<F: Future>(&self, after: Timeout, future: F) -> Timed<F> {
+    pub fn timeout<F: IntoFuture>(&self, after: Timeout, future: F) -> Timed<F::IntoFuture> {
         Timed {
-            future: Some(Box::pin(future)),
+            future: Some(Box::pin(future.into_future())),
             sleep: self.sleep(after),
         }
     }
@@ -115,14 +140,20 @@ impl Reactor {
             wait.min(self.0.until_nearest(now))
         };
 
-        let (slots, items) = self
-            .0
-            .pending(WaitItem::new(shared.notify.as_raw(), SIGNALED));
-        if wait == Timeout::POLL && slots.len() == 1 {
-            return;
+        let mut pending = self.0.pending.take();
+        self.0.collect(
+            &mut pending,
+            WaitItem::new(shared.notify.as_raw(), SIGNALED),
+        );
+        if wait != Timeout::POLL || pending.slots.len() > 1 {
+            self.wait_pending(shared, wait, &pending);
         }
+        self.0.pending.replace(pending);
+    }
 
-        let woken = wait_any(&items, wait);
+    fn wait_pending(&self, shared: &Shared, wait: Timeout, pending: &Pending) {
+        let Pending { slots, items } = pending;
+        let woken = wait_any(items, wait);
         shared.sleeping.store(false, SeqCst);
         self.0.wake_expired(Instant::now());
 
@@ -141,7 +172,7 @@ impl Reactor {
             },
             Err(Error::Syscall(SyscallError::Timeout)) => {}
             // Отказ не называет запись, и опрос каждой записи находит готовые и отказавшие.
-            Err(_) => self.0.probe(&slots, &items),
+            Err(_) => self.0.probe(slots, items),
         }
     }
 }
@@ -173,13 +204,14 @@ impl ReactorState {
             .map_or(Timeout::INFINITE, |(&(deadline, _), _)| deadline.since(now))
     }
 
-    fn pending(&self, notify: WaitItem) -> (Vec<Slot>, Vec<WaitItem>) {
+    fn collect(&self, pending: &mut Pending, notify: WaitItem) {
         let records = self.records.borrow();
         let len = records.len();
         let start = self.start.get().checked_rem(len).unwrap_or(0);
 
-        let mut slots = Vec::with_capacity(len.saturating_add(1));
-        let mut items = Vec::with_capacity(len.saturating_add(1));
+        let Pending { slots, items } = pending;
+        slots.clear();
+        items.clear();
         // Среди готовых записей ядро выбирает первую, поэтому записи задач идут по кругу от
         // `start`, а `notify` идёт последней.
         let order = (start..len).chain(0..start);
@@ -193,7 +225,6 @@ impl ReactorState {
         }
         slots.push(Slot::Notify);
         items.push(notify);
-        (slots, items)
     }
 
     fn probe(&self, slots: &[Slot], items: &[WaitItem]) {

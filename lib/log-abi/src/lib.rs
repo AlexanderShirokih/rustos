@@ -67,18 +67,19 @@ ipc::protocol! {
 
 #[cfg(test)]
 mod tests {
+    use core::cell::RefCell;
     use std::string::String;
 
     use super::{LOG_MESSAGE_MAX, log};
 
     #[derive(Default)]
     pub(crate) struct Sink {
-        pub(crate) last: Option<String>,
+        pub(crate) last: RefCell<Option<String>>,
     }
 
     impl<F: ipc::ReceivedResources> log::Service<F> for Sink {
-        fn write(&mut self, _frame: &F, message: &str) {
-            self.last = Some(String::from(message));
+        fn write(&self, _frame: &F, message: &str) {
+            *self.last.borrow_mut() = Some(String::from(message));
         }
     }
 
@@ -86,13 +87,13 @@ mod tests {
     fn write_round_trip() {
         let (client_end, server_end) = ipc_test::pair();
         let client = log::Client::new(client_end);
-        client.write("log line").expect("log write");
+        client.write("log line").wait().expect("log write");
 
-        let mut sink = Sink::default();
+        let sink = Sink::default();
         server_end
-            .serve(|frame| log::dispatch(&mut sink, frame))
+            .serve(|frame| log::dispatch(&sink, frame))
             .expect("dispatch ok");
-        assert_eq!(sink.last.as_deref(), Some("log line"));
+        assert_eq!(sink.last.borrow().as_deref(), Some("log line"));
     }
 
     #[test]
@@ -100,12 +101,15 @@ mod tests {
         let (client_end, server_end) = ipc_test::pair();
         let client = log::Client::new(client_end);
         let message = "m".repeat(LOG_MESSAGE_MAX);
-        client.write(&message).expect("log write");
+        client.write(&message).wait().expect("log write");
 
-        let mut sink = Sink::default();
+        let sink = Sink::default();
         server_end
-            .serve(|frame| log::dispatch(&mut sink, frame))
+            .serve(|frame| log::dispatch(&sink, frame))
             .expect("dispatch ok");
-        assert_eq!(sink.last.expect("logged").len(), LOG_MESSAGE_MAX);
+        assert_eq!(
+            sink.last.into_inner().expect("logged").len(),
+            LOG_MESSAGE_MAX
+        );
     }
 }

@@ -8,7 +8,7 @@ use std::{
 };
 
 use components::into_std_handle;
-use filesystem_abi::{FileSystemError, NAME_MAX, PATH_MAX};
+use filesystem_abi::{FileSystemError, IO_TRANSFER_MAX, NAME_MAX, PATH_MAX};
 use kernel_objects::Port;
 
 const IMAGE_FILE: &str = "/boot/testrunner/sample";
@@ -202,7 +202,7 @@ pub(crate) fn an_append_lands_at_the_end_in_one_piece() {
         .open(APPENDED)
         .expect("an append open");
 
-    let long = vec![b'x'; 16 * 1024];
+    let long = vec![b'x'; 2 * usize::try_from(IO_TRANSFER_MAX).expect("transfer limit fits usize")];
     let first = (&file).write(&long).expect("an append write");
     assert!(0 < first && first < long.len(), "{first} of {}", long.len());
     (&file).write_all(&long[first..]).expect("the rest appends");

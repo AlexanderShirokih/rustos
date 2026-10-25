@@ -23,7 +23,7 @@ mod ram;
 mod session;
 mod store;
 
-pub use backend::{FileSystemBackend, NodeMetadata};
+pub use backend::{DirBatch, FileSystemBackend, NodeMetadata};
 pub use image::{ImageFileSystem, ImageFileSystemError};
 pub use node::{NodeId, Window};
 pub use ram::RamFileSystem;

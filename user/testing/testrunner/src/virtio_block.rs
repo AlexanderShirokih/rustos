@@ -15,14 +15,13 @@ use virtio::{
     DeviceType,
     block::{Config, RequestKind, SECTOR_BYTES, feature},
 };
-use virtio_driver::open_slot;
 
 use crate::{
     composition::{Composition, Import, Importer},
     rootkeeper_system::{
         FIRST_VIRTIO, await_revoked, finish, pair, platform_describes, query, with_drivers,
     },
-    virtio_mmio::{BUS_IMPORT, bus_session},
+    virtio_mmio::{BUS_IMPORT, open_transport},
 };
 
 const DISK: &str = "disk";
@@ -56,10 +55,11 @@ struct Scripted(Rc<RefCell<Script>>);
 
 struct Tracked(Rc<Cell<usize>>);
 
+#[allow(clippy::unused_async_trait_impl)]
 impl Channel for Scripted {
     type Region = Tracked;
 
-    fn transfer(
+    async fn transfer(
         &mut self,
         _kind: RequestKind,
         sector: u64,
@@ -71,7 +71,7 @@ impl Channel for Scripted {
         script.statuses.pop_front().flatten()
     }
 
-    fn reset(&mut self) -> bool {
+    async fn reset(&mut self) -> bool {
         let mut script = self.0.borrow_mut();
         script.resets += 1;
         script.reset
@@ -144,7 +144,7 @@ fn acquired(
     session: &block_device::Client<SessionTransport>,
     size: u32,
 ) -> Result<MemoryRegion, CallError<BlockError>> {
-    session.acquire_buffer(size).map(MemoryRegion::from)
+    session.acquire_buffer(size).wait().map(MemoryRegion::from)
 }
 
 fn pattern(lba: u64, len: usize) -> Vec<u8> {
@@ -199,12 +199,12 @@ fn an_unusable_geometry_is_refused() {
 fn a_block_of_4096_bytes_addresses_eight_sectors_per_block() {
     let (mut disk, script) = disk(LARGE_BLOCK, &[Some(OK)], true);
 
-    let read = disk.serve(
+    let read = crate::executor::executor().block_on(disk.serve(
         RequestKind::Read,
         3,
         1,
         Some(&buffer(LARGE_BLOCK, &Rc::default())),
-    );
+    ));
 
     test_harness::check_eq!(read, Ok(()));
     test_harness::check_eq!(script.borrow().sectors, vec![24]);
@@ -215,11 +215,14 @@ fn a_request_outside_the_disk_or_the_buffer_does_not_reach_the_device() {
     let (mut disk, script) = disk(SECTOR_BYTES, &[], true);
     let small = Some(&buffer(SMALL_BUFFER_BYTES, &Rc::default()));
 
-    let overflow = disk.serve(RequestKind::Read, u64::MAX, 2, small);
-    let past_end = disk.serve(RequestKind::Read, QEMU_BLOCKS, 1, small);
-    let too_long = disk.serve(RequestKind::Read, 0, 9, small);
-    let no_buffer = disk.serve(RequestKind::Write, 0, 1, None);
-    let empty = disk.serve(RequestKind::Write, 0, 0, small);
+    let overflow =
+        crate::executor::executor().block_on(disk.serve(RequestKind::Read, u64::MAX, 2, small));
+    let past_end =
+        crate::executor::executor().block_on(disk.serve(RequestKind::Read, QEMU_BLOCKS, 1, small));
+    let too_long = crate::executor::executor().block_on(disk.serve(RequestKind::Read, 0, 9, small));
+    let no_buffer =
+        crate::executor::executor().block_on(disk.serve(RequestKind::Write, 0, 1, None));
+    let empty = crate::executor::executor().block_on(disk.serve(RequestKind::Write, 0, 0, small));
 
     test_harness::check_eq!(overflow, Err(BlockError::OutOfRange));
     test_harness::check_eq!(past_end, Err(BlockError::OutOfRange));
@@ -234,8 +237,8 @@ fn an_io_error_fails_only_its_own_request() {
     let (mut disk, script) = disk(SECTOR_BYTES, &[Some(IO_ERROR), Some(OK)], true);
     let small = Some(&buffer(SMALL_BUFFER_BYTES, &Rc::default()));
 
-    let failed = disk.serve(RequestKind::Read, 0, 1, small);
-    let next = disk.serve(RequestKind::Read, 0, 1, small);
+    let failed = crate::executor::executor().block_on(disk.serve(RequestKind::Read, 0, 1, small));
+    let next = crate::executor::executor().block_on(disk.serve(RequestKind::Read, 0, 1, small));
 
     test_harness::check_eq!(failed, Err(BlockError::Device));
     test_harness::check_eq!(next, Ok(()));
@@ -246,12 +249,18 @@ fn an_io_error_fails_only_its_own_request() {
 fn an_unanswered_request_fails_the_disk_and_frees_its_region_only_after_a_reset() {
     for reset in [true, false] {
         let released = Rc::new(Cell::new(0));
-        let small = buffer(SECTOR_BYTES, &released);
+        let small = Rc::new(buffer(SECTOR_BYTES, &released));
         let (mut disk, script) = disk(SECTOR_BYTES, &[None], reset);
 
-        let unanswered = disk.serve(RequestKind::Write, 0, 1, Some(&small));
-        let next = disk.serve(RequestKind::Read, 0, 1, Some(&small));
-        disk.release(small.region);
+        let unanswered = crate::executor::executor().block_on(disk.serve(
+            RequestKind::Write,
+            0,
+            1,
+            Some(&small),
+        ));
+        let next =
+            crate::executor::executor().block_on(disk.serve(RequestKind::Read, 0, 1, Some(&small)));
+        disk.release(small);
 
         test_harness::check_eq!(unanswered, Err(BlockError::Device));
         test_harness::check_eq!(next, Err(BlockError::Device));
@@ -265,7 +274,7 @@ fn an_unanswered_request_fails_the_disk_and_frees_its_region_only_after_a_reset(
 fn the_16_mib_qemu_disk_keeps_a_pattern_in_its_first_and_last_block() {
     on_disk(|_, importer| {
         let session = opened(importer).expect("disk session");
-        let info = session.info().expect("info call");
+        let info = session.info().wait().expect("info call");
         let region = acquired(&session, info.block_size).expect("buffer granted");
         let buffer = Mapping::full(region, UserMemFlags::ReadWrite).expect("buffer maps");
         let len = info.block_size as usize;
@@ -277,9 +286,9 @@ fn the_16_mib_qemu_disk_keeps_a_pattern_in_its_first_and_last_block() {
             let mut read = vec![0; len];
 
             buffer.copy_in(&written).expect("pattern fits the buffer");
-            let write = session.write(lba, 1);
+            let write = session.write(lba, 1).wait();
             buffer.zero_at(0, len).expect("buffer clears");
-            let read_back = session.read(lba, 1);
+            let read_back = session.read(lba, 1).wait();
             buffer.copy_out(&mut read).expect("block fits the buffer");
 
             test_harness::check_eq!(write, Ok(()));
@@ -293,7 +302,7 @@ fn the_16_mib_qemu_disk_keeps_a_pattern_in_its_first_and_last_block() {
 fn a_session_gets_one_buffer_within_the_transfer_limit() {
     on_disk(|_, importer| {
         let session = opened(importer).expect("disk session");
-        let transfer_max = session.info().expect("info call").transfer_max;
+        let transfer_max = session.info().wait().expect("info call").transfer_max;
 
         let oversized = acquired(&session, transfer_max + 1).map(drop);
         let region = acquired(&session, transfer_max).expect("buffer granted");
@@ -338,8 +347,7 @@ fn a_closed_session_loses_its_buffer_and_frees_the_disk() {
 fn a_disk_whose_transport_is_held_is_refused() {
     on_disk(|composition, importer| {
         let bus_importer = composition.importer(&[BUS_IMPORT]);
-        let bus = bus_session(&bus_importer);
-        let _held = open_slot(&bus, DeviceType::Block).expect("block transport");
+        let _held = open_transport(&bus_importer, DeviceType::Block).expect("block transport");
 
         let refused = opened(importer).map(drop);
 

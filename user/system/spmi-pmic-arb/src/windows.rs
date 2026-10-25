@@ -1,5 +1,6 @@
 //! Окна регистров арбитра, отображённые в процесс шины.
 
+use executor::PortChannel;
 use kernel_objects::{MmioMapping, SessionTransport};
 use mmio::MappedWindows;
 use platform_abi::{DeviceId, WindowRefusal, platform};
@@ -14,19 +15,19 @@ pub(crate) struct Windows {
 }
 
 impl Windows {
-    pub(crate) fn take(
-        platform: &platform::Client<SessionTransport>,
+    pub(crate) async fn take(
+        platform: &platform::Client<PortChannel<SessionTransport>>,
         id: &DeviceId,
         node: &ArbiterNode,
     ) -> Result<Self, WindowRefusal> {
-        let region = |window| platform.map_mmio(id, node.resource(window));
+        let region = async |window| platform.map_mmio(id, node.resource(window)).await;
 
         Ok(Self {
-            core: region(Window::Core)?,
-            channels: region(Window::Channels)?,
-            observer: region(Window::Observer)?,
-            interrupts: region(Window::Interrupts)?,
-            config: region(Window::Config)?,
+            core: region(Window::Core).await?,
+            channels: region(Window::Channels).await?,
+            observer: region(Window::Observer).await?,
+            interrupts: region(Window::Interrupts).await?,
+            config: region(Window::Config).await?,
         })
     }
 }

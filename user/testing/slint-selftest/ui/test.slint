@@ -1,0 +1,13 @@
+export component TestWindow inherits Window {
+    width: 64px;
+    height: 32px;
+    callback pressed();
+    in-out property <bool> posted;
+    forward-focus: keys;
+    keys := FocusScope {
+        key-pressed(event) => {
+            root.pressed();
+            return accept;
+        }
+    }
+}

@@ -3,15 +3,13 @@
 
 use core::num::NonZeroU64;
 
-use component_abi::component_startup as startup_contract;
 use component_startup::{
-    Requirements as _, SessionPort, SessionRequest, accept, component_manifest,
+    AsyncStartup, Requirements as _, SessionPort, SessionRequest, accept, component_manifest,
 };
-use ipc::{CallError, Listener as _, RecvError, wire::MESSAGE_INLINE_MAX};
+use executor::{Executor, PortChannel, Reactor};
+use ipc::CallError;
 use kernel_objects::Port;
-use runtime::{
-    FAILED_EXIT_CODE, PortTransport, Timeout, exit, log_line, process_exit, spawn_bound,
-};
+use runtime::{FAILED_EXIT_CODE, Timeout, exit, log_line, process_exit, spawn_bound};
 use syscall::{Handle, Rights, kind};
 
 mod child_steps_protocol;
@@ -36,44 +34,52 @@ struct Fixture {
     parent: Handle<kind::Port>,
     export: SessionPort,
     held: Option<SessionRequest>,
+    reactor: Reactor,
 }
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
-    let steps = StepsStartup::from_parent(parent)
-        .steps
-        .open()
-        .map_err(|_| Failed)?;
-    let logged = runtime::log::installed();
-    let export = SessionPort::create().map_err(|_| Failed)?;
+    let executor = Executor::new().map_err(|_| Failed)?;
+    let reactor = executor.reactor();
 
-    let steps = steps.client().with_wait(Timeout::INFINITE);
-    let mut fixture = Fixture {
-        parent,
-        export,
-        held: None,
-    };
-    let mut last = (outcome::STARTED, u64::from(logged));
-    loop {
-        let (code, value) = last;
-        let report = Report {
-            outcome: code,
-            value,
+    executor.block_on(async {
+        let steps = StepsStartup::from_parent(parent)
+            .steps
+            .open_async(&reactor)
+            .await
+            .map_err(|_| Failed)?;
+        let logged = runtime::log::installed();
+        let export = SessionPort::create().map_err(|_| Failed)?;
+
+        let steps = PortChannel::client(steps, reactor.clone()).with_wait(Timeout::INFINITE);
+        let mut fixture = Fixture {
+            parent,
+            export,
+            held: None,
+            reactor,
         };
-        let step = steps.next(report).map_err(|_| Failed)?;
-        match step.action {
-            action::RETURN_OK => return Ok(()),
-            action::RETURN_ERR => return Err(Failed),
-            action::PANIC => panic_on_step(),
-            _ => last = fixture.run(step),
+        let mut last = (outcome::STARTED, u64::from(logged));
+        loop {
+            let (code, value) = last;
+            let report = Report {
+                outcome: code,
+                value,
+            };
+            let step = steps.next(report).await.map_err(|_| Failed)?;
+            match step.action {
+                action::RETURN_OK => return Ok(()),
+                action::RETURN_ERR => return Err(Failed),
+                action::PANIC => panic_on_step(),
+                _ => last = fixture.run(step).await,
+            }
         }
-    }
+    })
 }
 
 impl Fixture {
-    fn run(&mut self, step: Step) -> (u32, u64) {
+    async fn run(&mut self, step: Step) -> (u32, u64) {
         match step.action {
-            action::ACCEPT => self.accept(Timeout::from_ns(step.argument)),
+            action::ACCEPT => self.accept(Timeout::from_ns(step.argument)).await,
             action::ANSWER_SESSION => match self.export.create_session() {
                 Ok(minted) => self.answer(Ok(minted.port)),
                 Err(_) => (outcome::NO_SESSION, 0),
@@ -98,7 +104,7 @@ impl Fixture {
                 Some(_) => (outcome::DROPPED, 0),
                 None => (outcome::NO_REQUEST, 0),
             },
-            action::RECV => self.recv(Timeout::from_ns(step.argument)),
+            action::RECV => self.recv(Timeout::from_ns(step.argument)).await,
             action::LOG => {
                 log_line(STEP_LINE);
                 (outcome::LOGGED, 0)
@@ -113,9 +119,11 @@ impl Fixture {
         }
     }
 
-    fn accept(&mut self, wait: Timeout) -> (u32, u64) {
-        let parent = startup_contract::Client::new(PortTransport::new(self.parent)).with_wait(wait);
-        match accept::<probe::Protocol>(&parent) {
+    async fn accept(&mut self, wait: Timeout) -> (u32, u64) {
+        let parent =
+            AsyncStartup::new(PortChannel::new(self.parent, self.reactor.clone())).with_wait(wait);
+
+        match accept::<probe::Protocol>(&parent).await {
             Ok(request) => {
                 self.held = Some(request);
                 (outcome::ACCEPTED, 0)
@@ -137,17 +145,20 @@ impl Fixture {
         }
     }
 
-    fn recv(&self, wait: Timeout) -> (u32, u64) {
-        let mut bytes = [0u8; MESSAGE_INLINE_MAX];
-        match PortTransport::new(self.export.port().as_raw()).recv(&mut bytes, wait) {
-            Ok(frame) => {
+    async fn recv(&self, wait: Timeout) -> (u32, u64) {
+        let mut events = self.export.events();
+
+        match self.reactor.timeout(wait, events.recv(&self.reactor)).await {
+            Some(Ok(Some(component_startup::SessionEvent::Frame(frame)))) => {
                 let badge = frame.resources.badge;
-                let _ = probe::dispatch(&mut Echo, frame);
+                let _ = probe::dispatch(&Echo, frame);
                 (outcome::FRAME, badge)
             }
-            Err(RecvError::SenderGone(badge)) => (outcome::SENDER_GONE, badge),
-            Err(RecvError::Timeout) => (outcome::RECV_TIMEOUT, 0),
-            Err(_) => (outcome::RECV_FAILED, 0),
+            Some(Ok(Some(component_startup::SessionEvent::Gone(badge)))) => {
+                (outcome::SENDER_GONE, badge)
+            }
+            None => (outcome::RECV_TIMEOUT, 0),
+            _ => (outcome::RECV_FAILED, 0),
         }
     }
 }

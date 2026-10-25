@@ -1,75 +1,93 @@
-//! Сессии `I2c` и сессии устройств выпускаются на одном порту из общего счётчика значков.
-//! Кадр значка, которым занято устройство, обслуживает протокол `I2cDevice`, остальные кадры -
-//! протокол `I2c`. Передача держит цикл сессий до ответа, и передачи контроллера идут по
-//! одной.
+//! Сессии `I2c` и `I2cDevice` делят порт и счётчик значков. Независимые вызовы обслуживаются
+//! одновременно, а передача удерживает mutex своего контроллера до завершения или отмены.
 
-use component_startup::{SessionEvent, SessionPort};
+use alloc::rc::Rc;
+
+use component_startup::SessionPort;
+use executor::Either;
 use i2c_abi::{I2cError, TransferBuf, TransferError, i2c, i2c_device};
 use i2c_qup::{Bus, Device, Operation};
-use ipc::IntoWireValue;
-use kernel_objects::{Delivery, IrqLine, MmioMapping};
-use platform_abi::DeviceId;
+use ipc::{Incoming, IntoWireValue, ServiceOwner, wire::IpcError};
+use kernel_objects::Delivery;
+use platform_abi::{DeviceId, MappedDescription};
 
-use crate::supplies::Supplies;
+use crate::supplies::{ControllerWindow, Interrupt, Supplies};
 
-struct Opener<'s, 'p, 'd> {
-    bus: &'s mut Bus<'d, Supplies<'p>>,
-    sessions: &'s SessionPort,
+pub(crate) struct Service {
+    pub(crate) bus: Bus<Supplies>,
+    pub(crate) description: MappedDescription,
+    pub(crate) sessions: Rc<SessionPort>,
 }
 
-struct Held<'t>(Device<'t, MmioMapping, IrqLine>);
+#[derive(Clone)]
+struct Held(Device<ControllerWindow, Interrupt>);
 
-impl i2c::Service<Delivery> for Opener<'_, '_, '_> {
-    fn open(
-        &mut self,
+impl ServiceOwner for Held {
+    type Service = Self;
+
+    fn service(&self) -> &Self {
+        self
+    }
+}
+
+impl Service {
+    pub(crate) fn serve(
+        service: &Rc<Self>,
+        frame: Incoming<'_, Delivery>,
+    ) -> Result<Option<impl Future<Output = Result<(), IpcError>> + use<>>, IpcError> {
+        let description = service
+            .description
+            .description()
+            .map_err(|_| IpcError::InvalidValue)?;
+
+        let call = if let Some(device) = service.bus.device(&description, frame.resources.badge) {
+            i2c_device::serve(&Held(device), frame)?.map(Either::Left)
+        } else {
+            i2c::serve(service, frame)?.map(Either::Right)
+        };
+
+        Ok(call.map(Either::run))
+    }
+}
+
+impl i2c::Service<Delivery> for Service {
+    async fn open(
+        &self,
         _frame: &Delivery,
         device: DeviceId,
     ) -> impl IntoWireValue<Delivery, Read = Result<ipc::wire::Session<i2c_device::Protocol>, I2cError>>
     {
-        self.bus.prepare(&device)?;
+        let description = self
+            .description
+            .description()
+            .map_err(|_| I2cError::NoDevice)?;
+        self.bus.prepare(&description, &device).await?;
+
         let minted = self
             .sessions
             .create_session()
             .map_err(|_| I2cError::NoSpace)?;
         self.bus.claim(minted.badge.get(), device);
 
-        // Порт сессии устройства выпускает эта шина, и она же обслуживает на нём `I2cDevice`.
         Ok(kernel_objects::Session::from_handle(minted.port))
     }
 }
 
-impl i2c_device::Service<Delivery> for Held<'_> {
-    fn write(&mut self, _frame: &Delivery, data: &[u8]) -> Result<(), TransferError> {
-        self.0.transfer(Operation::Write(data)).map(drop)
+impl i2c_device::Service<Delivery> for Held {
+    async fn write(&self, _frame: &Delivery, data: &[u8]) -> Result<(), TransferError> {
+        self.0.transfer(Operation::Write(data)).await.map(drop)
     }
 
-    fn read(&mut self, _frame: &Delivery, count: u16) -> Result<TransferBuf, TransferError> {
-        self.0.transfer(Operation::Read(count))
+    async fn read(&self, _frame: &Delivery, count: u16) -> Result<TransferBuf, TransferError> {
+        self.0.transfer(Operation::Read(count)).await
     }
 
-    fn write_read(
-        &mut self,
+    async fn write_read(
+        &self,
         _frame: &Delivery,
         data: &[u8],
         count: u16,
     ) -> Result<TransferBuf, TransferError> {
-        self.0.transfer(Operation::WriteRead(data, count))
-    }
-}
-
-pub(crate) fn serve(bus: &mut Bus<'_, Supplies<'_>>, sessions: &SessionPort) {
-    let mut events = sessions.events();
-
-    while let Some(event) = events.recv() {
-        match event {
-            SessionEvent::Frame(frame) => {
-                if let Some(device) = bus.device(frame.resources.badge) {
-                    let _ = i2c_device::dispatch(&mut Held(device), frame);
-                } else {
-                    let _ = i2c::dispatch(&mut Opener { bus, sessions }, frame);
-                }
-            }
-            SessionEvent::Gone(badge) => bus.release(badge),
-        }
+        self.0.transfer(Operation::WriteRead(data, count)).await
     }
 }

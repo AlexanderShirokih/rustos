@@ -1,27 +1,26 @@
-//! Контракт файлового сервиса: команды над деревом имён и узлами. Данные переменной длины идут
-//! через буфер данных сессии, кадр содержит пути, длины и счётчики.
+//! Управляющий порт файлового сервиса открывает дескрипторы, передаёт метаданные
+//! и capability. Чтение, запись и перечисление выполняются через общий обмен IoRecord.
 //!
 //! Порт равен монтированию. Путь отсчитывается от корня монтирования, а сервер не отслеживает
 //! собственный префикс и соседей. Префикс снимает клиент по длине, которую отдал маршрутизатор
 //! имён.
 //!
-//! Порядок операций закреплён за вызовом, сессия его не добавляет. Несколько незавершённых вызовов
-//! применяются в любом порядке, и исход их пересечения на одном узле контракт не определяет.
-//! Клиент, которому нужен порядок, держит на сессии один незавершённый вызов. Ослабление идёт от
-//! приёма несколькими потоками сервера. Значение закрытого дескриптора при этом не
-//! переназначается другому узлу. Отставший вызов по нему получает `BadDescriptor`.
+//! Сессия выполняет одну операцию переноса до её завершения либо отмены. Операции разных
+//! сессий над одним узлом согласует сервер. Управляющие вызовы, не зависящие от активного
+//! переноса, могут завершаться независимо. Клиент задаёт нужный ему порядок вызовов.
+//! Значение закрытого дескриптора не переназначается другому узлу. Отставший вызов по нему
+//! получает `BadDescriptor`.
 
 use ipc::wire::{BODY_MAX, FIELD_OVERHEAD};
 
 use crate::{
-    cursor::DirCursor,
     descriptor::NodeDescriptor,
     error::FileSystemError,
     flags::OpenFlags,
     kind::NodeKind,
     limits::PATH_MAX,
     mode::AccessMode,
-    reply::{Listed, NodeInfo, Opened, Written},
+    reply::{NodeInfo, Opened},
 };
 
 const _: () = assert!(
@@ -36,20 +35,26 @@ const _: () = assert!(
     "open frame exceeds the body budget"
 );
 
-/// Смещение дозаписи: `write` по нему кладёт байты за последним байтом узла.
+/// Смещение, с которым операция Write выбирает актуальный конец узла на сервере.
 pub const APPEND_OFFSET: u64 = u64::MAX;
 
 ipc::protocol! {
-    /// Файловый сервис: дерево имён и содержимое узлов. Операции без собственного результата
+    /// Доступ к дереву имён и содержимому узлов. Операции без собственного результата
     /// возвращают `0`.
     pub mod file_system {
         name = "FileSystem";
 
-        /// Выделяет сессии буфер данных под `size` байт и отдаёт RW-capability на него. Объём
-        /// округляется вверх до страницы, нулевой либо превышающий потолок сервера - `NoSpace`.
-        /// Сессия получает буфер один раз, повторный вызов - `AlreadyExists`. Регион остаётся за
-        /// сервером, и закрытие сессии отзывает выданную capability.
-        call fn acquire_buffer(size: u32) -> own Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
+        /// Устанавливает единственную пару колец сессии. Повторная установка даёт AlreadyExists.
+        /// Корни колец и сигналов удерживает сервер; capability несут только управляющие записи.
+        call(defer) fn start_io() -> own Result<crate::IoBootstrap, FileSystemError>;
+
+        /// Принимает capability поколения, объявленного записью Register. Другой номер либо
+        /// отсутствие регистрации дают NoBuffer. Клиент подтверждает отображение через Registered.
+        call fn take_io_region(region: u64) -> own Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
+
+        /// Выдаёт scratch установленного обмена размера `IO_SCRATCH_BYTES` с правом записи.
+        /// Сессия без обмена получает NoBuffer.
+        call fn take_io_scratch() -> own Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
 
         /// Открывает узел по пути внутри монтирования. `mode` задаёт режим доступа дескриптора,
         /// `flags` - действия над деревом имён. Дескриптор держит узел до `close` и адресует тот
@@ -59,7 +64,7 @@ ipc::protocol! {
         /// существующего узла - `AlreadyExists`, `DIRECTORY` на файле - `NotADirectory`,
         /// `TRUNCATE` без права записи - `WrongMode`. Режим записи в неизменяемом дереве -
         /// `ReadOnly`, исчерпанный потолок дескрипторов сессии - `TooManyOpenFiles`.
-        call fn open(
+        call async fn open(
             path: &str,
             mode: AccessMode,
             flags: OpenFlags,
@@ -70,39 +75,14 @@ ipc::protocol! {
         /// дескриптор - `BadDescriptor`.
         call fn close(fd: NodeDescriptor) -> Result<u32, FileSystemError>;
 
-        /// Кладёт в начало буфера сессии до `len` байт узла со смещения `offset`. Возвращает
-        /// число прочитанных байт. Сервер заполняет нулями непрочитанный хвост запрошенных `len`
-        /// байт, смещение от длины узла и дальше даёт ноль байт. Дескриптор без права чтения -
-        /// `WrongMode`, сессия без буфера - `NoBuffer`, `len` сверх буфера - `BufferTooSmall`.
-        call fn read(fd: NodeDescriptor, offset: u64, len: u32) -> Result<u32, FileSystemError>;
-
-        /// Пишет в узел `len` байт из начала буфера сессии по смещению `offset`. Промежуток
-        /// между прежней длиной узла и `offset` заполняется нулями. Смещение [`APPEND_OFFSET`]
-        /// дозаписывает байты за последним байтом узла, и между сессиями такая дозапись
-        /// неделима.
-        ///
-        /// Дескриптор без права записи - `WrongMode`, сессия без буфера - `NoBuffer`, `len`
-        /// сверх буфера - `BufferTooSmall`, длина узла за пределом файловой системы - `NoSpace`.
-        call fn write(
-            fd: NodeDescriptor,
-            offset: u64,
-            len: u32,
-        ) -> Result<Written, FileSystemError>;
-
         /// Задаёт длину узла. Байты за `size` отбрасываются, расширение дописывает нули.
         /// Дескриптор без права записи - `WrongMode`, дескриптор каталога - `IsADirectory`,
         /// длина сверх предела файловой системы - `NoSpace`.
-        call fn set_size(fd: NodeDescriptor, size: u64) -> Result<u32, FileSystemError>;
+        call async fn set_size(fd: NodeDescriptor, size: u64) -> Result<u32, FileSystemError>;
 
         /// Отдаёт метаданные узла, закреплённого за дескриптором. Дескриптор без права чтения -
         /// `WrongMode`.
         call fn stat(fd: NodeDescriptor) -> Result<NodeInfo, FileSystemError>;
-
-        /// Укладывает в буфер сессии записи каталога с позиции `from`, сколько их помещается.
-        /// Перечисление продолжает вызов с `from` из [`Listed::next`]. Дескриптор файла -
-        /// `NotADirectory`, дескриптор без права чтения - `WrongMode`, сессия без буфера -
-        /// `NoBuffer`.
-        call fn list(fd: NodeDescriptor, from: DirCursor) -> Result<Listed, FileSystemError>;
 
         /// Переносит узел из `from` под имя `to` внутри монтирования. Занятое имя `to` перенос
         /// замещает, и замещённый узел остаётся без имени. Совпадение `from` с `to` дерево не
@@ -147,7 +127,7 @@ ipc::protocol! {
         ///
         /// Доставленный ответ закрепляет ёмкость узла за регионом. Запись и `set_size` за
         /// пределом этой ёмкости отвечают `NoSpace`.
-        call fn backing_memory(
+        call(defer) async fn backing_memory(
             fd: NodeDescriptor,
         ) -> own Result<ipc::wire::Cap<syscall::kind::MemoryRegion>, FileSystemError>;
 
@@ -155,7 +135,7 @@ ipc::protocol! {
         /// отсчитывается от корня вызванной сессии, и окно производной сессии только сужается.
         /// Отсутствие узла - `NotFound`, путь за `PATH_MAX` вместе с окном - `InvalidPath`.
         ///
-        /// Дескрипторы и буфер данных у производной сессии свои.
+        /// Дескрипторы и обмен данными у производной сессии свои.
         call fn open_root(
             path: &str,
         ) -> own Result<ipc::wire::Session<crate::file_system::Protocol>, FileSystemError>;
@@ -172,11 +152,11 @@ mod tests {
     };
 
     use ipc::{CallError, wire::Cap};
-    use ipc_test::{MockHandle, MockResources};
+    use ipc_test::{MockHandle, MockReply, MockResources, complete};
 
     use super::{
-        AccessMode, DirCursor, FileSystemError, Listed, NodeDescriptor, NodeInfo, NodeKind,
-        OpenFlags, Opened, PATH_MAX, Written, file_system,
+        AccessMode, FileSystemError, NodeDescriptor, NodeInfo, NodeKind, OpenFlags, Opened,
+        PATH_MAX, file_system,
     };
 
     const BUFFER_CAP: MockHandle<syscall::kind::MemoryRegion> = MockHandle::new(0x11);
@@ -186,7 +166,6 @@ mod tests {
         MockHandle<syscall::kind::Port>,
     > = ipc::wire::Session::from_handle(MockHandle::new(0x33));
     const IMPORT_CAP: MockHandle<syscall::kind::MemoryRegion> = MockHandle::new(0x44);
-    const READ_COUNT: u32 = 512;
     const DONE: u32 = 0;
     const FD: NodeDescriptor = NodeDescriptor::from_raw(7);
     const OPENED: Opened = Opened {
@@ -198,15 +177,6 @@ mod tests {
             node: 9,
         },
     };
-    const WRITTEN: Written = Written {
-        count: 12,
-        offset: 64,
-    };
-    const LISTED: Listed = Listed {
-        count: 3,
-        next: DirCursor::from_raw(5),
-        end: false,
-    };
     const NODE_INFO: NodeInfo = NodeInfo {
         kind: NodeKind::Directory,
         size: 128,
@@ -216,8 +186,10 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
-        AcquireBuffer {
-            size: u32,
+        StartIo,
+        TakeScratch,
+        ClaimRegion {
+            generation: u64,
         },
         Open {
             path: String,
@@ -227,26 +199,12 @@ mod tests {
         Close {
             fd: NodeDescriptor,
         },
-        Read {
-            fd: NodeDescriptor,
-            offset: u64,
-            len: u32,
-        },
-        Write {
-            fd: NodeDescriptor,
-            offset: u64,
-            len: u32,
-        },
         SetSize {
             fd: NodeDescriptor,
             size: u64,
         },
         Stat {
             fd: NodeDescriptor,
-        },
-        List {
-            fd: NodeDescriptor,
-            from: DirCursor,
         },
         Rename {
             from: String,
@@ -279,24 +237,47 @@ mod tests {
         }
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     impl file_system::Service<MockResources> for Recorder {
-        fn acquire_buffer(
-            &mut self,
+        fn start_io(&self, _frame: &MockResources, reply: file_system::start_io::Reply<MockReply>) {
+            self.record(Call::StartIo);
+            let _ = reply.send(Ok::<_, FileSystemError>(crate::IoBootstrap {
+                requests: BUFFER_CAP,
+                request_ready: MockHandle::<syscall::kind::Signal>::new(0x51),
+                responses: MockHandle::<syscall::kind::MemoryRegion>::new(0x12),
+                response_ready: MockHandle::<syscall::kind::Signal>::new(0x52),
+            }));
+        }
+
+        fn take_io_region(
+            &self,
             _frame: &MockResources,
-            size: u32,
+            region: u64,
         ) -> impl ipc::IntoWireValue<
             MockResources,
             Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>,
         > {
-            self.record(Call::AcquireBuffer { size });
-            if size == 0 {
-                return Err(FileSystemError::NoSpace);
+            self.record(Call::ClaimRegion { generation: region });
+            if region == 0 {
+                return Err(FileSystemError::NoBuffer);
             }
+
             Ok(BUFFER_CAP)
         }
 
-        fn open(
-            &mut self,
+        fn take_io_scratch(
+            &self,
+            _frame: &MockResources,
+        ) -> impl ipc::IntoWireValue<
+            MockResources,
+            Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>,
+        > {
+            self.record(Call::TakeScratch);
+            Ok(BUFFER_CAP)
+        }
+
+        async fn open(
+            &self,
             _frame: &MockResources,
             path: &str,
             mode: AccessMode,
@@ -311,7 +292,7 @@ mod tests {
         }
 
         fn close(
-            &mut self,
+            &self,
             _frame: &MockResources,
             fd: NodeDescriptor,
         ) -> Result<u32, FileSystemError> {
@@ -319,30 +300,8 @@ mod tests {
             Ok(DONE)
         }
 
-        fn read(
-            &mut self,
-            _frame: &MockResources,
-            fd: NodeDescriptor,
-            offset: u64,
-            len: u32,
-        ) -> Result<u32, FileSystemError> {
-            self.record(Call::Read { fd, offset, len });
-            Ok(READ_COUNT)
-        }
-
-        fn write(
-            &mut self,
-            _frame: &MockResources,
-            fd: NodeDescriptor,
-            offset: u64,
-            len: u32,
-        ) -> Result<Written, FileSystemError> {
-            self.record(Call::Write { fd, offset, len });
-            Ok(WRITTEN)
-        }
-
-        fn set_size(
-            &mut self,
+        async fn set_size(
+            &self,
             _frame: &MockResources,
             fd: NodeDescriptor,
             size: u64,
@@ -352,7 +311,7 @@ mod tests {
         }
 
         fn stat(
-            &mut self,
+            &self,
             _frame: &MockResources,
             fd: NodeDescriptor,
         ) -> Result<NodeInfo, FileSystemError> {
@@ -360,18 +319,8 @@ mod tests {
             Ok(NODE_INFO)
         }
 
-        fn list(
-            &mut self,
-            _frame: &MockResources,
-            fd: NodeDescriptor,
-            from: DirCursor,
-        ) -> Result<Listed, FileSystemError> {
-            self.record(Call::List { fd, from });
-            Ok(LISTED)
-        }
-
         fn rename(
-            &mut self,
+            &self,
             _frame: &MockResources,
             from: &str,
             to: &str,
@@ -384,7 +333,7 @@ mod tests {
         }
 
         fn unlink(
-            &mut self,
+            &self,
             _frame: &MockResources,
             path: &str,
             expected: NodeKind,
@@ -397,7 +346,7 @@ mod tests {
         }
 
         fn create_backed(
-            &mut self,
+            &self,
             _frame: &MockResources,
             path: &str,
             region: MockHandle<syscall::kind::MemoryRegion>,
@@ -411,20 +360,18 @@ mod tests {
             Ok(DONE)
         }
 
-        fn backing_memory(
-            &mut self,
+        async fn backing_memory(
+            &self,
             _frame: &MockResources,
             fd: NodeDescriptor,
-        ) -> impl ipc::IntoWireValue<
-            MockResources,
-            Read = Result<Cap<syscall::kind::MemoryRegion>, FileSystemError>,
-        > {
+            reply: file_system::backing_memory::Reply<MockReply>,
+        ) {
             self.record(Call::BackingMemory { fd });
-            Ok(BACKING_CAP)
+            let _ = reply.send(Ok::<_, FileSystemError>(BACKING_CAP));
         }
 
         fn open_root(
-            &mut self,
+            &self,
             _frame: &MockResources,
             path: &str,
         ) -> impl ipc::IntoWireValue<
@@ -445,11 +392,16 @@ mod tests {
         let client = file_system::Client::new(client_end);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let result = thread::scope(|scope| {
-            let mut service = Recorder {
+            let service = Recorder {
                 calls: Arc::clone(&calls),
             };
             scope.spawn(move || {
-                let _ = server_end.serve_all(|frame| file_system::dispatch(&mut service, frame));
+                let _ = server_end.serve_all(|frame| {
+                    complete(file_system::dispatch(
+                        &service,
+                        ipc::OwnedIncoming::new(frame).expect("frame fits"),
+                    ))
+                });
             });
             let result = body(&client);
             drop(client);
@@ -466,91 +418,83 @@ mod tests {
         text
     }
 
-    /// Каждая операция доносит свои параметры до метода сервиса и возвращает его ответ.
     #[test]
     fn every_operation_carries_its_parameters_and_answer() {
         let flags = OpenFlags::CREATE | OpenFlags::EXCLUSIVE;
-        let from = DirCursor::from_raw(2);
         let (answers, calls) = with_service(|client| {
             [
-                client.acquire_buffer(4096).map(|_| 0),
-                client.acquire_buffer(0).map(|_| 0),
+                client.start_io().wait().map(|ends| {
+                    assert_eq!(ends.requests.raw(), 0x11);
+                    assert_eq!(ends.responses.raw(), 0x12);
+                    assert_eq!(ends.request_ready.raw(), 0x51);
+                    assert_eq!(ends.response_ready.raw(), 0x52);
+                    0
+                }),
+                client.take_io_region(7).wait().map(|_| 0),
+                client.take_io_region(0).wait().map(|_| 0),
                 client
                     .open(path("/data/sample"), AccessMode::ReadWrite, flags)
+                    .wait()
                     .map(|opened| opened.info.size as u32),
-                client.close(FD),
-                client.read(FD, 1024, 4096),
-                client.write(FD, u64::MAX, 12).map(|written| written.count),
-                client.set_size(FD, 8192),
-                client.stat(FD).map(|info| info.size as u32),
-                client.list(FD, from).map(|listed| listed.count),
-                client.rename(path("/store/a"), path("/store/b")),
-                client.unlink(path("/store/a"), NodeKind::File),
-                client.backing_memory(FD).map(|_| 0),
-                client.create_backed(path("/store/shared"), IMPORT_CAP, 123),
-                client.open_root(path("/window")).map(|_| 0),
+                client.close(FD).wait(),
+                client.set_size(FD, 8192).wait(),
+                client.stat(FD).wait().map(|info| info.size as u32),
+                client.rename(path("/store/a"), path("/store/b")).wait(),
+                client.unlink(path("/store/a"), NodeKind::File).wait(),
+                client.backing_memory(FD).wait().map(|_| 0),
+                client
+                    .create_backed(path("/store/shared"), IMPORT_CAP, 123)
+                    .wait(),
+                client.open_root(path("/window")).wait().map(|_| 0),
             ]
         });
-
         assert_eq!(
             answers,
             [
                 Ok(0),
-                Err(CallError::Remote(FileSystemError::NoSpace)),
+                Ok(0),
+                Err(CallError::Remote(FileSystemError::NoBuffer)),
                 Ok(OPENED.info.size as u32),
                 Ok(DONE),
-                Ok(READ_COUNT),
-                Ok(WRITTEN.count),
                 Ok(DONE),
                 Ok(NODE_INFO.size as u32),
-                Ok(LISTED.count),
                 Ok(DONE),
                 Ok(DONE),
                 Ok(0),
                 Ok(DONE),
-                Ok(0),
+                Ok(0)
             ]
         );
         assert_eq!(
             calls,
             [
-                Call::AcquireBuffer { size: 4096 },
-                Call::AcquireBuffer { size: 0 },
+                Call::StartIo,
+                Call::ClaimRegion { generation: 7 },
+                Call::ClaimRegion { generation: 0 },
                 Call::Open {
                     path: "/data/sample".to_string(),
                     mode: AccessMode::ReadWrite,
-                    flags,
+                    flags
                 },
                 Call::Close { fd: FD },
-                Call::Read {
-                    fd: FD,
-                    offset: 1024,
-                    len: 4096,
-                },
-                Call::Write {
-                    fd: FD,
-                    offset: u64::MAX,
-                    len: 12,
-                },
                 Call::SetSize { fd: FD, size: 8192 },
                 Call::Stat { fd: FD },
-                Call::List { fd: FD, from },
                 Call::Rename {
                     from: "/store/a".to_string(),
-                    to: "/store/b".to_string(),
+                    to: "/store/b".to_string()
                 },
                 Call::Unlink {
                     path: "/store/a".to_string(),
-                    expected: NodeKind::File,
+                    expected: NodeKind::File
                 },
                 Call::BackingMemory { fd: FD },
                 Call::CreateBacked {
                     path: "/store/shared".to_string(),
                     region: IMPORT_CAP.raw(),
-                    size: 123,
+                    size: 123
                 },
                 Call::OpenRoot {
-                    path: "/window".to_string(),
+                    path: "/window".to_string()
                 },
             ]
         );
@@ -560,7 +504,7 @@ mod tests {
     fn path_at_bound_fits_the_frame() {
         let path = "/".to_string() + &"p".repeat(PATH_MAX - 1);
         let (result, calls) =
-            with_service(|client| client.open(&path, AccessMode::Read, OpenFlags::NONE));
+            with_service(|client| client.open(&path, AccessMode::Read, OpenFlags::NONE).wait());
         assert_eq!(result, Ok(OPENED));
         assert_eq!(
             calls,

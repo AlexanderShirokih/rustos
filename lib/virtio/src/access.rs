@@ -12,23 +12,24 @@ pub enum AccessWidth {
 }
 
 /// Доступ к регистрам транспорта virtio-mmio.
+#[allow(async_fn_in_trait)]
 pub trait Registers {
     /// Тип отказа обращения.
     type Error;
 
     /// Читает 32-битный регистр по смещению от начала окна.
-    fn read(&self, offset: usize) -> Result<u32, Self::Error>;
+    async fn read(&self, offset: usize) -> Result<u32, Self::Error>;
 
     /// Записывает 32-битный регистр по смещению от начала окна.
-    fn write(&mut self, offset: usize, value: u32) -> Result<(), Self::Error>;
+    async fn write(&mut self, offset: usize, value: u32) -> Result<(), Self::Error>;
 
     /// Читает поле конфигурации устройства одним обращением ширины `width` по смещению от
     /// начала конфигурации. Значение лежит в младших байтах.
-    fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, Self::Error>;
+    async fn read_config(&self, offset: usize, width: AccessWidth) -> Result<u32, Self::Error>;
 
     /// Записывает младшие байты `value` в поле конфигурации устройства одним обращением ширины
     /// `width` по смещению от начала конфигурации.
-    fn write_config(
+    async fn write_config(
         &mut self,
         offset: usize,
         width: AccessWidth,

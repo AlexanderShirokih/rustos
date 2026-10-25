@@ -26,7 +26,7 @@ pub(crate) async fn attach_sources(
     sources: &SessionPort,
     reactor: &Reactor,
 ) -> StartupError {
-    let watch = match providers.watch(Attributes::empty()) {
+    let watch = match providers.watch(reactor, Attributes::empty()).await {
         Ok(watch) => watch,
         Err(error) => return error,
     };
@@ -40,7 +40,7 @@ pub(crate) async fn attach_sources(
             RETRY_INTERVAL
         };
 
-        match watch.next_async(reactor, wait).await {
+        match watch.next(reactor, wait).await {
             Ok(found) => attach(providers, sources, reactor, found, &mut late, &mut attached).await,
             Err(error) if timed_out(&error) => {
                 for found in core::mem::take(&mut late) {
@@ -63,7 +63,7 @@ async fn attach(
     late: &mut Vec<Found>,
     attached: &mut Vec<Attached>,
 ) {
-    let source = match providers.open_async(reactor, &found).await {
+    let source = match providers.open(reactor, &found).await {
         Ok(source) => source,
         Err(error) if timed_out(&error) => {
             late.push(found);
@@ -83,7 +83,7 @@ async fn attach(
         }
     };
 
-    let client = input_source::AsyncClient::new(PortChannel::new(source.handle(), reactor.clone()))
+    let client = input_source::Client::new(PortChannel::new(source.handle(), reactor.clone()))
         .with_wait(ATTACH_TIMEOUT);
     match client.attach(inject).await {
         Ok(()) => attached.push(source),

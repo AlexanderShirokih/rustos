@@ -57,7 +57,7 @@ pub use region::{
 };
 pub use relocatable_ptr::RelocatablePtr;
 pub use syscall::MemoryProfile;
-pub use user_vm_allocator::{MappingTag, UserVmAllocator};
+pub use user_vm_allocator::{MappingBacking, MappingTag, UserVmAllocator};
 pub use user_vm_context::{UserVmContext, WeakUserVmContext};
 
 /// Размер страницы и фрейма в байтах. Выводится из выравнивания page-aligned

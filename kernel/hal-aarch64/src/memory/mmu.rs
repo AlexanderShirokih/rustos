@@ -109,8 +109,12 @@ impl Mmu<EL1> {
         // 5) Сброс TLB
         Tlb::invalidate();
 
-        // 6) Включение MMU + кэшей
-        Sctlr::set(config.mmu_config());
+        // 6) Включение MMU + кэшей. Проверка выравнивания снимается явно: невыровненные
+        // обращения к обычной памяти разрешены на EL0 и EL1 при любом состоянии от загрузчика.
+        Sctlr::update(
+            config.mmu_config(),
+            sctlr::SctlrBits::combine(&[sctlr::SctlrBit::AlignmentCheck]),
+        );
 
         // 7) Барьер после изменения всех регистров
         Self::full_system_barrier();

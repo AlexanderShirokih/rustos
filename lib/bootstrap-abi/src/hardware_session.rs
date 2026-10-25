@@ -50,14 +50,14 @@ mod tests {
 
     impl hardware::Service<MockResources> for Sink {
         fn acquire_irq_control(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<MockResources, Read = Result<Cap<kind::IrqControl>, u32>> {
             Ok::<_, u32>(cap::<kind::IrqControl>(0x77))
         }
 
         fn acquire_boot_fdt(
-            &mut self,
+            &self,
             _frame: &MockResources,
         ) -> impl IntoWireValue<MockResources, Read = Result<BootFdt, u32>> {
             Ok::<_, u32>(BootFdt {
@@ -67,7 +67,7 @@ mod tests {
         }
 
         fn acquire_device_memory(
-            &mut self,
+            &self,
             _frame: &MockResources,
             index: u32,
         ) -> impl IntoWireValue<MockResources, Read = Result<Cap<kind::MemoryRegion>, u32>>
@@ -85,24 +85,24 @@ mod tests {
         let client = hardware::Client::new(client_end);
         thread::scope(|scope| {
             scope.spawn(|| {
-                let mut sink = Sink;
+                let sink = Sink;
                 for _ in 0..4 {
                     server_end
-                        .serve(|frame| hardware::dispatch(&mut sink, frame))
+                        .serve(|frame| hardware::dispatch(&sink, frame))
                         .expect("dispatch ok");
                 }
             });
-            assert_eq!(client.acquire_irq_control(), Ok(cap(0x77)));
+            assert_eq!(client.acquire_irq_control().wait(), Ok(cap(0x77)));
             assert_eq!(
-                client.acquire_boot_fdt(),
+                client.acquire_boot_fdt().wait(),
                 Ok(BootFdt {
                     region: cap(0x99),
                     offset: 0x600,
                 })
             );
-            assert_eq!(client.acquire_device_memory(1), Ok(cap(0x91)));
+            assert_eq!(client.acquire_device_memory(1).wait(), Ok(cap(0x91)));
             assert_eq!(
-                client.acquire_device_memory(9),
+                client.acquire_device_memory(9).wait(),
                 Err(ipc::CallError::Remote(7))
             );
         });

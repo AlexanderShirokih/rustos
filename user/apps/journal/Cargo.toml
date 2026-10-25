@@ -16,6 +16,7 @@ test = false
 bench = false
 
 [dependencies]
+executor = { workspace = true }
 application-abi = { workspace = true }
 component-startup = { workspace = true }
 components = { workspace = true }

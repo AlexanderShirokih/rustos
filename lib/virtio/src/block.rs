@@ -85,14 +85,22 @@ impl Status {
 
 impl Config {
     /// Возвращает поля конфигурации устройства за транспортом `transport`.
-    pub fn read<R: Registers>(transport: &Transport<R>) -> Result<Self, R::Error> {
-        let low = transport.read_config(CAPACITY_OFFSET, AccessWidth::Word)?;
-        let high = transport.read_config(CAPACITY_OFFSET + 4, AccessWidth::Word)?;
+    pub async fn read<R: Registers>(transport: &Transport<R>) -> Result<Self, R::Error> {
+        let low = transport
+            .read_config(CAPACITY_OFFSET, AccessWidth::Word)
+            .await?;
+        let high = transport
+            .read_config(CAPACITY_OFFSET + 4, AccessWidth::Word)
+            .await?;
 
         Ok(Self {
             capacity: u64::from(high) << 32 | u64::from(low),
-            size_max: transport.read_config(SIZE_MAX_OFFSET, AccessWidth::Word)?,
-            blk_size: transport.read_config(BLK_SIZE_OFFSET, AccessWidth::Word)?,
+            size_max: transport
+                .read_config(SIZE_MAX_OFFSET, AccessWidth::Word)
+                .await?,
+            blk_size: transport
+                .read_config(BLK_SIZE_OFFSET, AccessWidth::Word)
+                .await?,
         })
     }
 }
@@ -117,7 +125,7 @@ pub fn encode_header(kind: RequestKind, sector: u64) -> [u8; HEADER_BYTES] {
 mod tests {
     use super::*;
     use crate::{
-        testing::{FakeRegisters, Log},
+        testing::{FakeRegisters, Log, complete},
         transport::DeviceType,
     };
 
@@ -144,10 +152,10 @@ mod tests {
         registers.set_config(0, &0x1_0000_8000u64.to_le_bytes());
         registers.set_config(8, &65536u32.to_le_bytes());
         registers.set_config(20, &4096u32.to_le_bytes());
-        let transport = Transport::probe(registers, DeviceType::Block).unwrap();
+        let transport = complete(Transport::probe(registers, DeviceType::Block)).unwrap();
 
         assert_eq!(
-            Config::read(&transport),
+            complete(Config::read(&transport)),
             Ok(Config {
                 capacity: 0x1_0000_8000,
                 size_max: 65536,

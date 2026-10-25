@@ -27,6 +27,7 @@ bench = false
 doctest = false
 
 [dependencies]
+executor = { workspace = true }
 kernel-objects = { workspace = true }
 component-startup = { workspace = true }
 input-abi = { workspace = true }

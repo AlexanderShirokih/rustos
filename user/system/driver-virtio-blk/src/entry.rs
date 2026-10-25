@@ -1,21 +1,25 @@
-//! Точка входа процесса: поток экспорта `BlockDevice` и обслуживание сессии диска.
+//! Обслуживание диска и его сессии задачами одного executor.
 //!
-//! Первая заявка подключает диск. Диск обслуживает одну сессию, и заявка ждёт ухода
-//! прежней сессии до [`SESSION_WAIT`].
+//! Первая заявка подключает диск. Новая заявка ждёт ухода прежней сессии до
+//! [`SESSION_WAIT`]. Уход сессии отзывает её буфер, а активная DMA-операция завершает очистку.
 
-use alloc::boxed::Box;
-use core::{fmt, time::Duration};
+use alloc::{
+    rc::{Rc, Weak},
+    vec::Vec,
+};
+use core::{cell::RefCell, fmt};
 
 use block_abi::{BlockError, BlockInfo, SESSION_WAIT, block_device};
 use component_startup::{
-    MintedSession, SessionError, SessionEvent, SessionPort, StartupError, component_manifest,
-    serve_export,
+    AsyncStartup, MintedSession, Requirements as _, SessionError, SessionPort, StartupError,
+    component_manifest, serve_component,
 };
 use driver_virtio_blk::{Disk, SessionBuffer};
-use ipc::{IntoWireValue, wire::Cap};
+use executor::{Executor, JoinHandle, Mutex, PortChannel, Reactor};
+use ipc::{IntoWireValue, ServiceOwner, wire::Cap};
 use kernel_objects::{Delivery, MemoryRegion, Port, SessionTransport};
-use runtime::{Instant, Mutex, Timeout, log_fmt, spawn_bound};
-use syscall::{Rights, kind};
+use runtime::{Instant, Timeout, log_fmt};
+use syscall::{Handle, Rights, kind};
 use virtio::block::RequestKind;
 use virtio_driver::DmaRegion;
 use virtio_mmio_abi::virtio_mmio;
@@ -23,8 +27,7 @@ use virtio_mmio_abi::virtio_mmio;
 use crate::device::Device;
 
 const BUS_CALL_TIMEOUT: Timeout = Timeout::from_secs(2);
-
-const BUSY_PAUSE: Duration = Duration::from_millis(5);
+const BUSY_PAUSE: Timeout = Timeout::from_millis(5);
 
 component_manifest! {
     struct VirtioBlockStartup {
@@ -37,117 +40,168 @@ component_manifest! {
 #[derive(Debug)]
 enum Stopped {
     Startup(StartupError),
-    ServicePort,
-    ExportThread,
+    Kernel(kernel_objects::Error),
     ServicePortClosed,
 }
 
 struct Shared {
-    service: SessionPort,
-    state: Mutex<State>,
+    service: Rc<SessionPort>,
+    bound: Mutex<Option<Rc<Bound>>>,
+    session: RefCell<Option<Rc<Session>>>,
+    executor: Weak<Executor>,
+    reactor: Reactor,
+    cleanups: RefCell<Vec<JoinHandle<()>>>,
+    bus: virtio_mmio::Client<PortChannel<SessionTransport>>,
 }
 
-#[derive(Default)]
-struct State {
-    disk: Option<Disk<Device>>,
-    session: Option<Session>,
+struct Bound {
+    disk: Mutex<Disk<Device>>,
+    info: BlockInfo,
 }
 
 struct Session {
     badge: u64,
-    buffer: Option<Granted>,
+    bound: Rc<Bound>,
+    buffer: RefCell<Option<Granted>>,
 }
 
 struct Granted {
-    buffer: SessionBuffer<DmaRegion>,
-    bridge: MemoryRegion,
+    buffer: Rc<SessionBuffer<DmaRegion>>,
+    _bridge: MemoryRegion,
 }
 
-struct Served<'a> {
-    disk: &'a mut Disk<Device>,
-    buffer: &'a mut Option<Granted>,
+#[derive(Clone)]
+struct Served {
+    session: Rc<Session>,
+    executor: Weak<Executor>,
+}
+
+impl ServiceOwner for Served {
+    type Service = Self;
+
+    fn service(&self) -> &Self {
+        self
+    }
 }
 
 impl fmt::Display for Stopped {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Startup(error) => error.fmt(formatter),
-            Self::ServicePort => formatter.write_str("service port refused"),
-            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::Kernel(error) => error.fmt(formatter),
             Self::ServicePortClosed => formatter.write_str("service port closed"),
         }
     }
 }
 
 impl Shared {
-    fn open(&self, bus: &virtio_mmio::Client<SessionTransport>) -> Result<Port, SessionError> {
+    async fn open(self: &Rc<Self>) -> Result<Port, SessionError> {
         let start = Instant::now();
-        loop {
-            {
-                let mut state = self.state.lock();
-                if state.session.is_none() {
-                    if state.disk.is_none() {
-                        state.disk = Some(connect(bus)?);
-                    }
-                    let MintedSession { badge, port } = self
-                        .service
-                        .create_session()
-                        .map_err(|_| SessionError::NoSpace)?;
-                    state.session = Some(Session {
-                        badge: badge.get(),
-                        buffer: None,
-                    });
-                    return Ok(port);
-                }
-            }
+        while self.session.borrow().is_some() {
             if Instant::now().since(start) >= SESSION_WAIT {
                 return Err(SessionError::Refused);
             }
-            runtime::sleep(BUSY_PAUSE);
+
+            self.reactor.sleep(BUSY_PAUSE).await;
+        }
+
+        let task = {
+            let executor = self.executor.upgrade().ok_or(SessionError::Unavailable)?;
+            let shared = self.clone();
+            executor.spawn(async move {
+                let mut bound = shared.bound.lock().await;
+                if bound.is_none() {
+                    let (device, info) = Device::connect(&shared.bus, shared.reactor.clone())
+                        .await
+                        .map_err(|refusal| {
+                            log_fmt(format_args!("block device refused: {refusal:?}"));
+                            SessionError::Refused
+                        })?;
+                    let BlockInfo {
+                        block_size, blocks, ..
+                    } = info;
+                    log_fmt(format_args!(
+                        "block device attached: {blocks} blocks of {block_size} bytes"
+                    ));
+                    *bound = Some(Rc::new(Bound {
+                        disk: Mutex::new(Disk::new(device, info)),
+                        info,
+                    }));
+                }
+
+                bound.clone().ok_or(SessionError::Unavailable)
+            })
+        };
+
+        let bound = task.await.ok_or(SessionError::Unavailable)??;
+        let MintedSession { badge, port } = self
+            .service
+            .create_session()
+            .map_err(|_| SessionError::NoSpace)?;
+        *self.session.borrow_mut() = Some(Rc::new(Session {
+            badge: badge.get(),
+            bound,
+            buffer: RefCell::new(None),
+        }));
+        Ok(port)
+    }
+
+    fn gone(&self, badge: u64) {
+        let session = self
+            .session
+            .borrow_mut()
+            .take_if(|session| session.badge == badge);
+        if let Some(session) = session {
+            self.release(&session);
         }
     }
 
-    fn serve(&self) {
-        let mut events = self.service.events();
+    fn release(&self, session: &Session) {
+        let buffer = session
+            .buffer
+            .borrow_mut()
+            .take()
+            .map(|granted| granted.buffer);
+        if let Some(buffer) = buffer
+            && let Some(executor) = self.executor.upgrade()
+        {
+            let bound = session.bound.clone();
+            let task = executor.spawn(async move {
+                bound.disk.lock().await.release(buffer);
+            });
+            let mut cleanups = self.cleanups.borrow_mut();
+            cleanups.retain(|task| !task.is_finished());
+            cleanups.push(task);
+        }
+    }
 
-        while let Some(event) = events.recv() {
-            let mut state = self.state.lock();
-            match event {
-                SessionEvent::Frame(frame) => {
-                    let badge = frame.resources.badge;
-                    let State { disk, session } = &mut *state;
-                    let session = session.as_mut().filter(|session| session.badge == badge);
-                    // Кадр значка без сессии отвергается закрытием его ответа.
-                    if let (Some(disk), Some(session)) = (disk.as_mut(), session) {
-                        let buffer = &mut session.buffer;
-                        let _ = block_device::dispatch(&mut Served { disk, buffer }, frame);
-                    }
-                }
-                SessionEvent::Gone(badge) => {
-                    if let Some(Session {
-                        buffer: Some(Granted { buffer, bridge }),
-                        ..
-                    }) = state.session.take_if(|session| session.badge == badge)
-                    {
-                        // Капа клиента производна от `bridge` и отзывается, даже если регион
-                        // остаётся занятым.
-                        drop(bridge);
-                        if let Some(disk) = &state.disk {
-                            disk.release(buffer.region);
-                        }
-                    }
-                }
+    async fn stop(&self) {
+        if let Some(session) = self.session.borrow_mut().take() {
+            self.release(&session);
+        }
+
+        let cleanups = core::mem::take(&mut *self.cleanups.borrow_mut());
+        for cleanup in cleanups {
+            let _ = cleanup.await;
+        }
+
+        if let Some(bound) = self.bound.lock().await.take() {
+            let stopped = bound.disk.lock().await.stop().await;
+            if !stopped {
+                core::mem::forget(bound);
             }
         }
     }
 }
 
-impl Served<'_> {
-    fn acquire(&mut self, size: u32) -> Result<MemoryRegion, BlockError> {
-        if self.buffer.is_some() {
+impl Served {
+    fn acquire(&self, size: u32) -> Result<MemoryRegion, BlockError> {
+        let mut buffer = self.session.buffer.borrow_mut();
+        if buffer.is_some() {
             return Err(BlockError::AlreadyExists);
         }
-        if size == 0 || size > self.disk.info().transfer_max {
+
+        if size == 0 || size > self.session.bound.info.transfer_max {
             return Err(BlockError::NoSpace);
         }
 
@@ -159,76 +213,110 @@ impl Served<'_> {
         let granted = bridge
             .duplicate(rights, None)
             .map_err(|_| BlockError::NoSpace)?;
-        *self.buffer = Some(Granted {
-            buffer: SessionBuffer { region, size },
-            bridge,
+        *buffer = Some(Granted {
+            buffer: Rc::new(SessionBuffer { region, size }),
+            _bridge: bridge,
         });
         Ok(granted)
     }
 
-    fn transfer(&mut self, kind: RequestKind, lba: u64, count: u32) -> Result<(), BlockError> {
-        let buffer = self.buffer.as_ref().map(|granted| &granted.buffer);
-        self.disk.serve(kind, lba, count, buffer)
+    async fn transfer(&self, kind: RequestKind, lba: u64, count: u32) -> Result<(), BlockError> {
+        let task = {
+            let executor = self.executor.upgrade().ok_or(BlockError::Device)?;
+            let session = Rc::downgrade(&self.session);
+            let bound = self.session.bound.clone();
+            let buffer = self
+                .session
+                .buffer
+                .borrow()
+                .as_ref()
+                .map(|granted| granted.buffer.clone())
+                .ok_or(BlockError::NoBuffer)?;
+
+            executor.spawn(async move {
+                let mut disk = bound.disk.lock().await;
+                if session.upgrade().is_none() {
+                    return Err(BlockError::Device);
+                }
+
+                disk.serve(kind, lba, count, Some(&buffer)).await
+            })
+        };
+
+        task.await.ok_or(BlockError::Device)?
     }
 }
 
-impl block_device::Service<Delivery> for Served<'_> {
-    fn info(&mut self, _frame: &Delivery) -> BlockInfo {
-        self.disk.info()
+#[allow(clippy::unused_async_trait_impl)]
+impl block_device::Service<Delivery> for Served {
+    fn info(&self, _frame: &Delivery) -> BlockInfo {
+        self.session.bound.info
     }
 
     fn acquire_buffer(
-        &mut self,
+        &self,
         _frame: &Delivery,
         size: u32,
     ) -> impl IntoWireValue<Delivery, Read = Result<Cap<kind::MemoryRegion>, BlockError>> {
         self.acquire(size)
     }
 
-    fn read(&mut self, _frame: &Delivery, lba: u64, count: u32) -> Result<(), BlockError> {
-        self.transfer(RequestKind::Read, lba, count)
+    async fn read(&self, _frame: &Delivery, lba: u64, count: u32) -> Result<(), BlockError> {
+        self.transfer(RequestKind::Read, lba, count).await
     }
 
-    fn write(&mut self, _frame: &Delivery, lba: u64, count: u32) -> Result<(), BlockError> {
-        self.transfer(RequestKind::Write, lba, count)
+    async fn write(&self, _frame: &Delivery, lba: u64, count: u32) -> Result<(), BlockError> {
+        self.transfer(RequestKind::Write, lba, count).await
     }
 }
 
 #[program_entry::component]
-fn run(requirements: VirtioBlockStartup) -> Result<(), Stopped> {
-    let bus = requirements
-        .virtio
-        .open()
-        .map_err(Stopped::Startup)?
-        .client()
-        .with_wait(BUS_CALL_TIMEOUT);
-    let service = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let shared: &'static Shared = Box::leak(Box::new(Shared {
+fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
+    let requirements = VirtioBlockStartup::from_parent(parent);
+    let bus = requirements.virtio.open().map_err(Stopped::Startup)?;
+
+    let executor = Rc::new(Executor::new().map_err(Stopped::Kernel)?);
+    let reactor = executor.reactor();
+    let service = Rc::new(SessionPort::create().map_err(Stopped::Kernel)?);
+    let shared = Rc::new(Shared {
+        service: service.clone(),
+        bound: Mutex::new(None),
+        session: RefCell::new(None),
+        executor: Rc::downgrade(&executor),
+        reactor: reactor.clone(),
+        cleanups: RefCell::new(Vec::new()),
+        bus: PortChannel::client(bus, reactor.clone()).with_wait(BUS_CALL_TIMEOUT),
+    });
+
+    let dispatch = shared.clone();
+    let opener = shared.clone();
+    let closer = shared.clone();
+
+    let served = serve_component::<block_device::Protocol, _>(
+        &executor,
+        AsyncStartup::new(PortChannel::new(parent, reactor)),
         service,
-        state: Mutex::new(State::default()),
-    }));
+        move |frame| {
+            let session = dispatch
+                .session
+                .borrow()
+                .as_ref()
+                .filter(|session| session.badge == frame.resources.badge)
+                .cloned();
+            let session = session.ok_or(ipc::wire::IpcError::PeerClosed)?;
+            let served = Served {
+                session,
+                executor: dispatch.executor.clone(),
+            };
+            block_device::serve(&served, frame)
+        },
+        async move |_| opener.open().await,
+        move |badge| closer.gone(badge),
+    );
 
-    // Поток экспорта работает до конца процесса.
-    let exporter = requirements.parent;
-    let _ = spawn_bound(move || {
-        serve_export::<block_device::Protocol>(exporter, |_| shared.open(&bus))
-    })
-    .map_err(|_| Stopped::ExportThread)?;
-
-    shared.serve();
+    executor.block_on(async {
+        let _ = served.await;
+        shared.stop().await;
+    });
     Err(Stopped::ServicePortClosed)
-}
-
-fn connect(bus: &virtio_mmio::Client<SessionTransport>) -> Result<Disk<Device>, SessionError> {
-    let (device, info) = Device::connect(bus).map_err(|refusal| {
-        log_fmt(format_args!("block device refused: {refusal:?}"));
-        SessionError::Refused
-    })?;
-    let BlockInfo {
-        block_size, blocks, ..
-    } = info;
-    log_fmt(format_args!(
-        "block device attached: {blocks} blocks of {block_size} bytes"
-    ));
-    Ok(Disk::new(device, info))
 }

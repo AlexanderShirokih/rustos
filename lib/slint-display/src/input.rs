@@ -5,12 +5,14 @@
 //! клавиш Slint приходят окну нажатием и отпусканием. `Resync` и уход устройства снимают
 //! нажатие указателя без клика, а нажатия из снимка устройства начинают жест заново.
 
-use std::{collections::BTreeMap, thread};
+use std::{collections::BTreeMap, rc::Rc};
 
+use executor::{Executor, PortChannel};
 use input_abi::{
     AxisMode, Binding, CANCEL, DeviceLayout, DeviceNumber, Kind, NO_CONTACT, Record, Usage, input,
 };
-use kernel_objects::SessionTransport;
+use ipc::Timeout;
+use kernel_objects::{Session, SessionTransport};
 use slint::{
     ComponentHandle, LogicalPosition, SharedString,
     platform::{Key, PointerEventButton, WindowEvent},
@@ -301,11 +303,12 @@ impl Point {
 }
 
 impl ScreenPlatform {
-    /// Запускает поток, который переводит записи сессии `input` в события окна `window`. Поток
-    /// заканчивается отказом `next` либо уходом окна.
+    /// Переводит записи `input` в события `window` задачей executor. Замена задачи либо
+    /// разрушение платформы отменяют ожидание ввода.
     pub fn deliver_input<T: ComponentHandle + 'static>(
-        &self,
-        input: input::Client<SessionTransport>,
+        &mut self,
+        executor: &Rc<Executor>,
+        input: Session<input::Protocol>,
         window: &T,
     ) {
         let dimension = self.dimension();
@@ -314,39 +317,61 @@ impl ScreenPlatform {
             height: f32::from(u16::try_from(dimension.height).unwrap_or(u16::MAX)),
             scale: self.scale_factor(),
         };
+
         let window = window.as_weak();
-        thread::spawn(move || deliver(&input, screen, &window));
+        let tasks = self.tasks.clone();
+        let input = PortChannel::client(input, executor.reactor()).with_wait(Timeout::INFINITE);
+        self.input = Some(
+            executor
+                .spawn_now(async move {
+                    deliver(&input, screen, &window, &tasks).await;
+                })
+                .abort_on_drop(),
+        );
     }
 }
 
-fn deliver<T: ComponentHandle + 'static>(
-    session: &input::Client<SessionTransport>,
+async fn deliver<T: ComponentHandle + 'static>(
+    session: &input::Client<PortChannel<SessionTransport>>,
     screen: Screen,
     window: &slint::Weak<T>,
+    tasks: &crate::event_loop::TaskQueue,
 ) {
     let mut translator = Translator::new(screen);
     loop {
-        let records = match session.next() {
+        let records = match session.next().await {
             Ok(records) => records,
             Err(error) => {
                 println!("input stopped: {error:?}");
                 return;
             }
         };
+
         for record in records.records() {
-            translator.feed(record, |device| session.describe(device).ok());
+            let layout = if record.kind == Kind::DeviceAdded {
+                if let Some(device) = record.device {
+                    session.describe(device).await.ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            translator.feed(record, |_| layout);
         }
 
         let events = translator.take_events();
         if !events.is_empty() {
-            let posted = window.upgrade_in_event_loop(move |window| {
-                for event in events {
-                    window.window().dispatch_event(event);
-                }
-            });
-            if posted.is_err() {
+            let Some(window) = window.upgrade() else {
                 return;
+            };
+
+            for event in events {
+                window.window().dispatch_event(event);
             }
+
+            tasks.notify();
         }
     }
 }

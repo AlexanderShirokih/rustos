@@ -17,19 +17,20 @@ ipc::protocol! {
     pub mod async_probe {
         name = "AsyncProbe";
 
-        call fn double(value: u32) -> u32;
-        cast fn hand(own signal: ipc::wire::Cap<kind::Signal>);
+        call async fn double(value: u32) -> u32;
+        cast async fn hand(own signal: ipc::wire::Cap<kind::Signal>);
     }
 }
 
 struct Doubler;
 
+#[allow(clippy::unused_async_trait_impl)]
 impl async_probe::Service<Delivery> for Doubler {
-    fn double(&mut self, _frame: &Delivery, value: u32) -> u32 {
+    async fn double(&self, _frame: &Delivery, value: u32) -> u32 {
         value.saturating_mul(2)
     }
 
-    fn hand(&mut self, _frame: &Delivery, _signal: runtime::IssuedHandle<kind::Signal>) {}
+    async fn hand(&self, _frame: &Delivery, _signal: runtime::IssuedHandle<kind::Signal>) {}
 }
 
 #[test_harness::test]
@@ -40,7 +41,10 @@ fn port_async_client_call_lets_other_tasks_run_until_the_answer() {
         let mut bytes = [0; ipc::wire::MESSAGE_INLINE_MAX];
         let frame = listener.recv(&mut bytes, JOIN_TIMEOUT).expect("call frame");
         sleep(REPLY_DELAY);
-        async_probe::dispatch(&mut Doubler, frame).expect("answer");
+        let owned = ipc::OwnedIncoming::new(frame).expect("frame fits");
+        executor()
+            .block_on(async_probe::dispatch(&Doubler, owned))
+            .expect("answer");
         0
     })
     .expect("server");
@@ -55,7 +59,7 @@ fn port_async_client_call_lets_other_tasks_run_until_the_answer() {
         }
     });
 
-    let client = async_probe::AsyncClient::new(PortChannel::new(
+    let client = async_probe::Client::new(PortChannel::new(
         service.client.as_raw(),
         executor.reactor(),
     ));
@@ -81,7 +85,7 @@ fn port_async_client_call_times_out_by_default_and_refuses_the_late_answer() {
         holder.set(server.recv(Timeout::POLL).expect("receive"));
     });
 
-    let client = async_probe::AsyncClient::new(PortChannel::new(port.as_raw(), executor.reactor()));
+    let client = async_probe::Client::new(PortChannel::new(port.as_raw(), executor.reactor()));
     let answer = executor.block_on(client.double(1));
 
     test_harness::check_eq!(answer, Err(IpcError::Timeout));
@@ -105,7 +109,7 @@ fn port_async_client_cast_returns_the_capability_when_receivers_leave() {
     let signal = Signal::create().expect("signal");
     signal.notify_all().expect("raise");
 
-    let client = async_probe::AsyncClient::new(PortChannel::new(
+    let client = async_probe::Client::new(PortChannel::new(
         service.client.as_raw(),
         executor.reactor(),
     ));

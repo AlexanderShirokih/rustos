@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 use capability::{Capability, HandleId, HandleTable, Resource};
 use kbase::{LockCell, MutexCell};
 use memory::{
-    AccessMask, MappingTag, MemFlags, MemoryRegion,
+    AccessMask, MappingBacking, MappingTag, MemFlags, MemoryRegion,
     frame::Frame,
     frame_allocator::{FrameAllocator, FrameError, ReserveFrameError},
     range_allocator::RangeError,
@@ -202,10 +202,13 @@ fn memory_allocate_refuses_full_mapping_table_before_frames_and_budget() {
         core::iter::from_fn(|| {
             let tag = MappingTag {
                 flags: MemFlags::user_rw(),
-                region: filler.clone(),
+                backing: Some(MappingBacking {
+                    region: filler.clone(),
+                    revocation: None,
+                }),
                 grant: AccessMask::RW,
-                revocation: None,
             };
+
             alloc.allocate(size, tag).ok().map(|range| range.base())
         })
         .collect()

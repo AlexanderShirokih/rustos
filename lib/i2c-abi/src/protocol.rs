@@ -17,7 +17,7 @@ ipc::protocol! {
         /// - `Busy` - устройство занято сессией;
         /// - `Unsupported` - шина не работает с адресом устройства;
         /// - `NoSpace` - шине не хватает ресурса на сессию устройства.
-        call fn open(
+        call async fn open(
             device: platform_abi::DeviceId,
         ) -> own Result<ipc::wire::Session<crate::i2c_device::Protocol>, I2cError>;
     }
@@ -35,14 +35,14 @@ ipc::protocol! {
         /// - `NoAck` - устройство не подтвердило адрес либо байт;
         /// - `Bus` - контроллер сообщил об ошибке шины;
         /// - `Timeout` - контроллер не завершил передачу за отведённое время.
-        call fn write(data: &[u8]) -> Result<(), TransferError>;
+        call async fn write(data: &[u8]) -> Result<(), TransferError>;
 
         /// Читает `count` байт устройства одним сообщением с остановкой в конце.
         ///
         /// Отказы:
         /// - `Length` - `count` равно 0 либо больше, чем контроллер принимает за раз;
         /// - `NoAck`, `Bus`, `Timeout` - как у `write`.
-        call fn read(count: u16) -> Result<TransferBuf, TransferError>;
+        call async fn read(count: u16) -> Result<TransferBuf, TransferError>;
 
         /// Передаёт устройству байты `data`, затем повторным стартом читает у него `count` байт.
         /// Остановка на шине следует только после чтения.
@@ -50,6 +50,6 @@ ipc::protocol! {
         /// Отказы:
         /// - `Length` - `data` или `count` нарушают пределы `write` и `read`;
         /// - `NoAck`, `Bus`, `Timeout` - как у `write`.
-        call fn write_read(data: &[u8], count: u16) -> Result<TransferBuf, TransferError>;
+        call async fn write_read(data: &[u8], count: u16) -> Result<TransferBuf, TransferError>;
     }
 }

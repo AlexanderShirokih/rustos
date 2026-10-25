@@ -265,6 +265,7 @@ fn kernel_server_closes_the_capabilities_of_a_discarded_frame() {
     crate::hardware_session()
         .client()
         .acquire_irq_control()
+        .wait()
         .expect("vend ok");
 }
 
@@ -424,7 +425,9 @@ fn kernel_server_serves_past_frames_it_refuses() {
 
     let image = bootstrap::Client::new(PortTransport::new(crate::bootstrap_handle()))
         .acquire_userland_image()
+        .wait()
         .expect("vend ok");
+
     drop(MemoryRegion::from(image));
 }
 
@@ -461,11 +464,11 @@ fn each_role_refuses_the_operations_of_other_roles() {
     let as_hardware = hardware::Client::new(PortTransport::new(crate::bootstrap_handle()));
 
     test_harness::check_eq!(
-        as_bootstrap.acquire_userland_image().err(),
+        as_bootstrap.acquire_userland_image().wait().err(),
         Some(CallError::Ipc(IpcError::PeerClosed))
     );
     test_harness::check_eq!(
-        as_hardware.acquire_irq_control().err(),
+        as_hardware.acquire_irq_control().wait().err(),
         Some(CallError::Ipc(IpcError::PeerClosed))
     );
 
@@ -475,12 +478,15 @@ fn each_role_refuses_the_operations_of_other_roles() {
     let as_system_info = system_info::Client::new(PortTransport::new(crate::bootstrap_handle()));
 
     test_harness::check_eq!(
-        as_bootstrap.acquire_userland_image().err(),
+        as_bootstrap.acquire_userland_image().wait().err(),
         Some(CallError::Ipc(IpcError::PeerClosed))
     );
     test_harness::check_eq!(
-        as_hardware.acquire_irq_control().err(),
+        as_hardware.acquire_irq_control().wait().err(),
         Some(CallError::Ipc(IpcError::PeerClosed))
     );
-    test_harness::check_eq!(as_system_info.snapshot().err(), Some(IpcError::PeerClosed));
+    test_harness::check_eq!(
+        as_system_info.snapshot().wait().err(),
+        Some(IpcError::PeerClosed)
+    );
 }

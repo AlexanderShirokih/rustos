@@ -3,9 +3,10 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::rc::Rc;
 
 use component_startup::{SessionPort, component_manifest};
+use executor::Executor;
 use runtime::log_line;
 use syscall::{Handle, kind};
 
@@ -23,5 +24,6 @@ component_manifest! {
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let export = SessionPort::create().map_err(|_| Failed)?;
     log_line("started");
-    serve_probe(parent, Box::leak(Box::new(export)))
+    let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
+    executor.block_on(serve_probe(&executor, parent, export))
 }

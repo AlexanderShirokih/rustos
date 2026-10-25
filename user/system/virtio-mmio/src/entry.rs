@@ -1,13 +1,15 @@
-//! Точка входа процесса: требования, поток экспорта `VirtioMmio` и обслуживание шины.
+//! Экспорт шины и обслуживание слотов одним executor.
 
-use alloc::sync::Arc;
-use core::fmt;
+use alloc::rc::Rc;
+use core::{cell::RefCell, fmt};
 
 use component_startup::{
-    SessionPort, StartupError, component_manifest, serve_export, whole_export,
+    AsyncStartup, Requirements as _, SessionError, SessionPort, StartupError, component_manifest,
+    serve_component,
 };
+use executor::{Executor, PortChannel};
 use platform_abi::platform;
-use runtime::spawn_bound;
+use syscall::{Handle, kind};
 use virtio_mmio_abi::virtio_mmio;
 
 use crate::bus::Bus;
@@ -23,9 +25,7 @@ component_manifest! {
 #[derive(Debug)]
 enum Stopped {
     Startup(StartupError),
-    Description,
-    ServicePort,
-    ExportThread,
+    Kernel(kernel_objects::Error),
     ServicePortClosed,
 }
 
@@ -33,32 +33,57 @@ impl fmt::Display for Stopped {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Startup(error) => error.fmt(formatter),
-            Self::Description => formatter.write_str("platform description refused"),
-            Self::ServicePort => formatter.write_str("service port refused"),
-            Self::ExportThread => formatter.write_str("export thread refused"),
+            Self::Kernel(error) => error.fmt(formatter),
             Self::ServicePortClosed => formatter.write_str("service port closed"),
         }
     }
 }
 
 #[program_entry::component]
-fn run(requirements: VirtioMmioStartup) -> Result<(), Stopped> {
-    // Сессия `Platform` держит окна и линии транспортов до конца процесса.
-    let platform = requirements
-        .platform
-        .open()
-        .map_err(Stopped::Startup)?
-        .client();
-    let mut bus = Bus::take(&platform).ok_or(Stopped::Description)?;
-    let sessions = SessionPort::create().map_err(|_| Stopped::ServicePort)?;
-    let sessions = Arc::new(sessions);
+fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
+    let requirements = VirtioMmioStartup::from_parent(parent);
+    let platform = requirements.platform.open().map_err(Stopped::Startup)?;
 
-    let exporter = requirements.parent;
-    let port = Arc::clone(&sessions);
-    let _ =
-        spawn_bound(move || serve_export::<virtio_mmio::Protocol>(exporter, whole_export(&port)))
-            .map_err(|_| Stopped::ExportThread)?;
+    let executor = Rc::new(Executor::new().map_err(Stopped::Kernel)?);
+    let reactor = executor.reactor();
 
-    bus.serve(&sessions);
+    let platform = PortChannel::client(platform, reactor.clone());
+
+    let sessions = Rc::new(SessionPort::create().map_err(Stopped::Kernel)?);
+    let bus = Rc::new(RefCell::new(None::<Rc<Bus>>));
+
+    let dispatch = bus.clone();
+    let opened = bus.clone();
+    let closed = bus.clone();
+    let port = sessions.clone();
+
+    let served = serve_component::<virtio_mmio::Protocol, core::future::Ready<_>>(
+        &executor,
+        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        sessions,
+        move |frame| {
+            let bus = dispatch.borrow().clone();
+            let bus = bus.ok_or(ipc::wire::IpcError::PeerClosed)?;
+            bus.dispatch(frame).map(|()| None)
+        },
+        async move |_| {
+            if opened.borrow().is_none() {
+                let bus = Bus::take(&platform, port.clone())
+                    .await
+                    .ok_or(SessionError::Refused)?;
+
+                *opened.borrow_mut() = Some(Rc::new(bus));
+            }
+
+            port.open_session()
+        },
+        move |badge| {
+            if let Some(bus) = closed.borrow().as_ref() {
+                bus.gone(badge);
+            }
+        },
+    );
+
+    let _ = executor.block_on(served);
     Err(Stopped::ServicePortClosed)
 }

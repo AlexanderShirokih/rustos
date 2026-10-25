@@ -21,6 +21,7 @@ bench = false
 doctest = false
 
 [dependencies]
+executor = { workspace = true }
 kernel-objects = { workspace = true }
 mmio = { workspace = true }
 clocks-abi = { workspace = true }
