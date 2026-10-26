@@ -30,6 +30,8 @@ const TF: Reg<u32> = Reg::new(0x100);
 
 const SR_TXRDY: u32 = 1 << 2;
 const SR_TXEMT: u32 = 1 << 3;
+const CR_TX_ENABLE: u32 = 1 << 2;
+const CMD_RESET_TX: u32 = 2 << 4;
 const CMD_CLEAR_TX_READY: u32 = 0x300;
 
 const REG_UART_INDEX: usize = 0;
@@ -52,6 +54,11 @@ impl UartDm {
             mmio,
             tx_sequence_claimed: AtomicBool::new(false),
         }
+    }
+
+    fn reset_tx(&self) {
+        self.mmio.write_reg(CR, CMD_RESET_TX);
+        self.mmio.write_reg(CR, CR_TX_ENABLE);
     }
 
     fn claim_tx_sequence(&self) -> TxSequenceClaim<'_> {
@@ -206,6 +213,9 @@ impl Driver for UartDmDriver {
             })?;
 
         let uart = UartDm::new(bound);
+
+        // Загрузчик может оставить передатчик с незавершённой передачей.
+        uart.reset_tx();
 
         services.set_console(Arc::new(uart));
         Ok(())
