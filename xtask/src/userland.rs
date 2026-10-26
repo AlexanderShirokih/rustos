@@ -1,7 +1,6 @@
 //! Сборка образа userland и прогон cargo в его workspace: и то, и другое идёт по
 //! подготовленному дереву исходников `std`, собранной библиотеке C и исходникам стороннего
-//! кода. Сборка образа готовит данные записи стороннего кода, из каталога которой берётся файл
-//! образа.
+//! кода.
 //!
 //! Путь к дереву cargo принимает только переменной окружения: `[env]` из `.cargo/config.toml`
 //! доходит до порождённых процессов, а до самого cargo - нет. Остальную конфигурацию таргета
@@ -15,7 +14,6 @@ use std::{
 use anyhow::{Context, Result};
 use userland_image_tool::{
     BuildEnvironment, ExtraFile, USERLAND_WORKSPACE, UserlandTarget, build_userland,
-    manifest_file_sources,
 };
 
 use crate::{
@@ -62,9 +60,6 @@ pub(crate) fn build_image(
 ) -> Result<PathBuf> {
     let manifest_path = image_manifest_path(project_root, image)?;
     let std_src = prepare_build()?;
-    let mut sources = manifest_file_sources(&manifest_path)?;
-    sources.extend(files.iter().map(|file| file.source.clone()));
-    third_party::materialize_referenced(&sources)?;
     let target = UserlandTarget::new(project_root.join(&arch.system), &arch.name)?;
     build_userland(
         project_root,

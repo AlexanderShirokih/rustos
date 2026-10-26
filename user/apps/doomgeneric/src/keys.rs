@@ -64,6 +64,14 @@ pub(crate) fn next(mode: Mode, now: u64) -> Option<KeyEvent> {
     queue.pop_front()
 }
 
+pub(crate) fn turn() -> i32 {
+    EVENTS
+        .lock()
+        .state
+        .as_mut()
+        .map_or(0, InputState::take_turn)
+}
+
 pub(crate) fn controls(mode: Mode) -> Option<Controls> {
     let mut events = EVENTS.lock();
     let Events { state, queue } = &mut *events;

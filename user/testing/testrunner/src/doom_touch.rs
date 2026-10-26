@@ -162,9 +162,10 @@ fn doom_touch_moves_fires_and_turns_with_two_fingers() {
     input.expect(&[(0xa3, true)]);
     fire.x += 100;
     input.move_to(1, fire);
-    input.expect(&[(0xae, true)]);
+    input.expect(&[]);
+    assert!(input.state.take_turn() > 0);
     input.up(1, false);
-    input.expect(&[(0xa3, false), (0xae, false)]);
+    input.expect(&[(0xa3, false)]);
     input.up(0, false);
     input.expect(&[(0xad, false)]);
 }
@@ -192,12 +193,13 @@ fn doom_touch_captures_the_pad_and_preserves_an_unchanged_axis() {
             y: use_button.y,
         },
     );
-    input.expect(&[(0xae, true)]);
+    input.expect(&[]);
+    assert!(input.state.take_turn() > 0);
     let mut command = Command::new();
     let raw = i64::from(point.x) * 65535 / 1279;
     command.contact_axis(0, 0, raw).expect("only X changes");
     input.send(&command);
-    input.expect(&[(0xae, false)]);
+    assert!(input.state.take_turn() < 0);
     input.up(0, true);
     input.expect(&[]);
     input.down(0, use_button);
@@ -242,9 +244,10 @@ fn doom_touch_resync_releases_and_snapshot_restarts_the_gesture() {
     input.down(0, fire);
     fire.x -= 80;
     input.move_to(0, fire);
-    input.expect(&[(0xa3, true), (0xac, true)]);
+    input.expect(&[(0xa3, true)]);
+    assert!(input.state.take_turn() < 0);
     input.record(Record::resync());
-    input.expect(&[(0xa3, false), (0xac, false)]);
+    input.expect(&[(0xa3, false)]);
     input.record(Record::device_added(input.number));
     let mut snapshot = RecordBuf::new();
     input.tracker.snapshot(&mut snapshot);

@@ -12,6 +12,9 @@ use crate::{
     },
 };
 
+/// Сдвиг мыши движка на ширину экрана: полный оборот при чувствительности по умолчанию.
+const TURN_PER_WIDTH: i64 = 8192;
+
 /// Переход игровой клавиши в кодах `doomkeys.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyEvent {
@@ -39,6 +42,7 @@ pub struct InputState {
     weapons: bool,
     repeat: Option<(u8, u64)>,
     stick: Option<Point>,
+    turn: i64,
 }
 
 struct Device {
@@ -64,6 +68,7 @@ impl InputState {
             weapons: false,
             repeat: None,
             stick: None,
+            turn: 0,
         }
     }
 
@@ -75,6 +80,7 @@ impl InputState {
         self.mode = mode;
         self.weapons = false;
         self.repeat = None;
+        self.turn = 0;
         for device in self.devices.values_mut() {
             device.contacts.clear();
         }
@@ -110,6 +116,16 @@ impl InputState {
             (Some(key), _) => self.repeat = Some((key, now.saturating_add(350))),
             (None, _) => self.repeat = None,
         }
+    }
+
+    /// Сдвиг поворота касаниями с прошлого вызова в единицах мыши движка. Доля
+    /// единицы переходит в следующий вызов.
+    pub fn take_turn(&mut self) -> i32 {
+        let width = i64::from(self.layout.width.max(1));
+        let units = self.turn / width;
+        self.turn -= units * width;
+
+        i32::try_from(units).unwrap_or(0)
     }
 
     /// Передаёт переходы после `Frame`, `DeviceRemoved` и `Resync`. `describe` вызывается
@@ -157,6 +173,7 @@ impl InputState {
         self.devices.clear();
         self.weapons = false;
         self.repeat = None;
+        self.turn = 0;
         self.publish(&mut emit);
     }
 
@@ -173,7 +190,13 @@ impl InputState {
                 press(key);
             }
             for contact in device.contacts.values_mut() {
-                toggle |= contact.press(self.layout, self.mode, self.weapons, &mut press);
+                toggle |= contact.press(
+                    self.layout,
+                    self.mode,
+                    self.weapons,
+                    &mut self.turn,
+                    &mut press,
+                );
             }
         }
         self.stick = self
@@ -258,6 +281,7 @@ impl Contact {
         layout: Layout,
         mode: Mode,
         weapons: bool,
+        turn: &mut i64,
         press: &mut impl FnMut(u8),
     ) -> bool {
         let (Some(x), Some(y)) = (self.x, self.y) else {
@@ -265,7 +289,7 @@ impl Contact {
         };
         let point = layout.logical(Point { x, y });
         let initial = self.capture.is_none();
-        let (button, origin) = *self.capture.get_or_insert_with(|| {
+        let (button, last) = self.capture.get_or_insert_with(|| {
             (
                 layout
                     .buttons(mode, weapons)
@@ -274,7 +298,8 @@ impl Contact {
                 point,
             )
         });
-        let Some(button) = button else {
+        let previous = core::mem::replace(last, point);
+        let Some(button) = *button else {
             return false;
         };
         let dead = i64::from((layout.height / 36).max(1));
@@ -293,7 +318,7 @@ impl Contact {
                 } else if mode == Mode::Game {
                     direction(x, dead, KEY_STRAFE_L, KEY_STRAFE_R, press);
                     direction(y, dead, KEY_UPARROW, KEY_DOWNARROW, press);
-                    if x.abs().max(y.abs()) > i64::from(button.area.width) * 2 / 5 {
+                    if !button.contains(point) {
                         press(KEY_RSHIFT);
                     }
                 }
@@ -302,13 +327,7 @@ impl Contact {
                 if button.control == Control::Fire {
                     press(KEY_FIRE);
                 }
-                direction(
-                    i64::from(point.x) - i64::from(origin.x),
-                    dead,
-                    KEY_LEFTARROW,
-                    KEY_RIGHTARROW,
-                    press,
-                );
+                *turn += (i64::from(point.x) - i64::from(previous.x)) * TURN_PER_WIDTH;
             }
         }
         false

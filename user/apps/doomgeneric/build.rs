@@ -1,16 +1,31 @@
-//! Компилирует движок doomgeneric из исходников стороннего кода. Состав движка - список
-//! `SRC_DOOM` из `Makefile` закреплённого коммита без платформенной части `doomgeneric_xlib.c`.
-//! Размер `DG_ScreenBuffer` движка задают константы модуля `frame` программы.
+//! Компилирует движок doomgeneric из исходников стороннего кода и кладёт в `OUT_DIR` IWAD
+//! программы. Состав движка - список `SRC_DOOM` из `Makefile` закреплённого коммита без
+//! платформенной части `doomgeneric_xlib.c` и класса файлов `w_file_stdc.c`. Класс файлов
+//! WAD и проверку IWAD в `d_iwad.c` даёт программа. Размер `DG_ScreenBuffer` движка задают
+//! константы модуля `frame` программы.
 
 #[path = "src/frame.rs"]
 mod frame;
+#[path = "build/iwad.rs"]
+mod iwad;
 
-use userland_build::{CSources, Error, third_party_dir};
+use core::error::Error;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use userland_build::{CSources, third_party_dir};
 
 use crate::frame::{FRAME_HEIGHT, FRAME_WIDTH};
 
 const ENTRY: &str = "doomgeneric";
 const ENGINE_DIR: &str = "doomgeneric";
+const IWAD_ENTRY: &str = "freedoom";
+const IWAD_SOURCE: &str = "freedoom-0.13.0/freedoom1.wad";
+const IWAD_OUTPUT: &str = "freedoom1.wad";
+const IWAD_SEARCH: &str = "d_iwad.c";
+const IWAD_EXISTS: &str = "M_FileExists=DG_IwadExists";
 
 const ENGINE: &[&str] = &[
     "dummy.c",
@@ -20,7 +35,6 @@ const ENGINE: &[&str] = &[
     "dstrings.c",
     "d_event.c",
     "d_items.c",
-    "d_iwad.c",
     "d_loop.c",
     "d_main.c",
     "d_mode.c",
@@ -89,31 +103,58 @@ const ENGINE: &[&str] = &[
     "w_main.c",
     "w_wad.c",
     "z_zone.c",
-    "w_file_stdc.c",
     "i_input.c",
     "i_video.c",
     "doomgeneric.c",
 ];
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Box<dyn Error>> {
     userland_build::emit_linker_script()?;
 
     let root = third_party_dir(ENTRY)?.join(ENGINE_DIR);
-    let sources: Vec<String> = ENGINE
+    let engine: Vec<String> = ENGINE
         .iter()
         .map(|source| root.join(source).display().to_string())
         .collect();
-    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let search = [root.join(IWAD_SEARCH).display().to_string()];
+    compile("doomgeneric", &root, &engine, &[])?;
+    compile("doomgeneric-iwad", &root, &search, &[IWAD_EXISTS])?;
 
+    write_iwad()
+}
+
+fn compile(
+    name: &str,
+    root: &Path,
+    sources: &[String],
+    definitions: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
     let width = format!("DOOMGENERIC_RESX={FRAME_WIDTH}");
     let height = format!("DOOMGENERIC_RESY={FRAME_HEIGHT}");
-    CSources::new("doomgeneric", &sources)
-        .include_dir(&root)
+    definitions
+        .iter()
+        .fold(CSources::new(name, &sources), |sources, definition| {
+            sources.define(definition)
+        })
+        .include_dir(root)
         .define(&width)
         .define(&height)
         .define("NORMALUNIX")
         .define("LINUX")
         .define("_DEFAULT_SOURCE")
         .foreign()
-        .compile()
+        .compile()?;
+    Ok(())
+}
+
+fn write_iwad() -> Result<(), Box<dyn Error>> {
+    let source = third_party_dir(IWAD_ENTRY)?.join(IWAD_SOURCE);
+    println!("cargo:rerun-if-changed={}", source.display());
+    let wad = fs::read(&source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?;
+    let output = PathBuf::from(env::var("OUT_DIR")?).join(IWAD_OUTPUT);
+    fs::write(&output, iwad::first_episode(&wad)?)
+        .map_err(|error| format!("failed to write {}: {error}", output.display()))?;
+    Ok(())
 }

@@ -83,10 +83,3 @@ pub fn build_userland(
         .with_context(|| format!("Failed to write userland image '{}'", output_path.display()))?;
     Ok(output_path)
 }
-
-/// Отдаёт пути `source` из `[[files]]` манифеста образа `manifest_path` в записанном виде.
-/// Относительный путь отсчитывается от корня проекта, путь может содержать шаблон.
-pub fn manifest_file_sources(manifest_path: &Path) -> Result<Vec<PathBuf>> {
-    let manifest = load_manifest(manifest_path)?;
-    Ok(manifest.files.into_iter().map(|file| file.source).collect())
-}

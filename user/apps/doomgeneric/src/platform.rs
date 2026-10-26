@@ -37,6 +37,8 @@ unsafe extern "C" {
     static mut saveStringEnter: c_int;
     static mut currentMenu: *const c_void;
     static mut MainDef: c_void;
+    static mut mousex: c_int;
+    static mut mouseSensitivity: c_int;
 }
 
 #[allow(clippy::multiple_unsafe_ops_per_block)]
@@ -89,7 +91,9 @@ extern "C" fn DG_GetTicksMs() -> u32 {
 #[unsafe(no_mangle)]
 extern "C" fn DG_GetKey(pressed: *mut c_int, key: *mut c_uchar) -> c_int {
     let now = Instant::now().as_nanos() / NS_PER_MS;
-    let Some(event) = keys::next(mode(), now) else {
+    let mode = mode();
+    let Some(event) = keys::next(mode, now) else {
+        post_turn(mode);
         return 0;
     };
     // SAFETY: `I_GetEvent` движка передаёт указатель на свою локальную переменную `pressed`.
@@ -97,6 +101,19 @@ extern "C" fn DG_GetKey(pressed: *mut c_int, key: *mut c_uchar) -> c_int {
     // SAFETY: `I_GetEvent` движка передаёт указатель на свою локальную переменную `key`.
     unsafe { key.write(event.key) };
     1
+}
+
+/// Поворот касаниями копится в `mousex` движка с его чувствительностью мыши.
+fn post_turn(mode: Mode) {
+    let turn = keys::turn();
+    if mode != Mode::Game || turn == 0 {
+        return;
+    }
+    // SAFETY: m_menu.c определяет int `mouseSensitivity`, меню меняет его в потоке движка.
+    let sensitivity = unsafe { mouseSensitivity };
+    let shift = turn.saturating_mul(sensitivity.saturating_add(5)) / 10;
+    // SAFETY: g_game.c определяет int `mousex`, сборка тика читает его в потоке движка.
+    unsafe { mousex += shift };
 }
 
 #[unsafe(no_mangle)]

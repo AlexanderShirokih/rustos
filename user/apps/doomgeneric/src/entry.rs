@@ -1,6 +1,6 @@
 use alloc::{rc::Rc, sync::Arc};
 use core::{
-    ffi::{CStr, c_char, c_int},
+    ffi::{c_char, c_int},
     fmt, ptr,
 };
 
@@ -18,6 +18,7 @@ use syscall::{SIGNALED, SyscallError, Timeout};
 use crate::{
     keys,
     screen::{self, Screen, ScreenError},
+    wad_file::IWAD,
 };
 
 c_library::component_manifest! {
@@ -28,8 +29,6 @@ c_library::component_manifest! {
         exports: [application::Protocol => [{ name = "doom" }]],
     }
 }
-
-const IWAD: &CStr = c"/boot/doom/freedoom1.wad";
 
 #[allow(unsafe_code)]
 unsafe extern "C" {
