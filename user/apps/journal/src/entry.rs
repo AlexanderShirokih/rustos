@@ -6,7 +6,7 @@ use components::component_manifest;
 use executor::Executor;
 use log_abi::journal;
 use slint::{ComponentHandle, ModelRc, VecModel};
-use slint_display::{ScreenPlatform, Shown, accept_window};
+use slint_display::{ScreenPlatform, Shown, receive_window};
 
 use crate::{
     follow::{follow, show, subscribe},
@@ -28,7 +28,7 @@ pub(crate) fn main() -> Result<(), Box<dyn Error>> {
 
 async fn run(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     let JournalStartup { journal, parent } = components::requirements::<JournalStartup>()?;
-    let Shown { window, input } = accept_window(executor, parent).await?;
+    let Shown { window, input } = receive_window(executor, parent).await?;
     let mut platform = ScreenPlatform::open(window, executor.reactor()).await?;
 
     let window = ui::Journal::new().map_err(|error| format!("ui refused: {error:?}"))?;

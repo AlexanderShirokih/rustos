@@ -21,7 +21,7 @@ test = false
 bench = false
 
 [[bin]]
-name = "calculator"
+name = "calculator-service"
 path = "src/calculator.rs"
 test = false
 bench = false

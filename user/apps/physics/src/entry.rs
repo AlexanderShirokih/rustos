@@ -15,7 +15,7 @@ use application_abi::application;
 use components::component_manifest;
 use executor::Executor;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use slint_display::{ScreenError, ScreenPlatform, accept_window};
+use slint_display::{ScreenError, ScreenPlatform, receive_window};
 
 use crate::{physics, ui};
 
@@ -55,7 +55,7 @@ pub(crate) fn main() -> Result<(), Box<dyn Error>> {
 async fn start(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     let PhysicsStartup { parent } = components::requirements::<PhysicsStartup>()?;
     let mut platform = ScreenPlatform::open(
-        accept_window(executor, parent).await?.window,
+        receive_window(executor, parent).await?.window,
         executor.reactor(),
     )
     .await?;

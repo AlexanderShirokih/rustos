@@ -7,7 +7,7 @@
 //!
 //! [`ScreenPlatform::deliver_input`] переводит записи сессии `Input` в события окна.
 //!
-//! [`accept_window`] получает окно и сессию `Input` приложения вызовом `show` его экспорта
+//! [`receive_window`] получает окно и сессию `Input` приложения вызовом `show` его экспорта
 //! `Application`.
 //!
 //! Slint собран с `unsafe-single-threaded` и не проверяет поток, его объекты использует
@@ -21,6 +21,6 @@ mod pixel;
 mod scale;
 mod screen;
 
-pub use application::{Shown, accept_window};
+pub use application::{Shown, receive_window};
 pub use application_window::WindowError;
 pub use screen::{ScreenError, ScreenPlatform};

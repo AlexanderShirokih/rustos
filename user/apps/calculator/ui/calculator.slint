@@ -1,0 +1,188 @@
+import "@inter/Inter-Regular.ttf";
+
+enum KeyKind {
+    digit,
+    command,
+    operator,
+    equals,
+}
+
+struct Key {
+    label: string,
+    kind: KeyKind,
+    column: int,
+    row: int,
+    columns: int,
+    rows: int,
+}
+
+global Theme {
+    out property <color> ground: #f8fafc;
+    out property <color> text: #111827;
+    out property <color> muted: #6b7280;
+    out property <color> edge: #e5e7eb;
+    out property <color> failure: #b42318;
+    out property <color> digit: #ffffff;
+    out property <color> command: #eef2f7;
+    out property <color> command-down: #d9e0ea;
+    out property <color> command-text: #4b5563;
+    out property <color> operator: #eff6ff;
+    out property <color> operator-edge: #dbe7fb;
+    out property <color> operator-text: #2563eb;
+    out property <color> lit: #3b82f6;
+    out property <color> accent: #2563eb;
+    out property <color> accent-down: #1d4ed8;
+    out property <color> on-accent: #ffffff;
+}
+
+component KeyButton inherits Rectangle {
+    in property <Key> key;
+    in property <bool> lit;
+    in property <float> fit: 1;
+
+    callback clicked();
+
+    property <bool> down: touch.pressed && touch.has-hover;
+
+    border-radius: 18px * root.fit;
+    border-width: 1px;
+    border-color: root.key.kind == KeyKind.digit ? Theme.edge
+        : root.key.kind == KeyKind.command ? Theme.command
+        : root.key.kind == KeyKind.equals ? Theme.accent
+        : root.lit ? Theme.lit
+        : Theme.operator-edge;
+    background: root.key.kind == KeyKind.digit ? (root.down ? Theme.edge : Theme.digit)
+        : root.key.kind == KeyKind.command ? (root.down ? Theme.command-down : Theme.command)
+        : root.key.kind == KeyKind.equals ? (root.down ? Theme.accent-down : Theme.accent)
+        : root.lit ? Theme.lit
+        : root.down ? Theme.operator-edge : Theme.operator;
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Text {
+        text: root.key.label;
+        color: root.key.kind == KeyKind.digit ? Theme.text
+            : root.key.kind == KeyKind.command ? Theme.command-text
+            : root.key.kind == KeyKind.equals || root.lit ? Theme.on-accent
+            : Theme.operator-text;
+        font-size: (root.key.kind == KeyKind.command ? 24px : root.key.kind == KeyKind.digit ? 28px : 30px)
+            * root.fit;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+export component Calculator inherits Window {
+    in property <string> display;
+    in property <string> expression;
+    in property <string> lit-operator;
+    in property <bool> failed;
+    in property <length> screen-height;
+
+    callback press(string) -> bool;
+
+    // Высота, при которой интерфейс помещается в натуральную величину; на экране ниже
+    // отступы, клавиши и шрифты сжимаются пропорционально.
+    property <length> natural-height: 620px;
+    property <float> fit: max(0.4, min(1, root.screen-height / root.natural-height));
+    property <length> gap: 12px * root.fit;
+    property <length> row-height: 76px * root.fit;
+    property <[Key]> keys: [
+        { label: "C", kind: KeyKind.command, column: 0, row: 0, columns: 1, rows: 1 },
+        { label: "⌫", kind: KeyKind.command, column: 1, row: 0, columns: 1, rows: 1 },
+        { label: "÷", kind: KeyKind.operator, column: 2, row: 0, columns: 1, rows: 1 },
+        { label: "×", kind: KeyKind.operator, column: 3, row: 0, columns: 1, rows: 1 },
+        { label: "7", kind: KeyKind.digit, column: 0, row: 1, columns: 1, rows: 1 },
+        { label: "8", kind: KeyKind.digit, column: 1, row: 1, columns: 1, rows: 1 },
+        { label: "9", kind: KeyKind.digit, column: 2, row: 1, columns: 1, rows: 1 },
+        { label: "−", kind: KeyKind.operator, column: 3, row: 1, columns: 1, rows: 1 },
+        { label: "4", kind: KeyKind.digit, column: 0, row: 2, columns: 1, rows: 1 },
+        { label: "5", kind: KeyKind.digit, column: 1, row: 2, columns: 1, rows: 1 },
+        { label: "6", kind: KeyKind.digit, column: 2, row: 2, columns: 1, rows: 1 },
+        { label: "+", kind: KeyKind.operator, column: 3, row: 2, columns: 1, rows: 1 },
+        { label: "1", kind: KeyKind.digit, column: 0, row: 3, columns: 1, rows: 1 },
+        { label: "2", kind: KeyKind.digit, column: 1, row: 3, columns: 1, rows: 1 },
+        { label: "3", kind: KeyKind.digit, column: 2, row: 3, columns: 1, rows: 1 },
+        { label: "=", kind: KeyKind.equals, column: 3, row: 3, columns: 1, rows: 2 },
+        { label: "0", kind: KeyKind.digit, column: 0, row: 4, columns: 2, rows: 1 },
+        { label: ".", kind: KeyKind.digit, column: 2, row: 4, columns: 1, rows: 1 },
+    ];
+
+    default-font-family: "Inter";
+    background: Theme.ground;
+
+    FocusScope {
+        init => {
+            self.focus();
+        }
+
+        key-pressed(event) => {
+            root.press(event.text) ? EventResult.accept : EventResult.reject
+        }
+
+        HorizontalLayout {
+            padding: 16px * root.fit;
+            alignment: center;
+
+            VerticalLayout {
+                preferred-width: 480px;
+                spacing: 16px * root.fit;
+
+                VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: end;
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 8px * root.fit;
+
+                    Text {
+                        text: root.expression;
+                        color: Theme.muted;
+                        font-size: 20px * root.fit;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: root.display;
+                        color: root.failed ? Theme.failure : Theme.text;
+                        font-size: (root.failed ? 30px
+                            : root.display.character-count > 13 ? 36px
+                            : root.display.character-count > 9 ? 46px
+                            : 64px) * root.fit;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Theme.edge;
+                }
+
+                keypad := Rectangle {
+                    property <length> cell: (self.width - 3 * root.gap) / 4;
+
+                    height: 5 * root.row-height + 4 * root.gap;
+
+                    for key in root.keys: KeyButton {
+                        x: key.column * (keypad.cell + root.gap);
+                        y: key.row * (root.row-height + root.gap);
+                        width: key.columns * keypad.cell + (key.columns - 1) * root.gap;
+                        height: key.rows * root.row-height + (key.rows - 1) * root.gap;
+                        key: key;
+                        lit: key.label == root.lit-operator;
+                        fit: root.fit;
+                        clicked => {
+                            root.press(key.label);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

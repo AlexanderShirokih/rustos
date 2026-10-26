@@ -6,7 +6,7 @@ memory_limit = "1M"
 restarts = 2
 
 [[components]]
-executable = "calculator"
+executable = "calculator-service"
 memory_limit = "1M"
 restarts = 2
 

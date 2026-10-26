@@ -1,9 +1,9 @@
-//! Кнопки устройства и клавиша `Home`.
+//! Кнопки устройства и клавиши возврата.
 //!
 //! Устройство только из кнопок питания и громкости лаунчер резервирует от сессий фокуса. Громкость
 //! вниз и вверх он переводит в стрелки виртуальной клавиатуры, нажатие питания передаёт главному
-//! циклу, который отличает короткое нажатие от удержания. Клавиша `Home` любого устройства
-//! возвращает плитки.
+//! циклу, который отличает короткое нажатие от удержания. Клавиши `Home` и `F1` любого
+//! устройства возвращают плитки.
 
 use std::{collections::BTreeMap, sync::mpsc::Sender};
 
@@ -87,7 +87,7 @@ async fn added(
 
 fn key(usage: Usage, pressed: bool, reserved: bool, cancelled: bool) -> Option<Command> {
     match usage {
-        Usage::HOME if pressed => Some(Command::Home),
+        Usage::HOME | Usage::F1 if pressed => Some(Command::Home),
         Usage::VOLUME_DOWN if reserved => Some(Command::Arrow(Arrow::Down, pressed)),
         Usage::VOLUME_UP if reserved => Some(Command::Arrow(Arrow::Up, pressed)),
         Usage::POWER if reserved && cancelled => Some(Command::PowerLost),

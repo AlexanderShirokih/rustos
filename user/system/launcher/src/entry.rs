@@ -34,7 +34,12 @@ const UP_KEY: u16 = 0;
 const DOWN_KEY: u16 = 1;
 const ENTER_KEY: u16 = 2;
 
-const APPS: [App; 4] = [
+const APPS: [App; 5] = [
+    App {
+        name: "calculator",
+        title: "Calculator",
+        accent: 0x8b_5c_f6,
+    },
     App {
         name: "doom",
         title: "Doom",
@@ -116,9 +121,8 @@ struct Keyboard {
 struct Shown {
     name: &'static str,
     opened: u64,
-    _application: application::Client<PortChannel<SessionTransport>>,
+    application: application::Client<PortChannel<SessionTransport>>,
     _watch: TaskHandle,
-    _window: Session<display::Protocol>,
 }
 
 #[derive(Debug)]
@@ -153,7 +157,7 @@ impl Home {
                 Command::Next if self.shown.is_none() => self.select_next(),
                 Command::Previous if self.shown.is_none() => self.select_previous(),
                 Command::Open(index) if self.shown.is_none() => self.open(index).await?,
-                Command::Home | Command::PowerHeld => self.home().await?,
+                Command::Home | Command::PowerHeld => self.home().await,
                 Command::Closed(opened)
                     if self
                         .shown
@@ -235,28 +239,26 @@ impl Home {
         Ok(())
     }
 
-    async fn home(&mut self) -> Result<(), Box<dyn Error>> {
-        if self.shown.is_none() {
-            return Ok(());
+    async fn home(&self) {
+        // Ответ на `close` ещё не означает освобождение окна приложения.
+        if let Some(shown) = &self.shown
+            && let Err(error) = shown.application.close().await
+        {
+            println!("{} not closed: {error:?}", shown.name);
+        }
+    }
+
+    async fn closed(&mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(shown) = self.shown.take() {
+            println!("{} closed", shown.name);
         }
 
         if let Err(error) = self.focus.focus(Some(self.tiles_input)).await {
             println!("tiles not focused: {error:?}");
         }
-        // Поля `Shown` закрывают сессию `Application` раньше корня окна, и приложение
-        // выходит до отзыва окна.
-        self.shown = None;
         let display = self.screen.open_async(&self.executor.reactor()).await?;
         self.platform.attach(display).await?;
         Ok(())
-    }
-
-    async fn closed(&mut self) -> Result<(), Box<dyn Error>> {
-        if let Some(shown) = &self.shown {
-            println!("{} closed", shown.name);
-        }
-
-        self.home().await
     }
 }
 
@@ -480,14 +482,9 @@ async fn open(
         .open_async(&reactor)
         .await
         .map_err(OpenError::Startup)?;
-    let derived = window
-        .handle()
-        .duplicate(Rights::WRITE | Rights::TRANSFER, None)
-        .map_err(OpenError::Kernel)?;
-
     let FocusSession { session, number } = focus.open().await.map_err(OpenError::Focus)?;
     application
-        .show(Session::from_handle(derived), session)
+        .show(window, session)
         .await
         .map_err(OpenError::Show)?;
     // Приложение без ввода закрывает сессию `Input`. Фокус тогда снимается, и плитки за окном
@@ -500,9 +497,8 @@ async fn open(
     Ok(Shown {
         name,
         opened,
-        _application: application,
+        application,
         _watch: watch,
-        _window: window,
     })
 }
 

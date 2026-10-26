@@ -443,3 +443,55 @@ fn doom_touch_back_closes_the_main_menu_without_a_second_menu_button() {
     input.up(0, false);
     input.expect(&[(27, false)]);
 }
+
+#[test_harness::test]
+fn doom_touch_controls_follow_devices_with_screen_contacts() {
+    let pointer = |binding, contacts| {
+        let mut axes = AxisList::new();
+        axes.push(AxisDecl::absolute(Usage::X, 0, 65535))
+            .expect("X");
+        axes.push(AxisDecl::absolute(Usage::Y, 0, 65535))
+            .expect("Y");
+        let (device_axes, contact_axes) = if contacts == 0 {
+            (axes, AxisList::new())
+        } else {
+            (AxisList::new(), axes)
+        };
+        DeviceDescriptor::new(
+            "pointer",
+            binding,
+            &KeyList::new(),
+            &device_axes,
+            contacts,
+            &contact_axes,
+        )
+        .expect("descriptor")
+        .layout()
+        .expect("layout")
+    };
+    let mut state = InputState::new(layout(1280, 800));
+    assert!(!state.controls().touch);
+    let tablet = DeviceNumber::new(1).expect("tablet");
+    state.feed(
+        Record::device_added(tablet),
+        |_| Some(pointer(Binding::Screen, 0)),
+        |_| {},
+    );
+    assert!(!state.controls().touch);
+    let pad = DeviceNumber::new(2).expect("pad");
+    state.feed(
+        Record::device_added(pad),
+        |_| Some(pointer(Binding::None, 2)),
+        |_| {},
+    );
+    assert!(!state.controls().touch);
+    let touch = DeviceNumber::new(3).expect("touch");
+    state.feed(
+        Record::device_added(touch),
+        |_| Some(pointer(Binding::Screen, 2)),
+        |_| {},
+    );
+    assert!(state.controls().touch);
+    state.feed(Record::device_removed(touch), |_| None, |_| {});
+    assert!(!state.controls().touch);
+}

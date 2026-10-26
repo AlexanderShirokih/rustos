@@ -236,8 +236,9 @@ export component Launcher inherits Window {
                 }
 
                 Rectangle {
-                    property <int> columns: 4;
+                    property <length> min-size: 80px;
                     property <length> gap: 16px;
+                    property <int> columns: max(1, floor((self.width + self.gap) / (self.min-size + self.gap)));
                     property <length> size: (self.width - (self.columns - 1) * self.gap) / self.columns;
                     property <length> stride: self.size + 30px + self.gap;
 

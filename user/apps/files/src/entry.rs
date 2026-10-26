@@ -6,7 +6,7 @@ use components::{component_manifest, into_std_handle};
 use executor::Executor;
 use filesystem_abi::namespace;
 use slint::{ComponentHandle, ModelRc, VecModel};
-use slint_display::{ScreenPlatform, Shown, accept_window};
+use slint_display::{ScreenPlatform, Shown, receive_window};
 
 use crate::{desktop, ui};
 
@@ -37,7 +37,7 @@ async fn run(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     molecular::install_filesystem_root(into_std_handle(namespace.into_handle()))
         .map_err(|_| "filesystem root is already installed")?;
 
-    let Shown { window, input } = accept_window(executor, requirements.parent).await?;
+    let Shown { window, input } = receive_window(executor, requirements.parent).await?;
     let mut platform = ScreenPlatform::open(window, executor.reactor()).await?;
 
     let files = ui::Files::new().map_err(|error| format!("ui refused: {error:?}"))?;

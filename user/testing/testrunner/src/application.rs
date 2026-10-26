@@ -80,3 +80,23 @@ fn closed_answers_peer_closed_when_the_application_exits() {
     drop(session);
     finish(composition);
 }
+
+#[test_harness::test]
+fn close_ends_the_application() {
+    let composition = scenario(&[APPLICATION_FIXTURE]);
+    let importer = composition.importer(APPLICATION_IMPORT);
+    let session = shown(&importer);
+    let watcher = wait_closed(&session);
+    pause(RECEIVE_PAUSE);
+
+    let closed = client(&session).close().wait();
+    let finished = watcher.wait(DEPARTURE_TIMEOUT);
+    let departed = watcher.exit_code();
+
+    test_harness::check_eq!(closed, Ok(()));
+    test_harness::check_eq!(finished, Ok(()));
+    test_harness::check_eq!(departed, Ok(PEER_CLOSED));
+    let _ = watcher.join(DEPARTURE_TIMEOUT);
+    drop(session);
+    finish(composition);
+}

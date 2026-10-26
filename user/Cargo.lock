@@ -480,6 +480,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "calculator"
+version = "0.1.0"
+dependencies = [
+ "application-abi",
+ "components",
+ "executor",
+ "slint",
+ "slint-build",
+ "slint-display",
+ "userland-build",
+]
+
+[[package]]
 name = "calculator-demo"
 version = "0.1.0"
 dependencies = [

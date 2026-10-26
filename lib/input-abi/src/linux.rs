@@ -78,6 +78,7 @@ mod tests {
     #[test]
     fn key_and_button_are_translated() {
         assert_eq!(Usage::from_linux_key(28), Some(Usage::ENTER));
+        assert_eq!(Usage::from_linux_key(59), Some(Usage::F1));
         assert_eq!(Usage::from_linux_key(0x111), Some(Usage::SECONDARY));
     }
 

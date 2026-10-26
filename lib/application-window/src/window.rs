@@ -24,7 +24,7 @@ pub enum WindowError {
     Closed,
 }
 
-/// Окно и ввод из вызова `show` и сессия `Application`, в которой они пришли.
+/// Окно, ввод и сессия приложения.
 pub struct ApplicationWindow {
     pub window: Session<display::Protocol>,
     pub input: Session<input::Protocol>,
@@ -102,11 +102,15 @@ impl application::Service<Delivery> for Application {
         }
         core::future::pending().await
     }
+
+    fn close(&self, _frame: &Delivery) {
+        self.end();
+    }
 }
 
 impl ApplicationSession {
-    /// Ждёт закрытия сессии открывшим приложение. Незавершённые вызовы отменяются
-    /// задачей обслуживания перед возвратом.
+    /// Ждёт закрытия сессии или вызова `close` и отменяет незавершённые вызовы.
+    /// После возврата вызывающая программа должна завершить процесс.
     pub async fn serve(self) {
         core::future::poll_fn(|cx| {
             if self.state.ended.get() {
@@ -119,9 +123,9 @@ impl ApplicationSession {
     }
 }
 
-/// Принимает заявку на экспорт `Application` от родителя `parent` и возвращает окно и ввод
-/// из вызова `show`. `executor` обслуживает сессию до разрушения `ApplicationSession`.
-pub async fn accept_window(
+/// Получает окно, ввод и сессию приложения.
+/// `executor` обслуживает сессию до разрушения `ApplicationSession`.
+pub async fn receive_window(
     executor: &Rc<Executor>,
     parent: AsyncStartup,
 ) -> Result<ApplicationWindow, WindowError> {

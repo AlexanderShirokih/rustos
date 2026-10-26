@@ -18,6 +18,9 @@ ipc::protocol! {
 
         /// Завершается `PeerClosed` с уходом приложения. Второй ждущий вызов получает `Refused`.
         call async fn closed() -> Result<(), ApplicationError>;
+
+        /// Просит приложение завершить процесс после ответа.
+        call fn close() -> ();
     }
 }
 
@@ -63,6 +66,8 @@ mod tests {
         async fn closed(&self, _frame: &MockResources) -> Result<(), ApplicationError> {
             Err(ApplicationError::Refused)
         }
+
+        fn close(&self, _frame: &MockResources) {}
     }
 
     #[test]

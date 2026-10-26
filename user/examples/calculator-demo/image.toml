@@ -18,8 +18,8 @@ path = "/driver-pl031"
 
 [[programs]]
 package = "calculator-demo"
-bin = "calculator"
-path = "/calculator"
+bin = "calculator-service"
+path = "/calculator-service"
 
 [[programs]]
 package = "calculator-demo"

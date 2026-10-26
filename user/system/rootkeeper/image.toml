@@ -105,6 +105,10 @@ package = "files"
 path = "/files"
 
 [[programs]]
+package = "calculator"
+path = "/calculator"
+
+[[programs]]
 package = "physics"
 path = "/physics"
 

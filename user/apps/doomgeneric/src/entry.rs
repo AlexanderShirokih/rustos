@@ -5,7 +5,7 @@ use core::{
 };
 
 use application_abi::application;
-use application_window::{ApplicationWindow, WindowError, accept_window};
+use application_window::{ApplicationWindow, WindowError, receive_window};
 use component_startup::{AsyncStartup, StartupError, component_startup as startup_contract};
 use display_abi::display;
 use executor::{Executor, PortChannel};
@@ -107,7 +107,7 @@ fn open_window(
                         window,
                         input,
                         session,
-                    } = accept_window(&executor, parent).await?;
+                    } = receive_window(&executor, parent).await?;
                     *output.lock() = Some(Ok((window, input)));
                     posted.notify_all().map_err(WindowError::Kernel)?;
                     session.serve().await;

@@ -25,6 +25,8 @@ use crate::{
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Сессия `Display` с отображённой поверхностью и окно Slint на весь экран.
+///
+/// Безопасность доступа к поверхности при её отзыве поставщиком не обеспечена.
 pub struct ScreenPlatform {
     attached: Option<Attached>,
     dimension: DisplayDimension,
@@ -266,13 +268,11 @@ fn surface_pixels(surface: &mut Mapping, dimension: DisplayDimension) -> Option<
     let base = usize::try_from(surface.va()).ok()?;
 
     #[allow(unsafe_code)]
-    // SAFETY: `surface` - отображение `Mapping::full` с `UserMemFlags::ReadWrite` из
-    // `map_surface`. Ядро инициализировало его память, оно владеет регионом, выровнено
-    // по странице и, по проверке выше, не меньше `count * 4` байт. Срез заимствует `surface`
-    // исключительно, поэтому отображение не снимается, пока срез жив. Поставщик `Display`
-    // читает поверхность только внутри `present`, который отвечает после записи на экран, а
-    // срез снимается до `present`. `Xrgb` - `repr(transparent)` над `u32`, любое значение
-    // допустимо.
+    // SAFETY: `map_surface` отображает занулённую память RW с выравниванием по странице;
+    // размер проверен выше. Заём `surface` исключает локальное снятие отображения.
+    // Сервер читает поверхность только в `present`, после освобождения среза.
+    // `Xrgb` прозрачен над `u32` и допускает любое значение.
+    // Обоснование неполно при внешнем отзыве, который может снять отображение до конца заёма.
     let pixels = unsafe { core::slice::from_raw_parts_mut(base as *mut Xrgb, count) };
     Some(pixels)
 }

@@ -2,7 +2,8 @@
 //!
 //! Указатель окна ведут устройства с привязкой осей к экрану: абсолютные оси `X` и `Y`
 //! устройства с кнопками указателя либо первый контакт касания. Клавиши с аналогом среди
-//! клавиш Slint приходят окну нажатием и отпусканием. `Resync` и уход устройства снимают
+//! клавиш Slint и печатные клавиши раскладки US приходят окну нажатием и отпусканием.
+//! Цифровой блок печатает цифры независимо от Num Lock. `Resync` и уход устройства снимают
 //! нажатие указателя без клика, а нажатия из снимка устройства начинают жест заново.
 
 use std::{collections::BTreeMap, rc::Rc};
@@ -19,6 +20,18 @@ use slint::{
 };
 
 use crate::screen::ScreenPlatform;
+
+const KEYBOARD_PAGE: u16 = 0x07;
+const LEFT_SHIFT: Usage = Usage::new(KEYBOARD_PAGE, 0xE1);
+const RIGHT_SHIFT: Usage = Usage::new(KEYBOARD_PAGE, 0xE5);
+const KEYPAD_ENTER: Usage = Usage::new(KEYBOARD_PAGE, 0x58);
+
+const TYPED_FIRST: u16 = 0x04;
+const TYPED: &[u8; 53] = b"abcdefghijklmnopqrstuvwxyz1234567890\0\0\0\0 -=[]\\\\;'`,./";
+const TYPED_SHIFTED: &[u8; 53] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()\0\0\0\0 _+{}||:\"~<>?";
+
+const KEYPAD_FIRST: u16 = 0x54;
+const KEYPAD: &[u8; 16] = b"/*-+\x001234567890.";
 
 #[derive(Clone, Copy)]
 struct Screen {
@@ -46,6 +59,7 @@ struct Device {
     pointer_moved: bool,
     buttons: Vec<ButtonChange>,
     buttons_held: u8,
+    shifts_held: u8,
     contacts: BTreeMap<u16, Contact>,
 }
 
@@ -168,8 +182,18 @@ impl Translator {
             return;
         }
 
-        if let Some(key) = slint_key(usage) {
-            let text = SharedString::from(key);
+        if usage == LEFT_SHIFT || usage == RIGHT_SHIFT {
+            device.shifts_held = if pressed {
+                device.shifts_held.saturating_add(1)
+            } else {
+                device.shifts_held.saturating_sub(1)
+            };
+        }
+
+        let text = slint_key(usage)
+            .map(SharedString::from)
+            .or_else(|| typed(usage, device.shifts_held > 0).map(SharedString::from));
+        if let Some(text) = text {
             self.events.push(if pressed {
                 WindowEvent::KeyPressed { text }
             } else {
@@ -258,6 +282,7 @@ impl Device {
             pointer_moved: false,
             buttons: Vec::new(),
             buttons_held: 0,
+            shifts_held: 0,
             contacts: BTreeMap::new(),
         }
     }
@@ -397,8 +422,10 @@ fn pointer_button(usage: Usage) -> Option<PointerEventButton> {
 
 fn slint_key(usage: Usage) -> Option<Key> {
     match usage {
-        Usage::ENTER => Some(Key::Return),
+        Usage::ENTER | KEYPAD_ENTER => Some(Key::Return),
         Usage::ESCAPE => Some(Key::Escape),
+        LEFT_SHIFT => Some(Key::Shift),
+        RIGHT_SHIFT => Some(Key::ShiftR),
         Usage::BACKSPACE => Some(Key::Backspace),
         Usage::TAB => Some(Key::Tab),
         Usage::RIGHT => Some(Key::RightArrow),
@@ -406,5 +433,61 @@ fn slint_key(usage: Usage) -> Option<Key> {
         Usage::DOWN => Some(Key::DownArrow),
         Usage::UP => Some(Key::UpArrow),
         _ => None,
+    }
+}
+
+fn typed(usage: Usage, shift: bool) -> Option<char> {
+    if usage.page != KEYBOARD_PAGE {
+        return None;
+    }
+
+    let byte = if let Some(index) = usage.id.checked_sub(KEYPAD_FIRST) {
+        KEYPAD.get(usize::from(index))
+    } else {
+        let table = if shift { TYPED_SHIFTED } else { TYPED };
+        table.get(usize::from(usage.id.checked_sub(TYPED_FIRST)?))
+    };
+
+    // Нуль в таблице стоит у клавиш без символа.
+    byte.filter(|byte| **byte != 0)
+        .map(|byte| char::from(*byte))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(id: u16, shift: bool) -> Option<char> {
+        typed(Usage::new(KEYBOARD_PAGE, id), shift)
+    }
+
+    #[test]
+    fn printable_keys_follow_the_us_layout_and_shift() {
+        assert_eq!(text(0x04, false), Some('a'));
+        assert_eq!(text(0x04, true), Some('A'));
+
+        assert_eq!(text(0x1E, false), Some('1'));
+        assert_eq!(text(0x27, false), Some('0'));
+        assert_eq!(text(0x25, true), Some('*'));
+
+        assert_eq!(text(0x2E, false), Some('='));
+        assert_eq!(text(0x2E, true), Some('+'));
+        assert_eq!(text(0x38, false), Some('/'));
+
+        assert_eq!(text(0x39, false), None);
+        assert_eq!(text(0x28, false), None);
+    }
+
+    #[test]
+    fn keypad_types_digits_and_operators_regardless_of_shift() {
+        assert_eq!(text(0x54, true), Some('/'));
+        assert_eq!(text(0x57, false), Some('+'));
+        assert_eq!(text(0x58, false), None);
+
+        assert_eq!(text(0x59, false), Some('1'));
+        assert_eq!(text(0x62, false), Some('0'));
+        assert_eq!(text(0x63, false), Some('.'));
+
+        assert_eq!(text(0x64, false), None);
     }
 }

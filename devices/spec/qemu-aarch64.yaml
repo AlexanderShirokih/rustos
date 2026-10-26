@@ -9,9 +9,9 @@ boot:
 features: [power-semihosting]
 
 run: [
-  "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -m 512M -serial mon:stdio -nic none -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device -device virtio-mouse-device -device virtio-multitouch-device -global virtio-mmio.force-legacy=false -semihosting -d guest_errors,unimp -D qemu.log -kernel target/build/kernel.bin -initrd target/build/userland.img"
+  "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -m 512M -serial mon:stdio -display default,show-cursor=on -nic none -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device -device virtio-mouse-device -global virtio-mmio.force-legacy=false -semihosting -d guest_errors,unimp -D qemu.log -kernel target/build/kernel.bin -initrd target/build/userland.img"
 ]
 
 debug: [
-  "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -m 512M -serial mon:stdio -nic none -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device -device virtio-mouse-device -device virtio-multitouch-device -global virtio-mmio.force-legacy=false -semihosting -kernel target/build/kernel.bin -initrd target/build/userland.img -S -gdb tcp::1234"
+  "qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a53 -m 512M -serial mon:stdio -display default,show-cursor=on -nic none -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device -device virtio-mouse-device -global virtio-mmio.force-legacy=false -semihosting -kernel target/build/kernel.bin -initrd target/build/userland.img -S -gdb tcp::1234"
 ]

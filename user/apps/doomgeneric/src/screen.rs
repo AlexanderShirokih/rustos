@@ -127,7 +127,13 @@ impl Screen {
             .surface
             .zero_at(0, self.stride * self.layout.panel().height as usize)
             .and_then(|()| self.copy(frame))
-            .and_then(|()| self.controls(controls));
+            .and_then(|()| {
+                if controls.touch {
+                    self.controls(controls)
+                } else {
+                    Ok(())
+                }
+            });
         let panel = self.layout.panel();
         self.show(
             copied,

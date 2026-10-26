@@ -3,6 +3,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "apps/calculator",
     "apps/doomgeneric",
     "apps/files",
     "apps/journal",

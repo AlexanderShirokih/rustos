@@ -29,6 +29,7 @@ pub struct Controls {
     pub weapons: bool,
     pub held: [bool; 256],
     pub stick: Option<Point>,
+    pub touch: bool,
 }
 
 /// Обрабатывает целые кадры `Input`. Дескрипторы запрашиваются при `DeviceAdded`.
@@ -93,6 +94,9 @@ impl InputState {
             weapons: self.weapons,
             held: self.held,
             stick: self.stick,
+            touch: self.devices.values().any(|device| {
+                device.layout.binding() == Binding::Screen && device.layout.max_contacts() > 0
+            }),
         }
     }
 

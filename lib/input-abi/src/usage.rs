@@ -22,6 +22,7 @@ impl Usage {
     pub const ESCAPE: Self = Self::new(0x07, 0x29);
     pub const BACKSPACE: Self = Self::new(0x07, 0x2A);
     pub const TAB: Self = Self::new(0x07, 0x2B);
+    pub const F1: Self = Self::new(0x07, 0x3A);
 
     pub const RIGHT: Self = Self::new(0x07, 0x4F);
     pub const LEFT: Self = Self::new(0x07, 0x50);
