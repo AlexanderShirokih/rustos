@@ -156,7 +156,7 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
-debug = true
+strip = "symbols"
 opt-level = 2
 lto = "fat"
 codegen-units = 1

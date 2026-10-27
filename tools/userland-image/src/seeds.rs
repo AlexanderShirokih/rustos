@@ -2,7 +2,7 @@
 
 use anyhow::{Result, anyhow};
 use component_abi::{Attribute, ExportDeclaration, encode_manifest, manifest_len};
-use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE, encode_program};
+use userland::{Program, Segment, SegmentPermissions, USERLAND_PAGE_SIZE, encode_elf_program};
 use userland_image::{BOOT_PLAN_PATH, ComponentSpec, ImageRecord, encode, encode_plan};
 
 const BOOT_PATH: &str = "/boot/rootkeeper/exec";
@@ -112,7 +112,7 @@ fn boot_program() -> Result<Vec<u8>> {
         },
     ];
 
-    encode_program(&Program {
+    encode_elf_program(&Program {
         manifest: &encode_manifest::<MANIFEST_LEN>(&[], EXPORTS, &[]),
         entry_va: 0x4000_0000,
         stack_size: 4 * USERLAND_PAGE_SIZE,

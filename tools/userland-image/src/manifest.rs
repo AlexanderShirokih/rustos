@@ -30,7 +30,6 @@ impl ProgramManifest {
             Attribute, ExportDeclaration, RequirementDeclaration, encode_manifest_into,
             manifest_len,
         };
-        use userland::{Program, Segment, SegmentPermissions, encode_program};
 
         let requirements: Vec<_> = self
             .requirements
@@ -73,18 +72,23 @@ impl ProgramManifest {
         let features: Vec<&str> = self.features.iter().map(String::as_str).collect();
         let mut manifest = vec![0; manifest_len(&requirements, &exports, &features)];
         encode_manifest_into(&mut manifest, &requirements, &exports, &features);
-
-        encode_program(&Program {
-            manifest: &manifest,
-            entry_va: 4096,
-            stack_size: 4096,
-            segments: &[Segment {
-                va_base: 4096,
-                mem_size: 4096,
-                permissions: SegmentPermissions::ReadExecute,
-                bytes: b"CODE",
-            }],
-        })
-        .expect("fixture program")
+        program_with_manifest(&manifest)
     }
+}
+
+pub(crate) fn program_with_manifest(manifest: &[u8]) -> Vec<u8> {
+    use userland::{Program, Segment, SegmentPermissions, encode_elf_program};
+
+    encode_elf_program(&Program {
+        manifest,
+        entry_va: 4096,
+        stack_size: 4096,
+        segments: &[Segment {
+            va_base: 4096,
+            mem_size: 4096,
+            permissions: SegmentPermissions::ReadExecute,
+            bytes: b"CODE",
+        }],
+    })
+    .expect("fixture program")
 }

@@ -411,14 +411,14 @@ fn plan_counts_boot_exports_before_accepting_all_requirements() {
 fn plan_rejects_an_export_past_the_protocol_id_bound() {
     const WIDE: &str = "wide-exporter";
     let protocol = "P".repeat(PROTOCOL_ID_MAX + 1);
-    let mut bytes = declaration(Vec::new(), &[&protocol[..PROTOCOL_ID_MAX]]).program_bytes();
-    let at = 31 + 40 + 16;
-    bytes[at] += 1;
-    bytes.insert(at + 1, b'P');
-    bytes[27..31].copy_from_slice(
-        &(16u32 + 1 + u32::try_from(protocol.len()).expect("protocol length fits") + 1)
-            .to_le_bytes(),
-    );
+    let narrow = declaration(Vec::new(), &[&protocol[..PROTOCOL_ID_MAX]]).program_bytes();
+    let mut manifest = userland::ProgramView::manifest(
+        &userland::decode_program(&narrow).expect("fixture program"),
+    )
+    .to_vec();
+    manifest[16] += 1;
+    manifest.insert(17, b'P');
+    let bytes = crate::manifest::program_with_manifest(&manifest);
     let image = Image::new();
     let mut programs = image.programs();
     programs.push(PlanProgram {

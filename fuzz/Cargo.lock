@@ -147,6 +147,7 @@ version = "0.1.0"
 name = "userland"
 version = "0.1.0"
 dependencies = [
+ "component-abi",
  "syscall",
 ]
 

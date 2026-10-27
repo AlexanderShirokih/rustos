@@ -315,7 +315,7 @@ fn out_of_bounds(entry_index: usize, header: RecordHeader) -> ImageDecodeError {
 #[cfg(test)]
 mod tests {
     use userland::{
-        Program, ProgramView, Segment, SegmentPermissions, decode_program, encode_program,
+        Program, ProgramView, Segment, SegmentPermissions, decode_program, encode_elf_program,
     };
 
     use super::*;
@@ -338,7 +338,7 @@ mod tests {
                 bytes: b"RW",
             },
         ];
-        encode_program(&Program {
+        encode_elf_program(&Program {
             manifest: &[],
             entry_va: 0x4000_0000,
             stack_size: 0x4000,

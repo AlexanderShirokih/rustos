@@ -29,7 +29,6 @@ use rootkeeper::{
 use rtc_abi::rtc;
 use runtime::{JoinHandle, PortTransport, Timeout, spawn_owned};
 use syscall::{Handle, ProcessName, Rights, SyscallError, kind};
-use userland::USERLAND_PROGRAM_MAGIC;
 use userland_image::{ComponentSpec, ExportIndex, PlanDecodeError};
 
 use crate::{
@@ -778,12 +777,14 @@ fn compiled_plan_carries_the_boot_composition() {
 #[test_harness::test]
 fn a_program_entry_read_as_a_plan_names_the_boot_failure() {
     let failure = image().plan(EXPORT_ENTRY).err();
+    let entries = image().entries().expect("image entries");
+    let magic = entries
+        .entry(EXPORT_ENTRY)
+        .and_then(|entry| entry.data().first_chunk::<8>().copied());
 
     test_harness::check_eq!(
         failure,
-        Some(BootFailure::Plan(PlanDecodeError::InvalidMagic(
-            USERLAND_PROGRAM_MAGIC
-        )))
+        magic.map(|magic| BootFailure::Plan(PlanDecodeError::InvalidMagic(magic)))
     );
     test_harness::check_eq!(failure.map(BootFailure::stopped), Some(Stopped::BadImage));
 }

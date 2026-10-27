@@ -141,13 +141,10 @@ mod tests {
     use std::path::PathBuf;
 
     use component_abi::encode_manifest;
-    use userland::{Program, ProgramView, Segment, SegmentPermissions, encode_program};
+    use userland::{Program, ProgramView, Segment, SegmentPermissions, encode_elf_program};
     use userland_image::decode;
 
-    use super::{
-        super::{build::BuiltSegment, program::ResolvedProgram},
-        *,
-    };
+    use super::{super::program::ResolvedProgram, *};
 
     const BOOT_PATH: &str = "/boot/rootkeeper";
 
@@ -162,34 +159,25 @@ mod tests {
     }
 
     fn built_segment(
-        bytes: &[u8],
+        bytes: &'static [u8],
         va_base: u64,
         mem_size: u64,
         permissions: SegmentPermissions,
-    ) -> BuiltSegment {
-        BuiltSegment {
-            bytes: bytes.to_vec(),
+    ) -> Segment<'static> {
+        Segment {
+            bytes,
             va_base,
             mem_size,
             permissions,
         }
     }
 
-    fn built_entry(path: &str, boot: bool, entry_va: u64, segments: &[BuiltSegment]) -> BuiltEntry {
-        let views: Vec<_> = segments
-            .iter()
-            .map(|segment| Segment {
-                bytes: &segment.bytes,
-                va_base: segment.va_base,
-                mem_size: segment.mem_size,
-                permissions: segment.permissions,
-            })
-            .collect();
-        let bytes = encode_program(&Program {
+    fn built_entry(path: &str, boot: bool, entry_va: u64, segments: &[Segment<'_>]) -> BuiltEntry {
+        let bytes = encode_elf_program(&Program {
             manifest: &encode_manifest::<16>(&[], &[], &[]),
             entry_va,
             stack_size: 0x4000,
-            segments: &views,
+            segments,
         })
         .unwrap_or_default();
         BuiltEntry {
