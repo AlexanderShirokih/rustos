@@ -192,7 +192,8 @@ pub trait FileSystemBackend {
     }
 
     /// Копирует `data` в подготовленное окно и публикует конец записи после переноса байт.
-    /// Вызывающий исключает конкурирующие изменения узла на время операции.
+    /// Пустой `data` длину узла не меняет. Вызывающий исключает конкурирующие изменения узла
+    /// на время операции.
     fn write_at(
         &mut self,
         stores: &mut dyn ByteStore,
@@ -205,8 +206,10 @@ pub trait FileSystemBackend {
                 return Err(FileSystemError::ReadOnly);
             }
 
-            let size = self.metadata(node)?.size;
-            self.set_size(stores, node, size.max(offset))?;
+            if self.metadata(node)?.kind.is_directory() {
+                return Err(FileSystemError::IsADirectory);
+            }
+
             return Ok(0);
         }
 

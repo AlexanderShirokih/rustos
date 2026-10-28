@@ -749,9 +749,14 @@ fn split_last(path: &str) -> Option<(&str, &str)> {
 }
 
 fn write_into(file: &mut Vec<u8>, start: usize, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+
     let end = start + data.len();
     if file.len() < end {
         file.resize(end, 0);
     }
+
     file[start..end].copy_from_slice(data);
 }

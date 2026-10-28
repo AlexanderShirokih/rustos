@@ -788,8 +788,6 @@ mod tests {
     fn write_past_the_end_grows_the_file_with_zeros() {
         let mut fs = RamFileSystem::new();
         let sample = file(&mut fs, "/sample");
-        assert_eq!(fs.write_at(sample, 4, b""), Ok(0));
-        assert_eq!(read(&fs, sample, 0, 4), b"\0\0\0\0");
         assert_eq!(fs.write_at(sample, 4, b"tail"), Ok(4));
         assert_eq!(fs.metadata(sample).expect("metadata").size, 8);
         assert_eq!(read(&fs, sample, 0, 8), b"\0\0\0\0tail");
@@ -797,6 +795,14 @@ mod tests {
         assert_eq!(fs.write_at(sample, 0, b"head"), Ok(4));
         assert_eq!(read(&fs, sample, 0, 8), b"headtail");
         assert_eq!(fs.metadata(sample).expect("metadata").size, 8);
+    }
+
+    #[test]
+    fn empty_write_past_the_end_keeps_the_size() {
+        let mut fs = RamFileSystem::new();
+        let sample = file(&mut fs, "/sample");
+        assert_eq!(fs.write_at(sample, 4, b""), Ok(0));
+        assert_eq!(fs.metadata(sample).expect("metadata").size, 0);
     }
 
     #[test]

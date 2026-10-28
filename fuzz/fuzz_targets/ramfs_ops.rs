@@ -497,7 +497,7 @@ fn write_at(fs: &mut RamFileSystem, model: &mut Model, path: &str, offset: u64, 
     let Some(node) = node_of(fs, model, path) else {
         return;
     };
-    let expected = expected_write(model, path, offset);
+    let expected = expected_write(model, path, offset, data);
     let written = fs.write_at(node, offset, data);
     if let Err(error) = expected {
         assert_eq!(written, Err(error), "write {path} at {offset}");
@@ -507,11 +507,21 @@ fn write_at(fs: &mut RamFileSystem, model: &mut Model, path: &str, offset: u64, 
     }
 }
 
-fn expected_write(model: &Model, path: &str, offset: u64) -> Result<(), FileSystemError> {
+fn expected_write(
+    model: &Model,
+    path: &str,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), FileSystemError> {
     let node = model.resolve(path)?;
     if node.kind == NodeKind::Directory {
         return Err(FileSystemError::IsADirectory);
     }
+
+    if data.is_empty() {
+        return Ok(());
+    }
+
     // Смещение генерируется либо внутри потолка файла, либо за OVERSIZE_MIN: промежуток между
     // ними прогон не выдаёт, поэтому одной границы хватает.
     if offset >= OVERSIZE_MIN {
@@ -524,7 +534,7 @@ fn append(fs: &mut RamFileSystem, model: &mut Model, path: &str, data: &[u8]) {
     let Some(node) = node_of(fs, model, path) else {
         return;
     };
-    let expected = expected_append(model, path);
+    let expected = expected_append(model, path, data);
     let appended = fs.append(node, data);
     match expected {
         Err(error) => assert_eq!(appended, Err(error), "append {path}"),
@@ -535,13 +545,13 @@ fn append(fs: &mut RamFileSystem, model: &mut Model, path: &str, data: &[u8]) {
     }
 }
 
-fn expected_append(model: &Model, path: &str) -> Result<u64, FileSystemError> {
+fn expected_append(model: &Model, path: &str, data: &[u8]) -> Result<u64, FileSystemError> {
     let node = model.resolve(path)?;
     if node.kind == NodeKind::Directory {
         return Err(FileSystemError::IsADirectory);
     }
     let offset = node.data.len() as u64;
-    expected_write(model, path, offset)?;
+    expected_write(model, path, offset, data)?;
     Ok(offset)
 }
 
@@ -705,9 +715,14 @@ fn assert_bytes(fs: &RamFileSystem, node: NodeId, expected: &[u8], path: &str) {
 }
 
 fn write_into(file: &mut Vec<u8>, start: usize, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+
     let end = start + data.len();
     if file.len() < end {
         file.resize(end, 0);
     }
+
     file[start..end].copy_from_slice(data);
 }
