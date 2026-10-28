@@ -4,7 +4,7 @@ use core::{convert::Infallible, error::Error, fmt, time::Duration};
 use std::{rc::Rc, time::Instant};
 
 use display_abi::{Area, DisplayDimension, DisplayError, display};
-use executor::{PortChannel, Reactor, TaskHandle};
+use executor::{PortChannel, TaskHandle};
 use ipc::CallError;
 use kernel_objects::{Mapping, MemoryRegion, Session, SessionTransport};
 use slint::{
@@ -35,7 +35,6 @@ pub struct ScreenPlatform {
     window: Rc<MinimalSoftwareWindow>,
     pub(crate) tasks: TaskQueue,
     blank: bool,
-    reactor: Reactor,
     pub(crate) input: Option<TaskHandle>,
 }
 
@@ -57,11 +56,8 @@ impl ScreenPlatform {
     /// Получает размер, физический размер и поверхность сессии `screen` и устанавливает
     /// платформу Slint, окно которой занимает весь экран. Масштаб окна выбирается по плотности
     /// экрана.
-    pub async fn open(
-        screen: Session<display::Protocol>,
-        reactor: Reactor,
-    ) -> Result<Self, ScreenError> {
-        let screen = PortChannel::client(screen, reactor.clone());
+    pub async fn open(screen: Session<display::Protocol>) -> Result<Self, ScreenError> {
+        let screen = PortChannel::client(screen);
         let dimension = screen
             .dimension()
             .await
@@ -93,7 +89,6 @@ impl ScreenPlatform {
             window,
             tasks,
             blank: false,
-            reactor,
             input: None,
         })
     }
@@ -107,7 +102,7 @@ impl ScreenPlatform {
     /// Подключает сессию `screen` вместо прежней. Размер экрана сессии должен совпадать с
     /// размером экрана [`open`](Self::open). Следующий кадр рисует окно целиком.
     pub async fn attach(&mut self, screen: Session<display::Protocol>) -> Result<(), ScreenError> {
-        let screen = PortChannel::client(screen, self.reactor.clone());
+        let screen = PortChannel::client(screen);
         self.attached = None;
         let dimension = screen
             .dimension()
@@ -207,7 +202,7 @@ impl ScreenPlatform {
             let changed = self.tasks.changed(revision);
             if let Some(timeout) = timeout {
                 let nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
-                let _ = self.reactor.timeout(Timeout::from_ns(nanos), changed).await;
+                let _ = executor::timeout(Timeout::from_ns(nanos), changed).await;
             } else {
                 changed.await;
             }

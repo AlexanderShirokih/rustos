@@ -1,7 +1,6 @@
 use core::marker::PhantomData;
 
 use component_abi::{Attributes, STARTUP_REQUEST_TIMEOUT};
-use executor::Reactor;
 use kernel_objects::{Session, kind};
 use syscall::Handle;
 
@@ -48,12 +47,11 @@ impl<P: ipc::Protocol> Import<P> {
         })
     }
 
-    /// Открывает сессию как [`Self::open`], ожидая ответ через `reactor`.
-    pub async fn open_async(&self, reactor: &Reactor) -> Result<Session<P>, StartupError> {
+    /// Открывает сессию как [`Self::open`], не останавливая другие задачи потока.
+    pub async fn open_async(&self) -> Result<Session<P>, StartupError> {
         loop {
             let answer = session_async::<P>(
                 self.parent,
-                reactor,
                 self.requirement,
                 Attributes::empty(),
                 STARTUP_REQUEST_TIMEOUT,

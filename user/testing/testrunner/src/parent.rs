@@ -525,8 +525,6 @@ fn serve(executor: &Rc<Executor>, state: Arc<Mutex<State>>) -> impl Future<Outpu
         },
     );
 
-    let reactor = executor.reactor();
-
     async move {
         let maintenance = async {
             loop {
@@ -541,7 +539,7 @@ fn serve(executor: &Rc<Executor>, state: Arc<Mutex<State>>) -> impl Future<Outpu
                         .min(LAUNCH_CHECK_INTERVAL)
                 };
 
-                reactor.sleep(wait).await;
+                executor::sleep(wait).await;
             }
         };
 

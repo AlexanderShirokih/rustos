@@ -3,7 +3,7 @@ use core::marker::PhantomData;
 use component_abi::{
     Attributes, STARTUP_REQUEST_TIMEOUT, SessionError, SessionRequirement, component_startup,
 };
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use ipc::{CallError, Timeout};
 use kernel_objects::{Port, Session, kind};
 use syscall::Handle;
@@ -58,14 +58,9 @@ impl<P: ipc::Protocol> Providers<P> {
         }
     }
 
-    /// Ищет экспорты протокола `P`, совпавшие с наборами `query`. Ответы родителя задача ждёт
-    /// через `reactor`. Наборы запрашиваются по очереди, результаты набора фиксируются на
-    /// момент запроса.
-    pub async fn all<Q: Query>(
-        &self,
-        reactor: &Reactor,
-        query: Q,
-    ) -> Result<ProviderSessions<Q>, StartupError> {
+    /// Ищет экспорты протокола `P`, совпавшие с наборами `query`. Наборы запрашиваются по
+    /// очереди, результаты набора фиксируются на момент запроса.
+    pub async fn all<Q: Query>(&self, query: Q) -> Result<ProviderSessions<Q>, StartupError> {
         let mut sessions = ProviderSessions {
             parent: self.parent,
             requirement: self.requirement,
@@ -75,19 +70,15 @@ impl<P: ipc::Protocol> Providers<P> {
             stage: Stage::Finished,
         };
 
-        sessions.stage = sessions.enumerate_next(reactor).await?;
+        sessions.stage = sessions.enumerate_next().await?;
         Ok(sessions)
     }
 
     /// Запрашивает наблюдение за экспортами протокола `P`, совпавшими с `attributes`. Ответ
-    /// родителя задача ждёт через `reactor` не дольше `STARTUP_REQUEST_TIMEOUT`.
-    pub async fn watch(
-        &self,
-        reactor: &Reactor,
-        attributes: Attributes<'_>,
-    ) -> Result<ProviderWatch, StartupError> {
-        let parent = AsyncStartup::new(PortChannel::new(self.parent, reactor.clone()))
-            .with_wait(STARTUP_REQUEST_TIMEOUT);
+    /// родителя задача ждёт не дольше `STARTUP_REQUEST_TIMEOUT`.
+    pub async fn watch(&self, attributes: Attributes<'_>) -> Result<ProviderWatch, StartupError> {
+        let parent =
+            AsyncStartup::new(PortChannel::new(self.parent)).with_wait(STARTUP_REQUEST_TIMEOUT);
 
         let watch = answered(
             self.requirement,
@@ -100,11 +91,11 @@ impl<P: ipc::Protocol> Providers<P> {
         })
     }
 
-    /// Открывает сессию экспорта `found` через `reactor`. Каждый запрос ждёт не дольше
+    /// Открывает сессию экспорта `found`. Каждый запрос ждёт не дольше
     /// `STARTUP_REQUEST_TIMEOUT` и повторяется при `IpcError::PeerClosed`.
-    pub async fn open(&self, reactor: &Reactor, found: &Found) -> Result<Session<P>, StartupError> {
+    pub async fn open(&self, found: &Found) -> Result<Session<P>, StartupError> {
         loop {
-            let answer = open::<P>(found, reactor, STARTUP_REQUEST_TIMEOUT).await;
+            let answer = open::<P>(found, STARTUP_REQUEST_TIMEOUT).await;
 
             if !repeats(&answer) {
                 return answered(self.requirement, answer);
@@ -112,38 +103,27 @@ impl<P: ipc::Protocol> Providers<P> {
         }
     }
 
-    /// Открывает через `reactor` сессию первого экспорта, совпавшего с наборами `query`.
+    /// Открывает сессию первого экспорта, совпавшего с наборами `query`.
     /// `None` - ни один набор не дал совпадений.
-    pub async fn open_first<Q: Query>(
-        &self,
-        reactor: &Reactor,
-        query: Q,
-    ) -> Result<Option<Session<P>>, StartupError> {
-        let Some(found) = self
-            .all(reactor, query)
-            .await?
-            .next(reactor)
-            .await
-            .transpose()?
-        else {
+    pub async fn open_first<Q: Query>(&self, query: Q) -> Result<Option<Session<P>>, StartupError> {
+        let Some(found) = self.all(query).await?.next().await.transpose()? else {
             return Ok(None);
         };
 
-        self.open(reactor, &found).await.map(Some)
+        self.open(&found).await.map(Some)
     }
 }
 
 impl ProviderWatch {
-    /// Ждёт не дольше `wait` экспорт, ещё не выданный этим наблюдением. Ответ родителя
-    /// задача ждёт через `reactor`.
+    /// Ждёт не дольше `wait` экспорт, ещё не выданный этим наблюдением.
     ///
     /// Отказы:
     /// - `Ipc(IpcError::Timeout)` - срок истёк, экспорт остаётся для следующего вызова;
     /// - `Refused` - вызов заменён либо родитель ответил концом перечисления;
     /// - `NoSpace` - у родителя не хватило ресурса на результат;
     /// - `Ipc` - другой отказ транспорта.
-    pub async fn next(&self, reactor: &Reactor, wait: Timeout) -> Result<Found, StartupError> {
-        self.found(next(&self.watch, reactor, wait).await)
+    pub async fn next(&self, wait: Timeout) -> Result<Found, StartupError> {
+        self.found(next(&self.watch, wait).await)
     }
 
     fn found(
@@ -158,14 +138,14 @@ impl ProviderWatch {
 }
 
 impl<Q: Query> ProviderSessions<Q> {
-    /// Забирает следующий результат перечисления через `reactor`.
-    pub async fn next(&mut self, reactor: &Reactor) -> Option<Result<Found, StartupError>> {
+    /// Забирает следующий результат перечисления.
+    pub async fn next(&mut self) -> Option<Result<Found, StartupError>> {
         loop {
             let failed = match &self.stage {
                 Stage::Enumerating(enumeration) => {
                     match answered(
                         self.requirement,
-                        next(enumeration, reactor, STARTUP_REQUEST_TIMEOUT).await,
+                        next(enumeration, STARTUP_REQUEST_TIMEOUT).await,
                     ) {
                         Ok(Some(found)) => return Some(Ok(found)),
                         Ok(None) => {
@@ -176,7 +156,7 @@ impl<Q: Query> ProviderSessions<Q> {
                         Err(error) => error,
                     }
                 }
-                Stage::NextSet => match self.enumerate_next(reactor).await {
+                Stage::NextSet => match self.enumerate_next().await {
                     Ok(stage) => {
                         self.stage = stage;
                         continue;
@@ -191,13 +171,13 @@ impl<Q: Query> ProviderSessions<Q> {
         }
     }
 
-    async fn enumerate_next(&mut self, reactor: &Reactor) -> Result<Stage, StartupError> {
+    async fn enumerate_next(&mut self) -> Result<Stage, StartupError> {
         let Some(attributes) = self.query.attributes(self.step) else {
             return Ok(Stage::Finished);
         };
 
-        let parent = AsyncStartup::new(PortChannel::new(self.parent, reactor.clone()))
-            .with_wait(STARTUP_REQUEST_TIMEOUT);
+        let parent =
+            AsyncStartup::new(PortChannel::new(self.parent)).with_wait(STARTUP_REQUEST_TIMEOUT);
 
         let enumeration = answered(
             self.requirement,

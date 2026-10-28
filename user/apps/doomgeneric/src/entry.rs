@@ -99,10 +99,8 @@ fn open_window(
             .and_then(|executor| {
                 let executor = Rc::new(executor);
                 executor.block_on(async {
-                    let parent = AsyncStartup::new(PortChannel::from_transport(
-                        parent.into_channel(),
-                        executor.reactor(),
-                    ));
+                    let parent =
+                        AsyncStartup::new(PortChannel::from_transport(parent.into_channel()));
                     let ApplicationWindow {
                         window,
                         input,

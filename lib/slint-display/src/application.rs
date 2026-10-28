@@ -18,10 +18,7 @@ pub async fn receive_window(
     executor: &Rc<Executor>,
     parent: startup_contract::Client<PortTransport>,
 ) -> Result<Shown, WindowError> {
-    let parent = AsyncStartup::new(PortChannel::from_transport(
-        parent.into_channel(),
-        executor.reactor(),
-    ));
+    let parent = AsyncStartup::new(PortChannel::from_transport(parent.into_channel()));
     let ApplicationWindow {
         window,
         input,

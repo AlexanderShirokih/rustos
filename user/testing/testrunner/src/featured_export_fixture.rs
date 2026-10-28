@@ -10,7 +10,7 @@ use bootstrap_abi::{features, hardware, image, system_info};
 use component_startup::{
     Attributes, Providers, Requirements as _, SessionPort, component_manifest,
 };
-use executor::{Executor, PortChannel, Reactor};
+use executor::{Executor, PortChannel};
 use kernel_objects::Session;
 use log_abi::journal;
 use runtime::{log_fmt, log_line};
@@ -40,46 +40,22 @@ component_manifest! {
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let requirements = FeaturedExportStartup::from_parent(parent);
     let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
-    let reactor = executor.reactor();
 
     executor.block_on(async {
-        log_opened(
-            "hardware",
-            &requirements.hardware,
-            &reactor,
-            async |_session| {},
-        )
-        .await?;
-        log_opened(
-            "system_info",
-            &requirements.system_info,
-            &reactor,
-            async |session| {
-                PortChannel::client(session, reactor.clone())
-                    .snapshot()
-                    .await
-                    .is_ok_and(|snapshot| {
-                        snapshot.cpus > 0 && snapshot.free_frames <= snapshot.managed_frames
-                    })
-            },
-        )
+        log_opened("hardware", &requirements.hardware, async |_session| {}).await?;
+        log_opened("system_info", &requirements.system_info, async |session| {
+            PortChannel::client(session)
+                .snapshot()
+                .await
+                .is_ok_and(|snapshot| {
+                    snapshot.cpus > 0 && snapshot.free_frames <= snapshot.managed_frames
+                })
+        })
         .await?;
 
-        log_opened("image", &requirements.images, &reactor, async |_session| {}).await?;
-        log_opened(
-            "features",
-            &requirements.features,
-            &reactor,
-            async |_session| {},
-        )
-        .await?;
-        log_opened(
-            "journal",
-            &requirements.journal,
-            &reactor,
-            async |_session| {},
-        )
-        .await?;
+        log_opened("image", &requirements.images, async |_session| {}).await?;
+        log_opened("features", &requirements.features, async |_session| {}).await?;
+        log_opened("journal", &requirements.journal, async |_session| {}).await?;
 
         let export = SessionPort::create().map_err(|_| Failed)?;
         log_line("started");
@@ -90,21 +66,16 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
 async fn log_opened<P: ipc::Protocol, T: Debug>(
     name: &str,
     providers: &Providers<P>,
-    reactor: &Reactor,
     inspect: impl AsyncFnOnce(Session<P>) -> T,
 ) -> Result<(), Failed> {
     let mut found = providers
-        .all(reactor, Attributes::empty())
+        .all(Attributes::empty())
         .await
         .map_err(|_| Failed)?;
 
-    let found = found
-        .next(reactor)
-        .await
-        .ok_or(Failed)?
-        .map_err(|_| Failed)?;
+    let found = found.next().await.ok_or(Failed)?.map_err(|_| Failed)?;
 
-    let opened = match providers.open(reactor, &found).await {
+    let opened = match providers.open(&found).await {
         Ok(session) => Ok(inspect(session).await),
         Err(error) => Err(error.failure),
     };

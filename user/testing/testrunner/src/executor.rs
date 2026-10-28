@@ -11,7 +11,7 @@ use core::{
 };
 
 use component_startup::{SessionEvent, SessionEvents};
-use executor::{Executor, Reactor, yield_now};
+use executor::{Executor, yield_now};
 use kernel_objects::{Error, Port, Signal};
 use runtime::{Instant, Mutex, Timeout, port_send, sleep, spawn_owned};
 use syscall::{Rights, SIGNALED, SyscallError, WAIT_MANY_MAX_COUNT, WaitItem};
@@ -58,10 +58,10 @@ fn send_frame(session: Port, result: &'static AtomicI64) -> runtime::JoinHandle 
     .expect("spawn sender")
 }
 
-async fn first_frame(reactor: &Reactor, port: &Port) -> kernel_objects::Result<u64> {
+async fn first_frame(port: &Port) -> kernel_objects::Result<u64> {
     let mut events = SessionEvents::new(port);
     loop {
-        match events.recv(reactor).await? {
+        match events.recv().await? {
             Some(SessionEvent::Frame(frame)) => return Ok(frame.resources.badge),
             Some(SessionEvent::Gone(_)) => {}
             None => return Err(Error::Syscall(SyscallError::BadHandle)),
@@ -128,15 +128,13 @@ fn executor_serves_two_ports_on_one_thread() {
     let second_sender = send_frame(session(&second, SECOND_BADGE), &SECOND_SEND);
 
     let executor = executor();
-    let reactor = executor.reactor();
     let spawned = Rc::new(Cell::new(None));
     let spawned_badge = Rc::clone(&spawned);
-    let task_reactor = reactor.clone();
     executor.spawn(async move {
-        spawned_badge.set(Some(first_frame(&task_reactor, &second).await));
+        spawned_badge.set(Some(first_frame(&second).await));
     });
     let main = executor.block_on(async {
-        let badge = first_frame(&reactor, &first).await;
+        let badge = first_frame(&first).await;
         until(|| spawned.get().is_some()).await;
         badge
     });
@@ -147,6 +145,48 @@ fn executor_serves_two_ports_on_one_thread() {
     second_sender.join(JOIN_TIMEOUT).expect("sender joins");
     test_harness::check_eq!(FIRST_SEND.load(SeqCst), 0);
     test_harness::check_eq!(SECOND_SEND.load(SeqCst), 0);
+}
+
+#[test_harness::test]
+fn executors_on_two_threads_resume_their_own_tasks() {
+    let first = Port::create().expect("port create");
+    let second = Port::create().expect("port create");
+    let first_sender = send_frame(session(&first, FIRST_BADGE), &FIRST_SEND);
+    let second_sender = send_frame(session(&second, SECOND_BADGE), &SECOND_SEND);
+
+    let worker = spawn_owned(move || {
+        let badge = executor().block_on(first_frame(&second));
+
+        u32::from(badge == Ok(SECOND_BADGE.get()))
+    })
+    .expect("spawn worker");
+    let main = executor().block_on(first_frame(&first));
+
+    worker.wait(JOIN_TIMEOUT).expect("worker exits");
+    test_harness::check_eq!(worker.exit_code(), Ok(1));
+    worker.join(JOIN_TIMEOUT).expect("worker joins");
+    test_harness::check_eq!(main, Ok(FIRST_BADGE.get()));
+    first_sender.join(JOIN_TIMEOUT).expect("sender joins");
+    second_sender.join(JOIN_TIMEOUT).expect("sender joins");
+}
+
+#[test_harness::test]
+fn a_nested_executor_returns_the_wait_context_of_the_outer_one() {
+    let port = Port::create().expect("port create");
+
+    let (slept, badge) = executor().block_on(async {
+        let start = Instant::now();
+        executor().block_on(executor::sleep(SLEEP_DEADLINE));
+        let slept = Instant::now().since(start);
+        let sender = send_frame(session(&port, FIRST_BADGE), &FIRST_SEND);
+        let badge = first_frame(&port).await;
+        sender.join(JOIN_TIMEOUT).expect("sender joins");
+
+        (slept, badge)
+    });
+
+    test_harness::check!(slept >= SLEEP_DEADLINE);
+    test_harness::check_eq!(badge, Ok(FIRST_BADGE.get()));
 }
 
 #[test_harness::test]
@@ -161,12 +201,10 @@ fn executor_fails_a_wait_on_a_closed_handle() {
         .expect("signal is open");
 
     let executor = executor();
-    let reactor = executor.reactor();
     let failed = Rc::new(Cell::new(None));
     let waiter_result = Rc::clone(&failed);
-    let waiter_reactor = reactor.clone();
     executor.spawn(async move {
-        waiter_result.set(Some(waiter_reactor.wait(item).await));
+        waiter_result.set(Some(executor::wait(item).await));
     });
     executor.spawn(async move {
         // Ожидатель регистрирует запись до закрытия.
@@ -174,7 +212,7 @@ fn executor_fails_a_wait_on_a_closed_handle() {
         closing.borrow_mut().take();
     });
     let main = executor.block_on(async {
-        let badge = first_frame(&reactor, &port).await;
+        let badge = first_frame(&port).await;
         until(|| failed.get().is_some()).await;
         badge
     });
@@ -197,13 +235,11 @@ fn executor_refuses_a_wait_over_the_limit() {
     let completed = Rc::new(Cell::new(0usize));
 
     let executor = executor();
-    let reactor = executor.reactor();
     for signal in signals.iter() {
         let item = WaitItem::new(signal.as_raw(), SIGNALED);
         let completed = Rc::clone(&completed);
-        let reactor = reactor.clone();
         executor.spawn(async move {
-            if reactor.wait(item).await.is_ok() {
+            if executor::wait(item).await.is_ok() {
                 completed.set(completed.get().saturating_add(1));
             }
         });
@@ -213,7 +249,7 @@ fn executor_refuses_a_wait_over_the_limit() {
     let (refused, waiting) = executor.block_on(async {
         // Порождённые задачи регистрируют ожидания до следующего опроса главной.
         yield_now().await;
-        let refused = reactor.wait(WaitItem::new(extra.as_raw(), SIGNALED)).await;
+        let refused = executor::wait(WaitItem::new(extra.as_raw(), SIGNALED)).await;
         let waiting = completed.get();
         for signal in signals.iter() {
             signal.notify_all().expect("signal raise");
@@ -236,13 +272,11 @@ fn executor_alternates_constantly_ready_objects() {
     let resumed = Rc::new([Cell::new(0u64), Cell::new(0u64)]);
 
     let executor = executor();
-    let reactor = executor.reactor();
     for (index, signal) in ready.iter().enumerate() {
         let item = WaitItem::new(signal.as_raw(), SIGNALED);
         let resumed = Rc::clone(&resumed);
-        let reactor = reactor.clone();
         executor.spawn(async move {
-            while reactor.wait(item).await.is_ok() {
+            while executor::wait(item).await.is_ok() {
                 if let Some(count) = resumed.get(index) {
                     count.set(count.get().saturating_add(1));
                 }
@@ -261,7 +295,7 @@ fn executor_alternates_constantly_ready_objects() {
                 0
             })
             .expect("spawn timer");
-            let stopped = reactor.wait(WaitItem::new(stop.as_raw(), SIGNALED)).await;
+            let stopped = executor::wait(WaitItem::new(stop.as_raw(), SIGNALED)).await;
             test_harness::check!(stopped.is_ok());
             timer.join(JOIN_TIMEOUT).expect("timer joins");
             *round = [
@@ -287,20 +321,19 @@ fn executor_resumes_a_sleep_while_another_task_receives() {
     let port = Port::create().expect("port create");
 
     let executor = executor();
-    let reactor = executor.reactor();
     let received = Rc::new(Cell::new(false));
     let slept = Rc::new(Cell::new(None));
-    let sleeper = (reactor.clone(), Rc::clone(&received), Rc::clone(&slept));
+    let sleeper = (Rc::clone(&received), Rc::clone(&slept));
     let start = Instant::now();
     executor.spawn(async move {
-        let (reactor, received, slept) = sleeper;
-        reactor.sleep(SLEEP_DEADLINE).await;
+        let (received, slept) = sleeper;
+        executor::sleep(SLEEP_DEADLINE).await;
         slept.set(Some((Instant::now().since(start), received.get())));
     });
 
     let sender = send_frame(session(&port, FIRST_BADGE), &FIRST_SEND);
     let main = executor.block_on(async {
-        let badge = first_frame(&reactor, &port).await;
+        let badge = first_frame(&port).await;
         received.set(true);
         until(|| slept.get().is_some()).await;
         badge
@@ -329,15 +362,13 @@ fn executor_timeout_drops_a_wait_without_a_signal() {
     let item = WaitItem::new(signal.as_raw(), SIGNALED);
 
     let executor = executor();
-    let reactor = executor.reactor();
     let dropped = Rc::new(Cell::new(false));
     let guard = Dropped(Rc::clone(&dropped));
 
-    let waited = executor.block_on(reactor.timeout(SLEEP_DEADLINE, {
-        let reactor = reactor.clone();
+    let waited = executor.block_on(executor::timeout(SLEEP_DEADLINE, {
         async move {
             let _guard = guard;
-            reactor.wait(item).await
+            executor::wait(item).await
         }
     }));
 
@@ -361,9 +392,10 @@ fn executor_cancels_an_owned_task_while_it_is_being_polled() {
         })
         .abort_on_drop();
     *holder.borrow_mut() = Some(task);
-    let reactor = executor.reactor();
-    let completed =
-        executor.block_on(reactor.timeout(SEND_TIMEOUT, until(|| Rc::strong_count(&marker) == 1)));
+    let completed = executor.block_on(executor::timeout(
+        SEND_TIMEOUT,
+        until(|| Rc::strong_count(&marker) == 1),
+    ));
     test_harness::check!(completed.is_some());
     test_harness::check_eq!(Rc::strong_count(&marker), 1);
     test_harness::check!(holder.borrow().is_none());
@@ -409,10 +441,7 @@ fn executor_mutex_waits_without_stopping_tasks_and_cancels_waiters() {
         *guard = 7;
         drop(guard);
 
-        let completed = executor
-            .reactor()
-            .timeout(SEND_TIMEOUT, until(|| entered.get()))
-            .await;
+        let completed = executor::timeout(SEND_TIMEOUT, until(|| entered.get())).await;
         test_harness::check!(completed.is_some());
         test_harness::check_eq!(*mutex.lock().await, 8);
         test_harness::check!(!cancelled_entered.get());
@@ -447,11 +476,7 @@ fn executor_mutex_releases_the_value_when_its_owner_is_cancelled() {
 
     drop(owner);
 
-    let completed = executor.block_on(
-        executor
-            .reactor()
-            .timeout(SEND_TIMEOUT, until(|| entered.get())),
-    );
+    let completed = executor.block_on(executor::timeout(SEND_TIMEOUT, until(|| entered.get())));
     test_harness::check!(completed.is_some());
     test_harness::check!(survivor.is_finished());
 }
@@ -465,31 +490,28 @@ fn executor_wait_any_returns_the_index_and_releases_cancelled_registrations() {
         WaitItem::new(first.as_raw(), SIGNALED),
         WaitItem::new(second.as_raw(), SIGNALED),
     ];
-    let reactor = executor.reactor();
 
     executor.block_on(async {
         for _ in 0..WAIT_MANY_MAX_COUNT {
             test_harness::check!(
-                reactor
-                    .timeout(Timeout::POLL, reactor.wait_any(&items))
+                executor::timeout(Timeout::POLL, executor::wait_any(&items))
                     .await
                     .is_none()
             );
         }
 
         second.notify_all().expect("second signal raised");
-        test_harness::check_eq!(reactor.wait_any(&items).await, Ok(1));
+        test_harness::check_eq!(executor::wait_any(&items).await, Ok(1));
 
         for _ in 0..WAIT_MANY_MAX_COUNT {
             test_harness::check!(
-                reactor
-                    .timeout(Timeout::POLL, reactor.wait_any(&items))
+                executor::timeout(Timeout::POLL, executor::wait_any(&items))
                     .await
                     .is_none()
             );
         }
 
-        test_harness::check_eq!(reactor.wait_any(&items).await, Ok(1));
+        test_harness::check_eq!(executor::wait_any(&items).await, Ok(1));
     });
 }
 
@@ -515,8 +537,7 @@ fn executor_keeps_operation_resources_after_its_result_waiter_is_dropped() {
     });
 
     drop(result);
-    let reactor = executor.reactor();
-    let completed = executor.block_on(reactor.timeout(SEND_TIMEOUT, async {
+    let completed = executor.block_on(executor::timeout(SEND_TIMEOUT, async {
         until(|| entered.get()).await;
         test_harness::check_eq!(Rc::strong_count(&marker), 2);
 

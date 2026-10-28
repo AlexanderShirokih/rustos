@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, sync::Arc};
-use core::task::{Context, Waker};
+use core::task::Poll;
 
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use ipc::{
     CallError, Listener as _,
     wire::{IpcError, MESSAGE_INLINE_MAX},
@@ -24,7 +24,6 @@ type Probe = Session<async_probe::Protocol>;
 type SlowAnswer = Result<u64, CallError<u8>>;
 
 struct Bus {
-    reactor: Reactor,
     entered: Arc<Signal>,
     release: Arc<Signal>,
 }
@@ -39,15 +38,13 @@ struct PendingBus {
 impl slow_bus::Service<Delivery> for Bus {
     async fn wait(&self, _frame: &Delivery) -> u64 {
         self.entered.notify_all().expect("bus request entered");
-        self.reactor
-            .timeout(
-                REQUEST_TIMEOUT,
-                self.reactor
-                    .wait(WaitItem::new(self.release.as_raw(), SIGNALED)),
-            )
-            .await
-            .expect("bus release before timeout")
-            .expect("bus released");
+        executor::timeout(
+            REQUEST_TIMEOUT,
+            executor::wait(WaitItem::new(self.release.as_raw(), SIGNALED)),
+        )
+        .await
+        .expect("bus release before timeout")
+        .expect("bus released");
         BUS_VALUE
     }
 }
@@ -66,7 +63,6 @@ impl PendingBus {
         let thread = spawn_owned(move || {
             let executor = crate::executor::executor();
             let bus = Bus {
-                reactor: executor.reactor(),
                 entered: observed,
                 release: resumed,
             };
@@ -185,20 +181,17 @@ fn async_component_serves_calls_and_exports_while_a_method_waits() {
 
     let bus = PendingBus::start();
     let executor = crate::executor::executor();
-    let caller = async_probe::Client::new(PortChannel::new(
-        first.handle().as_raw(),
-        executor.reactor(),
-    ))
-    .with_wait(REQUEST_TIMEOUT);
+    let caller = async_probe::Client::new(PortChannel::new(first.handle().as_raw()))
+        .with_wait(REQUEST_TIMEOUT);
     let mut call = Box::pin(core::future::IntoFuture::into_future(
         caller.slow(bus.session()),
     ));
 
-    test_harness::check!(
-        call.as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-            .is_pending()
-    );
+    // Ожидание исхода регистрируется в executor, который опрашивает вызов.
+    let started = executor.block_on(core::future::poll_fn(|cx| {
+        Poll::Ready(call.as_mut().poll(cx).is_pending())
+    }));
+    test_harness::check!(started);
     bus.entered
         .wait(SIGNALED, REQUEST_TIMEOUT)
         .expect("cancelled call reached bus");

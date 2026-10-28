@@ -15,7 +15,7 @@ use component_startup::{
     component_manifest, serve_component,
 };
 use driver_virtio_blk::{Disk, SessionBuffer};
-use executor::{Executor, JoinHandle, Mutex, PortChannel, Reactor};
+use executor::{Executor, JoinHandle, Mutex, PortChannel};
 use ipc::{IntoWireValue, ServiceOwner, wire::Cap};
 use kernel_objects::{Delivery, MemoryRegion, Port, SessionTransport};
 use runtime::{Instant, Timeout, log_fmt};
@@ -49,7 +49,6 @@ struct Shared {
     bound: Mutex<Option<Rc<Bound>>>,
     session: RefCell<Option<Rc<Session>>>,
     executor: Weak<Executor>,
-    reactor: Reactor,
     cleanups: RefCell<Vec<JoinHandle<()>>>,
     bus: virtio_mmio::Client<PortChannel<SessionTransport>>,
 }
@@ -102,7 +101,7 @@ impl Shared {
                 return Err(SessionError::Refused);
             }
 
-            self.reactor.sleep(BUSY_PAUSE).await;
+            executor::sleep(BUSY_PAUSE).await;
         }
 
         let task = {
@@ -111,12 +110,10 @@ impl Shared {
             executor.spawn(async move {
                 let mut bound = shared.bound.lock().await;
                 if bound.is_none() {
-                    let (device, info) = Device::connect(&shared.bus, shared.reactor.clone())
-                        .await
-                        .map_err(|refusal| {
-                            log_fmt(format_args!("block device refused: {refusal:?}"));
-                            SessionError::Refused
-                        })?;
+                    let (device, info) = Device::connect(&shared.bus).await.map_err(|refusal| {
+                        log_fmt(format_args!("block device refused: {refusal:?}"));
+                        SessionError::Refused
+                    })?;
                     let BlockInfo {
                         block_size, blocks, ..
                     } = info;
@@ -276,16 +273,14 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let bus = requirements.virtio.open().map_err(Stopped::Startup)?;
 
     let executor = Rc::new(Executor::new().map_err(Stopped::Kernel)?);
-    let reactor = executor.reactor();
     let service = Rc::new(SessionPort::create().map_err(Stopped::Kernel)?);
     let shared = Rc::new(Shared {
         service: service.clone(),
         bound: Mutex::new(None),
         session: RefCell::new(None),
         executor: Rc::downgrade(&executor),
-        reactor: reactor.clone(),
         cleanups: RefCell::new(Vec::new()),
-        bus: PortChannel::client(bus, reactor.clone()).with_wait(BUS_CALL_TIMEOUT),
+        bus: PortChannel::client(bus).with_wait(BUS_CALL_TIMEOUT),
     });
 
     let dispatch = shared.clone();
@@ -294,7 +289,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<block_device::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         service,
         move |frame| {
             let session = dispatch

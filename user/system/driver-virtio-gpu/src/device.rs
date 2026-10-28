@@ -3,7 +3,7 @@
 use alloc::rc::Weak;
 
 use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, SURFACE_PIXEL_BYTES};
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use ipc::wire::IpcError;
 use kernel_objects::{IrqLine, Mapping, SessionTransport};
 use runtime::{Timeout, log_fmt};
@@ -70,7 +70,6 @@ struct Device {
     commands: DmaRegion,
     transfer: Option<TransferBuffer>,
     edid: bool,
-    reactor: Reactor,
 }
 
 struct TransferBuffer {
@@ -124,9 +123,8 @@ impl From<kernel_objects::Error> for BindRefusal {
 impl Gpu {
     pub(crate) async fn bind(
         bus: &virtio_mmio::Client<PortChannel<SessionTransport>>,
-        reactor: Reactor,
     ) -> Result<Self, BindRefusal> {
-        let mut device = Device::open(bus, reactor).await?;
+        let mut device = Device::open(bus).await?;
         match device.attach().await {
             Ok((scanout, dimension)) => {
                 let physical_size = device.physical_size(scanout).await;
@@ -220,12 +218,11 @@ impl Gpu {
 impl Device {
     async fn open(
         bus: &virtio_mmio::Client<PortChannel<SessionTransport>>,
-        reactor: Reactor,
     ) -> Result<Self, BindRefusal> {
-        let session = open_slot(bus, &reactor, DeviceType::Gpu)
+        let session = open_slot(bus, DeviceType::Gpu)
             .await
             .map_err(|error| error.fold(BindRefusal::BusCall, BindRefusal::Bus))?;
-        let slot = PortChannel::client(session, reactor.clone()).with_wait(SLOT_CALL_TIMEOUT);
+        let slot = PortChannel::client(session).with_wait(SLOT_CALL_TIMEOUT);
         let line = slot
             .irq()
             .await
@@ -244,7 +241,6 @@ impl Device {
             commands,
             transfer: None,
             edid: false,
-            reactor,
         };
 
         if let Err(refusal) = device.initialize().await {
@@ -458,7 +454,6 @@ impl Device {
             &mut self.transport,
             &mut self.queue_memory,
             &self.line,
-            &self.reactor,
             COMPLETION_TIMEOUT,
         )
         .await?)

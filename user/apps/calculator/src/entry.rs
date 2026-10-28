@@ -26,7 +26,7 @@ async fn run(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     let Shown { window, input } = receive_window(executor, parent).await?;
 
     // Привязываем сессию окна к Slint.
-    let mut platform = ScreenPlatform::open(window, executor.reactor()).await?;
+    let mut platform = ScreenPlatform::open(window).await?;
 
     // Slint вызывает обработчики в потоке цикла кадра, поэтому состоянию хватает `RefCell`
     // внутри замыкания.

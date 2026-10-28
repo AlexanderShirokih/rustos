@@ -1,16 +1,14 @@
 //! Потоки POSIX библиотеки C: запись потока, его жизненный цикл и атрибуты.
 //!
 //! `pthread_t` - адрес записи потока. Запись хранит `errno` потока, значение выхода, состояние
-//! отсоединения, `JoinHandle` потока, массив его экземпляров thread-local переменных emutls и
-//! список деструкторов `thread_local`.
+//! отсоединения, `JoinHandle` потока и список деструкторов `thread_local`.
 //! Поток находит свою запись по ключу идентичности `runtime::tls`, пустой слот означает главный
 //! поток со статической записью.
 //!
 //! Деструкторы `thread_local` выполняются при выходе потока до деструкторов его ключей, а при
 //! `exit` - для вызвавшего потока.
 //!
-//! Запись существует до терминации потока, в том числе во время деструкторов его ключей, и
-//! освобождается вместе с массивом экземпляров.
+//! Запись существует до терминации потока, в том числе во время деструкторов его ключей.
 //! Запись отсоединённого потока при выходе встаёт в список завершившихся. Список проходят
 //! `pthread_create`, `pthread_join` и `pthread_detach` и освобождают записи терминированных
 //! потоков.
@@ -32,7 +30,7 @@ use core::{
 use runtime::{JoinHandle, Mutex, Timeout, thread::Builder, tls};
 use syscall::PAGE_SIZE;
 
-use crate::{emutls::Instances, errno::Errno, process};
+use crate::{errno::Errno, process};
 
 type Start = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 
@@ -71,7 +69,6 @@ pub(crate) struct Record {
     next: AtomicPtr<Record>,
     start: Option<Start>,
     arg: *mut c_void,
-    instances: Instances,
     destructors: UnsafeCell<Vec<(Destructor, *mut c_void)>>,
 }
 
@@ -86,7 +83,7 @@ struct Exited {
 }
 
 // SAFETY: `start` и `arg` пишет создатель до запуска потока и затем только читает сам поток;
-// массив экземпляров и список деструкторов меняет только сам поток; остальные поля атомарны
+// список деструкторов меняет только сам поток; остальные поля атомарны
 // или под мьютексом.
 unsafe impl Sync for Record {}
 
@@ -104,17 +101,12 @@ impl Record {
             next: AtomicPtr::new(ptr::null_mut()),
             start,
             arg,
-            instances: Instances::new(),
             destructors: UnsafeCell::new(Vec::new()),
         }
     }
 
     pub(crate) const fn errno(&self) -> *mut c_int {
         self.errno.as_ptr()
-    }
-
-    pub(crate) const fn instances(&self) -> &Instances {
-        &self.instances
     }
 
     unsafe fn push_destructor(&self, destructor: Destructor, object: *mut c_void) -> bool {

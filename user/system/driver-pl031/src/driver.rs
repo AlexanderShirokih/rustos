@@ -4,7 +4,7 @@ use core::cell::RefCell;
 use component_startup::{
     AsyncStartup, Requirements as _, SessionError, SessionPort, component_manifest, serve_component,
 };
-use executor::{Executor, Mutex, PortChannel, Reactor};
+use executor::{Executor, Mutex, PortChannel};
 use io::mmio::Reg;
 use kernel_objects::{IrqLine, MmioMapping, SessionTransport};
 use platform_abi::{MappedDescription, platform};
@@ -38,14 +38,13 @@ component_manifest! {
 struct Pl031 {
     registers: MmioMapping,
     line: IrqLine,
-    reactor: Reactor,
     alarm: Mutex<()>,
 }
 
 struct AlarmReset<'a>(&'a Pl031);
 
 impl Pl031 {
-    async fn bind(platform: &platform::Client<Channel>, reactor: Reactor) -> Result<Self> {
+    async fn bind(platform: &platform::Client<Channel>) -> Result<Self> {
         let region = platform.description().await?;
         let mapped = MappedDescription::new(region).map_err(kernel_objects::Error::from)?;
 
@@ -62,7 +61,6 @@ impl Pl031 {
         Ok(Self {
             registers,
             line,
-            reactor,
             alarm: Mutex::new(()),
         })
     }
@@ -95,10 +93,7 @@ impl<F: ipc::ReceivedResources> rtc::Service<F> for Pl031 {
         self.arm();
 
         let line = WaitItem::new(self.line.as_raw(), SIGNALED);
-        let completed = self
-            .reactor
-            .timeout(ALARM_BUDGET, self.reactor.wait(line))
-            .await;
+        let completed = executor::timeout(ALARM_BUDGET, executor::wait(line)).await;
         if !matches!(completed, Some(Ok(()))) || self.acknowledge().is_err() {
             log_line("alarm line silent");
             exit(FAILED_EXIT_CODE);
@@ -126,9 +121,8 @@ fn run(parent: Handle<kind::Port>) -> Result<()> {
     let platform_session = requirements.platform.open()?;
 
     let executor = Rc::new(Executor::new()?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform_session, reactor.clone());
+    let platform = PortChannel::client(platform_session);
 
     let device = Rc::new(RefCell::new(None::<Rc<Pl031>>));
 
@@ -139,7 +133,7 @@ fn run(parent: Handle<kind::Port>) -> Result<()> {
 
     let served = serve_component::<rtc::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor.clone())),
+        AsyncStartup::new(PortChannel::new(parent)),
         sessions,
         move |frame| {
             let device = device.borrow().clone();
@@ -148,12 +142,10 @@ fn run(parent: Handle<kind::Port>) -> Result<()> {
         },
         async move |_| {
             if bound.borrow().is_none() {
-                let device = Pl031::bind(&platform, reactor.clone())
-                    .await
-                    .map_err(|error| {
-                        log_fmt(format_args!("{COMPATIBLE} not bound: {error:?}"));
-                        SessionError::Refused
-                    })?;
+                let device = Pl031::bind(&platform).await.map_err(|error| {
+                    log_fmt(format_args!("{COMPATIBLE} not bound: {error:?}"));
+                    SessionError::Refused
+                })?;
 
                 *bound.borrow_mut() = Some(Rc::new(device));
                 log_fmt(format_args!("{COMPATIBLE} bound"));

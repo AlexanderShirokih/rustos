@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(thread_local)]
 #![allow(unsafe_code)]
 #![allow(
     clippy::expect_used,
@@ -7,11 +8,14 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{
+    cell::Cell,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use fixture_protocol::{
     OP_ALLOCATE_PAGES, OP_CLOSE_CAP, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_HOLD_CAP, OP_HOLD_SELF,
-    OP_MAP_CHECK, OP_PROCESS_EXIT, OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN,
+    OP_JOIN_THREAD, OP_MAP_CHECK, OP_PROCESS_EXIT, OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN,
     REPLY_ACCESS_DENIED, REPLY_ALLOCATE_FAILED, REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED,
     REPLY_HOLD_FAILED, REPLY_MAP_FAILED, REPLY_OK, REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED,
     REQUEST_LEN, decode_request,
@@ -30,6 +34,9 @@ mod fixture_protocol;
 mod ipc_raw;
 
 static SLOT: AtomicU64 = AtomicU64::new(0);
+
+#[thread_local]
+static TOUCHED: Cell<u64> = Cell::new(0);
 
 const FAILED_EXIT_CODE: u64 = 101;
 
@@ -79,6 +86,7 @@ fn run(port: &Port) -> ExitCode {
                 answer(reply, &[hold_cap(cap)]);
             }
             OP_HOLD_SELF => answer(reply, &[hold_self()]),
+            OP_JOIN_THREAD => answer(reply, &[join_thread()]),
             OP_CLOSE_CAP => {
                 let Some(handle) = (if ncaps == 1 {
                     ipc_raw::take_cap(0)
@@ -119,6 +127,19 @@ fn start_parked_sibling() -> bool {
         return false;
     }
     ready.wait(SIGNALED, PARK_TIMEOUT).is_ok()
+}
+
+fn join_thread() -> u8 {
+    let joined = spawn_owned(|| {
+        TOUCHED.set(TOUCHED.get() + 1);
+        0
+    })
+    .and_then(|thread| thread.join(PARK_TIMEOUT));
+
+    match joined {
+        Ok(()) => REPLY_OK,
+        Err(_) => REPLY_SPAWN_FAILED,
+    }
 }
 
 fn park_forever(ready: Handle<kind::Signal>) -> u32 {

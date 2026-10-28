@@ -24,10 +24,7 @@ impl<F: ipc::ReceivedResources> calculator::Service<F> for Calculator {
 pub(crate) fn main() -> Result<(), Box<dyn Error>> {
     let CalculatorStartup { parent } = components::requirements::<CalculatorStartup>()?;
     let executor = Rc::new(Executor::new()?);
-    let parent = AsyncStartup::new(PortChannel::from_transport(
-        parent.into_channel(),
-        executor.reactor(),
-    ));
+    let parent = AsyncStartup::new(PortChannel::from_transport(parent.into_channel()));
     let service = Rc::new(SessionPort::create()?);
     let opened = service.clone();
     let calls = Rc::new(Calculator);

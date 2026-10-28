@@ -1,6 +1,6 @@
 //! Открытие слота транспорта на шине.
 
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use ipc::CallError;
 use kernel_objects::{Session, SessionTransport};
 use runtime::Timeout;
@@ -17,7 +17,6 @@ const BUSY_PAUSE: Timeout = Timeout::from_millis(5);
 /// последний ответ шины.
 pub async fn open_slot(
     bus: &virtio_mmio::Client<PortChannel<SessionTransport>>,
-    reactor: &Reactor,
     device: DeviceType,
 ) -> Result<Session<virtio_slot::Protocol>, CallError<VirtioMmioError>> {
     let mut attempts = BUSY_ATTEMPTS;
@@ -25,7 +24,7 @@ pub async fn open_slot(
         match bus.open(device as u32).await {
             Err(CallError::Remote(VirtioMmioError::Busy)) if attempts > 1 => {
                 attempts -= 1;
-                reactor.sleep(BUSY_PAUSE).await;
+                executor::sleep(BUSY_PAUSE).await;
             }
             opened => return opened.map(Session::from_session),
         }

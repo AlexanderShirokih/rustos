@@ -1,7 +1,7 @@
 //! Устройство контроллера, выданное шиной SPMI.
 
 use component_startup::{AnyOf, Providers};
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use ipc::CallError;
 use kernel_objects::{Session, SessionTransport};
 use pinctrl_spmi_gpio::{ControllerNode, Registers};
@@ -24,7 +24,6 @@ impl Device {
         description: &Description<'_>,
         spmi: &Providers<spmi::Protocol>,
         controller: &ControllerNode,
-        reactor: &Reactor,
     ) -> Result<Self, PinsError> {
         let bus = spmi_abi::controller(description, &controller.id).ok_or(PinsError::Failed)?;
         let compatible = bus
@@ -34,12 +33,12 @@ impl Device {
             .ok_or(PinsError::Failed)?;
 
         let session = spmi
-            .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+            .open_first(AnyOf::new(CONTROLLER_KEY, compatible))
             .await
             .map_err(|_| PinsError::Failed)?
             .ok_or(PinsError::Failed)?;
 
-        let bus = PortChannel::client(session, reactor.clone()).with_wait(BUS_CALL_TIMEOUT);
+        let bus = PortChannel::client(session).with_wait(BUS_CALL_TIMEOUT);
         let device = bus
             .open_blocks(controller.id.clone(), controller.pins())
             .await
@@ -47,18 +46,14 @@ impl Device {
 
         Ok(Self {
             _bus: bus,
-            device: PortChannel::client(
-                Session::<spmi_device::Protocol>::from_session(device),
-                reactor.clone(),
-            )
-            .with_wait(BUS_CALL_TIMEOUT),
+            device: PortChannel::client(Session::<spmi_device::Protocol>::from_session(device))
+                .with_wait(BUS_CALL_TIMEOUT),
         })
     }
 
     pub(crate) async fn irq(
         &self,
         block: u8,
-        reactor: &Reactor,
     ) -> Result<spmi_interrupt::Client<PortChannel<SessionTransport>>, PinsError> {
         let interrupt = self
             .device
@@ -66,11 +61,10 @@ impl Device {
             .await
             .map_err(irq_refused)?;
 
-        Ok(PortChannel::client(
-            Session::<spmi_interrupt::Protocol>::from_session(interrupt),
-            reactor.clone(),
+        Ok(
+            PortChannel::client(Session::<spmi_interrupt::Protocol>::from_session(interrupt))
+                .with_wait(BUS_CALL_TIMEOUT),
         )
-        .with_wait(BUS_CALL_TIMEOUT))
     }
 }
 

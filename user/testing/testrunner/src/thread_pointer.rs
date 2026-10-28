@@ -35,8 +35,8 @@ fn thread_pointer() -> u64 {
 
 fn set_thread_pointer(value: u64) {
     // SAFETY: TPIDR_EL0 пишется на EL0 по архитектуре и принадлежит текущему потоку; запись
-    // не трогает память. Локальными данными потока эта программа не пользуется, поэтому
-    // подмена наблюдаема только тестом.
+    // не трогает память. Пока регистр занят меткой, тест не обращается к локальным данным
+    // потока, и подмена наблюдаема только им.
     unsafe {
         asm!(
             "msr tpidr_el0, {value}",
@@ -51,7 +51,8 @@ extern "C" fn pointer_worker(arg: usize) -> u32 {
     // потоков, которое идёт до выхода из кадра.
     let shared = unsafe { &*(arg as *const Shared) };
 
-    if thread_pointer() != 0 {
+    let block = thread_pointer();
+    if block == 0 {
         shared.mismatches.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -65,9 +66,9 @@ extern "C" fn pointer_worker(arg: usize) -> u32 {
             shared.mismatches.fetch_add(1, Ordering::Relaxed);
         }
     }
-    // Регистр принадлежит локальным данным потока, а тест занял его под свою метку. Уход
-    // потока разбирает эти данные по указателю из регистра, поэтому метку надо снять.
-    set_thread_pointer(0);
+    // Завершение потока обращается к TLS через `TPIDR_EL0`. Перед возвратом из рабочего потока
+    // регистр должен содержать адрес его блока TLS.
+    set_thread_pointer(block);
     0
 }
 

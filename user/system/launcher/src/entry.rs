@@ -11,7 +11,7 @@ use bootstrap_abi::system_info;
 use component_startup::{AnyOf, Found, Import, Providers, StartupError};
 use components::{Attributes, component_manifest, into_std_handle};
 use display_abi::display;
-use executor::{Executor, PortChannel, Reactor, TaskHandle};
+use executor::{Executor, PortChannel, TaskHandle};
 use input_abi::{
     AxisList, Binding, DeviceDescriptor, DeviceNumber, FocusError, FocusNumber, FocusSession,
     KeyList, Usage, input, input_focus, input_inject,
@@ -231,7 +231,7 @@ impl Home {
 
             Err(error) => {
                 println!("{} not shown: {error}", app.name);
-                let display = self.screen.open_async(&self.executor.reactor()).await?;
+                let display = self.screen.open_async().await?;
                 self.platform.attach(display).await?;
             }
         }
@@ -256,7 +256,7 @@ impl Home {
         if let Err(error) = self.focus.focus(Some(self.tiles_input)).await {
             println!("tiles not focused: {error:?}");
         }
-        let display = self.screen.open_async(&self.executor.reactor()).await?;
+        let display = self.screen.open_async().await?;
         self.platform.attach(display).await?;
         Ok(())
     }
@@ -309,7 +309,6 @@ pub(crate) fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn start(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
-    let reactor = executor.reactor();
     let LauncherStartup {
         screen,
         apps,
@@ -321,16 +320,12 @@ async fn start(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
         ..
     } = components::requirements::<LauncherStartup>()?;
 
-    let buttons = PortChannel::client(buttons.open_async(&reactor).await?, reactor.clone())
-        .with_wait(Timeout::INFINITE);
-    let focus = PortChannel::client(focus.open_async(&reactor).await?, reactor.clone())
-        .with_wait(REPLY_TIMEOUT);
+    let buttons = PortChannel::client(buttons.open_async().await?).with_wait(Timeout::INFINITE);
+    let focus = PortChannel::client(focus.open_async().await?).with_wait(REPLY_TIMEOUT);
 
-    let keyboard = Keyboard::declare(
-        PortChannel::client(inject.open_async(&reactor).await?, reactor.clone())
-            .with_wait(REPLY_TIMEOUT),
-    )
-    .await?;
+    let keyboard =
+        Keyboard::declare(PortChannel::client(inject.open_async().await?).with_wait(REPLY_TIMEOUT))
+            .await?;
 
     let FocusSession {
         session: tiles_input,
@@ -345,20 +340,19 @@ async fn start(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
         .await
         .map_err(|error| format!("tiles not focused: {error:?}"))?;
 
-    let system = PortChannel::client(system.open_async(&reactor).await?, reactor.clone())
-        .with_wait(REPLY_TIMEOUT);
+    let system = PortChannel::client(system.open_async().await?).with_wait(REPLY_TIMEOUT);
 
-    let clock = install_clock(&rtc, &reactor).await.unwrap_or_else(|error| {
+    let clock = install_clock(&rtc).await.unwrap_or_else(|error| {
         println!("realtime clock not installed: {error}");
         false
     });
 
-    let display = screen.open_async(&reactor).await?;
-    let mut platform = ScreenPlatform::open(display, reactor.clone()).await?;
+    let display = screen.open_async().await?;
+    let mut platform = ScreenPlatform::open(display).await?;
 
     let mut tiles = Vec::new();
     for app in &APPS {
-        if find(&apps, &reactor, app.name).await.is_ok() {
+        if find(&apps, app.name).await.is_ok() {
             tiles.push(app);
         }
     }
@@ -436,7 +430,6 @@ fn start_status(
 ) -> TaskHandle {
     let started = Instant::now();
     let weak = view.as_weak();
-    let reactor = executor.reactor();
     executor
         .spawn_now(async move {
             loop {
@@ -450,7 +443,7 @@ fn start_status(
                     return;
                 }
 
-                reactor.sleep(Timeout::from_secs(1)).await;
+                executor::sleep(Timeout::from_secs(1)).await;
             }
         })
         .abort_on_drop()
@@ -465,23 +458,16 @@ async fn open(
     opened: u64,
     commands: &mpsc::Sender<Command>,
 ) -> Result<Shown, OpenError> {
-    let reactor = executor.reactor();
-    let found = find(apps, &reactor, name).await?;
-    let session = apps
-        .open(&reactor, &found)
-        .await
-        .map_err(OpenError::Startup)?;
+    let found = find(apps, name).await?;
+    let session = apps.open(&found).await.map_err(OpenError::Startup)?;
     let watched = session
         .handle()
         .duplicate(Rights::WRITE, None)
         .map_err(OpenError::Kernel)?;
     let application: application::Client<PortChannel<SessionTransport>> =
-        PortChannel::client(session, reactor.clone()).with_wait(REPLY_TIMEOUT);
+        PortChannel::client(session).with_wait(REPLY_TIMEOUT);
 
-    let window = screen
-        .open_async(&reactor)
-        .await
-        .map_err(OpenError::Startup)?;
+    let window = screen.open_async().await.map_err(OpenError::Startup)?;
     let FocusSession { session, number } = focus.open().await.map_err(OpenError::Focus)?;
     application
         .show(window, session)
@@ -509,21 +495,17 @@ fn watch_closed(
     commands: &mpsc::Sender<Command>,
 ) -> TaskHandle {
     let commands = commands.clone();
-    let reactor = executor.reactor();
     executor
         .spawn_now(async move {
-            let application = PortChannel::client(watched, reactor).with_wait(Timeout::INFINITE);
+            let application = PortChannel::client(watched).with_wait(Timeout::INFINITE);
             let _ = application.closed().await;
             let _ = send_waking_loop(&commands, Command::Closed(opened));
         })
         .abort_on_drop()
 }
 
-async fn install_clock(
-    rtc: &Providers<rtc::Protocol>,
-    reactor: &Reactor,
-) -> Result<bool, Box<dyn Error>> {
-    let Some(session) = rtc.open_first(reactor, Attributes::empty()).await? else {
+async fn install_clock(rtc: &Providers<rtc::Protocol>) -> Result<bool, Box<dyn Error>> {
+    let Some(session) = rtc.open_first(Attributes::empty()).await? else {
         return Ok(false);
     };
 
@@ -548,15 +530,11 @@ fn show_status(
     }
 }
 
-async fn find(
-    apps: &Providers<application::Protocol>,
-    reactor: &Reactor,
-    name: &str,
-) -> Result<Found, OpenError> {
-    apps.all(reactor, AnyOf::new(NAME_KEY, [name]))
+async fn find(apps: &Providers<application::Protocol>, name: &str) -> Result<Found, OpenError> {
+    apps.all(AnyOf::new(NAME_KEY, [name]))
         .await
         .map_err(OpenError::Startup)?
-        .next(reactor)
+        .next()
         .await
         .ok_or(OpenError::NotFound)?
         .map_err(OpenError::Startup)

@@ -4,7 +4,7 @@ use std::{rc::Rc, thread};
 use component_startup::{SessionPort, serve_calls};
 use components::component_manifest;
 use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, display};
-use executor::{Executor, Reactor};
+use executor::Executor;
 use input_abi::{
     AxisList, Binding, DescribeError, DeviceDescriptor, DeviceLayout, DeviceNumber, KeyList,
     NextError, Record, RecordBuf, Usage, input,
@@ -30,13 +30,11 @@ struct Screen {
     started: Rc<Signal>,
     delivered: Rc<Signal>,
     presents: Cell<u32>,
-    reactor: Reactor,
 }
 
 struct Input {
     started: Rc<Signal>,
     sent: Cell<bool>,
-    reactor: Reactor,
 }
 
 #[allow(clippy::unused_async_trait_impl)]
@@ -64,8 +62,7 @@ impl display::Service<Delivery> for Screen {
         self.presents.set(count + 1);
         if count == 0 {
             self.started.notify_all().expect("present starts");
-            self.reactor
-                .wait(WaitItem::new(self.delivered.as_raw(), SIGNALED))
+            executor::wait(WaitItem::new(self.delivered.as_raw(), SIGNALED))
                 .await
                 .expect("input is delivered before present finishes");
         }
@@ -81,8 +78,7 @@ impl input::Service<Delivery> for Input {
             return core::future::pending().await;
         }
 
-        self.reactor
-            .wait(WaitItem::new(self.started.as_raw(), SIGNALED))
+        executor::wait(WaitItem::new(self.started.as_raw(), SIGNALED))
             .await
             .expect("present is pending");
         let mut records = RecordBuf::new();
@@ -118,10 +114,8 @@ impl input::Service<Delivery> for Input {
 pub(crate) fn main() {
     let _ = components::requirements::<StandStartup>().expect("startup is present");
     let executor = Rc::new(Executor::new().expect("executor"));
-    let reactor = executor.reactor();
     executor.block_on(async {
-        reactor
-            .timeout(CHECK_TIMEOUT, check(&executor))
+        executor::timeout(CHECK_TIMEOUT, check(&executor))
             .await
             .expect("Slint completes its checks");
     });
@@ -129,7 +123,6 @@ pub(crate) fn main() {
 }
 
 async fn check(executor: &Rc<Executor>) {
-    let reactor = executor.reactor();
     let resource = Resource::self_resource().expect("process resource");
     let started = Rc::new(Signal::create().expect("present signal"));
     let delivered = Rc::new(Signal::create().expect("input signal"));
@@ -143,7 +136,6 @@ async fn check(executor: &Rc<Executor>) {
         started: started.clone(),
         delivered: delivered.clone(),
         presents: Cell::new(0),
-        reactor: reactor.clone(),
     });
 
     let screens = Rc::new(SessionPort::create().expect("display port"));
@@ -164,7 +156,6 @@ async fn check(executor: &Rc<Executor>) {
     let source = Rc::new(Input {
         started,
         sent: Cell::new(false),
-        reactor: reactor.clone(),
     });
 
     let serving = serve_calls(
@@ -175,9 +166,7 @@ async fn check(executor: &Rc<Executor>) {
     );
     let _input = executor.spawn_now(serving).abort_on_drop();
 
-    let mut platform = ScreenPlatform::open(display, reactor)
-        .await
-        .expect("screen opens");
+    let mut platform = ScreenPlatform::open(display).await.expect("screen opens");
 
     let view = TestWindow::new().expect("UI");
     let pressed = Rc::new(Cell::new(false));

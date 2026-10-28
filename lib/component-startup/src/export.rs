@@ -8,7 +8,6 @@ use core::{
 };
 
 use component_abi::{AcceptError, Attributes, SessionError};
-use executor::Reactor;
 use ipc::{CallError, FrameBytes, Incoming, Listener, RecvError, wire::MESSAGE_INLINE_MAX};
 use kernel_objects::{Delivery, Error, Port, PortTransport};
 use syscall::{READABLE, Rights, Timeout, WaitItem};
@@ -113,16 +112,14 @@ impl<'p> SessionEvents<'p> {
 
     /// Ждёт следующий кадр сессии либо уход значка, уступая поток executor.
     /// `None` означает конец приёма, ошибка - отказ ожидания порта.
-    pub async fn recv(&mut self, reactor: &Reactor) -> Result<Option<SessionEvent<'_>>, Error> {
+    pub async fn recv(&mut self) -> Result<Option<SessionEvent<'_>>, Error> {
         let transport = PortTransport::new(self.port.borrow());
         let (len, resources) = loop {
             match transport.recv(&mut self.bytes, Timeout::POLL) {
                 Ok(frame) => break (frame.bytes.len(), frame.resources),
                 Err(RecvError::SenderGone(badge)) => return Ok(Some(SessionEvent::Gone(badge))),
                 Err(RecvError::Timeout) => {
-                    reactor
-                        .wait(WaitItem::new(self.port.as_raw(), READABLE))
-                        .await?;
+                    executor::wait(WaitItem::new(self.port.as_raw(), READABLE)).await?;
                 }
                 Err(RecvError::Discarded) => {}
                 Err(RecvError::Closed) => return Ok(None),
@@ -141,7 +138,7 @@ impl<'p> SessionEvents<'p> {
 }
 
 /// Отвечает на заявки импортёров на экспорт протокола `P` до первого отказа `accept`.
-/// Заявку задача ждёт через reactor канала `parent`, а сессию строит асинхронный `open`.
+/// Сессию строит асинхронный `open`.
 pub async fn serve_export<P: ipc::Protocol>(
     parent: AsyncStartup,
     mut open: impl AsyncFnMut(Attributes<'_>) -> Result<Port, SessionError>,

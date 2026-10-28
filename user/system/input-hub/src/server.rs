@@ -64,9 +64,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let holders = Rc::new(SessionPort::create()?);
 
     let executor = Rc::new(Executor::new()?);
-    let reactor = executor.reactor();
     let hub = Rc::new(RefCell::new(Hub::new()));
-    let startup = || AsyncStartup::new(PortChannel::new(parent, reactor.clone()));
+    let startup = || AsyncStartup::new(PortChannel::new(parent));
 
     let source = Rc::new(Source { hub: hub.clone() });
     let source_gone = source.clone();
@@ -93,11 +92,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
         move |badge| holder_gone.gone(badge),
     )));
 
-    let watching = reactor.clone();
     executor.spawn(stop_on(async move {
-        Stopped::SourceWatch(
-            Box::pin(attach_sources(&requirements.sources, &sources, &watching)).await,
-        )
+        Stopped::SourceWatch(Box::pin(attach_sources(&requirements.sources, &sources)).await)
     }));
 
     let consumer = Rc::new(Consumer { hub: hub.clone() });

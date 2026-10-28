@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::{borrow::Borrow, fmt, future::Future, pin::Pin, task::Poll};
 
-use executor::{Executor, Reactor, TaskHandle, yield_now};
+use executor::{Executor, TaskHandle, yield_now};
 use ipc::{Incoming, wire::IpcError};
 use kernel_objects::{Delivery, Port};
 
@@ -33,7 +33,6 @@ impl fmt::Display for ServeStopped {
 }
 
 async fn serve_sessions(
-    reactor: &Reactor,
     port: &SessionPort,
     mut handle: impl FnMut(SessionEvent<'_>),
 ) -> ServeStopped {
@@ -41,7 +40,7 @@ async fn serve_sessions(
     let mut served = 0usize;
 
     loop {
-        match events.recv(reactor).await {
+        match events.recv().await {
             Ok(Some(event)) => {
                 handle(event);
                 served += 1;
@@ -68,7 +67,6 @@ pub fn serve_calls<F: Future<Output = Result<(), IpcError>> + 'static>(
     handle: impl Fn(Incoming<'_, Delivery>) -> Result<Option<F>, IpcError> + 'static,
     mut gone: impl FnMut(u64) + 'static,
 ) -> impl Future<Output = ServeStopped> + 'static {
-    let reactor = executor.reactor();
     let executor = Rc::downgrade(executor);
 
     async move {
@@ -78,7 +76,7 @@ pub fn serve_calls<F: Future<Output = Result<(), IpcError>> + 'static>(
 
         let mut calls: Vec<(u64, TaskHandle<Result<(), IpcError>>)> = Vec::new();
 
-        serve_sessions(&reactor, sessions.borrow(), |event| match event {
+        serve_sessions(sessions.borrow(), |event| match event {
             SessionEvent::Frame(frame) => {
                 let badge = frame.resources.badge;
                 if let Some(future) = start(&handle, frame)

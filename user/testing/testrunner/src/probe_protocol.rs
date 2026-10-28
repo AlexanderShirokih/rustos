@@ -56,7 +56,7 @@ pub(crate) async fn serve_probe(
 ) -> ! {
     let export = Rc::new(export);
     let opened = export.clone();
-    let parent = AsyncStartup::new(PortChannel::new(parent, executor.reactor()));
+    let parent = AsyncStartup::new(PortChannel::new(parent));
     let calls = Rc::new(Echo);
 
     let served = serve_component::<probe::Protocol, _>(

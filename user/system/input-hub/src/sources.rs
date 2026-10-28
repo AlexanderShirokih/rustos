@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use component_startup::{
     Attributes, Found, IpcError, Providers, Session, SessionPort, StartupError, StartupFailure,
 };
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use input_abi::input_source;
 use runtime::log_fmt;
 use syscall::Timeout;
@@ -24,9 +24,8 @@ type Attached = Session<input_source::Protocol>;
 pub(crate) async fn attach_sources(
     providers: &Providers<input_source::Protocol>,
     sources: &SessionPort,
-    reactor: &Reactor,
 ) -> StartupError {
-    let watch = match providers.watch(reactor, Attributes::empty()).await {
+    let watch = match providers.watch(Attributes::empty()).await {
         Ok(watch) => watch,
         Err(error) => return error,
     };
@@ -40,15 +39,15 @@ pub(crate) async fn attach_sources(
             RETRY_INTERVAL
         };
 
-        match watch.next(reactor, wait).await {
-            Ok(found) => attach(providers, sources, reactor, found, &mut late, &mut attached).await,
+        match watch.next(wait).await {
+            Ok(found) => attach(providers, sources, found, &mut late, &mut attached).await,
             Err(error) if timed_out(&error) => {
                 for found in core::mem::take(&mut late) {
-                    attach(providers, sources, reactor, found, &mut late, &mut attached).await;
+                    attach(providers, sources, found, &mut late, &mut attached).await;
                 }
             }
             Err(error) if error.failure == StartupFailure::NoSpace => {
-                reactor.sleep(NO_SPACE_PAUSE).await;
+                executor::sleep(NO_SPACE_PAUSE).await;
             }
             Err(error) => return error,
         }
@@ -58,12 +57,11 @@ pub(crate) async fn attach_sources(
 async fn attach(
     providers: &Providers<input_source::Protocol>,
     sources: &SessionPort,
-    reactor: &Reactor,
     found: Found,
     late: &mut Vec<Found>,
     attached: &mut Vec<Attached>,
 ) {
-    let source = match providers.open(reactor, &found).await {
+    let source = match providers.open(&found).await {
         Ok(source) => source,
         Err(error) if timed_out(&error) => {
             late.push(found);
@@ -83,8 +81,8 @@ async fn attach(
         }
     };
 
-    let client = input_source::Client::new(PortChannel::new(source.handle(), reactor.clone()))
-        .with_wait(ATTACH_TIMEOUT);
+    let client =
+        input_source::Client::new(PortChannel::new(source.handle())).with_wait(ATTACH_TIMEOUT);
     match client.attach(inject).await {
         Ok(()) => attached.push(source),
         Err(error) => log_fmt(format_args!("source attach failed: {error:?}")),

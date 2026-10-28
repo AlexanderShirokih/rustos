@@ -29,7 +29,7 @@ pub(crate) fn main() -> Result<(), Box<dyn Error>> {
 async fn run(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     let JournalStartup { journal, parent } = components::requirements::<JournalStartup>()?;
     let Shown { window, input } = receive_window(executor, parent).await?;
-    let mut platform = ScreenPlatform::open(window, executor.reactor()).await?;
+    let mut platform = ScreenPlatform::open(window).await?;
 
     let window = ui::Journal::new().map_err(|error| format!("ui refused: {error:?}"))?;
     let rows = Rc::new(VecModel::<ui::Row>::default());
@@ -44,7 +44,7 @@ async fn run(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     window.set_source_column(i32::try_from(JournalView::source_column())?);
     window.set_text_column(i32::try_from(view.text_column())?);
 
-    match subscribe(&journal, &executor.reactor()).await {
+    match subscribe(&journal).await {
         Ok(follower) => {
             let weak = window.as_weak();
             thread::spawn(move || follow(follower, view, &weak));

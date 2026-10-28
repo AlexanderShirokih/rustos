@@ -18,7 +18,6 @@ extern crate alloc;
 mod clock;
 mod cond;
 mod descriptor;
-mod emutls;
 mod errno;
 mod files;
 mod key;

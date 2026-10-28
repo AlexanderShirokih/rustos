@@ -182,12 +182,11 @@ impl TurnThread {
             let turning = Arc::clone(&turning);
             spawn_owned(move || {
                 let executor = Rc::new(Executor::new().expect("turn executor"));
-                let reactor = executor.reactor();
                 let served = build(&executor);
                 executor.block_on(async {
                     let mut served = core::pin::pin!(served);
                     while turning.load(Ordering::Acquire) {
-                        if reactor.timeout(TURN, served.as_mut()).await.is_some() {
+                        if executor::timeout(TURN, served.as_mut()).await.is_some() {
                             break;
                         }
                     }
@@ -287,11 +286,9 @@ impl Importer {
         >,
     ) -> Result<Session<startup_contract::Protocol>, CallError<SessionError>> {
         let executor = crate::executor::executor();
-        let parent = component_startup::AsyncStartup::new(executor::PortChannel::new(
-            self.handle(),
-            executor.reactor(),
-        ))
-        .with_wait(IMPORTER_WAIT);
+        let parent =
+            component_startup::AsyncStartup::new(executor::PortChannel::new(self.handle()))
+                .with_wait(IMPORTER_WAIT);
 
         executor.block_on(request(parent))
     }
@@ -395,27 +392,23 @@ pub(crate) fn controller_provider<P: Protocol>(
     compatibles: &[String],
 ) -> Session<P> {
     let executor = crate::executor::executor();
-    let reactor = executor.reactor();
     let providers = Providers::<P>::new(importer, requirement);
 
     executor.block_on(async {
         let mut found = providers
-            .all(
-                &reactor,
-                AnyOf::new(CONTROLLER_KEY, compatibles.iter().map(String::as_str)),
-            )
+            .all(AnyOf::new(
+                CONTROLLER_KEY,
+                compatibles.iter().map(String::as_str),
+            ))
             .await
             .expect("provider enumeration");
 
         let found = found
-            .next(&reactor)
+            .next()
             .await
             .expect("provider export")
             .expect("provider export found");
-        providers
-            .open(&reactor, &found)
-            .await
-            .expect("provider session")
+        providers.open(&found).await.expect("provider session")
     })
 }
 
@@ -439,7 +432,6 @@ pub(crate) fn drained(enumeration: &Session<startup_contract::Protocol>) -> Vec<
         let executor = crate::executor::executor();
         executor.block_on(component_startup::next(
             enumeration,
-            &executor.reactor(),
             STARTUP_REQUEST_TIMEOUT,
         ))
     }

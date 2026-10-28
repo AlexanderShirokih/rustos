@@ -30,7 +30,7 @@ const MAIN_TASK: TaskId = 0;
 ///
 /// Задачи выполняются на потоке, который зовёт [`Self::block_on`], и делят его IPC-буфер.
 /// Задача выполняет только неблокирующие вызовы ядра. Блокирующий вызов останавливает все
-/// задачи потока. Задача ждёт сигналы объекта ядра через [`Reactor::wait`].
+/// задачи потока. Задача ждёт сигналы объекта ядра через [`wait`](crate::wait).
 pub struct Executor {
     shared: Arc<Shared>,
     tasks: Rc<RefCell<BTreeMap<TaskId, Task>>>,
@@ -119,12 +119,6 @@ impl Executor {
         (JoinHandle::new(slot, Rc::downgrade(&self.tasks), id), waker)
     }
 
-    /// Reactor, через который задачи этого executor ждут объекты ядра.
-    #[must_use]
-    pub fn reactor(&self) -> Reactor {
-        self.reactor.clone()
-    }
-
     /// Выполняет `main` и порождённые задачи до готовности `main` и возвращает её результат.
     /// Пока ни одна задача не разбужена, поток ждёт в ядре.
     pub fn block_on<F: IntoFuture>(&self, main: F) -> F::Output {
@@ -147,9 +141,10 @@ impl Executor {
                     continue;
                 }
                 main_task.queued.store(false, SeqCst);
-                if let Poll::Ready(output) =
-                    main.as_mut().poll(&mut Context::from_waker(&main_waker))
-                {
+                let entered = self.reactor.enter();
+                let polled = main.as_mut().poll(&mut Context::from_waker(&main_waker));
+                drop(entered);
+                if let Poll::Ready(output) = polled {
                     return output;
                 }
             }
@@ -186,13 +181,13 @@ impl Executor {
         };
         task.waker.queued.store(false, SeqCst);
         let waker = Waker::from(Arc::clone(&task.waker));
-        if task
+        let entered = self.reactor.enter();
+        let polled = task
             .future
             .as_mut()
-            .poll_task(&mut Context::from_waker(&waker), &*task.slot)
-            .is_pending()
-            && task.slot.is_pending()
-        {
+            .poll_task(&mut Context::from_waker(&waker), &*task.slot);
+        drop(entered);
+        if polled.is_pending() && task.slot.is_pending() {
             self.tasks.borrow_mut().insert(id, task);
         }
     }

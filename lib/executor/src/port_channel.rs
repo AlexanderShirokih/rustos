@@ -3,10 +3,10 @@ use kernel_objects::{Session, SessionTransport};
 use syscall::{Handle, SIGNALED, Timeout, WaitItem, kind};
 use syscall_user::{Delivery, IssuedHandle, PortTransport, take_call, take_send};
 
-use crate::Reactor;
+use crate::{timeout, wait};
 
 /// Канал IPC-контракта поверх хендла порта. [`Channel`] использует синхронное рандеву,
-/// [`AsyncChannel`] запускает отложенную операцию и ждёт её через [`Reactor`].
+/// [`AsyncChannel`] запускает отложенную операцию и ждёт её в executor задачи.
 ///
 /// `new` заимствует хендл порта. `client` удерживает сессию до конца операций.
 /// По истечении срока канал закрывает отложенную операцию. Ответ сервера после срока
@@ -15,16 +15,14 @@ use crate::Reactor;
 /// вместе с операцией.
 pub struct PortChannel<T = PortTransport> {
     transport: T,
-    reactor: Reactor,
 }
 
 impl PortChannel {
-    /// Канал поверх `port`. Исходы операций задача ждёт через `reactor`.
+    /// Канал поверх `port`.
     #[must_use]
-    pub fn new(port: impl Into<Handle<kind::Port>>, reactor: Reactor) -> Self {
+    pub fn new(port: impl Into<Handle<kind::Port>>) -> Self {
         Self {
             transport: PortTransport::new(port),
-            reactor,
         }
     }
 }
@@ -32,27 +30,26 @@ impl PortChannel {
 impl PortChannel<SessionTransport> {
     /// Клиент протокола `P` поверх канала, владеющего сессией `session`. Разрушение канала
     /// закрывает её capability.
-    pub fn client<P: ipc::Protocol>(session: Session<P>, reactor: Reactor) -> P::Client<Self> {
+    pub fn client<P: ipc::Protocol>(session: Session<P>) -> P::Client<Self> {
         P::client(Self {
             transport: SessionTransport::new(session.into_handle()),
-            reactor,
         })
     }
 }
 
 impl<T: AsRef<PortTransport>> PortChannel<T> {
     /// Канал поверх существующего транспорта. `transport` задаёт владение сессией.
-    pub fn from_transport(transport: T, reactor: Reactor) -> Self {
-        Self { transport, reactor }
+    pub const fn from_transport(transport: T) -> Self {
+        Self { transport }
     }
 
     async fn settle(
         &self,
         pending: &IssuedHandle<kind::Pending>,
-        wait: Timeout,
+        limit: Timeout,
     ) -> Result<(), IpcError> {
-        let signaled = self.reactor.wait(WaitItem::new(pending.as_raw(), SIGNALED));
-        match self.reactor.timeout(wait, signaled).await {
+        let signaled = wait(WaitItem::new(pending.as_raw(), SIGNALED));
+        match timeout(limit, signaled).await {
             Some(Ok(())) => Ok(()),
             Some(Err(_)) => Err(IpcError::PeerClosed),
             None => Err(IpcError::Timeout),

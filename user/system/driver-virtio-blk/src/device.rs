@@ -6,7 +6,7 @@
 
 use block_abi::BlockInfo;
 use driver_virtio_blk::{Channel, GeometryError, geometry};
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use ipc::CallError;
 use kernel_objects::{IrqLine, SessionTransport};
 use runtime::{Timeout, log_fmt};
@@ -55,18 +55,16 @@ pub(crate) struct Device {
     queue: SplitQueue,
     queue_memory: DmaRegion,
     header: DmaRegion,
-    reactor: Reactor,
 }
 
 impl Device {
     pub(crate) async fn connect(
         bus: &virtio_mmio::Client<PortChannel<SessionTransport>>,
-        reactor: Reactor,
     ) -> Result<(Self, BlockInfo), ConnectRefusal> {
-        let session = open_slot(bus, &reactor, DeviceType::Block)
+        let session = open_slot(bus, DeviceType::Block)
             .await
             .map_err(ConnectRefusal::Bus)?;
-        let slot = PortChannel::client(session, reactor.clone()).with_wait(SLOT_CALL_TIMEOUT);
+        let slot = PortChannel::client(session).with_wait(SLOT_CALL_TIMEOUT);
         let line = IrqLine::from(slot.irq().await.map_err(ConnectRefusal::Line)?);
         let mut transport = Transport::probe(SlotRegisters::new(slot), DeviceType::Block)
             .await
@@ -106,7 +104,6 @@ impl Device {
             queue,
             queue_memory,
             header,
-            reactor,
         };
 
         Ok((device, info))
@@ -160,7 +157,6 @@ impl Device {
             &mut self.transport,
             &mut self.queue_memory,
             &self.line,
-            &self.reactor,
             COMPLETION_TIMEOUT,
         )
         .await

@@ -14,7 +14,7 @@ use component_abi::{
     AttributeSet, Attributes, attributes_len, encode_attributes_into,
 };
 use component_startup::{Import, session_async};
-use executor::{Executor, PortChannel, Reactor};
+use executor::{Executor, PortChannel};
 use filesystem_abi::{
     FileSystemError, MountEnded, Path, file_system, file_system_mount, namespace,
 };
@@ -43,8 +43,8 @@ pub(crate) struct MountLine {
     attributes: AttributeSet,
 }
 
-pub(crate) async fn read(image: &Import<image::Protocol>, reactor: &Reactor) -> Vec<MountLine> {
-    let image = match image.open_async(reactor).await {
+pub(crate) async fn read(image: &Import<image::Protocol>) -> Vec<MountLine> {
+    let image = match image.open_async().await {
         Ok(image) => image,
         Err(error) => {
             log_fmt(format_args!("mount table skipped: {error}"));
@@ -52,7 +52,7 @@ pub(crate) async fn read(image: &Import<image::Protocol>, reactor: &Reactor) -> 
         }
     };
 
-    let client = PortChannel::client(image, reactor.clone());
+    let client = PortChannel::client(image);
     let Ok(region) = client.region().await.map(MemoryRegion::from) else {
         log_fmt(format_args!("mount table skipped: image region refused"));
         return Vec::new();
@@ -102,9 +102,8 @@ pub(crate) fn start(
     let enclosing: Vec<Option<String>> = lines.iter().map(|line| enclosing(&lines, line)).collect();
     for (line, enclosing) in lines.into_iter().zip(enclosing) {
         let router = router.clone();
-        let reactor = executor.reactor();
         executor.spawn(async move {
-            mount(&line, enclosing.as_deref(), parent, &router, &reactor).await;
+            mount(&line, enclosing.as_deref(), parent, &router).await;
         });
     }
 }
@@ -159,12 +158,11 @@ async fn mount(
     enclosing: Option<&str>,
     parent: Handle<kind::Port>,
     router: &Router,
-    reactor: &Reactor,
 ) {
     let number = line.number;
     loop {
         if let Some(enclosing) = enclosing
-            && let Err(error) = await_mount(enclosing, router, reactor).await
+            && let Err(error) = await_mount(enclosing, router).await
         {
             log_fmt(format_args!(
                 "mount table line {number} {}: {enclosing} not awaited: {error:?}",
@@ -174,7 +172,6 @@ async fn mount(
 
         let filesystem = match session_async::<file_system::Protocol>(
             parent,
-            reactor,
             FILESYSTEM_REQUIREMENT,
             line.attributes.as_attributes(),
             Timeout::INFINITE,
@@ -202,7 +199,7 @@ async fn mount(
             }
         };
 
-        let client = PortChannel::client(session, reactor.clone()).with_wait(Timeout::INFINITE);
+        let client = PortChannel::client(session).with_wait(Timeout::INFINITE);
         match client.mount(&line.path, filesystem).await {
             Ok(MountEnded::FileSystemGone) => {}
             ended => {
@@ -228,16 +225,9 @@ fn enclosing(lines: &[MountLine], line: &MountLine) -> Option<String> {
         .map(|other| other.path.clone())
 }
 
-async fn await_mount(
-    path: &str,
-    router: &Router,
-    reactor: &Reactor,
-) -> Result<(), CallError<FileSystemError>> {
+async fn await_mount(path: &str, router: &Router) -> Result<(), CallError<FileSystemError>> {
     let view = router.open(path).map_err(CallError::Remote)?;
-    let client = PortChannel::client(
-        Session::<namespace::Protocol>::from_handle(view),
-        reactor.clone(),
-    )
-    .with_wait(Timeout::INFINITE);
+    let client = PortChannel::client(Session::<namespace::Protocol>::from_handle(view))
+        .with_wait(Timeout::INFINITE);
     client.resolve("/").await.map(drop)
 }

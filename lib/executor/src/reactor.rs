@@ -12,7 +12,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-use kernel_objects::{Error, wait_any};
+use kernel_objects::Error;
 use syscall::{SIGNALED, SyscallError, Timeout, WAIT_MANY_MAX_COUNT, WaitItem, WakeCount};
 use syscall_user::clock::Instant;
 
@@ -20,27 +20,28 @@ use crate::executor::Shared;
 
 const REGISTRATIONS_MAX: usize = WAIT_MANY_MAX_COUNT - 1;
 
-/// Ожидание объектов ядра задачами одного [`Executor`](crate::Executor).
-#[derive(Clone)]
-pub struct Reactor(Rc<ReactorState>);
+#[thread_local]
+static CURRENT: RefCell<Option<Rc<ReactorState>>> = RefCell::new(None);
 
-/// Future из [`Reactor::wait`]. Разрушение снимает ожидание.
+pub(crate) struct Reactor(Rc<ReactorState>);
+
+pub(crate) struct Entered(Option<Rc<ReactorState>>);
+
+/// Future из [`wait`]. Разрушение снимает ожидание.
 #[must_use = "future does nothing until awaited"]
 pub struct Wait {
-    reactor: Rc<ReactorState>,
+    registered: Option<(Rc<ReactorState>, usize)>,
     item: WaitItem,
-    record: Option<usize>,
 }
 
-/// Future из [`Reactor::sleep`]. Разрушение снимает срок.
+/// Future из [`sleep`]. Разрушение снимает срок.
 #[must_use = "future does nothing until awaited"]
 pub struct Sleep {
-    reactor: Rc<ReactorState>,
     deadline: Option<Instant>,
-    timer: Option<u64>,
+    timer: Option<(Rc<ReactorState>, u64)>,
 }
 
-/// Future из [`Reactor::timeout`]. Возвращает `Some(result)`, если операция завершилась до
+/// Future из [`timeout`]. Возвращает `Some(result)`, если операция завершилась до
 /// истечения срока, иначе - `None`. По истечении срока операция разрушается.
 #[must_use = "future does nothing until awaited"]
 pub struct Timed<F: Future> {
@@ -86,50 +87,8 @@ impl Reactor {
         }))
     }
 
-    /// Готов, когда на объекте `item` поднят бит его маски. Ожидание заканчивается ошибкой,
-    /// если ядро отвергает либо отменяет его на этом handle. Ожидание сверх предела
-    /// `SignalWaitMany` за вычетом записи пробуждения executor получает `ResourceExhausted`.
-    pub fn wait(&self, item: WaitItem) -> Wait {
-        Wait {
-            reactor: Rc::clone(&self.0),
-            item,
-            record: None,
-        }
-    }
-
-    /// Ждёт готовности одного из `items` и возвращает его индекс. Каждая запись входит в
-    /// предел [`Self::wait`]. Пустой набор остаётся в ожидании до отмены future.
-    pub async fn wait_any(&self, items: &[WaitItem]) -> kernel_objects::Result<usize> {
-        let mut waits: Vec<_> = items.iter().map(|item| self.wait(*item)).collect();
-
-        core::future::poll_fn(|cx| {
-            for (index, wait) in waits.iter_mut().enumerate() {
-                if let Poll::Ready(outcome) = Pin::new(wait).poll(cx) {
-                    return Poll::Ready(outcome.map(|()| index));
-                }
-            }
-
-            Poll::Pending
-        })
-        .await
-    }
-
-    /// Готов по истечении срока `after`. С [`Timeout::INFINITE`] future не готов никогда. Сроки
-    /// не входят в предел ожиданий [`Self::wait`].
-    pub fn sleep(&self, after: Timeout) -> Sleep {
-        Sleep {
-            reactor: Rc::clone(&self.0),
-            deadline: Instant::now().after(after),
-            timer: None,
-        }
-    }
-
-    /// Ограничивает операцию `future` сроком `after`.
-    pub fn timeout<F: IntoFuture>(&self, after: Timeout, future: F) -> Timed<F::IntoFuture> {
-        Timed {
-            future: Some(Box::pin(future.into_future())),
-            sleep: self.sleep(after),
-        }
+    pub(crate) fn enter(&self) -> Entered {
+        Entered(CURRENT.replace(Some(Rc::clone(&self.0))))
     }
 
     pub(crate) fn turn(&self, shared: &Shared, wait: Timeout) {
@@ -153,7 +112,7 @@ impl Reactor {
 
     fn wait_pending(&self, shared: &Shared, wait: Timeout, pending: &Pending) {
         let Pending { slots, items } = pending;
-        let woken = wait_any(items, wait);
+        let woken = kernel_objects::wait_any(items, wait);
         shared.sleeping.store(false, SeqCst);
         self.0.wake_expired(Instant::now());
 
@@ -174,6 +133,12 @@ impl Reactor {
             // Отказ не называет запись, и опрос каждой записи находит готовые и отказавшие.
             Err(_) => self.0.probe(slots, items),
         }
+    }
+}
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        CURRENT.replace(self.0.take());
     }
 }
 
@@ -232,7 +197,7 @@ impl ReactorState {
             let &Slot::Record(record) = slot else {
                 continue;
             };
-            match wait_any(core::slice::from_ref(item), Timeout::POLL) {
+            match kernel_objects::wait_any(core::slice::from_ref(item), Timeout::POLL) {
                 Ok(_) => self.complete(record, Ok(())),
                 Err(Error::Syscall(SyscallError::Timeout)) => {}
                 Err(error) => self.complete(record, Err(error)),
@@ -286,17 +251,19 @@ impl Future for Wait {
     type Output = kernel_objects::Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let Some(record) = self.record else {
-            let Some(record) = self.reactor.register(self.item, cx.waker()) else {
+        let Some((reactor, record)) = &self.registered else {
+            let reactor = current();
+            let Some(record) = reactor.register(self.item, cx.waker()) else {
                 return Poll::Ready(Err(Error::Syscall(SyscallError::ResourceExhausted)));
             };
-            self.record = Some(record);
+            self.registered = Some((reactor, record));
+
             return Poll::Pending;
         };
 
         let outcome = {
-            let mut records = self.reactor.records.borrow_mut();
-            let Some(Some(registration)) = records.get_mut(record) else {
+            let mut records = reactor.records.borrow_mut();
+            let Some(Some(registration)) = records.get_mut(*record) else {
                 return Poll::Pending;
             };
             let Some(outcome) = registration.outcome.take() else {
@@ -305,8 +272,10 @@ impl Future for Wait {
             };
             outcome
         };
-        self.reactor.release(record);
-        self.record = None;
+        if let Some((reactor, record)) = self.registered.take() {
+            reactor.release(record);
+        }
+
         Poll::Ready(outcome)
     }
 }
@@ -320,32 +289,36 @@ impl Future for Sleep {
         };
 
         if deadline <= Instant::now() {
-            if let Some(id) = self.timer.take() {
-                self.reactor.timers.borrow_mut().remove(&(deadline, id));
+            if let Some((reactor, id)) = self.timer.take() {
+                reactor.timers.borrow_mut().remove(&(deadline, id));
             }
             return Poll::Ready(());
         }
 
-        let mut timers = self.reactor.timers.borrow_mut();
-        if let Some(waker) = self.timer.and_then(|id| timers.get_mut(&(deadline, id))) {
+        if let Some((reactor, id)) = &self.timer
+            && let Some(waker) = reactor.timers.borrow_mut().get_mut(&(deadline, *id))
+        {
             waker.clone_from(cx.waker());
             return Poll::Pending;
         }
 
-        let id = self.reactor.next_timer.get();
-        self.reactor.next_timer.set(id.wrapping_add(1));
-        timers.insert((deadline, id), cx.waker().clone());
-        drop(timers);
+        let reactor = current();
+        let id = reactor.next_timer.get();
+        reactor.next_timer.set(id.wrapping_add(1));
+        reactor
+            .timers
+            .borrow_mut()
+            .insert((deadline, id), cx.waker().clone());
+        self.timer = Some((reactor, id));
 
-        self.timer = Some(id);
         Poll::Pending
     }
 }
 
 impl Drop for Sleep {
     fn drop(&mut self) {
-        if let (Some(deadline), Some(id)) = (self.deadline, self.timer) {
-            self.reactor.timers.borrow_mut().remove(&(deadline, id));
+        if let (Some(deadline), Some((reactor, id))) = (self.deadline, &self.timer) {
+            reactor.timers.borrow_mut().remove(&(deadline, *id));
         }
     }
 }
@@ -368,8 +341,60 @@ impl<F: Future> Future for Timed<F> {
 
 impl Drop for Wait {
     fn drop(&mut self) {
-        if let Some(record) = self.record {
-            self.reactor.release(record);
+        if let Some((reactor, record)) = &self.registered {
+            reactor.release(*record);
         }
     }
+}
+
+/// Готов, когда на объекте `item` поднят бит его маски. Первый опрос регистрирует ожидание в
+/// текущем executor. Регистрация без текущего executor вызывает панику. Ожидание заканчивается
+/// ошибкой, если ядро отвергает либо отменяет его на этом handle. Ожидание сверх предела
+/// `SignalWaitMany` за вычетом записи пробуждения executor получает `ResourceExhausted`.
+pub const fn wait(item: WaitItem) -> Wait {
+    Wait {
+        registered: None,
+        item,
+    }
+}
+
+/// Ждёт готовности одного из `items` и возвращает его индекс. Каждая запись входит в предел
+/// [`wait`]. Пустой набор остаётся в ожидании до отмены future.
+pub async fn wait_any(items: &[WaitItem]) -> kernel_objects::Result<usize> {
+    let mut waits: Vec<_> = items.iter().map(|item| wait(*item)).collect();
+
+    core::future::poll_fn(|cx| {
+        for (index, wait) in waits.iter_mut().enumerate() {
+            if let Poll::Ready(outcome) = Pin::new(wait).poll(cx) {
+                return Poll::Ready(outcome.map(|()| index));
+            }
+        }
+
+        Poll::Pending
+    })
+    .await
+}
+
+/// Готов по истечении срока `after`, отсчитанного от вызова. С [`Timeout::INFINITE`] остаётся
+/// в ожидании до отмены future. Сроки не входят в предел ожиданий [`wait`].
+pub fn sleep(after: Timeout) -> Sleep {
+    Sleep {
+        deadline: Instant::now().after(after),
+        timer: None,
+    }
+}
+
+/// Ограничивает операцию `future` сроком `after`.
+pub fn timeout<F: IntoFuture>(after: Timeout, future: F) -> Timed<F::IntoFuture> {
+    Timed {
+        future: Some(Box::pin(future.into_future())),
+        sleep: sleep(after),
+    }
+}
+
+fn current() -> Rc<ReactorState> {
+    let current = CURRENT.borrow().clone();
+    // Регистрация требует executor, который проверяет готовность ожидания и будит задачу.
+    #[allow(clippy::panic)]
+    current.unwrap_or_else(|| panic!("executor wait polled outside an executor task"))
 }

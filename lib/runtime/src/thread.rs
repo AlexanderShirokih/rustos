@@ -3,14 +3,15 @@
 //!
 //! Стек - анонимный регион `MemoryAllocate`, и под его нижней границей ядро оставляет
 //! неотображённую страницу. Запись в эту страницу завершает процесс отказом доступа. Rust-код
-//! таргета пробует стек постранично, и кадр больше страницы тоже упирается в эту страницу.
+//! таргета пробует стек постранично, и кадр больше страницы тоже упирается в эту страницу. Над
+//! стеком в том же регионе лежит блок TLS потока.
 //!
 //! Механизм - выдача стека и `ThreadCreate`, а что делает поток на выходе, решает трамплин
 //! вызывающего. Поверх механизма лежат [`Builder`] и `spawn`. Они берут тело потока значением и
 //! снимают с вызывающего передачу состояния через сырой указатель.
 
-use alloc::boxed::Box;
-use core::{fmt::Display, ptr::NonNull, time::Duration};
+use alloc::{boxed::Box, vec};
+use core::{fmt::Display, ptr::NonNull, slice, time::Duration};
 
 use syscall::{
     Handle, MEMORY_ALLOCATE_GUARD_PAGE, PAGE_SIZE, Priority, SIGNALED, SyscallError, Timeout,
@@ -25,6 +26,7 @@ use crate::{
         thread_exit, thread_exit_code,
     },
     tls::run_destructors,
+    tls_block::{self, BlockLayout},
 };
 
 const DEFAULT_STACK_BYTES: usize = 0x10000;
@@ -56,7 +58,7 @@ impl Spawned {
         self.stack
     }
 
-    /// Размер стека потока в байтах.
+    /// Размер региона в байтах, включая стек, блок TLS и отступы выравнивания.
     #[must_use]
     pub const fn stack_bytes(&self) -> usize {
         self.stack_bytes
@@ -148,8 +150,22 @@ impl Default for Builder {
     }
 }
 
+/// Инициализирует TLS главного потока. Точка входа программы вызывает функцию до первого
+/// обращения к переменным `#[thread_local]`. Блок TLS сохраняется до завершения процесса.
+pub fn enter_main() {
+    let layout = BlockLayout::of_program();
+    let memory = Box::leak(vec![0; layout.bytes() + layout.align()].into_boxed_slice());
+    let offset = memory.as_ptr().align_offset(layout.align());
+    let Some(block) = memory.get_mut(offset..offset + layout.bytes()) else {
+        crate::exit(crate::FAILED_EXIT_CODE)
+    };
+
+    layout.write(block);
+    tls_block::install(block);
+}
+
 /// Поднимает поток в текущем процессе. Выделяет стек `stack_bytes`, округлённый вверх до
-/// страницы, и входит в `entry(arg)` с приоритетом `priority`.
+/// страницы, с блоком TLS над ним и входит в `entry(arg)` с приоритетом `priority`.
 ///
 /// На отказе выделенный стек освобождается.
 pub fn create(
@@ -158,12 +174,29 @@ pub fn create(
     stack_bytes: usize,
     priority: Priority,
 ) -> Result<Spawned, SyscallError> {
-    let bytes = stack_bytes
+    let stack_bytes = stack_bytes
         .max(PAGE_SIZE)
         .checked_next_multiple_of(PAGE_SIZE)
         .ok_or(SyscallError::InvalidArgument)?;
+    let layout = BlockLayout::of_program();
+    // Регион выровнен по странице, и блок с большим выравниванием сдвигается внутри него.
+    let bytes = stack_bytes
+        .checked_add(layout.bytes())
+        .and_then(|bytes| bytes.checked_add(layout.align().saturating_sub(PAGE_SIZE)))
+        .and_then(|bytes| bytes.checked_next_multiple_of(PAGE_SIZE))
+        .ok_or(SyscallError::InvalidArgument)?;
 
     let stack = allocate_stack(bytes)?;
+    let block = stack
+        .as_ptr()
+        .map_addr(|address| (address + stack_bytes).next_multiple_of(layout.align()));
+
+    // SAFETY: размер обнулённого региона `allocate_stack` включает блок и отступ выравнивания.
+    // До запуска потока к блоку обращается только этот срез.
+    let block = unsafe { slice::from_raw_parts_mut(block, layout.bytes()) };
+
+    layout.write(block);
+    let start = tls_block::entry_through(block, entry);
 
     let process = match process_self() {
         Ok(process) => process,
@@ -177,8 +210,8 @@ pub fn create(
     // владелец `process`.
     let created = thread_create(
         process.as_raw(),
-        entry as *const () as u64,
-        stack.addr().get() as u64 + bytes as u64,
+        start as *const () as u64,
+        block.as_ptr().addr() as u64,
         arg as u64,
         u64::from(priority),
     );

@@ -26,7 +26,6 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let executor = Executor::new().map_err(|_| Failed)?;
     let parent = AsyncStartup::new(PortChannel::from_transport(
         requirements.parent.into_channel(),
-        executor.reactor(),
     ));
 
     let _ = executor.block_on(serve_export::<file_system::Protocol>(

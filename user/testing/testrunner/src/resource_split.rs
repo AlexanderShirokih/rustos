@@ -197,7 +197,7 @@ fn split_of_zero_bytes_is_rejected() {
     ));
 }
 
-fn spare_pages(fixture: &Fixture) -> u64 {
+pub(crate) fn spare_pages(fixture: &Fixture) -> u64 {
     let mut granted = 0;
     let mut refused = fixture.budget_bytes().div_ceil(USERLAND_PAGE_SIZE) + 1;
     while refused - granted > 1 {

@@ -55,9 +55,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let platform = requirements.platform.open().map_err(Stopped::Startup)?;
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform, reactor.clone());
+    let platform = PortChannel::client(platform);
 
     let sessions = Rc::new(SessionPort::create().map_err(|_| Stopped::ServicePort)?);
     let controller = Rc::new(RefCell::new(None::<Rc<Controller>>));
@@ -69,7 +68,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<clocks::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         sessions,
         move |frame| {
             let controller = dispatch.borrow().clone();

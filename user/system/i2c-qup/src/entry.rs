@@ -51,11 +51,10 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let requirements = I2cStartup::from_parent(parent);
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::ServicePort)?);
-    let reactor = executor.reactor();
 
     let platform = requirements.platform.open().map_err(Stopped::Startup)?;
 
-    let platform = PortChannel::client(platform, reactor.clone());
+    let platform = PortChannel::client(platform);
 
     let description = platform
         .description()
@@ -65,12 +64,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let mapped = MappedDescription::new(description).map_err(|_| Stopped::Description)?;
 
     let sessions = Rc::new(SessionPort::create().map_err(|_| Stopped::ServicePort)?);
-    let supplies = Supplies::new(
-        platform,
-        requirements.pins,
-        requirements.clocks,
-        reactor.clone(),
-    );
+    let supplies = Supplies::new(platform, requirements.pins, requirements.clocks);
     let service = Rc::new(Service {
         bus: Bus::new(supplies),
         description: mapped,
@@ -82,7 +76,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<i2c::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         sessions,
         move |frame| Service::serve(&service, frame),
         whole_export(exported),

@@ -265,7 +265,6 @@ fn an_open_after_the_session_reaches_the_started_image_program() {
             let executor = crate::executor::executor();
             executor.block_on(component_startup::open::<display::Protocol>(
                 found,
-                &executor.reactor(),
                 DISPLAY_REPLY_TIMEOUT,
             ))
         }

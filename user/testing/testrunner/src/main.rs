@@ -9,6 +9,7 @@
 #![recursion_limit = "256"]
 #![no_std]
 #![no_main]
+#![feature(thread_local)]
 #![allow(unsafe_code)]
 #![allow(
     clippy::expect_used,
@@ -120,6 +121,7 @@ mod std_selftest;
 mod stress;
 mod sync;
 mod system_info_session;
+mod thread_local;
 #[cfg(target_arch = "aarch64")]
 mod thread_pointer;
 mod thread_stack;

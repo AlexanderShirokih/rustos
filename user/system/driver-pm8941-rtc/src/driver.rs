@@ -12,7 +12,7 @@ use component_startup::{
     AnyOf, AsyncStartup, Providers, Requirements as _, SessionError, SessionPort, StartupError,
     component_manifest, serve_component,
 };
-use executor::{Executor, Mutex, PortChannel, Reactor};
+use executor::{Executor, Mutex, PortChannel};
 use ipc::CallError;
 use kernel_objects::{Port, Session, SessionTransport, Signal};
 use platform_abi::{CONTROLLER_KEY, DescriptionError, MappedDescription, PlatformError, platform};
@@ -65,14 +65,12 @@ struct Clock {
     device: Rc<spmi_device::Client<Channel>>,
     alarm: Mutex<Option<Rc<Alarm>>>,
     executor: Weak<Executor>,
-    reactor: Reactor,
 }
 
 struct Alarm {
     interrupt: spmi_interrupt::Client<Channel>,
     signal: Signal,
     device: Rc<spmi_device::Client<Channel>>,
-    reactor: Reactor,
     state: RefCell<AlarmState>,
 }
 
@@ -122,10 +120,9 @@ impl Shared {
         platform: &platform::Client<Channel>,
         spmi: &Providers<spmi::Protocol>,
         executor: &Weak<Executor>,
-        reactor: &Reactor,
     ) -> Result<Port, SessionError> {
         if self.clock.borrow().is_none() {
-            let clock = Clock::bind(platform, spmi, executor.clone(), reactor.clone())
+            let clock = Clock::bind(platform, spmi, executor.clone())
                 .await
                 .map_err(|failure| {
                     log_fmt(format_args!("{COMPATIBLE} not bound: {failure:?}"));
@@ -147,7 +144,6 @@ impl Clock {
         platform: &platform::Client<Channel>,
         spmi: &Providers<spmi::Protocol>,
         executor: Weak<Executor>,
-        reactor: Reactor,
     ) -> Result<Self, Failure> {
         let description = platform.description().await.map_err(Failure::Platform)?;
         let mapped = MappedDescription::new(description)
@@ -166,27 +162,23 @@ impl Clock {
             .ok_or(Failure::NoController)?;
 
         let session = spmi
-            .open_first(&reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+            .open_first(AnyOf::new(CONTROLLER_KEY, compatible))
             .await
             .map_err(Failure::Startup)?
             .ok_or(Failure::NoBus)?;
 
-        let bus = PortChannel::client(session, reactor.clone()).with_wait(BUS_CALL_TIMEOUT);
+        let bus = PortChannel::client(session).with_wait(BUS_CALL_TIMEOUT);
 
         let device = bus.open(id.clone()).await.map_err(Failure::Bus)?;
 
         let clock = Self {
             _bus: bus,
             device: Rc::new(
-                PortChannel::client(
-                    Session::<spmi_device::Protocol>::from_session(device),
-                    reactor.clone(),
-                )
-                .with_wait(BUS_CALL_TIMEOUT),
+                PortChannel::client(Session::<spmi_device::Protocol>::from_session(device))
+                    .with_wait(BUS_CALL_TIMEOUT),
             ),
             alarm: Mutex::new(None),
             executor,
-            reactor,
         };
 
         clock
@@ -200,12 +192,9 @@ impl Clock {
     async fn alarm(&self) -> Result<u64, Failure> {
         let mut slot = self.alarm.lock().await;
         if slot.is_none() {
-            let interrupt = PortChannel::client(
-                Session::<spmi_interrupt::Protocol>::from_session(
-                    self.device.irq(ALARM_INTERRUPT).await?,
-                ),
-                self.reactor.clone(),
-            )
+            let interrupt = PortChannel::client(Session::<spmi_interrupt::Protocol>::from_session(
+                self.device.irq(ALARM_INTERRUPT).await?,
+            ))
             .with_wait(BUS_CALL_TIMEOUT);
             let signal = Signal::from(interrupt.signal().await?);
 
@@ -213,7 +202,6 @@ impl Clock {
                 interrupt,
                 signal,
                 device: self.device.clone(),
-                reactor: self.reactor.clone(),
                 state: RefCell::new(AlarmState {
                     generation: 0,
                     requested: false,
@@ -273,8 +261,7 @@ impl Alarm {
             Poll::Pending
         });
 
-        self.reactor
-            .timeout(ALARM_BUDGET, waiting)
+        executor::timeout(ALARM_BUDGET, waiting)
             .await
             .ok_or(Failure::Silent)
     }
@@ -307,15 +294,13 @@ impl Alarm {
             .update(ALARM_CONTROL, ALARM_ENABLE, ALARM_ENABLE)
             .await?;
 
-        self.reactor
-            .timeout(
-                ALARM_BUDGET,
-                self.reactor
-                    .wait(WaitItem::new(self.signal.as_raw(), SIGNALED)),
-            )
-            .await
-            .ok_or(Failure::Silent)?
-            .map_err(|_| Failure::Silent)?;
+        executor::timeout(
+            ALARM_BUDGET,
+            executor::wait(WaitItem::new(self.signal.as_raw(), SIGNALED)),
+        )
+        .await
+        .ok_or(Failure::Silent)?
+        .map_err(|_| Failure::Silent)?;
 
         self.device.update(ALARM_CONTROL, ALARM_ENABLE, 0).await?;
         self.device.update(ALARM_CONTROL_2, ALARM_CLEAR, 0).await?;
@@ -366,13 +351,9 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let requirements = RtcStartup::from_parent(parent);
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(
-        requirements.platform.open().map_err(Stopped::Startup)?,
-        reactor.clone(),
-    )
-    .with_wait(BUS_CALL_TIMEOUT);
+    let platform = PortChannel::client(requirements.platform.open().map_err(Stopped::Startup)?)
+        .with_wait(BUS_CALL_TIMEOUT);
 
     let shared = Rc::new(Shared {
         sessions: Rc::new(SessionPort::create().map_err(|_| Stopped::ServicePort)?),
@@ -384,17 +365,14 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<rtc::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor.clone())),
+        AsyncStartup::new(PortChannel::new(parent)),
         shared.sessions.clone(),
         move |frame| {
             let clock = shared.clock.borrow().clone();
             let clock = clock.ok_or(ipc::wire::IpcError::PeerClosed)?;
             rtc::serve(&clock, frame)
         },
-        async move |_| {
-            open.open(&platform, &requirements.spmi, &spawning, &reactor)
-                .await
-        },
+        async move |_| open.open(&platform, &requirements.spmi, &spawning).await,
         |_| {},
     );
 

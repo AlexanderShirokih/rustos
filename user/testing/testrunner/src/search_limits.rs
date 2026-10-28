@@ -131,27 +131,26 @@ fn provider_sessions_continue_after_no_space() {
     let composition = limited(&[EXPORT, NEIGHBOUR], OWNER_STATES);
     let importer = composition.importer(&[probe_of(PROBE)]);
     let executor = crate::executor::executor();
-    let reactor = executor.reactor();
     let (refused, second) = executor.block_on(async {
         let mut sessions = Providers::<probe::Protocol>::new(importer.handle(), PROBE)
-            .all(&reactor, Attributes::empty())
+            .all(Attributes::empty())
             .await
             .expect("enumeration granted");
 
-        let first = sessions.next(&reactor).await.and_then(Result::ok).expect("a provider is found");
+        let first = sessions.next().await.and_then(Result::ok).expect("a provider is found");
 
         let mut refused = true;
         for _ in 0..REFUSAL_REPEATS {
-            refused &= matches!(sessions.next(&reactor).await, Some(Err(error)) if error.failure == StartupFailure::NoSpace);
+            refused &= matches!(sessions.next().await, Some(Err(error)) if error.failure == StartupFailure::NoSpace);
         }
 
         drop(first);
 
         let mut second = None;
         for _ in 0..POLL_ATTEMPTS {
-            second = sessions.next(&reactor).await.and_then(Result::ok);
+            second = sessions.next().await.and_then(Result::ok);
             if second.is_some() { break; }
-            reactor.sleep(POLL_INTERVAL).await;
+            executor::sleep(POLL_INTERVAL).await;
         }
 
         (refused, second)
@@ -170,18 +169,17 @@ fn the_next_set_of_alternatives_is_requested_after_the_exhausted_one_is_released
     let importer = composition.importer(&[probe_of(PROBE)]);
     let _held = all(&importer).expect("held enumeration granted");
     let executor = crate::executor::executor();
-    let reactor = executor.reactor();
     let ended = executor.block_on(async {
         let mut sessions = Providers::<probe::Protocol>::new(importer.handle(), PROBE)
-            .all(&reactor, AnyOf::new("kind", ["absent", "missing"]))
+            .all(AnyOf::new("kind", ["absent", "missing"]))
             .await
             .expect("first set granted");
 
         for _ in 0..POLL_ATTEMPTS {
-            match sessions.next(&reactor).await {
+            match sessions.next().await {
                 None => return true,
                 Some(Err(error)) if error.failure == StartupFailure::NoSpace => {
-                    reactor.sleep(POLL_INTERVAL).await;
+                    executor::sleep(POLL_INTERVAL).await;
                 }
                 Some(_) => return false,
             }
@@ -256,11 +254,7 @@ fn an_undelivered_result_keeps_its_export_and_returns_its_state() {
         let held = composition.hold();
         let answer = {
             let executor = crate::executor::executor();
-            executor.block_on(component_startup::next(
-                &enumeration,
-                &executor.reactor(),
-                UNDELIVERED_TIMEOUT,
-            ))
+            executor.block_on(component_startup::next(&enumeration, UNDELIVERED_TIMEOUT))
         }
         .map(drop);
         drop(held);
@@ -312,7 +306,6 @@ fn next(
         let executor = crate::executor::executor();
         executor.block_on(component_startup::next(
             enumeration,
-            &executor.reactor(),
             STARTUP_REQUEST_TIMEOUT,
         ))
     }
@@ -323,7 +316,6 @@ fn opened(found: &Found) -> Result<(), CallError<SessionError>> {
         let executor = crate::executor::executor();
         executor.block_on(component_startup::open::<probe::Protocol>(
             found,
-            &executor.reactor(),
             COMPONENT_REPLY_TIMEOUT,
         ))
     }

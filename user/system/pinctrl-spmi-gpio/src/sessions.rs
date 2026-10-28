@@ -4,7 +4,7 @@ use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
 use component_startup::{Providers, SessionPort};
-use executor::{Either, Mutex, MutexGuard, PortChannel, Reactor};
+use executor::{Either, Mutex, MutexGuard, PortChannel};
 use ipc::{Incoming, IntoWireValue, ServiceOwner, wire::IpcError};
 use kernel_objects::{Delivery, Port, SessionTransport, Signal};
 use pinctrl_spmi_gpio::{ControllerNode, Gpio, Line, line, plan};
@@ -20,7 +20,6 @@ pub(crate) struct Driver {
     description: MappedDescription,
     spmi: Providers<spmi::Protocol>,
     sessions: Rc<SessionPort>,
-    reactor: Reactor,
     gpios: RefCell<Vec<Rc<Slot>>>,
     claims: RefCell<Claims>,
     lines: RefCell<Lines<Rc<Input>>>,
@@ -55,13 +54,11 @@ impl Driver {
         description: MappedDescription,
         spmi: Providers<spmi::Protocol>,
         sessions: Rc<SessionPort>,
-        reactor: Reactor,
     ) -> Self {
         Self {
             description,
             spmi,
             sessions,
-            reactor,
             gpios: RefCell::new(Vec::new()),
             claims: RefCell::new(Claims::new()),
             lines: RefCell::new(Lines::new()),
@@ -167,13 +164,7 @@ impl Slot {
                 .description
                 .description()
                 .map_err(|_| PinsError::NoDevice)?;
-            let device = Device::bind(
-                &description,
-                &driver.spmi,
-                &self.controller,
-                &driver.reactor,
-            )
-            .await?;
+            let device = Device::bind(&description, &driver.spmi, &self.controller).await?;
             *gpio = Some(Gpio::new(device));
         }
 
@@ -261,10 +252,7 @@ impl Held {
                 let slot = self.driver.slot(&input.line.controller);
                 let gpio = slot.lock(&self.driver).await?;
                 let gpio = gpio.as_ref().ok_or(PinsError::Failed)?;
-                let interrupt = gpio
-                    .registers()
-                    .irq(input.line.block, &self.driver.reactor)
-                    .await?;
+                let interrupt = gpio.registers().irq(input.line.block).await?;
 
                 *irq = Some(Rc::new(interrupt));
             }

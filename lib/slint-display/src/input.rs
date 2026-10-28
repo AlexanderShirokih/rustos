@@ -345,7 +345,7 @@ impl ScreenPlatform {
 
         let window = window.as_weak();
         let tasks = self.tasks.clone();
-        let input = PortChannel::client(input, executor.reactor()).with_wait(Timeout::INFINITE);
+        let input = PortChannel::client(input).with_wait(Timeout::INFINITE);
         self.input = Some(
             executor
                 .spawn_now(async move {

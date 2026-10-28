@@ -18,7 +18,8 @@ use syscall::{MAX_RESOURCE_DEPTH, ProcessName, Rights, SyscallError};
 
 use crate::{
     child_steps_protocol::{
-        Report, STEP_PANIC, Step, child_steps, ipc_error_code, outcome, session_error_code,
+        OUTSIDE_EXECUTOR_PANIC, Report, STEP_PANIC, Step, child_steps, ipc_error_code, outcome,
+        session_error_code,
     },
     composition::{pause, request},
     ipc_raw,
@@ -553,6 +554,32 @@ fn the_return_of_a_bound_thread_ends_its_process() {
         ))
     );
     test_harness::check_eq!(await_component_lines(STEPS_SOURCE, 1), ["stopped: failed"]);
+    stop_component_relay();
+}
+
+#[test_harness::test]
+fn a_wait_polled_outside_an_executor_ends_its_process() {
+    start_component_relay(SharedSourceNames);
+    let log = ScenarioLogSessions
+        .session(STEPS_BADGE)
+        .expect("steps log session");
+    let parent = Parent::start();
+    let mut steps = Steps::new();
+    let provider = parent.add(steps.child(PROVIDER).log(Answer::log(log)));
+
+    test_harness::check_eq!(steps.next(), started(true));
+    steps.send(Step::sleep_outside_executor());
+    test_harness::check_eq!(
+        parent.departure(DEPARTURE_TIMEOUT),
+        Some(departed(
+            provider,
+            Outcome::Exit(COMPONENT_FAILED_EXIT_CODE)
+        ))
+    );
+    let lines = await_component_lines(STEPS_SOURCE, 2);
+    test_harness::check_eq!(lines.len(), 2);
+    test_harness::check!(lines[0].starts_with("panic: "));
+    test_harness::check_eq!(lines[1], OUTSIDE_EXECUTOR_PANIC);
     stop_component_relay();
 }
 

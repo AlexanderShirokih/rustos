@@ -7,7 +7,7 @@
 use std::sync::mpsc;
 
 use component_startup::Import;
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use ipc::wire::IpcError;
 use kernel_objects::{LogConsumer, MemoryRegion, Session, Signal};
 use log_abi::{Level, LogRing, journal};
@@ -33,16 +33,13 @@ struct Batch {
     stopped: bool,
 }
 
-pub(crate) async fn subscribe(
-    journal: &Import<journal::Protocol>,
-    reactor: &Reactor,
-) -> Result<Follower, String> {
+pub(crate) async fn subscribe(journal: &Import<journal::Protocol>) -> Result<Follower, String> {
     let session = journal
-        .open_async(reactor)
+        .open_async()
         .await
         .map_err(|error| format!("journal unavailable: {error}"))?;
 
-    let ring = journal::Client::new(PortChannel::new(session.handle(), reactor.clone()))
+    let ring = journal::Client::new(PortChannel::new(session.handle()))
         .subscribe()
         .await
         .map_err(|error| format!("journal subscription refused: {error:?}"))?;

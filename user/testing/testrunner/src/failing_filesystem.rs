@@ -201,12 +201,11 @@ pub(crate) fn mount_failing() -> FailingMount {
 
 fn serve_failing(server: &Port) -> u32 {
     let executor = crate::executor::executor();
-    let reactor = executor.reactor();
     let failing = Failing { server };
     let mut events = SessionEvents::new(server);
 
     executor.block_on(async {
-        while let Some(event) = events.recv(&reactor).await.expect("failing receive") {
+        while let Some(event) = events.recv().await.expect("failing receive") {
             match event {
                 SessionEvent::Frame(frame) => {
                     let _ = file_system::dispatch(

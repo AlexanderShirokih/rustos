@@ -337,7 +337,6 @@ fn ping_found(found: &Found) -> Result<u64, IpcError> {
         let executor = crate::executor::executor();
         executor.block_on(component_startup::open::<probe::Protocol>(
             found,
-            &executor.reactor(),
             COMPONENT_REPLY_TIMEOUT,
         ))
     }
@@ -586,11 +585,7 @@ pub(crate) fn await_revoked<T>(inspect: impl Fn() -> Result<T, Error>) -> bool {
 fn held_request(found: Found, wait: Timeout) -> JoinHandle {
     spawn_owned(move || {
         let executor = crate::executor::executor();
-        match executor.block_on(component_startup::open::<probe::Protocol>(
-            &found,
-            &executor.reactor(),
-            wait,
-        )) {
+        match executor.block_on(component_startup::open::<probe::Protocol>(&found, wait)) {
             Ok(_) => GRANTED,
             Err(CallError::Remote(SessionError::Unavailable)) => UNAVAILABLE,
             Err(CallError::Ipc(IpcError::Timeout)) => TIMED_OUT,
@@ -628,7 +623,7 @@ fn held_next(watch: &Session<startup_contract::Protocol>) -> JoinHandle {
 
 fn watch_next(watch: &Session<startup_contract::Protocol>, wait: Timeout) -> Option<Found> {
     let executor = crate::executor::executor();
-    match executor.block_on(component_startup::next(watch, &executor.reactor(), wait)) {
+    match executor.block_on(component_startup::next(watch, wait)) {
         Ok(found) => found,
         Err(CallError::Ipc(IpcError::Timeout)) => None,
         Err(error) => panic!("watch next answers: {error:?}"),
@@ -858,7 +853,6 @@ fn an_importer_cannot_take_the_requests_of_a_child_export() {
     let executor = crate::executor::executor();
     let parent = component_startup::AsyncStartup::new(executor::PortChannel::from_transport(
         parent.into_channel(),
-        executor.reactor(),
     ))
     .with_wait(PARENT_REFUSAL_TIMEOUT);
     let taken = executor
@@ -1100,7 +1094,6 @@ fn a_child_is_served_while_another_waits_for_its_budget() {
             let executor = crate::executor::executor();
             executor.block_on(component_startup::open::<probe::Protocol>(
                 found,
-                &executor.reactor(),
                 SERVED_CHILD_REPLY_TIMEOUT,
             ))
         }
@@ -1126,7 +1119,6 @@ fn a_child_whose_budget_did_not_return_in_time_stays_removed() {
         let executor = crate::executor::executor();
         executor.block_on(component_startup::open::<probe::Protocol>(
             &first_found::<probe::Protocol>(&importer, HELD),
-            &executor.reactor(),
             BUDGET_RETURN_TIMEOUT,
         ))
     }
@@ -2043,11 +2035,7 @@ fn a_second_next_of_a_watch_refuses_the_waiting_one() {
     let pending = held_next(&watch);
     let second = {
         let executor = crate::executor::executor();
-        executor.block_on(component_startup::next(
-            &watch,
-            &executor.reactor(),
-            WATCH_WAIT_TIMEOUT,
-        ))
+        executor.block_on(component_startup::next(&watch, WATCH_WAIT_TIMEOUT))
     }
     .map(|found| found.is_some());
 
@@ -2163,7 +2151,6 @@ fn a_found_export_opens_only_as_its_protocol() {
         let executor = crate::executor::executor();
         executor.block_on(component_startup::open::<rtc::Protocol>(
             &found,
-            &executor.reactor(),
             STARTUP_REQUEST_TIMEOUT,
         ))
     }
@@ -2240,34 +2227,29 @@ fn an_enumeration_of_alternatives_walks_the_values_in_order() {
     let providers = Providers::<probe::Protocol>::new(importer.handle(), PROBE);
 
     let executor = crate::executor::executor();
-    let reactor = executor.reactor();
     let (found, pinged, unmatched) = executor.block_on(async {
         let mut sessions = providers
-            .all(&reactor, AnyOf::new("kind", ["absent", "b", "a", "b"]))
+            .all(AnyOf::new("kind", ["absent", "b", "a", "b"]))
             .await
             .expect("enumeration granted");
 
         let mut found = Vec::new();
-        while let Some(result) = sessions.next(&reactor).await {
+        while let Some(result) = sessions.next().await {
             let result = result.expect("results answered");
             found.push(format!("{}", Pairs(result.filter.as_attributes())));
         }
 
         let mut sessions = providers
-            .all(&reactor, AnyOf::new("kind", ["absent", "a"]))
+            .all(AnyOf::new("kind", ["absent", "a"]))
             .await
             .expect("enumeration granted");
 
-        let pinged = match sessions.next(&reactor).await {
+        let pinged = match sessions.next().await {
             Some(found) => {
-                let opened = providers
-                    .open(&reactor, &found.expect("result answered"))
-                    .await;
+                let opened = providers.open(&found.expect("result answered")).await;
 
                 match opened {
-                    Ok(opened) => Some(Ok(executor::PortChannel::client(opened, reactor.clone())
-                        .ping(PING)
-                        .await)),
+                    Ok(opened) => Some(Ok(executor::PortChannel::client(opened).ping(PING).await)),
                     Err(error) => Some(Err(error)),
                 }
             }
@@ -2275,12 +2257,12 @@ fn an_enumeration_of_alternatives_walks_the_values_in_order() {
         };
 
         let mut sessions = providers
-            .all(&reactor, AnyOf::new("kind", ["absent"]))
+            .all(AnyOf::new("kind", ["absent"]))
             .await
             .expect("enumeration granted");
 
         let mut unmatched = 0;
-        while sessions.next(&reactor).await.is_some() {
+        while sessions.next().await.is_some() {
             unmatched += 1;
         }
         (found, pinged, unmatched)
@@ -2366,7 +2348,6 @@ fn an_importer_finds_a_root_export_but_cannot_open_it() {
             let executor = crate::executor::executor();
             executor.block_on(component_startup::open::<hardware::Protocol>(
                 found,
-                &executor.reactor(),
                 STARTUP_REQUEST_TIMEOUT,
             ))
         }
@@ -2392,7 +2373,6 @@ fn a_finished_enumeration_keeps_the_results_it_gave() {
         let executor = crate::executor::executor();
         executor.block_on(component_startup::next(
             &enumeration,
-            &executor.reactor(),
             STARTUP_REQUEST_TIMEOUT,
         ))
     }
@@ -2471,7 +2451,6 @@ fn repeated_searches_release_their_grants() {
             let executor = crate::executor::executor();
             executor.block_on(component_startup::next(
                 &enumeration,
-                &executor.reactor(),
                 STARTUP_REQUEST_TIMEOUT,
             ))
         }

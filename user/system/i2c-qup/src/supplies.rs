@@ -2,7 +2,7 @@
 
 use clocks_abi::{ClocksError, clocks};
 use component_startup::{AnyOf, Providers, StartupError};
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use i2c_qup::{Failure, Line, Resources};
 use ipc::{CallError, Protocol};
 use kernel_objects::{IrqLine, MmioMapping, Session, SessionTransport};
@@ -28,7 +28,6 @@ pub(crate) struct Supplies {
     platform: platform::Client<Channel>,
     pins: Providers<pins::Protocol>,
     clocks: Providers<clocks::Protocol>,
-    reactor: Reactor,
 }
 
 pub(crate) struct ControllerWindow {
@@ -40,7 +39,6 @@ pub(crate) struct ControllerWindow {
 
 pub(crate) struct Interrupt {
     line: IrqLine,
-    reactor: Reactor,
 }
 
 #[derive(Debug, PartialEq)]
@@ -63,13 +61,11 @@ impl Supplies {
         platform: platform::Client<Channel>,
         pins: Providers<pins::Protocol>,
         clocks: Providers<clocks::Protocol>,
-        reactor: Reactor,
     ) -> Self {
         Self {
             platform,
             pins,
             clocks,
-            reactor,
         }
     }
 }
@@ -90,14 +86,12 @@ impl Registers<()> for ControllerWindow {
 
 impl Line for Interrupt {
     async fn wait(&self) -> bool {
-        self.reactor
-            .timeout(
-                INTERRUPT_TIMEOUT,
-                self.reactor
-                    .wait(WaitItem::new(self.line.as_raw(), SIGNALED)),
-            )
-            .await
-            .is_some_and(|outcome| outcome.is_ok())
+        executor::timeout(
+            INTERRUPT_TIMEOUT,
+            executor::wait(WaitItem::new(self.line.as_raw(), SIGNALED)),
+        )
+        .await
+        .is_some_and(|outcome| outcome.is_ok())
     }
 
     fn ack(&self) {
@@ -128,15 +122,9 @@ impl Resources for Supplies {
             return Err(Supply::Controllers(states.len()));
         };
 
-        let pins = PortChannel::client(
-            provider(&self.pins, pins_controller, &self.reactor).await?,
-            self.reactor.clone(),
-        );
+        let pins = PortChannel::client(provider(&self.pins, pins_controller).await?);
         let device = pins.open(controller.clone()).await.map_err(Supply::Pins)?;
-        let device = PortChannel::client(
-            Session::<device_pins::Protocol>::from_session(device),
-            self.reactor.clone(),
-        );
+        let device = PortChannel::client(Session::<device_pins::Protocol>::from_session(device));
 
         let clocks_controller = description
             .node(controller)
@@ -147,10 +135,7 @@ impl Resources for Supplies {
         let clocks_controller = description
             .find(clocks_controller.node.as_str())
             .ok_or(Supply::NoController)?;
-        let clocks = PortChannel::client(
-            provider(&self.clocks, &clocks_controller, &self.reactor).await?,
-            self.reactor.clone(),
-        );
+        let clocks = PortChannel::client(provider(&self.clocks, &clocks_controller).await?);
         clocks
             .enable(controller.clone())
             .await
@@ -183,10 +168,7 @@ impl Resources for Supplies {
             .map(IrqLine::from)
             .map_err(Supply::Line)?;
 
-        Ok(Interrupt {
-            line,
-            reactor: self.reactor.clone(),
-        })
+        Ok(Interrupt { line })
     }
 
     fn refused(&self, controller: &DeviceId, failure: &Failure<Supply>) {
@@ -200,7 +182,6 @@ impl Resources for Supplies {
 async fn provider<P: Protocol>(
     providers: &Providers<P>,
     controller: &Node<'_>,
-    reactor: &Reactor,
 ) -> Result<Session<P>, Supply> {
     let compatible = controller
         .strings("compatible")
@@ -208,7 +189,7 @@ async fn provider<P: Protocol>(
         .ok_or(Supply::NoController)?;
 
     providers
-        .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+        .open_first(AnyOf::new(CONTROLLER_KEY, compatible))
         .await
         .map_err(Supply::Startup)?
         .ok_or(Supply::NoProvider)

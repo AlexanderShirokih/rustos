@@ -6,7 +6,7 @@ use alloc::{
 };
 use core::cell::RefCell;
 
-use executor::{Mutex, Reactor, TaskHandle};
+use executor::{Mutex, TaskHandle};
 use filesystem::{ClientId, NodeId, Window};
 use filesystem_abi::{
     APPEND_OFFSET, AccessMode, DirCursor, FileSystemError, IO_FRAME_BYTES, IO_SCRATCH_BYTES,
@@ -75,7 +75,6 @@ struct Worker {
     requests: RingConsumer,
     responses: RingProducer,
     registration: Rc<RefCell<Registration>>,
-    reactor: Reactor,
     outgoing: RefCell<MessageBuf>,
     incoming: RefCell<[u8; IO_FRAME_BYTES]>,
     scratch: Mapping,
@@ -196,7 +195,6 @@ impl Exchange {
             responses: RingProducer::new(responses, IO_FRAME_BYTES, response_ready)
                 .ok_or(FileSystemError::NoSpace)?,
             registration: registration.clone(),
-            reactor: executor.reactor(),
             outgoing: RefCell::new(MessageBuf::new()),
             incoming: RefCell::new([0; IO_FRAME_BYTES]),
             scratch: Mapping::full(scratch, UserMemFlags::ReadWrite)
@@ -257,8 +255,7 @@ impl Worker {
                 }
             }
 
-            self.reactor
-                .wait(self.requests.wait_item())
+            executor::wait(self.requests.wait_item())
                 .await
                 .map_err(|_| IpcError::PeerClosed)?;
         }
@@ -399,10 +396,7 @@ impl Worker {
         }
 
         // Один срок ограничивает регистрацию и перенос. Отмена future освобождает блокировку узла.
-        let completed = self
-            .reactor
-            .timeout(OPERATION_TIMEOUT, self.complete(&lease, prepared))
-            .await;
+        let completed = executor::timeout(OPERATION_TIMEOUT, self.complete(&lease, prepared)).await;
         if !matches!(completed, Some(Ok(_))) {
             self.registration.borrow_mut().binding = None;
         }

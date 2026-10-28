@@ -15,7 +15,7 @@ use driver_novatek_nvt_ts::{
     Contacts, Device, DeviceError, PARAMETERS_ADDRESS, PARAMETERS_LENGTH, Parameters,
     ParametersError, REPORT_ADDRESS,
 };
-use executor::{Executor, Mutex, PortChannel, Reactor};
+use executor::{Executor, Mutex, PortChannel};
 use i2c_abi::{I2cError, TransferError, i2c, i2c_device};
 use input_abi::{
     AttachError, DeclareError, DeviceNumber, RecordsError, UpdateError, input_inject, input_source,
@@ -53,7 +53,6 @@ struct Source {
     attached: Mutex<bool>,
     refused: Cell<bool>,
     executor: Weak<Executor>,
-    reactor: Reactor,
 }
 
 struct Touchscreen {
@@ -123,19 +122,12 @@ impl Source {
             .ok_or(Failure::NoNode)?;
         *self.node.borrow_mut() = Some(node.clone());
 
-        let touchscreen = Touchscreen::bind(
-            &description,
-            &node,
-            &self.i2c,
-            &self.pins,
-            inject,
-            &self.reactor,
-        )
-        .await?;
+        let touchscreen =
+            Touchscreen::bind(&description, &node, &self.i2c, &self.pins, inject).await?;
         self.executor
             .upgrade()
             .ok_or(Failure::Executor)?
-            .spawn(touchscreen.watch(self.reactor.clone()));
+            .spawn(touchscreen.watch());
 
         Ok(())
     }
@@ -152,7 +144,7 @@ impl input_source::Service<Delivery> for Source {
             return Err(AttachError::Busy);
         }
 
-        let inject = PortChannel::client(Session::from_session(inject), self.reactor.clone());
+        let inject = PortChannel::client(Session::from_session(inject));
 
         let bound = self.bind(inject).await;
         let node = self.node.borrow();
@@ -180,37 +172,31 @@ impl Touchscreen {
         i2c: &Providers<i2c::Protocol>,
         pins: &Providers<pins::Protocol>,
         inject: input_inject::Client<Channel>,
-        reactor: &Reactor,
     ) -> Result<Self, Failure> {
         let states = controllers(description, node.as_str()).ok_or(Failure::State)?;
         let [controller] = states.as_slice() else {
             return Err(Failure::Controllers(states.len()));
         };
 
-        let pins_provider =
-            PortChannel::client(provider(pins, controller, reactor).await?, reactor.clone());
-        let device_pins = PortChannel::client(
-            Session::<device_pins::Protocol>::from_session(pins_provider.open(node.clone()).await?),
-            reactor.clone(),
-        );
+        let pins_provider = PortChannel::client(provider(pins, controller).await?);
+        let device_pins = PortChannel::client(Session::<device_pins::Protocol>::from_session(
+            pins_provider.open(node.clone()).await?,
+        ));
         device_pins
             .output(node.clone(), RESET_LINE, 0, false)
             .await?;
 
-        reactor.sleep(RESET_DELAY).await;
+        executor::sleep(RESET_DELAY).await;
 
         let parent = description
             .ancestors(node)
             .next()
             .ok_or(Failure::NoParent)?;
-        let bus = PortChannel::client(provider(i2c, &parent.node, reactor).await?, reactor.clone());
+        let bus = PortChannel::client(provider(i2c, &parent.node).await?);
 
-        let chip = PortChannel::client(
-            Session::<i2c_device::Protocol>::from_session(
-                bus.open(node.clone()).await.map_err(Failure::I2c)?,
-            ),
-            reactor.clone(),
-        );
+        let chip = PortChannel::client(Session::<i2c_device::Protocol>::from_session(
+            bus.open(node.clone()).await.map_err(Failure::I2c)?,
+        ));
 
         let parameters = chip
             .write_read(&[PARAMETERS_ADDRESS], PARAMETERS_LENGTH)
@@ -242,18 +228,17 @@ impl Touchscreen {
         })
     }
 
-    async fn watch(mut self, reactor: Reactor) {
-        match self.serve(&reactor).await {
+    async fn watch(mut self) {
+        match self.serve().await {
             Ok(never) => match never {},
             Err(failure) => stop(&failure),
         }
     }
 
-    async fn serve(&mut self, reactor: &Reactor) -> Result<Infallible, Failure> {
+    async fn serve(&mut self) -> Result<Infallible, Failure> {
         let mut read_refused = false;
         loop {
-            reactor
-                .wait(WaitItem::new(self.signal.as_raw(), SIGNALED))
+            executor::wait(WaitItem::new(self.signal.as_raw(), SIGNALED))
                 .await
                 .map_err(Failure::Wait)?;
             let time = Instant::now().as_nanos();
@@ -302,9 +287,8 @@ pub(crate) fn run(
     parent: Handle<kind::Port>,
 ) -> Result<(), Stopped> {
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?, reactor.clone());
+    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?);
 
     let export = Rc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
     let source = Rc::new(Source {
@@ -315,14 +299,13 @@ pub(crate) fn run(
         attached: Mutex::new(false),
         refused: Cell::new(false),
         executor: Rc::downgrade(&executor),
-        reactor: reactor.clone(),
     });
 
     let opened = export.clone();
 
     let served = serve_component::<input_source::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         export,
         move |frame| {
             let call = input_source::serve(&source, frame)?;
@@ -346,7 +329,6 @@ pub(crate) fn run(
 async fn provider<P: Protocol>(
     providers: &Providers<P>,
     controller: &platform_abi::Node<'_>,
-    reactor: &Reactor,
 ) -> Result<Session<P>, Failure> {
     let compatible = controller
         .strings("compatible")
@@ -354,7 +336,7 @@ async fn provider<P: Protocol>(
         .ok_or(Failure::NoController)?;
 
     providers
-        .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+        .open_first(AnyOf::new(CONTROLLER_KEY, compatible))
         .await
         .map_err(Failure::Startup)?
         .ok_or(Failure::NoProvider)

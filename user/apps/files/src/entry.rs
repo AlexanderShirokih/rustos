@@ -30,15 +30,12 @@ pub(crate) fn main() -> Result<(), Box<dyn Error>> {
 
 async fn run(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     let requirements = components::requirements::<FilesStartup>()?;
-    let namespace = requirements
-        .namespace
-        .open_async(&executor.reactor())
-        .await?;
+    let namespace = requirements.namespace.open_async().await?;
     molecular::install_filesystem_root(into_std_handle(namespace.into_handle()))
         .map_err(|_| "filesystem root is already installed")?;
 
     let Shown { window, input } = receive_window(executor, requirements.parent).await?;
-    let mut platform = ScreenPlatform::open(window, executor.reactor()).await?;
+    let mut platform = ScreenPlatform::open(window).await?;
 
     let files = ui::Files::new().map_err(|error| format!("ui refused: {error:?}"))?;
     files.set_narrow(platform.logical_size().width < NARROW_WIDTH_MAX);

@@ -51,11 +51,10 @@ pub(crate) fn open_transport(
     device: DeviceType,
 ) -> Result<Session<virtio_slot::Protocol>, CallError<VirtioMmioError>> {
     let executor = crate::executor::executor();
-    let reactor = executor.reactor();
     let session = request::<virtio_mmio::Protocol>(importer.handle(), BUS, BUS_REPLY_TIMEOUT)
         .expect("bus session");
-    let bus = PortChannel::client(session, reactor.clone()).with_wait(BUS_REPLY_TIMEOUT);
-    executor.block_on(open_slot(&bus, &reactor, device))
+    let bus = PortChannel::client(session).with_wait(BUS_REPLY_TIMEOUT);
+    executor.block_on(open_slot(&bus, device))
 }
 
 fn open(

@@ -161,10 +161,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let service = Rc::new(SessionPort::create().map_err(|_| Failed)?);
     let screen = Rc::new(Screen::new().ok_or(Failed)?);
     let parent = DisplayStartup::from_parent(parent).parent;
-    let parent = AsyncStartup::new(PortChannel::from_transport(
-        parent.into_channel(),
-        executor.reactor(),
-    ));
+    let parent = AsyncStartup::new(PortChannel::from_transport(parent.into_channel()));
     let calls = screen.clone();
     let opened = service.clone();
 

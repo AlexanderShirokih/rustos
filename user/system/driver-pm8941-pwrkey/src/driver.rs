@@ -8,7 +8,7 @@ use component_startup::{
     AnyOf, AsyncStartup, Import, Providers, SessionPort, StartupError, serve_component,
     whole_export,
 };
-use executor::{Executor, Mutex, PortChannel, Reactor};
+use executor::{Executor, Mutex, PortChannel};
 use input_abi::{
     AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, DeviceNumber, KeyList,
     UpdateError, Usage, input_inject, input_source,
@@ -54,7 +54,6 @@ struct Source {
     attached: Mutex<bool>,
     refused: Cell<bool>,
     executor: Weak<Executor>,
-    reactor: Reactor,
 }
 
 struct Node {
@@ -112,13 +111,13 @@ impl fmt::Display for Stopped {
 
 impl Source {
     async fn bind(&self, inject: input_inject::Client<Channel>) -> Result<(), Failure> {
-        let node = Node::find(self.key, &self.platform, &self.spmi, &self.reactor).await?;
-        let button = Button::bind(self.key, node, inject, &self.reactor).await?;
+        let node = Node::find(self.key, &self.platform, &self.spmi).await?;
+        let button = Button::bind(self.key, node, inject).await?;
 
         self.executor
             .upgrade()
             .ok_or(Failure::Executor)?
-            .spawn(button.watch(self.reactor.clone()));
+            .spawn(button.watch());
 
         Ok(())
     }
@@ -135,8 +134,7 @@ impl input_source::Service<Delivery> for Source {
             return Err(AttachError::Busy);
         }
 
-        let inject = PortChannel::client(Session::from_session(inject), self.reactor.clone())
-            .with_wait(CALL_TIMEOUT);
+        let inject = PortChannel::client(Session::from_session(inject)).with_wait(CALL_TIMEOUT);
 
         match self.bind(inject).await {
             Ok(()) => {
@@ -162,7 +160,6 @@ impl Node {
         key: &Key,
         platform: &platform::Client<Channel>,
         spmi: &Providers<spmi::Protocol>,
-        reactor: &Reactor,
     ) -> Result<Self, Failure> {
         let description = platform.description().await.map_err(Failure::Platform)?;
         let mapped = MappedDescription::new(description)
@@ -182,19 +179,16 @@ impl Node {
             .ok_or(Failure::NoController)?;
 
         let session = spmi
-            .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+            .open_first(AnyOf::new(CONTROLLER_KEY, compatible))
             .await
             .map_err(Failure::Startup)?
             .ok_or(Failure::NoBus)?;
 
-        let bus = PortChannel::client(session, reactor.clone()).with_wait(CALL_TIMEOUT);
+        let bus = PortChannel::client(session).with_wait(CALL_TIMEOUT);
 
-        let device = PortChannel::client(
-            Session::<spmi_device::Protocol>::from_session(
-                bus.open(id.clone()).await.map_err(Failure::Bus)?,
-            ),
-            reactor.clone(),
-        )
+        let device = PortChannel::client(Session::<spmi_device::Protocol>::from_session(
+            bus.open(id.clone()).await.map_err(Failure::Bus)?,
+        ))
         .with_wait(CALL_TIMEOUT);
 
         // База блока PON - первая ячейка `reg` узла, а без него - родителя, как в Linux.
@@ -236,7 +230,6 @@ impl Button {
         key: &Key,
         node: Node,
         inject: input_inject::Client<Channel>,
-        reactor: &Reactor,
     ) -> Result<Self, Failure> {
         let Node {
             bus,
@@ -266,11 +259,9 @@ impl Button {
         let window = generation.debounce_window(u8::try_from(configured).unwrap_or_default());
 
         let line = device.irq(KEY_INTERRUPT).await?;
-        let interrupt = PortChannel::client(
-            Session::<spmi_interrupt::Protocol>::from_session(line),
-            reactor.clone(),
-        )
-        .with_wait(CALL_TIMEOUT);
+        let interrupt =
+            PortChannel::client(Session::<spmi_interrupt::Protocol>::from_session(line))
+                .with_wait(CALL_TIMEOUT);
 
         let signal = Signal::from(interrupt.signal().await?);
 
@@ -295,14 +286,12 @@ impl Button {
         })
     }
 
-    async fn watch(self, reactor: Reactor) {
+    async fn watch(self) {
         let mut pressed = false;
         let mut quiet_until = 0;
 
         loop {
-            if let Err(error) = reactor
-                .wait(WaitItem::new(self.signal.as_raw(), SIGNALED))
-                .await
+            if let Err(error) = executor::wait(WaitItem::new(self.signal.as_raw(), SIGNALED)).await
             {
                 stop(&Failure::Signal(error));
             }
@@ -373,10 +362,9 @@ pub fn run(
     parent: Handle<kind::Port>,
 ) -> Result<(), Stopped> {
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?, reactor.clone())
-        .with_wait(CALL_TIMEOUT);
+    let platform =
+        PortChannel::client(platform.open().map_err(Stopped::Startup)?).with_wait(CALL_TIMEOUT);
 
     let export = Rc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
     let source = Rc::new(Source {
@@ -386,14 +374,13 @@ pub fn run(
         attached: Mutex::new(false),
         refused: Cell::new(false),
         executor: Rc::downgrade(&executor),
-        reactor: reactor.clone(),
     });
 
     let opened = export.clone();
 
     let served = serve_component::<input_source::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         export,
         move |frame| {
             let call = input_source::serve(&source, frame)?;

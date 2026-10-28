@@ -51,13 +51,12 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let requirements = RouterStartup::from_parent(parent);
 
     let executor = Rc::new(Executor::new()?);
-    let reactor = executor.reactor();
     let views = Rc::new(SessionPort::create()?);
     let mounts = Rc::new(SessionPort::create()?);
-    let router = Rc::new(Router::new(views.clone(), mounts.clone(), reactor.clone()));
+    let router = Rc::new(Router::new(views.clone(), mounts.clone()));
 
     executor.block_on(async {
-        let lines = table::read(&requirements.image, &reactor).await;
+        let lines = table::read(&requirements.image).await;
         table::start(lines, parent, &router, &executor);
 
         let dispatch = router.clone();
@@ -65,7 +64,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
         let closed = router.clone();
         let views = serve_component::<namespace::Protocol, _>(
             &executor,
-            AsyncStartup::new(PortChannel::new(parent, reactor.clone())),
+            AsyncStartup::new(PortChannel::new(parent)),
             views,
             move |frame| namespace::serve(&dispatch, frame),
             async move |_| opened.open_view(),
@@ -77,7 +76,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
         let closed = router.clone();
         let mounts = serve_component::<file_system_mount::Protocol, _>(
             &executor,
-            AsyncStartup::new(PortChannel::new(parent, reactor)),
+            AsyncStartup::new(PortChannel::new(parent)),
             mounts,
             move |frame| file_system_mount::serve(&dispatch, frame),
             async move |_| opened.open_mount(),

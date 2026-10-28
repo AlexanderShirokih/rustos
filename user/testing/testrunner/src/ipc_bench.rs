@@ -98,8 +98,7 @@ fn serve_tasks<F: Future<Output = Result<(), IpcError>> + 'static>(
     });
     let _serving = executor.spawn_now(serving).abort_on_drop();
 
-    let reactor = executor.reactor();
-    let _ = executor.block_on(reactor.wait(WaitItem::new(stop.as_raw(), SIGNALED)));
+    let _ = executor.block_on(executor::wait(WaitItem::new(stop.as_raw(), SIGNALED)));
     0
 }
 
@@ -141,9 +140,8 @@ fn measure_wait(port: &Port) -> u64 {
 
 fn measure_await(port: &Port) -> u64 {
     let executor = crate::executor::executor();
-    let reactor = executor.reactor();
     let start = Instant::now();
-    let client = echo_now::Client::new(PortChannel::new(port.as_raw(), reactor));
+    let client = echo_now::Client::new(PortChannel::new(port.as_raw()));
     executor.block_on(async {
         for _ in 0..ROUNDS {
             test_harness::check_eq!(client.echo(7).await, Ok(7));

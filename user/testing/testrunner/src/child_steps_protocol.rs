@@ -10,6 +10,7 @@ use syscall::Timeout;
 
 pub(crate) const STEP_LINE: &str = "step logged";
 pub(crate) const STEP_PANIC: &str = "step panics";
+pub(crate) const OUTSIDE_EXECUTOR_PANIC: &str = "executor wait polled outside an executor task";
 
 pub(crate) mod action {
     pub(crate) const ACCEPT: u32 = 1;
@@ -25,6 +26,7 @@ pub(crate) mod action {
     pub(crate) const RETURN_ERR: u32 = 11;
     pub(crate) const PANIC: u32 = 12;
     pub(crate) const BOUND_FAILURE: u32 = 13;
+    pub(crate) const SLEEP_OUTSIDE_EXECUTOR: u32 = 14;
 }
 
 pub(crate) mod outcome {
@@ -133,6 +135,11 @@ impl Step {
     #[must_use]
     pub(crate) const fn bound_failure() -> Self {
         Self::new(action::BOUND_FAILURE, 0)
+    }
+
+    #[must_use]
+    pub(crate) const fn sleep_outside_executor() -> Self {
+        Self::new(action::SLEEP_OUTSIDE_EXECUTOR, 0)
     }
 
     const fn new(action: u32, argument: u64) -> Self {

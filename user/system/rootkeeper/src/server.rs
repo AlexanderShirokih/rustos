@@ -4,7 +4,7 @@ use core::{future::Future, task::Poll};
 use ::component_startup::{SessionPort, serve_calls};
 use bootstrap_abi::{FeaturesError, ImageError, features, image};
 use component_abi::{QueryAttributes, SessionError, SessionRequirement, component_startup};
-use executor::{Executor, Reactor};
+use executor::Executor;
 use ipc::{
     Incoming, IntoWireValue,
     wire::{Cap, IpcError},
@@ -200,10 +200,8 @@ pub fn serve(executor: &Rc<Executor>, system: Shared) -> impl Future<Output = ()
         move |badge| gone.lock().gone(badge),
     );
 
-    let reactor = executor.reactor();
-
     async move {
-        let maintenance = maintenance(&system, &reactor);
+        let maintenance = maintenance(&system);
         let mut maintenance = core::pin::pin!(maintenance);
         let mut served = core::pin::pin!(served);
 
@@ -226,10 +224,10 @@ pub fn serve(executor: &Rc<Executor>, system: Shared) -> impl Future<Output = ()
     }
 }
 
-async fn maintenance(system: &Shared, reactor: &Reactor) -> Result<(), kernel_objects::Error> {
+async fn maintenance(system: &Shared) -> Result<(), kernel_objects::Error> {
     loop {
         let (changed, timeout) = system.lock().maintenance()?;
-        if let Some(result) = reactor.timeout(timeout, reactor.wait(changed)).await {
+        if let Some(result) = executor::timeout(timeout, executor::wait(changed)).await {
             result?;
         }
     }

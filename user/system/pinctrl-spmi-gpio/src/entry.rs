@@ -49,9 +49,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let platform = requirements.platform.open().map_err(Stopped::Startup)?;
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform, reactor.clone());
+    let platform = PortChannel::client(platform);
 
     let sessions = Rc::new(SessionPort::create().map_err(|_| Stopped::ServicePort)?);
     let driver = Rc::new(RefCell::new(None::<Rc<Driver>>));
@@ -64,7 +63,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<pins::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor.clone())),
+        AsyncStartup::new(PortChannel::new(parent)),
         sessions,
         move |frame| {
             let driver = dispatch.borrow().clone();
@@ -84,12 +83,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
                     .description()
                     .map_err(|_| SessionError::Refused)?;
                 let spmi = providers.take().ok_or(SessionError::Unavailable)?;
-                *bound.borrow_mut() = Some(Rc::new(Driver::new(
-                    description,
-                    spmi,
-                    port.clone(),
-                    reactor.clone(),
-                )));
+                *bound.borrow_mut() = Some(Rc::new(Driver::new(description, spmi, port.clone())));
             }
 
             port.open_session()

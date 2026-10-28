@@ -28,6 +28,7 @@ pub mod random;
 pub mod sync;
 pub mod thread;
 pub mod tls;
+mod tls_block;
 
 pub(crate) use atomic_handle::restore;
 pub use clock::{Instant, install_realtime, realtime};

@@ -24,7 +24,7 @@ use std::{
     cell::Cell,
     io::ErrorKind,
     os::molecular,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering::Relaxed},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -51,10 +51,24 @@ mod local {
     // атрибут с места вызова не доходит.
     #![allow(clippy::missing_const_for_thread_local)]
 
-    use std::cell::Cell;
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicU32, Ordering::Relaxed},
+    };
+
+    pub(crate) static DROPPED: AtomicU32 = AtomicU32::new(0);
+
+    pub(crate) struct Counted;
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            DROPPED.fetch_add(1, Relaxed);
+        }
+    }
 
     thread_local! {
         pub static LOCAL: Cell<u32> = const { Cell::new(0) };
+        pub static COUNTED: Counted = const { Counted };
     }
 }
 
@@ -77,6 +91,7 @@ fn main() -> Result<(), StartupError> {
     threads_share_state_under_a_mutex();
     a_thread_hands_back_its_value();
     thread_locals_stay_private_to_their_thread();
+    a_thread_local_is_dropped_with_its_thread();
     sleep_waits_out_its_duration();
     an_unrepresentable_stack_size_is_refused();
     spawning_outlives_the_handle_table();
@@ -239,6 +254,18 @@ fn thread_locals_stay_private_to_their_thread() {
         local::LOCAL.with(Cell::get),
         17,
         "the worker did not touch ours"
+    );
+}
+
+fn a_thread_local_is_dropped_with_its_thread() {
+    let before = local::DROPPED.load(Relaxed);
+    thread::spawn(|| local::COUNTED.with(|_| ()))
+        .join()
+        .expect("worker runs to its end");
+    assert_eq!(
+        local::DROPPED.load(Relaxed),
+        before + 1,
+        "the worker dropped its local"
     );
 }
 

@@ -13,7 +13,7 @@ use component_startup::{
     serve_component, whole_export,
 };
 use driver_virtio_input::Device;
-use executor::{Executor, JoinHandle, Mutex, PortChannel, Reactor};
+use executor::{Executor, JoinHandle, Mutex, PortChannel};
 use input_abi::{AttachError, DeviceNumber, RecordsError, UpdateError, input_inject, input_source};
 use ipc::CallError;
 use kernel_objects::{Delivery, IrqLine, ReceivedSession, Session, SessionTransport, Signal};
@@ -66,7 +66,6 @@ struct Source {
     attached: Mutex<bool>,
     refused: Cell<bool>,
     executor: Weak<Executor>,
-    reactor: Reactor,
     shutdown: Rc<Signal>,
     workers: RefCell<Vec<JoinHandle<()>>>,
 }
@@ -110,8 +109,7 @@ impl input_source::Service<Delivery> for Source {
                 *attached = true;
 
                 let inject =
-                    PortChannel::client(Session::from_session(inject), source.reactor.clone())
-                        .with_wait(CALL_TIMEOUT);
+                    PortChannel::client(Session::from_session(inject)).with_wait(CALL_TIMEOUT);
 
                 let result = Box::pin(source.attach_inputs(&Rc::new(inject))).await;
                 source.refused.set(result.is_err());
@@ -129,14 +127,14 @@ impl Source {
         inject: &Rc<input_inject::Client<PortChannel<SessionTransport>>>,
     ) -> Result<(), AttachError> {
         let mut slots = Vec::new();
-        while let Ok(slot) = open_slot(&self.bus, &self.reactor, DeviceType::Input).await {
+        while let Ok(slot) = open_slot(&self.bus, DeviceType::Input).await {
             slots.push(slot);
         }
 
         let mut attached = false;
 
         for slot in slots {
-            let slot = PortChannel::client(slot, self.reactor.clone()).with_wait(CALL_TIMEOUT);
+            let slot = PortChannel::client(slot).with_wait(CALL_TIMEOUT);
             let input = match Box::pin(Input::open(slot)).await {
                 Ok(input) => input,
                 Err(failure) => {
@@ -167,11 +165,10 @@ impl Source {
                 };
 
                 let inject = inject.clone();
-                let reactor = self.reactor.clone();
                 let shutdown = self.shutdown.clone();
                 executor.spawn(async move {
                     let mut input = input;
-                    let outcome = input.serve(id, &inject, &reactor, &shutdown).await;
+                    let outcome = input.serve(id, &inject, &shutdown).await;
                     input.release().await;
                     if let Err(failure) = outcome {
                         log_fmt(format_args!("input device {id}: {failure:?}"));
@@ -278,7 +275,6 @@ impl Input {
         &mut self,
         id: DeviceNumber,
         inject: &input_inject::Client<PortChannel<SessionTransport>>,
-        reactor: &Reactor,
         shutdown: &Signal,
     ) -> Result<(), Failure> {
         let waits = [
@@ -288,21 +284,25 @@ impl Input {
 
         loop {
             self.drain(id, inject).await?;
-            if reactor.wait_any(&waits).await.map_err(Failure::Line)? == 0 {
+            if executor::wait_any(&waits).await.map_err(Failure::Line)? == 0 {
                 return Ok(());
             }
-
-            let causes = self
-                .transport
-                .interrupt_status()
-                .await
-                .map_err(Failure::Slot)?;
-            self.transport
-                .acknowledge_interrupt(causes)
-                .await
-                .map_err(Failure::Slot)?;
-            self.line.ack().map_err(Failure::Line)?;
+            self.acknowledge().await?;
         }
+    }
+
+    async fn acknowledge(&mut self) -> Result<(), Failure> {
+        let causes = self
+            .transport
+            .interrupt_status()
+            .await
+            .map_err(Failure::Slot)?;
+        self.transport
+            .acknowledge_interrupt(causes)
+            .await
+            .map_err(Failure::Slot)?;
+
+        self.line.ack().map_err(Failure::Line)
     }
 
     async fn drain(
@@ -371,18 +371,16 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let bus = requirements.virtio.open().map_err(Stopped::Startup)?;
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
     let export = Rc::new(SessionPort::create().map_err(|_| Stopped::ServicePort)?);
     let shutdown = Rc::new(Signal::create().map_err(|_| Stopped::Executor)?);
 
     let source = Rc::new_cyclic(|owner| Source {
         owner: owner.clone(),
-        bus: PortChannel::client(bus, reactor.clone()).with_wait(CALL_TIMEOUT),
+        bus: PortChannel::client(bus).with_wait(CALL_TIMEOUT),
         attached: Mutex::new(false),
         refused: Cell::new(false),
         executor: Rc::downgrade(&executor),
-        reactor: reactor.clone(),
         shutdown,
         workers: RefCell::new(Vec::new()),
     });
@@ -392,7 +390,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<input_source::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         export,
         move |frame| {
             let call = input_source::serve(&dispatch, frame)?;

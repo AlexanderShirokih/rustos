@@ -1,15 +1,20 @@
 #![no_std]
 #![no_main]
 
-use core::num::NonZeroU64;
+use core::{
+    future::Future,
+    num::NonZeroU64,
+    pin::pin,
+    task::{Context, Waker},
+};
 
 use component_startup::{
     AsyncStartup, Requirements as _, SessionPort, SessionRequest, accept, component_manifest,
 };
-use executor::{Executor, PortChannel, Reactor};
+use executor::{Executor, PortChannel};
 use ipc::CallError;
 use kernel_objects::Port;
-use runtime::{FAILED_EXIT_CODE, Timeout, exit, log_line, process_exit, spawn_bound};
+use runtime::{FAILED_EXIT_CODE, Timeout, exit, log_line, process_exit, spawn_bound, spawn_owned};
 use syscall::{Handle, Rights, kind};
 
 mod child_steps_protocol;
@@ -34,29 +39,26 @@ struct Fixture {
     parent: Handle<kind::Port>,
     export: SessionPort,
     held: Option<SessionRequest>,
-    reactor: Reactor,
 }
 
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let executor = Executor::new().map_err(|_| Failed)?;
-    let reactor = executor.reactor();
 
     executor.block_on(async {
         let steps = StepsStartup::from_parent(parent)
             .steps
-            .open_async(&reactor)
+            .open_async()
             .await
             .map_err(|_| Failed)?;
         let logged = runtime::log::installed();
         let export = SessionPort::create().map_err(|_| Failed)?;
 
-        let steps = PortChannel::client(steps, reactor.clone()).with_wait(Timeout::INFINITE);
+        let steps = PortChannel::client(steps).with_wait(Timeout::INFINITE);
         let mut fixture = Fixture {
             parent,
             export,
             held: None,
-            reactor,
         };
         let mut last = (outcome::STARTED, u64::from(logged));
         loop {
@@ -115,13 +117,16 @@ impl Fixture {
                 Ok(_) => wait(),
                 Err(_) => (outcome::SPAWN_REFUSED, 0),
             },
+            action::SLEEP_OUTSIDE_EXECUTOR => match spawn_owned(sleep_outside_executor) {
+                Ok(_) => wait(),
+                Err(_) => (outcome::SPAWN_REFUSED, 0),
+            },
             _ => (outcome::UNKNOWN_STEP, 0),
         }
     }
 
     async fn accept(&mut self, wait: Timeout) -> (u32, u64) {
-        let parent =
-            AsyncStartup::new(PortChannel::new(self.parent, self.reactor.clone())).with_wait(wait);
+        let parent = AsyncStartup::new(PortChannel::new(self.parent)).with_wait(wait);
 
         match accept::<probe::Protocol>(&parent).await {
             Ok(request) => {
@@ -148,7 +153,7 @@ impl Fixture {
     async fn recv(&self, wait: Timeout) -> (u32, u64) {
         let mut events = self.export.events();
 
-        match self.reactor.timeout(wait, events.recv(&self.reactor)).await {
+        match executor::timeout(wait, events.recv()).await {
             Some(Ok(Some(component_startup::SessionEvent::Frame(frame)))) => {
                 let badge = frame.resources.badge;
                 let _ = probe::dispatch(&Echo, frame);
@@ -169,6 +174,13 @@ impl Fixture {
 )]
 fn panic_on_step() -> ! {
     panic!("{STEP_PANIC}")
+}
+
+fn sleep_outside_executor() -> u32 {
+    let mut sleep = pin!(executor::sleep(Timeout::from_secs(1)));
+    let _ = sleep.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+
+    0
 }
 
 fn wait() -> ! {

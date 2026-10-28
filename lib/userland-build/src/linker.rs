@@ -9,6 +9,9 @@
 //! обработчиками `atexit`, последней - `.fini_thread_local` с деструкторами `thread_local`.
 //! Массив обходится с конца. Таблица адресов `.got` C-кода лежит там же, в `.data`.
 //!
+//! Шаблон блока TLS потока - `.tdata` между `__tdata_start` и `__tdata_end` и обнуляемый `.tbss`
+//! до `__tbss_end`. Общее выравнивание секций - адрес символа `__tls_align`.
+//!
 //! Таблицы раскрутки стека `.eh_frame`, их индекс `.eh_frame_hdr` и таблицы обработчиков
 //! `.gcc_except_table` лежат в сегменте только для чтения. Раскрутчик C++ находит таблицы по
 //! символам `__eh_frame_start`/`__eh_frame_end` и `__eh_frame_hdr_start`/`__eh_frame_hdr_end`.
@@ -51,7 +54,19 @@ SECTIONS
     __eh_frame_end = .;
   }
 
-  .data ALIGN(0x1000) : {
+  .tdata ALIGN(0x1000) : {
+    __tdata_start = .;
+    *(.tdata .tdata.*)
+    __tdata_end = .;
+  }
+
+  .tbss : {
+    *(.tbss .tbss.*)
+    __tbss_end = .;
+  }
+  __tls_align = MAX(ALIGNOF(.tdata), ALIGNOF(.tbss));
+
+  .data : {
     . = ALIGN(8);
     PROVIDE_HIDDEN(__preinit_array_start = .);
     PROVIDE_HIDDEN(__bothinit_array_start = .);
@@ -101,5 +116,7 @@ pub fn emit_linker_script() -> Result<(), Error> {
     })?;
     println!("cargo:rustc-link-arg=-T{}", linker_script.display());
     println!("cargo:rustc-link-arg=--eh-frame-hdr");
+    // Программу не загружает динамический загрузчик, и RELRO ей не нужен.
+    println!("cargo:rustc-link-arg=-znorelro");
     Ok(())
 }

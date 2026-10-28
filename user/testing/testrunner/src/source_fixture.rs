@@ -9,7 +9,7 @@ use alloc::rc::Rc;
 use component_startup::{
     AsyncStartup, SessionPort, component_startup as startup_contract, serve_component, whole_export,
 };
-use executor::{Executor, Mutex, PortChannel, Reactor};
+use executor::{Executor, Mutex, PortChannel};
 use input_abi::{
     AttachError, AxisList, Binding, DeviceDescriptor, KeyList, Usage, input_inject, input_source,
 };
@@ -31,7 +31,6 @@ pub(crate) enum Attach {
 struct Source {
     attach: Attach,
     inject: Mutex<Option<input_inject::Client<PortChannel<SessionTransport>>>>,
-    reactor: Reactor,
 }
 
 impl input_source::Service<Delivery> for Source {
@@ -49,8 +48,7 @@ impl input_source::Service<Delivery> for Source {
             return Err(AttachError::Refused);
         };
 
-        let inject = PortChannel::client(Session::from_session(inject), self.reactor.clone())
-            .with_wait(DECLARE_TIMEOUT);
+        let inject = PortChannel::client(Session::from_session(inject)).with_wait(DECLARE_TIMEOUT);
 
         let mut keys = KeyList::new();
         keys.push(KEY).map_err(|_| AttachError::Refused)?;
@@ -96,7 +94,6 @@ pub(crate) fn serve_source(
         process_exit(1)
     };
     let executor = Rc::new(executor);
-    let reactor = executor.reactor();
 
     let Ok(export) = SessionPort::create() else {
         process_exit(1)
@@ -107,12 +104,8 @@ pub(crate) fn serve_source(
     let source = Rc::new(Source {
         attach,
         inject: Mutex::new(None),
-        reactor: reactor.clone(),
     });
-    let parent = AsyncStartup::new(PortChannel::from_transport(
-        parent.into_channel(),
-        reactor.clone(),
-    ));
+    let parent = AsyncStartup::new(PortChannel::from_transport(parent.into_channel()));
 
     let served = serve_component::<input_source::Protocol, _>(
         &executor,
@@ -125,7 +118,7 @@ pub(crate) fn serve_source(
 
     executor.block_on(async {
         if let Some(delay) = delay {
-            reactor.sleep(delay).await;
+            executor::sleep(delay).await;
         }
 
         let _ = served.await;

@@ -13,7 +13,7 @@ use component_startup::{
     component_manifest, serve_component,
 };
 use display_abi::{Area, DisplayDimension, DisplayError, PhysicalSize, display};
-use executor::{Executor, Mutex, PortChannel, Reactor};
+use executor::{Executor, Mutex, PortChannel};
 use ipc::{IntoWireValue, wire::Cap};
 use kernel_objects::{Delivery, Mapping, MemoryRegion, Port, Resource, SessionTransport};
 use runtime::{MemoryAccess, Timeout, UserMemFlags, log_fmt, log_line};
@@ -44,7 +44,6 @@ struct Shared {
     gpu: Mutex<Option<Gpu>>,
     sessions: RefCell<Vec<Rc<Session>>>,
     executor: Weak<Executor>,
-    reactor: Reactor,
     bus: virtio_mmio::Client<PortChannel<SessionTransport>>,
 }
 
@@ -78,12 +77,10 @@ impl Shared {
             executor.spawn(async move {
                 let mut bound = shared.gpu.lock().await;
                 if bound.is_none() {
-                    let gpu = Gpu::bind(&shared.bus, shared.reactor.clone())
-                        .await
-                        .map_err(|refusal| {
-                            log_fmt(format_args!("gpu refused: {refusal:?}"));
-                            SessionError::Refused
-                        })?;
+                    let gpu = Gpu::bind(&shared.bus).await.map_err(|refusal| {
+                        log_fmt(format_args!("gpu refused: {refusal:?}"));
+                        SessionError::Refused
+                    })?;
                     let DisplayDimension { width, height } = gpu.dimension();
                     match gpu.physical_size() {
                         Some(PhysicalSize {
@@ -251,7 +248,6 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let bus = requirements.virtio.open().map_err(Stopped::Startup)?;
 
     let executor = Rc::new(Executor::new().map_err(Stopped::Kernel)?);
-    let reactor = executor.reactor();
     let service = Rc::new(SessionPort::create().map_err(Stopped::Kernel)?);
 
     let shared = Rc::new(Shared {
@@ -259,8 +255,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
         gpu: Mutex::new(None),
         sessions: RefCell::new(Vec::new()),
         executor: Rc::downgrade(&executor),
-        reactor: reactor.clone(),
-        bus: PortChannel::client(bus, reactor.clone()).with_wait(BUS_CALL_TIMEOUT),
+        bus: PortChannel::client(bus).with_wait(BUS_CALL_TIMEOUT),
     });
 
     let dispatch = shared.clone();
@@ -269,7 +264,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<display::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         service,
         move |frame| {
             let session = dispatch

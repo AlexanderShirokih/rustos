@@ -225,9 +225,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let platform_session = requirements.platform.open().map_err(Stopped::Startup)?;
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::ServicePort)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform_session, reactor.clone());
+    let platform = PortChannel::client(platform_session);
 
     let description = platform
         .description()
@@ -254,7 +253,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<display::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         service,
         move |frame| {
             let badge = frame.resources.badge;

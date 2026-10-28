@@ -18,6 +18,7 @@ pub(crate) const OP_PROCESS_EXIT: u8 = 7;
 pub(crate) const OP_HOLD_CAP: u8 = 8;
 pub(crate) const OP_HOLD_SELF: u8 = 9;
 pub(crate) const OP_CLOSE_CAP: u8 = 10;
+pub(crate) const OP_JOIN_THREAD: u8 = 11;
 
 pub(crate) const REQUEST_LEN: usize = 1 + 8;
 pub(crate) const READ_REPLY_LEN: usize = 8 + 8;

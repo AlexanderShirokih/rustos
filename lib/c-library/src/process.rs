@@ -45,6 +45,8 @@ unsafe extern "Rust" {
 
 #[unsafe(no_mangle)]
 extern "C" fn _start(bootstrap: u32) -> ! {
+    runtime::thread::enter_main();
+
     if let Some(parent) = NonZeroU32::new(bootstrap) {
         runtime::start_component(Handle::from_abi(parent));
     }

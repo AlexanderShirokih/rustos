@@ -59,10 +59,7 @@ fn port_async_client_call_lets_other_tasks_run_until_the_answer() {
         }
     });
 
-    let client = async_probe::Client::new(PortChannel::new(
-        service.client.as_raw(),
-        executor.reactor(),
-    ));
+    let client = async_probe::Client::new(PortChannel::new(service.client.as_raw()));
     let answer = executor.block_on(client.double(21));
 
     test_harness::check_eq!(answer, Ok(42));
@@ -74,18 +71,16 @@ fn port_async_client_call_lets_other_tasks_run_until_the_answer() {
 fn port_async_client_call_times_out_by_default_and_refuses_the_late_answer() {
     let port = Rc::new(Port::create().expect("port"));
     let executor = executor();
-    let reactor = executor.reactor();
     let held = Rc::new(Cell::new(None));
     let (server, holder) = (Rc::clone(&port), Rc::clone(&held));
     executor.spawn(async move {
-        reactor
-            .wait(WaitItem::new(server.as_raw(), READABLE))
+        executor::wait(WaitItem::new(server.as_raw(), READABLE))
             .await
             .expect("readable");
         holder.set(server.recv(Timeout::POLL).expect("receive"));
     });
 
-    let client = async_probe::Client::new(PortChannel::new(port.as_raw(), executor.reactor()));
+    let client = async_probe::Client::new(PortChannel::new(port.as_raw()));
     let answer = executor.block_on(client.double(1));
 
     test_harness::check_eq!(answer, Err(IpcError::Timeout));
@@ -109,10 +104,7 @@ fn port_async_client_cast_returns_the_capability_when_receivers_leave() {
     let signal = Signal::create().expect("signal");
     signal.notify_all().expect("raise");
 
-    let client = async_probe::Client::new(PortChannel::new(
-        service.client.as_raw(),
-        executor.reactor(),
-    ));
+    let client = async_probe::Client::new(PortChannel::new(service.client.as_raw()));
     let refused = executor
         .block_on(client.hand(signal))
         .expect_err("receivers left");
@@ -128,10 +120,8 @@ fn port_async_call_runs_both_sides_on_one_executor_thread() {
     let executor = executor();
     let port = Rc::new(Port::create().expect("port"));
     let server = port.clone();
-    let reactor = executor.reactor();
     executor.spawn(async move {
-        reactor
-            .wait(WaitItem::new(server.as_raw(), READABLE))
+        executor::wait(WaitItem::new(server.as_raw(), READABLE))
             .await
             .expect("readable");
         let reply = server.recv(Timeout::POLL).expect("receive").expect("reply");
@@ -144,7 +134,6 @@ fn port_async_call_runs_both_sides_on_one_executor_thread() {
         ipc_raw::write_frame(b"answer", &[signal.into_raw().raw()]);
         reply.reply().expect("reply");
     });
-    let reactor = executor.reactor();
     executor.block_on(async {
         let signal = Signal::create().expect("signal");
         signal.notify_all().expect("raise");
@@ -163,8 +152,7 @@ fn port_async_call_runs_both_sides_on_one_executor_thread() {
             pending.duplicate(Rights::READ, None),
             Err(Error::Syscall(SyscallError::AccessDenied))
         ));
-        reactor
-            .wait(WaitItem::new(pending.as_raw(), SIGNALED))
+        executor::wait(WaitItem::new(pending.as_raw(), SIGNALED))
             .await
             .expect("completed");
         pending.take().expect("take");

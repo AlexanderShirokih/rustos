@@ -54,11 +54,7 @@ pub(crate) fn main() -> Result<(), Box<dyn Error>> {
 
 async fn start(executor: &Rc<Executor>) -> Result<(), Box<dyn Error>> {
     let PhysicsStartup { parent } = components::requirements::<PhysicsStartup>()?;
-    let mut platform = ScreenPlatform::open(
-        receive_window(executor, parent).await?.window,
-        executor.reactor(),
-    )
-    .await?;
+    let mut platform = ScreenPlatform::open(receive_window(executor, parent).await?.window).await?;
     let size = platform.logical_size();
     let field_width = size.width;
     let field_height = size.height - NOTE_HEIGHT;

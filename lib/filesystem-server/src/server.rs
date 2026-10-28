@@ -115,7 +115,7 @@ fn run(
     let gone = shared.clone();
     let served = serve_component::<file_system::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(start, executor.reactor())),
+        AsyncStartup::new(PortChannel::new(start)),
         shared.service.clone(),
         move |incoming| {
             let volume = calls.volumes.lock().of(incoming.resources.badge);

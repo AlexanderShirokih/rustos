@@ -72,6 +72,7 @@ pub(crate) fn expand_entry(
         #[allow(unsafe_code)]
         #[unsafe(no_mangle)]
         extern "C" fn _start(#start: u32) -> ! {
+            ::runtime::thread::enter_main();
             unsafe { ::runtime::start(#start) };
             let Some(#start) = ::runtime::take_bootstrap() else {
                 ::runtime::exit(::runtime::FAILED_EXIT_CODE)

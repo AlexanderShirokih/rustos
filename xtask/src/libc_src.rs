@@ -118,8 +118,6 @@ const MESON_OPTIONS: &[&str] = &[
     "-Dtests=false",
 ];
 
-const COMMON_CFLAGS: &[&str] = &["-femulated-tls"];
-
 const RUNTIMES_FLAGS: &[&str] = &[
     "-fPIC",
     // Открывает `strto*_l`, `locale_t` и `isascii` picolibc.
@@ -326,9 +324,7 @@ fn stamp_for(
 }
 
 fn cflags(arch: &ArchFlags) -> Vec<&'static str> {
-    // `-femulated-tls` направляет доступ к thread-local переменным в `__emutls_get_address`
-    // системного слоя, потому что регистром потока владеет рантайм процесса.
-    arch.cflags.iter().chain(COMMON_CFLAGS).copied().collect()
+    arch.cflags.to_vec()
 }
 
 fn build_arch(

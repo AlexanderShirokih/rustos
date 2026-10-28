@@ -1,7 +1,7 @@
 //! Локальные данные потока по ключам.
 //!
 //! Ключ - индекс слота в блоке потока, ноль зарезервирован под "ключа нет". Блок создаётся при
-//! первой записи, и его адрес хранится в указателе локальных данных потока.
+//! первой записи, и его адрес хранится в заголовке блока TLS потока.
 //!
 //! [`run_destructors`] обязан позвать тот, кто закрывает поток, в том числе рантайм программы
 //! при завершении её главного потока. Прогон обнуляет только слоты ключей с деструктором, и
@@ -9,15 +9,14 @@
 //! Ключевой TLS стандартной библиотеки рассчитывает на этот прогон и без него не отработают
 //! ни `Drop` у `thread_local!`, ни её собственная уборка потока.
 //!
-//! Указатель локальных данных есть только под RustOS на aarch64. На другом таргете блок потока
-//! не запоминается, и крейт собирается для хостовых тестов зависимых крейтов.
+//! Поток без блока TLS значений по ключам не хранит.
 
-#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
-use core::arch::asm;
 use core::{
     ptr,
     sync::atomic::{AtomicUsize, Ordering},
 };
+
+use crate::tls_block::keys_word;
 
 /// Ключ локальных данных потока. Ноль означает отсутствие ключа.
 pub type Key = usize;
@@ -138,22 +137,32 @@ pub fn run_destructors() {
         }
     }
 
-    set_thread_pointer(0);
+    if let Some(word) = keys_word() {
+        // SAFETY: `thread` выделяет и выравнивает заголовок TLS на время работы потока.
+        // Только этот поток обращается к слову заголовка.
+        unsafe { word.write(ptr::null_mut()) };
+    }
+
     // SAFETY: блок выдан `alloc` с этим layout и больше никому не виден.
     unsafe { crate::heap::dealloc(block.cast::<u8>(), size_of::<Block>(), align_of::<Block>()) };
 }
 
 fn block() -> Option<*mut Block> {
-    match thread_pointer() {
-        0 => None,
-        raw => Some(raw as *mut Block),
-    }
+    let word = keys_word()?;
+
+    // SAFETY: `thread` выделяет, выравнивает и обнуляет заголовок TLS при запуске потока.
+    // Заголовок принадлежит этому потоку и доступен до его завершения.
+    let keys = unsafe { word.read() };
+
+    (!keys.is_null()).then_some(keys.cast())
 }
 
 fn installed_block() -> Option<*mut Block> {
     if let Some(block) = block() {
         return Some(block);
     }
+
+    let word = keys_word()?;
 
     // SAFETY: layout `Block` ненулевого размера; выравнивание - степень двойки.
     let raw = unsafe { crate::heap::alloc(size_of::<Block>(), align_of::<Block>()) };
@@ -168,41 +177,10 @@ fn installed_block() -> Option<*mut Block> {
             slots: [ptr::null_mut(); MAX_KEYS],
         });
     }
-    set_thread_pointer(block as usize as u64);
+
+    // SAFETY: `thread` выделяет и выравнивает заголовок TLS на время работы потока.
+    // Только этот поток обращается к слову заголовка.
+    unsafe { word.write(raw) };
+
     Some(block)
 }
-
-#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
-fn thread_pointer() -> u64 {
-    let value: u64;
-    // SAFETY: указатель локальных данных читается на EL0 и принадлежит текущему потоку.
-    unsafe {
-        asm!(
-            "mrs {value}, tpidr_el0",
-            value = out(reg) value,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    value
-}
-
-#[cfg(all(target_os = "molecular", target_arch = "aarch64"))]
-fn set_thread_pointer(value: u64) {
-    // SAFETY: указатель локальных данных пишется на EL0 и принадлежит текущему потоку;
-    // его владелец - этот модуль.
-    unsafe {
-        asm!(
-            "msr tpidr_el0, {value}",
-            value = in(reg) value,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-}
-
-#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
-fn thread_pointer() -> u64 {
-    0
-}
-
-#[cfg(not(all(target_os = "molecular", target_arch = "aarch64")))]
-fn set_thread_pointer(_value: u64) {}

@@ -35,21 +35,17 @@ component_manifest! {
 #[program_entry::component]
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
-    let reactor = executor.reactor();
 
     executor.block_on(async {
         let files = BudgetHolderStartup::from_parent(parent)
             .files
-            .open_async(&reactor)
+            .open_async()
             .await
             .map_err(|_| Failed)?;
         let root = "/tmp";
-        let namespace = PortChannel::client(files, reactor.clone()).with_wait(CALL_TIMEOUT);
+        let namespace = PortChannel::client(files).with_wait(CALL_TIMEOUT);
         let session = namespace.resolve(root).await.map_err(|_| Failed)?;
-        let files = PortChannel::client(
-            kernel_objects::Session::from_session(session),
-            reactor.clone(),
-        );
+        let files = PortChannel::client(kernel_objects::Session::from_session(session));
         let started_path = STARTED_PATH;
         let held_path = HELD_PATH;
 

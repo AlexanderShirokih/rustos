@@ -5,7 +5,7 @@ use component_startup::{
     AsyncStartup, Requirements as _, SessionError, SessionPort, StartupError, component_manifest,
     serve_component,
 };
-use executor::{Executor, PortChannel, Reactor, TaskHandle};
+use executor::{Executor, PortChannel, TaskHandle};
 use kernel_objects::{IrqLine, SessionTransport};
 use platform_abi::{MappedDescription, platform};
 use runtime::{FAILED_EXIT_CODE, exit, log_fmt, log_line};
@@ -58,9 +58,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let platform = requirements.platform.open().map_err(Stopped::Startup)?;
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform, reactor.clone());
+    let platform = PortChannel::client(platform);
 
     let sessions = Rc::new(SessionPort::create().map_err(|_| Stopped::ServicePort)?);
     let bound = Rc::new(RefCell::new(None::<Rc<Bound>>));
@@ -74,7 +73,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
     let served = serve_component::<spmi::Protocol, core::future::Ready<_>>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor.clone())),
+        AsyncStartup::new(PortChannel::new(parent)),
         sessions,
         move |frame| {
             let bound = dispatch.borrow().clone();
@@ -90,7 +89,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
                         spawning
                             .upgrade()
                             .ok_or(SessionError::Unavailable)?
-                            .spawn_now(deliver(line, bus.clone(), reactor.clone()))
+                            .spawn_now(deliver(line, bus.clone()))
                             .abort_on_drop(),
                     )
                 } else {
@@ -115,10 +114,9 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     Err(Stopped::ServicePortClosed)
 }
 
-async fn deliver(line: IrqLine, bus: Rc<Bus>, reactor: Reactor) {
+async fn deliver(line: IrqLine, bus: Rc<Bus>) {
     loop {
-        if reactor
-            .wait(WaitItem::new(line.as_raw(), SIGNALED))
+        if executor::wait(WaitItem::new(line.as_raw(), SIGNALED))
             .await
             .is_err()
         {

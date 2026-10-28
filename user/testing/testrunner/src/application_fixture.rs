@@ -23,7 +23,7 @@ component_manifest! {
 fn run(parent: Handle<kind::Port>) -> Result<(), Failed> {
     let executor = Rc::new(Executor::new().map_err(|_| Failed)?);
     executor.block_on(async {
-        let parent = AsyncStartup::new(PortChannel::new(parent, executor.reactor()));
+        let parent = AsyncStartup::new(PortChannel::new(parent));
         let shown = receive_window(&executor, parent)
             .await
             .map_err(|_| Failed)?;

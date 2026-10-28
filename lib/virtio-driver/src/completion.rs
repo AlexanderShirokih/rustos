@@ -1,6 +1,5 @@
 //! Ожидание завершения команды очереди по линии прерывания транспорта.
 
-use executor::Reactor;
 use kernel_objects::IrqLine;
 use runtime::{Instant, Timeout};
 use syscall::{SIGNALED, SyscallError, WaitItem};
@@ -31,7 +30,6 @@ pub async fn await_completion<M: DeviceMemory>(
     transport: &mut Transport<SlotRegisters>,
     memory: &mut M,
     line: &IrqLine,
-    reactor: &Reactor,
     timeout: Timeout,
 ) -> Result<Completion, CompletionFailure> {
     let start = Instant::now();
@@ -45,16 +43,15 @@ pub async fn await_completion<M: DeviceMemory>(
         }
 
         let remaining = timeout.saturating_sub(Instant::now().since(start));
-        reactor
-            .timeout(
-                remaining,
-                reactor.wait(WaitItem::new(line.as_raw(), SIGNALED)),
-            )
-            .await
-            .ok_or(CompletionFailure::Line(kernel_objects::Error::Syscall(
-                SyscallError::Timeout,
-            )))?
-            .map_err(CompletionFailure::Line)?;
+        executor::timeout(
+            remaining,
+            executor::wait(WaitItem::new(line.as_raw(), SIGNALED)),
+        )
+        .await
+        .ok_or(CompletionFailure::Line(kernel_objects::Error::Syscall(
+            SyscallError::Timeout,
+        )))?
+        .map_err(CompletionFailure::Line)?;
 
         let causes = transport
             .interrupt_status()

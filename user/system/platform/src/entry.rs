@@ -7,7 +7,7 @@ use component_startup::{
     component_manifest, serve_component,
 };
 use device_resolver::{DeviceTreePlatform, PLATFORM_BINDINGS};
-use executor::{Executor, PortChannel, Reactor};
+use executor::{Executor, PortChannel};
 use fdt::devicetree::DeviceTree;
 use kernel_objects::{IrqControl, MemoryRegion, Port, ReadOnlyMapping, SessionTransport};
 use platform_abi::{Description, platform};
@@ -59,9 +59,8 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     let requirements = PlatformStartup::from_parent(parent);
 
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
     executor.block_on(async {
-        let (shared, platform) = start(&requirements, &reactor).await?;
+        let (shared, platform) = start(&requirements).await?;
         let platform = Rc::new(platform);
         let dispatch = platform.clone();
         let closed = platform.clone();
@@ -69,7 +68,7 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
 
         let served = serve_component::<platform::Protocol, _>(
             &executor,
-            AsyncStartup::new(PortChannel::new(parent, reactor)),
+            AsyncStartup::new(PortChannel::new(parent)),
             shared.service.clone(),
             move |frame| platform::serve(&dispatch, frame),
             async move |_| open(&opened),
@@ -80,17 +79,14 @@ fn run(parent: Handle<kind::Port>) -> Result<(), Stopped> {
     })
 }
 
-async fn start(
-    requirements: &PlatformStartup,
-    reactor: &Reactor,
-) -> Result<(Rc<Shared>, Platform), Stopped> {
+async fn start(requirements: &PlatformStartup) -> Result<(Rc<Shared>, Platform), Stopped> {
     let hardware = requirements
         .hardware
-        .open_async(reactor)
+        .open_async()
         .await
         .map_err(Stopped::Startup)?;
 
-    let hardware = PortChannel::client(hardware, reactor.clone());
+    let hardware = PortChannel::client(hardware);
     let lines = IrqControl::from(
         hardware
             .acquire_irq_control()
@@ -123,11 +119,11 @@ async fn start(
         .map_err(|_| Stopped::Description)?;
     let features = requirements
         .features
-        .open_async(reactor)
+        .open_async()
         .await
         .map_err(Stopped::Startup)?;
 
-    let features = PortChannel::client(features, reactor.clone());
+    let features = PortChannel::client(features);
     publish(&features, &description).await;
 
     Ok((

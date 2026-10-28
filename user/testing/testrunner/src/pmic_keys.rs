@@ -176,7 +176,6 @@ fn the_board_buttons_are_attached_input_sources_with_their_keys() {
                 let executor = crate::executor::executor();
                 executor.block_on(component_startup::open::<input_source::Protocol>(
                     found,
-                    &executor.reactor(),
                     REPLY_TIMEOUT,
                 ))
             }

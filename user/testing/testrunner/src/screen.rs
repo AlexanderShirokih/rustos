@@ -41,7 +41,6 @@ fn opened(screen: &Found) -> display::Client<SessionTransport> {
         let executor = crate::executor::executor();
         executor.block_on(component_startup::open::<display::Protocol>(
             screen,
-            &executor.reactor(),
             SCREEN_REPLY_TIMEOUT,
         ))
     }

@@ -16,7 +16,7 @@ use component_startup::{
     whole_export,
 };
 use driver_gpio_keys::{Edge, Key, KeysError, Window, keys};
-use executor::{Executor, Mutex, PortChannel, Reactor};
+use executor::{Executor, Mutex, PortChannel};
 use input_abi::{
     AttachError, AxisList, Binding, Command, DeclareError, DeviceDescriptor, DeviceNumber, KeyList,
     UpdateError, input_inject, input_source,
@@ -51,7 +51,6 @@ struct Source {
     attached: Mutex<bool>,
     refused: Cell<bool>,
     executor: Weak<Executor>,
-    reactor: Reactor,
 }
 
 struct Line {
@@ -124,12 +123,12 @@ impl Source {
             .ok_or(Failure::NoNode)?;
         *self.node.borrow_mut() = Some(node.clone());
 
-        let buttons = Buttons::bind(&description, &node, &self.pins, inject, &self.reactor).await?;
+        let buttons = Buttons::bind(&description, &node, &self.pins, inject).await?;
 
         self.executor
             .upgrade()
             .ok_or(Failure::Executor)?
-            .spawn(buttons.watch(self.reactor.clone()));
+            .spawn(buttons.watch());
 
         Ok(())
     }
@@ -146,7 +145,7 @@ impl input_source::Service<Delivery> for Source {
             return Err(AttachError::Busy);
         }
 
-        let inject = PortChannel::client(Session::from_session(inject), self.reactor.clone());
+        let inject = PortChannel::client(Session::from_session(inject));
 
         let bound = self.bind(inject).await;
         let node = self.node.borrow();
@@ -173,7 +172,6 @@ impl Buttons {
         node: &DeviceId,
         pins: &Providers<pins::Protocol>,
         inject: input_inject::Client<Channel>,
-        reactor: &Reactor,
     ) -> Result<Self, Failure> {
         let states = controllers(description, node.as_str()).ok_or(Failure::State)?;
         let [controller] = states.as_slice() else {
@@ -187,17 +185,16 @@ impl Buttons {
         let keys = keys(description, node).map_err(Failure::Keys)?;
 
         let session = pins
-            .open_first(reactor, AnyOf::new(CONTROLLER_KEY, compatible))
+            .open_first(AnyOf::new(CONTROLLER_KEY, compatible))
             .await
             .map_err(Failure::Startup)?
             .ok_or(Failure::NoProvider)?;
 
-        let provider = PortChannel::client(session, reactor.clone());
+        let provider = PortChannel::client(session);
 
-        let device = PortChannel::client(
-            Session::<device_pins::Protocol>::from_session(provider.open(node.clone()).await?),
-            reactor.clone(),
-        );
+        let device = PortChannel::client(Session::<device_pins::Protocol>::from_session(
+            provider.open(node.clone()).await?,
+        ));
 
         let mut lines = Vec::new();
         for key in &keys.keys {
@@ -227,14 +224,14 @@ impl Buttons {
         })
     }
 
-    async fn watch(mut self, reactor: Reactor) {
-        match self.serve(&reactor).await {
+    async fn watch(mut self) {
+        match self.serve().await {
             Ok(never) => match never {},
             Err(failure) => stop(&failure),
         }
     }
 
-    async fn serve(&mut self, reactor: &Reactor) -> Result<Infallible, Failure> {
+    async fn serve(&mut self) -> Result<Infallible, Failure> {
         for line in &mut self.lines {
             self.reporter.settle(line).await?;
         }
@@ -266,7 +263,7 @@ impl Buttons {
                     Timeout::from_ns(deadline.saturating_sub(Instant::now().as_nanos()))
                 });
 
-            match reactor.timeout(timeout, reactor.wait_any(&items)).await {
+            match executor::timeout(timeout, executor::wait_any(&items)).await {
                 Some(Ok(index)) => {
                     let now = Instant::now().as_nanos();
                     if let Some(line) = self.lines.get_mut(index) {
@@ -346,9 +343,8 @@ pub(crate) fn run(
     parent: Handle<kind::Port>,
 ) -> Result<(), Stopped> {
     let executor = Rc::new(Executor::new().map_err(|_| Stopped::Executor)?);
-    let reactor = executor.reactor();
 
-    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?, reactor.clone());
+    let platform = PortChannel::client(platform.open().map_err(Stopped::Startup)?);
 
     let export = Rc::new(SessionPort::create().map_err(|_| Stopped::ExportPort)?);
     let source = Rc::new(Source {
@@ -358,14 +354,13 @@ pub(crate) fn run(
         attached: Mutex::new(false),
         refused: Cell::new(false),
         executor: Rc::downgrade(&executor),
-        reactor: reactor.clone(),
     });
 
     let opened = export.clone();
 
     let served = serve_component::<input_source::Protocol, _>(
         &executor,
-        AsyncStartup::new(PortChannel::new(parent, reactor)),
+        AsyncStartup::new(PortChannel::new(parent)),
         export,
         move |frame| {
             let call = input_source::serve(&source, frame)?;

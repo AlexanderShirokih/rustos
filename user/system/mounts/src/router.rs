@@ -12,7 +12,7 @@ use core::{
 };
 
 use component_startup::{MintedSession, SessionError, SessionPort};
-use executor::{PortChannel, Reactor};
+use executor::PortChannel;
 use filesystem_abi::{
     FILE_SYSTEM_OPEN_ROOT_TIMEOUT, FileSystemError, MountEnded, PATH_MAX, Path, ResolvedPair,
     common_directory, file_system, file_system_mount, namespace, rebase,
@@ -35,7 +35,6 @@ pub(crate) struct Router {
     views: Rc<SessionPort>,
     mounts: Rc<SessionPort>,
     tree: RefCell<Tree>,
-    reactor: Reactor,
 }
 
 #[derive(Default)]
@@ -78,12 +77,11 @@ enum Request {
 }
 
 impl Router {
-    pub(crate) fn new(views: Rc<SessionPort>, mounts: Rc<SessionPort>, reactor: Reactor) -> Self {
+    pub(crate) fn new(views: Rc<SessionPort>, mounts: Rc<SessionPort>) -> Self {
         Self {
             views,
             mounts,
             tree: RefCell::new(Tree::default()),
-            reactor,
         }
     }
 
@@ -346,11 +344,8 @@ impl file_system_mount::Service<Delivery> for Router {
 
             let id = tree.next_mount;
             tree.next_mount = id.wrapping_add(1);
-            let filesystem = PortChannel::client(
-                kernel_objects::Session::from_session(filesystem),
-                self.reactor.clone(),
-            )
-            .with_wait(FILE_SYSTEM_OPEN_ROOT_TIMEOUT);
+            let filesystem = PortChannel::client(kernel_objects::Session::from_session(filesystem))
+                .with_wait(FILE_SYSTEM_OPEN_ROOT_TIMEOUT);
             tree.mounts.insert(
                 prefix.clone(),
                 Mount {
