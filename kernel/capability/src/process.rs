@@ -72,6 +72,7 @@ impl RevocationHook for ProcessHolder {
 
 pub struct ProcessObject {
     inner: TerminationState,
+    exit_request: MutexCell<Option<i32>>,
     metering: MutexCell<Option<MeteringGrant>>,
     holders: AtomicUsize,
 }
@@ -80,6 +81,7 @@ impl ProcessObject {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: TerminationState::new(),
+            exit_request: MutexCell::new(None),
             metering: MutexCell::new(None),
             holders: AtomicUsize::new(0),
         })
@@ -118,7 +120,7 @@ impl ProcessObject {
             return;
         }
 
-        if self.terminated() {
+        if self.exiting() {
             return;
         }
 
@@ -188,6 +190,23 @@ impl ProcessObject {
         self.inner.terminated()
     }
 
+    /// Ставит запрос снятия процесса и возвращает код, с которым процесс завершится. Код
+    /// фиксирует первый запрос.
+    pub fn request_exit(&self, code: i32) -> i32 {
+        self.exit_request
+            .with_lock(|request| *request.get_or_insert(code))
+    }
+
+    /// Код запроса снятия процесса. `None`, пока процесс не снимают.
+    pub fn requested_exit_code(&self) -> Option<i32> {
+        self.exit_request.with_lock(|request| *request)
+    }
+
+    /// Снимается ли процесс либо уже завершён. Новых потоков у такого процесса не будет.
+    pub fn exiting(&self) -> bool {
+        self.terminated() || self.requested_exit_code().is_some()
+    }
+
     /// Ленивый [`Signal`] терминации (бит `SIGNALED`). Материализуется
     /// при первом вызове и пре-сигналится, если процесс уже завершён.
     pub fn termination_signal(&self) -> Arc<Signal> {
@@ -211,6 +230,18 @@ mod tests {
         assert!(proc.terminated());
         assert_eq!(proc.exit_code(), 42);
         assert_eq!(proc.termination_signal().peek() & SIGNALED, SIGNALED);
+    }
+
+    #[test]
+    fn first_exit_request_fixes_the_code_before_termination() {
+        let proc = ProcessObject::new();
+        assert!(!proc.exiting());
+
+        assert_eq!(proc.request_exit(7), 7);
+        assert_eq!(proc.request_exit(9), 7);
+        assert!(proc.exiting());
+        assert!(!proc.terminated());
+        assert_eq!(proc.termination_signal().peek() & SIGNALED, 0);
     }
 
     #[test]

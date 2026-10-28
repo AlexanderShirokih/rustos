@@ -12,7 +12,6 @@ use crate::{
     },
 };
 
-/// Сдвиг мыши движка на ширину экрана: полный оборот при чувствительности по умолчанию.
 const TURN_PER_WIDTH: i64 = 8192;
 
 /// Переход игровой клавиши в кодах `doomkeys.h`.
@@ -331,6 +330,8 @@ impl Contact {
                 if button.control == Control::Fire {
                     press(KEY_FIRE);
                 }
+                // Проход касанием по всей ширине экрана даёт полный оборот при чувствительности
+                // по умолчанию.
                 *turn += (i64::from(point.x) - i64::from(previous.x)) * TURN_PER_WIDTH;
             }
         }

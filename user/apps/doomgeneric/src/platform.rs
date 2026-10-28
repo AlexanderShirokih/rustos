@@ -103,8 +103,8 @@ extern "C" fn DG_GetKey(pressed: *mut c_int, key: *mut c_uchar) -> c_int {
     1
 }
 
-/// Поворот касаниями копится в `mousex` движка с его чувствительностью мыши.
 fn post_turn(mode: Mode) {
+    // Поворот касаниями копится в `mousex` движка с его чувствительностью мыши.
     let turn = keys::turn();
     if mode != Mode::Game || turn == 0 {
         return;

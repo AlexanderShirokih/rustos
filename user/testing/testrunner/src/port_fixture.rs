@@ -14,11 +14,12 @@ use core::{
 };
 
 use fixture_protocol::{
-    OP_ALLOCATE_PAGES, OP_CLOSE_CAP, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT, OP_HOLD_CAP, OP_HOLD_SELF,
-    OP_JOIN_THREAD, OP_MAP_CHECK, OP_PROCESS_EXIT, OP_READ_SLOT, OP_WRITE_SLOT, READ_REPLY_LEN,
-    REPLY_ACCESS_DENIED, REPLY_ALLOCATE_FAILED, REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED,
-    REPLY_HOLD_FAILED, REPLY_MAP_FAILED, REPLY_OK, REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED,
-    REQUEST_LEN, decode_request,
+    OP_ALLOCATE_PAGES, OP_CALL_SIBLING, OP_CLOSE_CAP, OP_DUPLICATE_TRANSFER_CAP, OP_EXIT,
+    OP_HOLD_CAP, OP_HOLD_SELF, OP_JOIN_THREAD, OP_MAP_CHECK, OP_PROCESS_EXIT, OP_READ_SLOT,
+    OP_RECV_SIBLING, OP_SPIN_SIBLING, OP_WRITE_SLOT, READ_REPLY_LEN, REPLY_ACCESS_DENIED,
+    REPLY_ALLOCATE_FAILED, REPLY_BUDGET_EXHAUSTED, REPLY_DUPLICATE_FAILED, REPLY_HOLD_FAILED,
+    REPLY_MAP_FAILED, REPLY_OK, REPLY_PATTERN_MISMATCH, REPLY_SPAWN_FAILED, REQUEST_LEN,
+    decode_request,
 };
 use kernel_objects::{Error, Mapping, MemoryRegion, Port, Process, Reply, Resource, Signal, kind};
 use runtime::{
@@ -86,6 +87,19 @@ fn run(port: &Port) -> ExitCode {
                 answer(reply, &[hold_cap(cap)]);
             }
             OP_HOLD_SELF => answer(reply, &[hold_self()]),
+            OP_RECV_SIBLING => answer(reply, &[start_sibling(Sibling::Recv)]),
+            OP_CALL_SIBLING => {
+                let cap = if ncaps == 1 {
+                    ipc_raw::take_cap(0)
+                } else {
+                    None
+                };
+                let status = cap.map_or(REPLY_SPAWN_FAILED, |port| {
+                    start_sibling(Sibling::Call(Port::from(port.assume_kind())))
+                });
+                answer(reply, &[status]);
+            }
+            OP_SPIN_SIBLING => answer(reply, &[start_sibling(Sibling::Spin)]),
             OP_JOIN_THREAD => answer(reply, &[join_thread()]),
             OP_CLOSE_CAP => {
                 let Some(handle) = (if ncaps == 1 {
@@ -127,6 +141,49 @@ fn start_parked_sibling() -> bool {
         return false;
     }
     ready.wait(SIGNALED, PARK_TIMEOUT).is_ok()
+}
+
+enum Sibling {
+    Recv,
+    Call(Port),
+    Spin,
+}
+
+fn start_sibling(sibling: Sibling) -> u8 {
+    let Ok(ready) = Signal::create() else {
+        return REPLY_SPAWN_FAILED;
+    };
+    let ready_handle = ready.as_raw();
+    let spawned = spawn_owned(move || occupy(sibling, ready_handle));
+    if spawned.is_err() || ready.wait(SIGNALED, PARK_TIMEOUT).is_err() {
+        return REPLY_SPAWN_FAILED;
+    }
+
+    REPLY_OK
+}
+
+fn occupy(sibling: Sibling, ready: Handle<kind::Signal>) -> u32 {
+    match sibling {
+        Sibling::Recv => {
+            let Ok(port) = Port::create() else {
+                return 1;
+            };
+            let _ = signal_set(ready, SIGNALED, 0, WakeCount::All);
+            let _ = port.recv(Timeout::INFINITE);
+        }
+        Sibling::Call(port) => {
+            let _ = signal_set(ready, SIGNALED, 0, WakeCount::All);
+            ipc_raw::write_frame(&[], &[]);
+            let _ = port.call(Timeout::INFINITE);
+        }
+        Sibling::Spin => {
+            let _ = signal_set(ready, SIGNALED, 0, WakeCount::All);
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    }
+    0
 }
 
 fn join_thread() -> u8 {

@@ -605,16 +605,15 @@ impl<'a, C, V: ProgramView<'a>> Entry<'a, C, V> {
 }
 
 fn outcome_of(process: &Process) -> Outcome {
-    let exited = process.join(Timeout::POLL).is_ok();
-    if !exited {
+    // Снятый процесс завершается, когда его потоки дойдут до границы возврата в EL0. Исход
+    // известен сразу, а возврата бюджета перезапуск сам дожидается.
+    if process.join(Timeout::POLL).is_err() {
         let _ = process.terminate(SESSION_CLOSED_EXIT_CODE);
-        let _ = process.join(Timeout::POLL);
+        return Outcome::TakenDown;
     }
 
     match process.exit_code() {
-        Ok(SESSION_CLOSED_EXIT_CODE) if !exited => Outcome::TakenDown,
         Ok(code) => Outcome::Exit(code),
-        // `exit_code` отказывает, если процесс не завершился и после `terminate`.
         Err(_) => Outcome::TakenDown,
     }
 }

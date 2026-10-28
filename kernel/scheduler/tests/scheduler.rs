@@ -110,8 +110,8 @@ impl capability::KernelRuntime for ForwardingRuntime {
         }
     }
 
-    fn exit_if_terminated(&self) {
-        self.with(|rt| rt.exit_if_terminated());
+    fn exit_if_requested(&self) {
+        self.with(|rt| rt.exit_if_requested());
     }
 }
 
@@ -1040,6 +1040,7 @@ fn process_exit_terminates_all_threads_and_releases_handles() {
     panic::set_hook(prev_hook);
 
     assert!(result.is_err(), "process_exit must not return");
+    finish_requested_exits(&running);
     assert!(first_object.terminated());
     assert_eq!(first_object.exit_code(), 17);
     assert!(second_object.terminated());
@@ -1121,7 +1122,7 @@ fn process_create_rejects_name_over_capacity() {
 }
 
 #[test]
-fn thread_terminate_via_handle_signals_terminated() {
+fn process_terminate_finishes_a_thread_at_its_boundary() {
     use capability::UserThreadEntry;
 
     reset_switches();
@@ -1129,6 +1130,7 @@ fn thread_terminate_via_handle_signals_terminated() {
     let timer = MockTimer::new();
     let scheduler = make_scheduler_with_factory(timer, factory);
     let handle = scheduler.handle();
+    let _runtime = RuntimeLease::take(Arc::new(handle.clone()));
 
     let process = handle
         .create_empty_process("p")
@@ -1146,12 +1148,41 @@ fn thread_terminate_via_handle_signals_terminated() {
         )
         .expect("create_user_thread");
 
-    assert!(!thread.terminated());
     handle
-        .terminate_thread(&thread, 7)
-        .expect("terminate_thread");
+        .terminate_process(&process, 7)
+        .expect("terminate_process");
+    assert!(process.exiting());
+    assert!(
+        !thread.terminated(),
+        "the thread finishes itself at the boundary"
+    );
+    assert!(!process.terminated());
+    let late = handle.create_user_thread(
+        &process,
+        UserThreadEntry {
+            entry_pc: 0x4000_0000,
+            user_sp: 0x4001_0000,
+            arg: 0,
+            priority: 1,
+        },
+    );
+    assert!(
+        matches!(late, Err(capability::SpawnError::ProcessTerminated)),
+        "an exiting process accepts no new threads"
+    );
+
+    let running = scheduler.run();
+    assert!(Arc::ptr_eq(
+        &handle.current_thread_object().expect("current"),
+        &thread
+    ));
+    capability::KernelRuntime::exit_if_requested(&handle);
+
     assert!(thread.terminated());
     assert_eq!(thread.exit_code(), 7);
+    assert!(process.terminated());
+    assert_eq!(process.exit_code(), 7);
+    drop(running);
 }
 
 #[test]
@@ -1234,43 +1265,18 @@ fn process_terminate_via_handle_terminates_all_threads() {
     handle
         .terminate_process(&process, -1)
         .expect("terminate_process");
+    assert!(process.exiting());
+    assert!(
+        !process.terminated(),
+        "threads finish themselves at the boundary"
+    );
 
+    let running = scheduler.run();
+    finish_requested_exits(&running);
     assert!(t1.terminated());
     assert!(t2.terminated());
     assert!(process.terminated());
     assert_eq!(process.exit_code(), -1);
-}
-
-#[test]
-fn switch_to_next_skips_terminated_thread_in_ready_queue() {
-    reset_switches();
-    let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
-        .bootstrap()
-        .ok()
-        .expect("bootstrap must succeed in tests");
-    let t1 = scheduler
-        .spawn(SpawnConfig::new("t1"), || {})
-        .expect("spawn t1");
-    let t2 = scheduler
-        .spawn(SpawnConfig::new("t2"), || {})
-        .expect("spawn t2");
-    let t3 = scheduler
-        .spawn(SpawnConfig::new("t3"), || {})
-        .expect("spawn t3");
-    let t2_thread_object = scheduler.thread_object_for(t2).expect("t2 target");
-
-    let running = scheduler.run();
-    assert_eq!(running.current(), Some(t1));
-
-    let handle = running.handle();
-    handle
-        .terminate_thread(&t2_thread_object, 9)
-        .expect("terminate t2");
-    assert!(t2_thread_object.terminated());
-
-    running.yield_now();
-    assert_eq!(running.current(), Some(t3));
 }
 
 #[test]
@@ -1861,6 +1867,18 @@ fn put_handle(
         .expect("insert handle")
 }
 
+const EXIT_ROUNDS: usize = 16;
+
+fn finish_requested_exits(running: &Scheduler<MockContext, MockTimerSource, scheduler::Running>) {
+    // Каждый раунд проходит границу возврата в EL0, как на железе. Поток с запросом выхода
+    // завершается, остальные уступают CPU.
+    let handle = running.handle();
+    for _ in 0..EXIT_ROUNDS {
+        capability::KernelRuntime::exit_if_requested(&handle);
+        running.yield_now();
+    }
+}
+
 fn take_handle(table: &Arc<kbase::MutexCell<capability::HandleTable>>, id: capability::HandleId) {
     use kbase::LockCell;
 
@@ -1885,14 +1903,15 @@ fn last_process_holder_leaving_terminates_the_process() {
     assert!(!process.terminated());
 
     drop(holder);
+    assert!(process.exiting());
+    assert!(!thread.terminated());
 
+    let running = scheduler.run();
+    finish_requested_exits(&running);
     assert!(process.terminated());
     assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
     assert!(thread.terminated());
     assert_eq!(thread.exit_code(), scheduler::ORPHANED_EXIT_CODE);
-
-    let running = scheduler.run();
-    running.yield_now();
     assert!(
         running.process_object_for(pid).is_none(),
         "removed process must be reclaimed from the table"
@@ -1905,7 +1924,7 @@ fn last_process_holder_leaving_terminates_the_process() {
 }
 
 #[test]
-fn orphaning_the_current_process_exits_the_cpu_at_the_syscall_boundary() {
+fn orphaning_the_current_process_exits_the_cpu_at_the_el0_boundary() {
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -1929,20 +1948,21 @@ fn orphaning_the_current_process_exits_the_cpu_at_the_syscall_boundary() {
 
     drop(holder);
 
-    assert!(process.terminated());
+    assert!(process.exiting());
     assert_eq!(
         running.current(),
         Some(orphaned),
-        "the holder leaving marks the thread but keeps it on the CPU"
+        "the holder leaving requests the exit but keeps the thread on the CPU"
     );
     assert_eq!(switch_count(), switches_before);
 
-    capability::KernelRuntime::exit_if_terminated(&handle);
+    capability::KernelRuntime::exit_if_requested(&handle);
 
+    assert!(process.terminated());
     assert_eq!(
         switch_count(),
         switches_before + 1,
-        "the terminated current must leave the CPU before the syscall returns"
+        "the exiting current must leave the CPU at the boundary"
     );
     assert_ne!(running.current(), Some(orphaned));
 }
@@ -1980,16 +2000,17 @@ fn a_process_closing_its_last_holder_on_itself_is_removed() {
     // Закрытие последней капы на собственный процесс из-под своего же потока.
     take_handle(&table, own);
 
-    assert!(process.terminated());
-    assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
-    assert!(first_object.terminated());
+    assert!(process.exiting());
     assert_eq!(
         running.current(),
         Some(first),
-        "the closing thread finishes its turn"
+        "the closing thread finishes its syscall"
     );
 
-    with_simulated_irq(|| handle.on_timer_tick(1));
+    capability::KernelRuntime::exit_if_requested(&handle);
+    assert!(first_object.terminated());
+    assert!(process.terminated());
+    assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
     assert_eq!(running.current(), Some(second));
 }
 
@@ -2022,6 +2043,8 @@ fn orphan_removal_cascades_down_the_handle_tables() {
 
     drop(process_holder(&root));
 
+    let running = scheduler.run();
+    finish_requested_exits(&running);
     for process in [&root, &middle, &leaf] {
         assert!(process.terminated());
         assert_eq!(process.exit_code(), scheduler::ORPHANED_EXIT_CODE);
@@ -2058,11 +2081,14 @@ fn a_process_kept_by_another_holder_survives_the_cascade() {
 
     drop(process_holder(&root));
 
+    let running = scheduler.run();
+    finish_requested_exits(&running);
     assert!(root.terminated());
     assert!(middle.terminated());
-    assert!(!leaf.terminated(), "a live holder keeps the leaf running");
+    assert!(!leaf.exiting(), "a live holder keeps the leaf running");
 
     drop(outsider);
+    finish_requested_exits(&running);
     assert!(leaf.terminated());
     assert_eq!(leaf.exit_code(), scheduler::ORPHANED_EXIT_CODE);
 }
@@ -2087,6 +2113,8 @@ fn a_process_capability_without_write_does_not_hold() {
     assert!(!process.terminated(), "an observer does not hold a process");
 
     drop(holder);
+    let running = scheduler.run();
+    finish_requested_exits(&running);
     assert!(process.terminated());
 }
 
@@ -2107,6 +2135,8 @@ fn a_finished_process_keeps_its_exit_code_when_the_holder_leaves() {
 
     drop(holder);
 
+    let running = scheduler.run();
+    finish_requested_exits(&running);
     assert_eq!(process.exit_code(), 5);
 }
 
@@ -2139,6 +2169,8 @@ fn revoking_the_root_capability_takes_the_derived_holder_away() {
 
     take_handle(&table, root_id);
 
+    let running = scheduler.run();
+    finish_requested_exits(&running);
     assert!(
         process.terminated(),
         "the derived holder is revoked together with its root"
@@ -2165,6 +2197,7 @@ fn a_process_without_a_capability_lives_until_it_is_terminated() {
         .terminate_process(&process, 3)
         .expect("terminate_process");
 
+    finish_requested_exits(&running);
     assert!(process.terminated());
     assert_eq!(process.exit_code(), 3);
 }
@@ -2219,7 +2252,7 @@ fn process_terminate_drains_handle_table_held_outside_process() {
         .terminate_process(&process, 9)
         .expect("terminate_process");
     let running = scheduler.run();
-    running.yield_now();
+    finish_requested_exits(&running);
 
     assert_eq!(
         frozen_frame_table.with_lock(|tbl| tbl.live_count()),
@@ -2287,67 +2320,7 @@ fn second_bootstrap_of_the_same_cpu_is_rejected() {
 }
 
 #[test]
-fn reaped_ready_id_can_be_reused_before_first_cpu_entry() {
-    reset_switches();
-    let factory = new_factory_static();
-    let timer = MockTimer::new();
-    let scheduler = make_scheduler_with_factory(timer.clone(), factory);
-
-    let second = bootstrap_cpu(&scheduler.handle(), 1);
-
-    let first = scheduler
-        .spawn(SpawnConfig::new("first"), || {})
-        .expect("spawn first");
-    let running = scheduler.run();
-    assert_eq!(running.current(), Some(first));
-
-    let handle = running.handle();
-    let victim = SchedulerServiceExt::spawn(
-        &handle,
-        SpawnConfig::new("victim").address_space(SpawnAddressSpace::User),
-        || {},
-    )
-    .expect("enqueue victim on the idle second cpu");
-    assert_eq!(take_reschedules(), vec![second]);
-    let victim_object = running.thread_object_for(victim).expect("victim target");
-    handle
-        .terminate_thread(&victim_object, 9)
-        .expect("terminate victim before the second cpu enters");
-
-    // Любая scheduler boundary реапит не удерживаемый ready-thread. Его id
-    // переиспользуется сразу, поэтому старая ready-запись была бы ABA-ссылкой
-    // на replacement.
-    running.yield_now();
-    assert!(running.thread_object_for(victim).is_none());
-    let replacement = SchedulerServiceExt::spawn(&handle, SpawnConfig::new("replacement"), || {})
-        .expect("reuse victim slot");
-    assert_eq!(
-        replacement, victim,
-        "thread slot must be reused in this test"
-    );
-    assert_eq!(
-        take_reschedules(),
-        vec![second],
-        "the removed victim must not count as load on the second cpu",
-    );
-    take_address_space_switches();
-
-    set_current_cpu(second);
-    let entered = panic::catch_unwind(panic::AssertUnwindSafe(|| CpuEntry::enter(&handle)));
-    assert!(
-        entered.is_err(),
-        "mock first entry must stop in ArchContext::start"
-    );
-    assert_eq!(running.current(), Some(replacement));
-    assert_eq!(
-        take_address_space_switches(),
-        vec![None],
-        "first entry must start the replacement in the kernel address space",
-    );
-}
-
-#[test]
-fn unblocked_terminated_sleeper_leaves_no_reusable_aba_entry() {
+fn early_woken_sleeper_that_exits_leaves_no_reusable_aba_entry() {
     reset_switches();
     let timer = MockTimer::new();
     let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
@@ -2360,7 +2333,6 @@ fn unblocked_terminated_sleeper_leaves_no_reusable_aba_entry() {
     let runner = scheduler
         .spawn(SpawnConfig::new("runner"), || {})
         .expect("spawn runner");
-    let victim_object = scheduler.thread_object_for(victim).expect("victim target");
 
     let running = scheduler.run();
     assert_eq!(running.current(), Some(victim));
@@ -2368,17 +2340,15 @@ fn unblocked_terminated_sleeper_leaves_no_reusable_aba_entry() {
     assert_eq!(running.current(), Some(runner));
 
     capability::KernelRuntime::unblock(&running.handle(), capability::WaitToken::from(victim));
-    running
-        .handle()
-        .terminate_thread(&victim_object, 9)
-        .expect("terminate early-woken victim");
     running.yield_now();
+    assert_eq!(running.current(), Some(victim));
+    running.exit_current_with_code(9);
 
     assert!(running.thread_object_for(victim).is_none());
     assert_eq!(
         timer.scheduled_deadline(),
         DEFAULT_QUANTUM_NS,
-        "terminated ThreadId must own no stale sleep deadline",
+        "exited ThreadId must own no stale sleep deadline",
     );
 
     let replacement =
@@ -2481,7 +2451,7 @@ fn a_cpu_running_a_thread_is_not_picked_over_an_idle_one() {
 }
 
 #[test]
-fn terminating_a_remote_running_thread_reschedules_its_cpu() {
+fn a_remote_running_thread_of_a_terminated_process_exits_on_its_next_tick() {
     reset_switches();
     let factory = new_factory_static();
     let timer = MockTimer::new();
@@ -2518,19 +2488,22 @@ fn terminating_a_remote_running_thread_reschedules_its_cpu() {
     handle
         .terminate_process(&victim_process, 9)
         .expect("terminate victim process");
-    assert_eq!(take_reschedules(), vec![second]);
+    assert!(take_reschedules().is_empty());
     assert_eq!(
         factory.released(),
         0,
         "address space must stay alive until the remote cpu switches away",
     );
 
+    // Тик кванта приводит поток к границе возврата в EL0, и там он завершается.
     set_current_cpu(second);
-    handle.on_reschedule();
+    with_simulated_irq(|| handle.on_timer_tick(1));
+    assert_eq!(running.current(), Some(victim));
+    capability::KernelRuntime::exit_if_requested(&handle);
     assert_ne!(running.current(), Some(victim));
     assert!(
         running.thread_object_for(victim).is_none(),
-        "terminated remote thread must be reaped after quiescence",
+        "exited remote thread must be reaped after quiescence",
     );
     assert_eq!(
         factory.released(),
@@ -2599,78 +2572,84 @@ fn deferred_cancel_quarantines_remote_process_cleanup() {
 
     set_current_cpu(second);
     handle.on_reschedule();
+    capability::KernelRuntime::exit_if_requested(&handle);
     assert!(running.thread_object_for(victim).is_none());
     assert_eq!(factory.released(), 1);
 }
 
 #[test]
-fn terminated_current_rejects_late_cancel_and_exits_the_cpu() {
+fn exit_request_rejects_a_late_wait_and_keeps_the_thread_until_its_boundary() {
     reset_switches();
+    let factory = new_factory_static();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
-        .bootstrap()
-        .ok()
-        .expect("bootstrap must succeed in tests");
+    let scheduler = make_scheduler_with_factory(timer, factory);
     let victim = scheduler
-        .spawn(SpawnConfig::new("victim"), || {})
+        .spawn(
+            SpawnConfig::new("victim").address_space(SpawnAddressSpace::User),
+            || {},
+        )
         .expect("spawn victim");
-    let victim_object = scheduler.thread_object_for(victim).expect("victim target");
 
     let running = scheduler.run();
     let handle = running.handle();
+    let pid = running.thread_process_id(victim).expect("victim pid");
+    let process = running.process_object_for(pid).expect("process object");
     handle
-        .terminate_thread(&victim_object, 9)
-        .expect("terminate victim");
+        .terminate_process(&process, 9)
+        .expect("terminate victim process");
 
     let probe = SchedulerLockProbe::new(&handle);
     capability::KernelRuntime::set_blocked_cancel(
         &handle,
         probe.clone() as Arc<dyn capability::CancelTarget>,
     );
-    assert_eq!(probe.calls(), 1, "late cancel must be rejected immediately");
+    assert_eq!(probe.calls(), 1, "late wait must be canceled immediately");
     assert_eq!(
         probe.acquisitions(),
         1,
         "rejected cancel must run outside the scheduler lock",
     );
 
-    // Даже уже разрешённый waker не даёт terminal current вернуться из
-    // syscall: планировщик обязан сначала снять его с CPU.
-    let ready = core::sync::atomic::AtomicU32::new(capability::ParkState::SIGNALED);
-    capability::KernelRuntime::block_current_until(&handle, &ready, None);
+    // Снимаемый поток не паркуется, и его кадры идут к границе возврата в EL0.
+    capability::KernelRuntime::block_current_until(&handle, &parked_flag(), None);
+    assert_eq!(running.current(), Some(victim));
 
+    capability::KernelRuntime::exit_if_requested(&handle);
     assert_ne!(running.current(), Some(victim));
     assert!(
         running.thread_object_for(victim).is_none(),
-        "terminated thread must be reaped after leaving the cpu",
+        "exited thread must be reaped after leaving the cpu",
     );
 }
 
 #[test]
-fn thread_exit_after_external_termination_does_not_finalize_twice() {
+fn thread_exit_after_process_terminate_keeps_the_requested_process_code() {
     reset_switches();
+    let factory = new_factory_static();
     let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
-        .bootstrap()
-        .ok()
-        .expect("bootstrap must succeed in tests");
+    let scheduler = make_scheduler_with_factory(timer, factory);
     let victim = scheduler
-        .spawn(SpawnConfig::new("victim"), || {})
+        .spawn(
+            SpawnConfig::new("victim").address_space(SpawnAddressSpace::User),
+            || {},
+        )
         .expect("spawn victim");
     let victim_object = scheduler.thread_object_for(victim).expect("victim target");
 
     let running = scheduler.run();
     let pid = running.thread_process_id(victim).expect("victim pid");
+    let process = running.process_object_for(pid).expect("process object");
     running
         .handle()
-        .terminate_thread(&victim_object, 9)
-        .expect("terminate victim externally");
+        .terminate_process(&process, 9)
+        .expect("terminate victim process");
 
-    // Remote CPU мог уже войти в ThreadExit до reschedule IPI. Повторный
-    // exit обязан только переключиться, не уменьшая thread_count второй раз.
+    // Поток мог войти в ThreadExit раньше, чем дошёл до границы. Процесс завершается кодом
+    // запроса, поток - своим.
     running.exit_current_with_code(3);
 
-    assert_eq!(victim_object.exit_code(), 9);
+    assert_eq!(victim_object.exit_code(), 3);
+    assert_eq!(process.exit_code(), 9);
     assert!(running.thread_object_for(victim).is_none());
     assert!(running.process_object_for(pid).is_none());
 }
@@ -3068,54 +3047,6 @@ fn a_donor_without_stealable_work_does_not_end_the_search() {
         set_current_cpu(third);
     });
     set_current_cpu(CpuId::ZERO);
-}
-
-#[test]
-fn a_terminated_thread_stops_counting_towards_the_load_of_its_cpu() {
-    reset_switches();
-    let timer = MockTimer::new();
-    let scheduler = TestScheduler::new(MockTimerSource(timer.clone()), TEST_CONFIG)
-        .bootstrap()
-        .ok()
-        .expect("bootstrap must succeed in tests");
-
-    let busy = scheduler
-        .spawn(SpawnConfig::new("busy"), || {})
-        .expect("spawn busy");
-    let taken = scheduler
-        .spawn(SpawnConfig::new("taken"), || {})
-        .expect("spawn taken");
-    let victim = scheduler
-        .spawn(SpawnConfig::new("victim"), || {})
-        .expect("spawn victim");
-
-    let running = scheduler.run();
-    assert_eq!(running.current(), Some(busy));
-
-    let handle = running.handle();
-    let second = bootstrap_cpu(&handle, 1);
-
-    set_current_cpu(second);
-    with_simulated_irq(|| handle.on_timer_tick(1));
-    assert_eq!(running.current(), Some(taken));
-    set_current_cpu(CpuId::ZERO);
-
-    // Оба CPU исполняют по потоку, и лишний в очереди - только у первого.
-    let victim_object = running.thread_object_for(victim).expect("victim target");
-    handle
-        .terminate_thread(&victim_object, 9)
-        .expect("terminate the queued thread");
-
-    // Постановка идёт к наименее загруженному CPU, а при равной загрузке
-    // остаётся на текущем. Терминированный поток загрузку больше не создаёт.
-    let next =
-        SchedulerServiceExt::spawn(&handle, SpawnConfig::new("next"), || {}).expect("spawn next");
-    assert_eq!(
-        running.thread_cpu_affinity(next),
-        Some(CpuId::ZERO),
-        "a terminated thread must not keep inflating the load of its cpu",
-    );
-    assert_ne!(running.thread_cpu_affinity(next), Some(second));
 }
 
 fn parked_flag() -> core::sync::atomic::AtomicU32 {

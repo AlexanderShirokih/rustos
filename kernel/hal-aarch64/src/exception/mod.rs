@@ -6,5 +6,5 @@ pub(crate) mod gpreg;
 mod origin;
 mod syscall_frame;
 
-pub(crate) use exceptions::ExceptionVectors;
+pub(crate) use exceptions::{ExceptionFrame, ExceptionVectors, exception_return};
 pub(crate) use origin::originates_from_el0;

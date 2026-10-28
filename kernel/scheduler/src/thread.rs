@@ -49,6 +49,7 @@ pub struct Thread<A: ArchContext> {
     target: Arc<ThreadObject>,
     ipc_buffer: Option<IpcBufferSlot>,
     blocked_cancel: Option<Arc<dyn CancelTarget>>,
+    exit_request: Option<i32>,
     deferred_cleanup: usize,
 }
 
@@ -75,6 +76,7 @@ impl<A: ArchContext> Thread<A> {
             target: ThreadObject::new(),
             ipc_buffer: None,
             blocked_cancel: None,
+            exit_request: None,
             deferred_cleanup: 0,
         }
     }
@@ -160,9 +162,18 @@ impl<A: ArchContext> Thread<A> {
         self.blocked_cancel = Some(cancel);
     }
 
-    /// Изымает cancel-хук блокировки (после resolve либо при терминации).
+    /// Изымает cancel-хук блокировки (после resolve либо при запросе выхода).
     pub fn take_blocked_cancel(&mut self) -> Option<Arc<dyn CancelTarget>> {
         self.blocked_cancel.take()
+    }
+
+    /// Код выхода, с которым поток завершится на границе возврата в EL0.
+    pub fn exit_request(&self) -> Option<i32> {
+        self.exit_request
+    }
+
+    pub fn set_exit_request(&mut self, code: i32) {
+        self.exit_request = Some(code);
     }
 
     pub(super) fn defer_cleanup(&mut self) {

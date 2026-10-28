@@ -91,16 +91,8 @@ impl KernelRuntime for SelfRuntime {
         self.orphaned.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn exit_if_terminated(&self) {
-        if self
-            .current_process
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|process| process.terminated())
-        {
-            self.exited_cpu.fetch_add(1, Ordering::AcqRel);
-        }
+    fn exit_if_requested(&self) {
+        self.exited_cpu.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -339,7 +331,7 @@ fn closing_the_self_capability_leaves_the_process_running() {
 }
 
 #[test]
-fn closing_the_last_holder_of_the_current_process_exits_the_cpu() {
+fn closing_the_last_holder_of_the_current_process_returns_from_the_syscall() {
     let _g = test_lock();
     let rt = runtime();
     let process = ProcessObject::new();
@@ -366,27 +358,9 @@ fn closing_the_last_holder_of_the_current_process_exits_the_cpu() {
     assert_eq!(rt.take_orphaned(), 1);
     assert_eq!(
         rt.take_exited_cpu(),
-        1,
-        "the dispatcher must take the terminated process off the CPU instead of returning"
+        0,
+        "the dispatcher returns, and the thread exits at the EL0 boundary"
     );
-}
-
-#[test]
-fn a_syscall_of_a_live_process_returns_normally() {
-    let _g = test_lock();
-    let rt = runtime();
-    let process = ProcessObject::new();
-    *rt.current_process.lock().unwrap() = Some(process);
-    *rt.current_thread.lock().unwrap() = None;
-
-    let table = Arc::new(MutexCell::new(HandleTable::with_capacity(4)));
-    *rt.handle_table.lock().unwrap() = Some(table);
-    rt.take_exited_cpu();
-
-    let self_handle = process_self().expect("process_self");
-    assert_eq!(close(self_handle), Ok(0));
-
-    assert_eq!(rt.take_exited_cpu(), 0);
 }
 
 #[test]

@@ -43,7 +43,7 @@ mod thread;
 mod wait;
 
 pub use api::{
-    WaitManyOutcome, current_process_name, exit_if_terminated, handle_close, handle_duplicate,
+    WaitManyOutcome, current_process_name, exit_if_requested, handle_close, handle_duplicate,
     install_handle, irq_ack, irq_mint, process_exit, signal_create, signal_set, signal_wait_many,
     signal_wait_one, thread_exit, thread_yield,
 };

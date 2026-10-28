@@ -4,10 +4,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::{
-    reply::Reply,
-    runtime::{KernelRuntime, ParkState, WaitToken},
-};
+use super::runtime::{KernelRuntime, ParkState, WaitToken};
 
 /// Объект, разбуждаемый при изменении сигналов capability target.
 pub trait Waker: Send + Sync {
@@ -41,17 +38,12 @@ pub trait Waitable: Send + Sync {
 /// ([`KernelRuntime::set_blocked_cancel`](crate::KernelRuntime::set_blocked_cancel)).
 pub trait CancelTarget: Send + Sync {
     /// Снимает ожидание и будит поток, который его начал. Вызывается при закрытии либо передаче
-    /// хендла, на котором ожидание взведено, и при терминации ожидающего потока.
+    /// хендла, на котором ожидание взведено, и при запросе выхода ожидающего потока. После
+    /// вызова у ожидания терминальный исход, и цикл парковки потока заканчивается.
     ///
     /// Одна цель взводится на нескольких слотах, и снятие каждого из них вызывает метод заново,
     /// а реализация терпит повторы. Вызов идёт вне лока handle-таблицы.
     fn cancel(&self);
-
-    /// Изымает reply, доставленный снятому получателю и брошенный вместе с ним. Отмена этого
-    /// reply будит вызывателя и под scheduler-локом не выполняется.
-    fn take_abandoned_reply(&self) -> Option<Arc<Reply>> {
-        None
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

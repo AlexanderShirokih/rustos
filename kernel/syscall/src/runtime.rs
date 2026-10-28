@@ -60,12 +60,12 @@ pub trait SyscallRuntime: Send + Sync {
         entry: UserThreadEntry,
     ) -> Result<Arc<ThreadObject>, SpawnError>;
 
-    /// Завершает поток. Поднимает terminated-флаг потока. На нуле - поднимает
-    /// terminated-флаг владеющего процесса.
+    /// Ставит потоку запрос выхода. Поток завершается на границе возврата в EL0, процесс - с
+    /// уходом последнего потока.
     fn terminate_thread(&self, thread: &Arc<ThreadObject>, exit_code: i32) -> Result<(), IpcError>;
 
-    /// Завершает все потоки процесса. Для каждого потока поднимает
-    /// terminated-флаг, при достижении нуля - terminated-флаг процесса.
+    /// Снимает процесс, ставя всем его потокам запрос выхода. Поток завершается на границе
+    /// возврата в EL0, процесс - с уходом последнего потока.
     fn terminate_process(
         &self,
         process: &Arc<ProcessObject>,

@@ -38,8 +38,8 @@ pub trait SyscallFrame {
 }
 
 /// Главная точка входа декодирует op, диспатчит на handler и кодирует результат.
-/// Для `ThreadExit` и `ProcessExit` не возвращается. Не возвращается и для syscall,
-/// который убрал из таблицы последнего держателя capability на текущий процесс.
+/// Для `ThreadExit` и `ProcessExit` не возвращается. Поток снимаемого процесса возвращается
+/// отсюда и завершается на границе возврата в EL0.
 #[allow(clippy::too_many_lines)]
 pub fn dispatch(frame: &mut dyn SyscallFrame) {
     if frame.origin() == Origin::Kernel {
@@ -232,10 +232,6 @@ pub fn dispatch(frame: &mut dyn SyscallFrame) {
             frame.set_return(encode_return(r));
         }
     }
-
-    // Текущий процесс снимается уходом последнего держателя capability на него.
-    // Снятый поток уходит с CPU здесь.
-    capability::exit_if_terminated();
 }
 
 fn sys_thread_exit(code: u64) -> ! {

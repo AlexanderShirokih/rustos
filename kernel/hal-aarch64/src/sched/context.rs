@@ -1,4 +1,4 @@
-use core::ptr::NonNull;
+use core::{mem::offset_of, ptr::NonNull};
 
 use kbase::{CriticalSection as _, DaifCriticalSection};
 use memory::{
@@ -13,7 +13,7 @@ use super::{
     switch::{context_start, context_switch},
 };
 use crate::{
-    exception::gpreg::GpReg,
+    exception::{ExceptionFrame, exception_return, gpreg::GpReg},
     memory::{
         asid::unpack_asid,
         regs::{
@@ -141,88 +141,31 @@ unsafe extern "C" fn thread_entry_shim() -> ! {
 // SAFETY: вход только из `context_start`, который восстановил callee-saved
 // регистры и сделал `ret` сюда: `x19` = `bootstrap_x0` -> user `x0`, `x20` =
 // `user_pc` -> `ELR_EL1`, `x21` = `user_sp` -> `SP_EL0`, а текущий `sp` -
-// вершина kernel-стека, остающаяся в `SP_EL1` после `eret`.
+// вершина kernel-стека, выровненная на 16. Кадр исключения ложится под неё, и
+// `exception_return` восстанавливает из него регистры EL0 так же, как после исключения.
 #[unsafe(naked)]
 unsafe extern "C" fn el0_entry_shim() -> ! {
     core::arch::naked_asm!(
-        // Окно `msr ELR_EL1/SPSR_EL1` -> `eret` обязано быть атомарным: трап
-        // внутри него затирает оба регистра и `eret` уходит по чужому адресу.
-        // Обратно IRQ размаскирует сам `eret` через `SPSR_EL1 = 0`.
+        // `exception_return` пишет `ELR_EL1/SPSR_EL1` при замаскированных IRQ.
         "msr daifset, #0b0010",
-        "mov x0, x19",
-        "msr sp_el0, x21",
-        "msr elr_el1, x20",
-        // `SPSR_EL1 = 0`: `M[3:0]=0000` (EL0t), `M[4]=0` (AArch64), `DAIF=0`, `NZCV=0`.
-        "msr spsr_el1, xzr",
-        // Остальные GPR и `tpidr_el0` обнуляются: kernel-значения в EL0 через
-        // регистры не утекают.
-        "msr tpidr_el0, xzr",
-        // Регистровый файл SIMD/FP переживает смену потока в железе, поэтому свежий поток
-        // получает его обнулённым: значения прошлого владельца в EL0 не попадают.
-        "msr fpcr, xzr",
-        "msr fpsr, xzr",
-        "movi v0.2d,  #0",
-        "movi v1.2d,  #0",
-        "movi v2.2d,  #0",
-        "movi v3.2d,  #0",
-        "movi v4.2d,  #0",
-        "movi v5.2d,  #0",
-        "movi v6.2d,  #0",
-        "movi v7.2d,  #0",
-        "movi v8.2d,  #0",
-        "movi v9.2d,  #0",
-        "movi v10.2d, #0",
-        "movi v11.2d, #0",
-        "movi v12.2d, #0",
-        "movi v13.2d, #0",
-        "movi v14.2d, #0",
-        "movi v15.2d, #0",
-        "movi v16.2d, #0",
-        "movi v17.2d, #0",
-        "movi v18.2d, #0",
-        "movi v19.2d, #0",
-        "movi v20.2d, #0",
-        "movi v21.2d, #0",
-        "movi v22.2d, #0",
-        "movi v23.2d, #0",
-        "movi v24.2d, #0",
-        "movi v25.2d, #0",
-        "movi v26.2d, #0",
-        "movi v27.2d, #0",
-        "movi v28.2d, #0",
-        "movi v29.2d, #0",
-        "movi v30.2d, #0",
-        "movi v31.2d, #0",
-        "mov x1,  xzr",
-        "mov x2,  xzr",
-        "mov x3,  xzr",
-        "mov x4,  xzr",
-        "mov x5,  xzr",
-        "mov x6,  xzr",
-        "mov x7,  xzr",
-        "mov x8,  xzr",
-        "mov x9,  xzr",
-        "mov x10, xzr",
-        "mov x11, xzr",
-        "mov x12, xzr",
-        "mov x13, xzr",
-        "mov x14, xzr",
-        "mov x15, xzr",
-        "mov x16, xzr",
-        "mov x17, xzr",
-        "mov x18, xzr",
-        "mov x19, xzr",
-        "mov x20, xzr",
-        "mov x21, xzr",
-        "mov x22, xzr",
-        "mov x23, xzr",
-        "mov x24, xzr",
-        "mov x25, xzr",
-        "mov x26, xzr",
-        "mov x27, xzr",
-        "mov x28, xzr",
-        "mov x29, xzr",
-        "mov x30, xzr",
-        "eret",
+        "sub sp, sp, #{frame_size}",
+        // Нулевой кадр задаёт `SPSR_EL1 = 0` (EL0t, AArch64, `DAIF=0`) и обнуляет GPR,
+        // SIMD/FP и `tpidr_el0`: kernel-значения и регистры прошлого владельца CPU в EL0 не
+        // попадают.
+        "mov x9, sp",
+        "add x10, sp, #{frame_size}",
+        "1:",
+        "stp xzr, xzr, [x9], #16",
+        "cmp x9, x10",
+        "b.ne 1b",
+        "str x19, [sp, #{x0}]",
+        "str x20, [sp, #{elr}]",
+        "str x21, [sp, #{sp_el0}]",
+        "b {exception_return}",
+        frame_size = const size_of::<ExceptionFrame>(),
+        x0 = const offset_of!(ExceptionFrame, regs),
+        elr = const offset_of!(ExceptionFrame, elr),
+        sp_el0 = const offset_of!(ExceptionFrame, sp_el0),
+        exception_return = sym exception_return,
     )
 }

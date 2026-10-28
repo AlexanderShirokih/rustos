@@ -65,6 +65,23 @@ where
     A: ArchContext,
     T: TimerSource,
 {
+    fn leave_current_thread(&self, exit_code: i32) {
+        // Bare disable: путь не возвращается, парный enable не нужен.
+        <A::Cpu as ArchCpu>::disable_preemption();
+
+        let signals = self
+            .inner
+            .with_lock(|inner| inner.begin_exit_current(exit_code));
+        let deferred = signals.emit();
+        debug_assert!(deferred.is_empty());
+
+        let action = self.inner.with_lock(|inner| {
+            let now_ns = inner.now_ns();
+            inner.finish_exit_current(now_ns)
+        });
+        perform_schedule_action(&self.inner, action);
+    }
+
     fn emit_deferred_signals(&self, signals: DeferredSignals) {
         let completed = signals.emit();
         self.inner
@@ -361,18 +378,7 @@ where
     }
 
     fn exit_current_thread(&self, exit_code: i32) -> ! {
-        // Bare disable: путь не возвращается, парный enable не нужен.
-        <A::Cpu as ArchCpu>::disable_preemption();
-        let signals = self
-            .inner
-            .with_lock(|inner| inner.begin_exit_current(exit_code));
-        let deferred = signals.emit();
-        debug_assert!(deferred.is_empty());
-        let action = self.inner.with_lock(|inner| {
-            let now_ns = inner.now_ns();
-            inner.finish_exit_current(now_ns)
-        });
-        perform_schedule_action(&self.inner, action);
+        self.leave_current_thread(exit_code);
         unreachable!("terminated thread resumed after scheduler switch")
     }
 
@@ -400,11 +406,8 @@ where
             let action = self.inner.with_lock(|inner| {
                 // Если waker успел отработать до того, как мы взяли
                 // scheduler-lock, не уходим в блокировку - иначе никто
-                // не разбудит нас обратно. Terminated current обязан уйти с
-                // CPU независимо от состояния waker.
-                if !inner.current_is_terminated()
-                    && ready_flag.load(Ordering::Acquire) != ParkState::REGISTERED
-                {
+                // не разбудит нас обратно.
+                if ready_flag.load(Ordering::Acquire) != ParkState::REGISTERED {
                     return ScheduleAction::None;
                 }
                 let now_ns = inner.now_ns();
@@ -436,15 +439,9 @@ where
         let rejected = self
             .inner
             .with_lock(|inner| inner.set_current_blocked_cancel(cancel));
-        if let Some((thread_id, cancel)) = rejected {
+        // Отказ исполняет сам ожидающий поток, и его `ThreadId` удерживать не нужно.
+        if let Some(cancel) = rejected {
             cancel.cancel();
-            if let Some(reply) = cancel.take_abandoned_reply() {
-                reply.cancel();
-            }
-            if let Some(thread_id) = thread_id {
-                self.inner
-                    .with_lock(|inner| inner.finish_deferred_cleanup(&[thread_id]));
-            }
         }
     }
 
@@ -459,21 +456,11 @@ where
         self.drain_pending_orphans();
     }
 
-    fn exit_if_terminated(&self) {
-        with_preemption_disabled::<A::Cpu, _>(|| {
-            let action = self.inner.with_lock(|inner| {
-                // Пометку ставит `terminate_process_object`, он же снимает поток
-                // с очередей и ставит поток в pending-removal. Переключение
-                // контекста остаётся за этим методом.
-                if !inner.current_is_terminated() {
-                    return ScheduleAction::None;
-                }
-
-                let now_ns = inner.now_ns();
-                inner.finish_exit_current(now_ns)
-            });
-            perform_schedule_action(&self.inner, action);
-        });
+    fn exit_if_requested(&self) {
+        let Some(exit_code) = self.inner.with_lock(|inner| inner.current_exit_request()) else {
+            return;
+        };
+        self.leave_current_thread(exit_code);
     }
 }
 

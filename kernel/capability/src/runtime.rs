@@ -108,7 +108,8 @@ pub trait KernelRuntime: Send + Sync {
         self.unblock(token);
     }
 
-    /// Привязывает к текущему потоку cancel-хук.
+    /// Привязывает к текущему потоку cancel-хук. Хук вызывается сразу, если поток уже
+    /// получил запрос выхода.
     fn set_blocked_cancel(&self, cancel: Arc<dyn CancelTarget>);
 
     /// Снимает cancel-хук блокировки с текущего потока.
@@ -117,9 +118,9 @@ pub trait KernelRuntime: Send + Sync {
     /// Сообщает об уходе последнего держателя незавершённого `process`.
     fn release_process_holder(&self, process: &Arc<ProcessObject>);
 
-    /// Снимает текущий поток с CPU, когда этот поток помечен завершённым.
-    /// Возвращается, когда текущий поток жив.
-    fn exit_if_terminated(&self) {}
+    /// Завершает текущий поток, если ему поставлен запрос выхода. Вызывается на границе
+    /// возврата в EL0, где кадры syscall уже размотаны. Возвращается, если запрос не поставлен.
+    fn exit_if_requested(&self) {}
 }
 
 static RUNTIME: Once<Arc<dyn KernelRuntime>> = Once::new();

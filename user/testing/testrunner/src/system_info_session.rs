@@ -14,9 +14,9 @@ const SETTLE_STEP: Timeout = Timeout::from_millis(10);
 const SETTLE_MATCHES: usize = 8;
 const SETTLE_STEPS: usize = 500;
 
-type SystemInfo = system_info::Client<SessionTransport>;
+pub(crate) type SystemInfo = system_info::Client<SessionTransport>;
 
-fn system_info() -> SystemInfo {
+pub(crate) fn system_info() -> SystemInfo {
     crate::system_info_session().client()
 }
 
@@ -24,7 +24,7 @@ fn snapshot(system_info: &SystemInfo) -> SystemSnapshot {
     system_info.snapshot().wait().expect("snapshot answered")
 }
 
-fn settled_snapshot(system_info: &SystemInfo) -> SystemSnapshot {
+pub(crate) fn settled_snapshot(system_info: &SystemInfo) -> SystemSnapshot {
     // Ядро освобождает фреймы завершённых процессов прошлых тестов не сразу,
     // поэтому замер берётся, когда число свободных фреймов перестало меняться.
     let mut last = snapshot(system_info);

@@ -294,9 +294,6 @@ pub fn signal_wait_many(
     runtime.set_blocked_cancel(armed.cancel_target());
     if let Err(error) = armed.arm(items) {
         armed.cancel_target().cancel();
-        // Для живого current CANCELED-флаг делает checkpoint no-op;
-        // Terminated current обязан уйти с CPU до возврата из syscall.
-        runtime.block_current_until(armed.waker().state(), None);
         drop(armed);
         runtime.clear_blocked_cancel();
         return Err(error);
@@ -364,11 +361,12 @@ pub fn thread_exit(exit_code: i32) -> ! {
     runtime().exit_current_thread(exit_code)
 }
 
-/// Снимает текущий поток с CPU, когда ядро пометило этот поток завершённым.
-/// Возвращается, когда текущий поток жив либо рантайм не установлен.
-pub fn exit_if_terminated() {
+/// Завершает текущий поток, если ему поставлен запрос выхода. Вызывается на границе возврата
+/// в EL0.
+/// Возвращается, когда запроса выхода нет либо рантайм не установлен.
+pub fn exit_if_requested() {
     if let Some(runtime) = installed_runtime() {
-        runtime.exit_if_terminated();
+        runtime.exit_if_requested();
     }
 }
 

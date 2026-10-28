@@ -42,6 +42,7 @@ impl OutcomeSlot {
     pub(crate) const TRANSFER_FAILED: u32 = 5;
     pub(crate) const TIMEDOUT: u32 = 6;
     pub(crate) const SENDER_GONE: u32 = 7;
+    pub(crate) const CANCELED: u32 = 8;
 
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -131,6 +132,26 @@ impl OutcomeSlot {
             .is_ok()
     }
 
+    pub(crate) fn cancel_queued(&self) {
+        let _ = self.state.compare_exchange(
+            Self::PENDING,
+            Self::CANCELED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn try_cancel_reply(&self) -> bool {
+        self.state
+            .compare_exchange(
+                Self::AWAITING_REPLY,
+                Self::CANCELED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
     pub(crate) fn cancel_after_dequeue(&self) {
         #[cfg(test)]
         self.cancel_waiters.fetch_add(1, Ordering::AcqRel);
@@ -140,7 +161,7 @@ impl OutcomeSlot {
                 // терминального исхода.
                 Self::DELIVERING => core::hint::spin_loop(),
                 Self::AWAITING_REPLY => {
-                    if self.try_timeout() {
+                    if self.try_cancel_reply() {
                         break;
                     }
                 }

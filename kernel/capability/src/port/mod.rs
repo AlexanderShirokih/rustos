@@ -695,7 +695,7 @@ pub fn port_send(
         SendAction::Done => Ok(()),
         SendAction::Failed(e) => Err(e),
         SendAction::Park { waker, outcome } => {
-            arm_port_cancel(port, runtime, &waker, &outcome, None);
+            arm_port_cancel(port, runtime, &waker, &outcome);
             let result = resolve_send_recv(port, runtime, &waker, &outcome, deadline_ns);
             runtime.clear_blocked_cancel();
             result
@@ -717,7 +717,7 @@ pub fn port_call(
     match port.call(caller, runtime, deadline_ns, hold) {
         CallAction::Failed(e) => Err(e),
         CallAction::Park { waker, outcome } => {
-            arm_port_cancel(port, runtime, &waker, &outcome, None);
+            arm_port_cancel(port, runtime, &waker, &outcome);
             let result = resolve_call(port, runtime, &waker, &outcome, deadline_ns);
             runtime.clear_blocked_cancel();
             result
@@ -789,7 +789,7 @@ pub fn port_recv(
             outcome,
             reply_slot,
         } => {
-            arm_port_cancel(port, runtime, &waker, &outcome, Some(reply_slot.clone()));
+            arm_port_cancel(port, runtime, &waker, &outcome);
             let resolved = resolve_send_recv(port, runtime, &waker, &outcome, deadline_ns);
             runtime.clear_blocked_cancel();
             match outcome.try_get() {
@@ -823,18 +823,16 @@ struct PortCancel {
     port: Arc<Port>,
     waker: Arc<ParkWaker>,
     outcome: Arc<OutcomeSlot>,
-    reply_slot: Option<Arc<ReplySlot>>,
 }
 
 impl CancelTarget for PortCancel {
     fn cancel(&self) {
-        if !self.port.remove_waiter(&self.waker) {
+        if self.port.remove_waiter(&self.waker) {
+            self.outcome.cancel_queued();
+        } else {
             self.outcome.cancel_after_dequeue();
         }
-    }
-
-    fn take_abandoned_reply(&self) -> Option<Arc<Reply>> {
-        self.reply_slot.as_ref().and_then(|slot| slot.take())
+        CancelTarget::cancel(self.waker.as_ref());
     }
 }
 
@@ -843,13 +841,11 @@ fn arm_port_cancel(
     runtime: &Arc<dyn KernelRuntime>,
     waker: &Arc<ParkWaker>,
     outcome: &Arc<OutcomeSlot>,
-    reply_slot: Option<Arc<ReplySlot>>,
 ) {
     let cancel: Arc<dyn CancelTarget> = Arc::new(PortCancel {
         port: port.clone(),
         waker: waker.clone(),
         outcome: outcome.clone(),
-        reply_slot,
     });
     runtime.set_blocked_cancel(cancel);
 }
@@ -1192,7 +1188,7 @@ mod tests {
     }
 
     #[test]
-    fn port_cancel_removes_waiter_on_termination() {
+    fn port_cancel_removes_queued_waiter() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let RecvAction::Park { waker, outcome, .. } = ep.recv(&transport(BASE_B), &rt, None, None)
@@ -1201,13 +1197,12 @@ mod tests {
         };
         assert!(!ep.queue_is_empty());
 
-        // Терминация заблокированного потока: scheduler зовёт PortCancel, который снимает Waiter с
-        // очереди - матчер позже не доставит в мёртвый поток.
+        // Отмена ожидания снимает Waiter с очереди - матчер позже не доставит в ушедший
+        // поток.
         let cancel = PortCancel {
             port: ep.clone(),
             waker: waker.clone(),
             outcome: outcome.clone(),
-            reply_slot: None,
         };
         CancelTarget::cancel(&cancel);
         assert!(ep.queue_is_empty());
@@ -1237,7 +1232,6 @@ mod tests {
             port: ep,
             waker,
             outcome: outcome.clone(),
-            reply_slot: None,
         };
         let completed = Arc::new(AtomicBool::new(false));
         let completed_by_cancel = completed.clone();
@@ -1258,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn port_cancel_phase2_timeouts_caller_and_rejects_late_reply() {
+    fn port_cancel_phase2_cancels_caller_and_rejects_late_reply() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
@@ -1276,16 +1270,17 @@ mod tests {
         };
         assert_eq!(outcome.raw(), OutcomeSlot::AWAITING_REPLY);
 
-        // Терминация: PortCancel переводит слот в TIMEDOUT (фаза 2) - так
-        // поздний reply сервера не пишет в освобождаемый IPC-буфер.
+        // Отмена переводит слот в CANCELED - поздний reply сервера не пишет в IPC-буфер
+        // ушедшего вызывателя.
         let cancel = PortCancel {
             port: ep.clone(),
             waker: waker.clone(),
             outcome: outcome.clone(),
-            reply_slot: None,
         };
         CancelTarget::cancel(&cancel);
-        assert_eq!(outcome.raw(), OutcomeSlot::TIMEDOUT);
+        assert_eq!(outcome.raw(), OutcomeSlot::CANCELED);
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::CANCELED);
+        assert_eq!(outcome_to_result(&outcome), Err(IpcError::Canceled));
 
         // Поздний reply отвергнут - сервер получает PeerClosed.
         let server = transport(BASE_B);
@@ -1293,11 +1288,37 @@ mod tests {
 
         // Идемпотентность: повторный cancel - no-op.
         CancelTarget::cancel(&cancel);
-        assert_eq!(outcome.raw(), OutcomeSlot::TIMEDOUT);
+        assert_eq!(outcome.raw(), OutcomeSlot::CANCELED);
     }
 
     #[test]
-    fn port_cancel_releases_reply_abandoned_by_receiver() {
+    fn port_cancel_of_a_queued_caller_resolves_its_wait() {
+        let rt = StubRuntime::arc();
+        let dyn_rt: Arc<dyn KernelRuntime> = rt.clone();
+        let ep = Port::new();
+        let _receiver = receiver_capability(&ep);
+        let CallAction::Park { waker, outcome } = ep.call(&transport(BASE_A), &rt, None, None)
+        else {
+            panic!("call must park");
+        };
+
+        let cancel = PortCancel {
+            port: ep.clone(),
+            waker: waker.clone(),
+            outcome: outcome.clone(),
+        };
+        CancelTarget::cancel(&cancel);
+
+        assert_eq!(outcome.raw(), OutcomeSlot::CANCELED);
+        assert_eq!(waker.state().load(Ordering::Acquire), ParkState::CANCELED);
+        assert_eq!(
+            resolve_call(&ep, &dyn_rt, &waker, &outcome, None),
+            Err(IpcError::Canceled)
+        );
+    }
+
+    #[test]
+    fn port_cancel_after_match_leaves_the_reply_to_the_receiver() {
         let rt = StubRuntime::arc();
         let ep = Port::new();
         let _receiver = receiver_capability(&ep);
@@ -1311,36 +1332,30 @@ mod tests {
         };
 
         let CallAction::Park {
-            waker: caller_waker,
             outcome: caller_outcome,
+            ..
         } = ep.call(&transport(BASE_A), &rt, None, None)
         else {
             panic!("call must park");
         };
         assert_eq!(caller_outcome.raw(), OutcomeSlot::AWAITING_REPLY);
 
-        // Терминация получателя между матчем и изъятием reply: Waiter уже снят
-        // с очереди, и reply достижим только через слот.
+        // Отмена получателя после матча не отнимает у него доставленный кадр, потому что
+        // поток разбужен доставкой и сам забирает reply.
         let cancel = PortCancel {
             port: ep.clone(),
-            waker: receiver_waker,
-            outcome: receiver_outcome,
-            reply_slot: Some(reply_slot.clone()),
+            waker: receiver_waker.clone(),
+            outcome: receiver_outcome.clone(),
         };
         CancelTarget::cancel(&cancel);
-        let abandoned = cancel
-            .take_abandoned_reply()
-            .expect("cancel yields the abandoned reply");
-        // Слот опустошён, и нормальный путь изъятия того же reply уже ничего не найдёт.
-        assert!(reply_slot.take().is_none());
-        assert!(cancel.take_abandoned_reply().is_none());
-
-        abandoned.cancel();
-        assert_eq!(caller_outcome.get(), Some(RendezvousOutcome::PeerGone));
+        assert_eq!(receiver_outcome.get(), Some(RendezvousOutcome::Delivered));
         assert_eq!(
-            caller_waker.state().load(Ordering::Acquire),
-            ParkState::CANCELED
+            receiver_waker.state().load(Ordering::Acquire),
+            ParkState::SIGNALED
         );
+        let reply = reply_slot.take();
+        assert!(reply.is_some());
+        assert_eq!(caller_outcome.raw(), OutcomeSlot::AWAITING_REPLY);
     }
 
     #[test]

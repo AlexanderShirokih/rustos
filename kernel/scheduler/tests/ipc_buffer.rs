@@ -116,7 +116,7 @@ fn with_frame_allocator_user_thread_attaches_one_ipc_buffer_region() {
 }
 
 #[test]
-fn terminate_thread_releases_its_ipc_buffer_region() {
+fn thread_exiting_at_its_boundary_releases_its_ipc_buffer_region() {
     reset_switches();
     let factory = factory_static(PageMapperFactory::new());
     let timer = MockTimer::new();
@@ -135,17 +135,31 @@ fn terminate_thread_releases_its_ipc_buffer_region() {
     mark_loaded(&handle, &process);
     let pid = scheduler.process_id_for(&process).expect("pid lookup");
 
-    let thread_object = handle
+    // Второй поток держит процесс живым, пока первый выходит.
+    let first = handle
         .create_user_thread(&process, user_entry())
-        .expect("create_user_thread");
-    assert_eq!(scheduler.process_user_vm_region_count(pid), Some(1));
-
-    // Терминация должна снять PTE и вернуть range IPC-буфера в user_vm -
-    // иначе регион висел бы до сноса AS (регрессия на утечку фрейма).
+        .expect("create first thread");
     handle
-        .terminate_thread(&thread_object, 0)
-        .expect("terminate");
-    assert_eq!(scheduler.process_user_vm_region_count(pid), Some(0));
+        .create_user_thread(&process, user_entry())
+        .expect("create second thread");
+    assert_eq!(scheduler.process_user_vm_region_count(pid), Some(2));
+
+    let running = scheduler.run();
+    assert!(Arc::ptr_eq(
+        &handle.current_thread_object().expect("current"),
+        &first
+    ));
+    handle.terminate_process(&process, 0).expect("terminate");
+    assert_eq!(
+        running.process_user_vm_region_count(pid),
+        Some(2),
+        "a thread keeps its IPC buffer until it reaches its boundary",
+    );
+
+    // Выход должен снять PTE и вернуть range IPC-буфера в user_vm - иначе регион висел бы
+    // до сноса AS (регрессия на утечку фрейма).
+    capability::KernelRuntime::exit_if_requested(&handle);
+    assert_eq!(running.process_user_vm_region_count(pid), Some(1));
 }
 
 #[test]

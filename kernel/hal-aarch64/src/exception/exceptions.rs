@@ -183,6 +183,78 @@ extern "C" fn exception_handler(frame: &mut ExceptionFrame, kind: ExceptionKind)
     }
 }
 
+extern "C" fn exception_exit(frame: &ExceptionFrame) {
+    // Граница возврата в EL0. Кадры обработчика уже размотаны, IRQ подтверждено, и поток с
+    // запросом выхода завершается здесь, не вернувшись в код пользователя.
+    if originates_from_el0(frame.spsr) {
+        capability::exit_if_requested();
+    }
+}
+
+// SAFETY: `sp` указывает на `ExceptionFrame`, который положил вектор исключения либо
+// `el0_entry_shim`, а IRQ замаскированы до `eret`.
+#[unsafe(naked)]
+pub(crate) unsafe extern "C" fn exception_return() -> ! {
+    naked_asm!(
+        "mov x0, sp",
+        "bl  {exit}",
+
+        // Системные регистры (до восстановления GPR, т.к. x9/x10 - временные)
+        "ldp x9,  x10, [sp, #256]",
+        "msr elr_el1,  x9",
+        "msr spsr_el1, x10",
+        "ldp x9,  x10, [sp, #288]",
+        "msr sp_el0,  x9",
+        "msr tpidr_el0, x10",
+
+        // SIMD/FP: запись FPCR синхронизирует сам `eret` как context synchronization
+        // event, отдельный `isb` не нужен.
+        "ldr x9,  [sp, #816]",
+        "msr fpcr, x9",
+        "ldr x9,  [sp, #824]",
+        "msr fpsr, x9",
+        "ldp q0,  q1,  [sp, #304]",
+        "ldp q2,  q3,  [sp, #336]",
+        "ldp q4,  q5,  [sp, #368]",
+        "ldp q6,  q7,  [sp, #400]",
+        "ldp q8,  q9,  [sp, #432]",
+        "ldp q10, q11, [sp, #464]",
+        "ldp q12, q13, [sp, #496]",
+        "ldp q14, q15, [sp, #528]",
+        "ldp q16, q17, [sp, #560]",
+        "ldp q18, q19, [sp, #592]",
+        "ldp q20, q21, [sp, #624]",
+        "ldp q22, q23, [sp, #656]",
+        "ldp q24, q25, [sp, #688]",
+        "ldp q26, q27, [sp, #720]",
+        "ldp q28, q29, [sp, #752]",
+        "ldp q30, q31, [sp, #784]",
+
+        // Регистры общего назначения
+        "ldp x0,  x1,  [sp, #0]",
+        "ldp x2,  x3,  [sp, #16]",
+        "ldp x4,  x5,  [sp, #32]",
+        "ldp x6,  x7,  [sp, #48]",
+        "ldp x8,  x9,  [sp, #64]",
+        "ldp x10, x11, [sp, #80]",
+        "ldp x12, x13, [sp, #96]",
+        "ldp x14, x15, [sp, #112]",
+        "ldp x16, x17, [sp, #128]",
+        "ldp x18, x19, [sp, #144]",
+        "ldp x20, x21, [sp, #160]",
+        "ldp x22, x23, [sp, #176]",
+        "ldp x24, x25, [sp, #192]",
+        "ldp x26, x27, [sp, #208]",
+        "ldp x28, x29, [sp, #224]",
+        "ldr x30, [sp, #240]",
+
+        "add sp, sp, #{frame_size}",
+        "eret",
+        frame_size = const core::mem::size_of::<ExceptionFrame>(),
+        exit = sym exception_exit,
+    )
+}
+
 fn sync_handler(frame: &mut ExceptionFrame) {
     if frame.esr.exception_class() == ExceptionClass::Svc {
         syscall_kernel::dispatch(frame);
@@ -346,61 +418,12 @@ macro_rules! exception_entry {
                 "mov x1, #{kind}",
                 "bl  {handler}",
 
-                // Системные регистры (до восстановления GPR, т.к. x9/x10 - временные)
-                "ldp x9,  x10, [sp, #256]",
-                "msr elr_el1,  x9",
-                "msr spsr_el1, x10",
-                "ldp x9,  x10, [sp, #288]",
-                "msr sp_el0,  x9",
-                "msr tpidr_el0, x10",
-
-                // SIMD/FP: запись FPCR синхронизирует сам `eret` как context synchronization
-                // event, отдельный `isb` не нужен.
-                "ldr x9,  [sp, #816]",
-                "msr fpcr, x9",
-                "ldr x9,  [sp, #824]",
-                "msr fpsr, x9",
-                "ldp q0,  q1,  [sp, #304]",
-                "ldp q2,  q3,  [sp, #336]",
-                "ldp q4,  q5,  [sp, #368]",
-                "ldp q6,  q7,  [sp, #400]",
-                "ldp q8,  q9,  [sp, #432]",
-                "ldp q10, q11, [sp, #464]",
-                "ldp q12, q13, [sp, #496]",
-                "ldp q14, q15, [sp, #528]",
-                "ldp q16, q17, [sp, #560]",
-                "ldp q18, q19, [sp, #592]",
-                "ldp q20, q21, [sp, #624]",
-                "ldp q22, q23, [sp, #656]",
-                "ldp q24, q25, [sp, #688]",
-                "ldp q26, q27, [sp, #720]",
-                "ldp q28, q29, [sp, #752]",
-                "ldp q30, q31, [sp, #784]",
-
-                // Регистры общего назначения
-                "ldp x0,  x1,  [sp, #0]",
-                "ldp x2,  x3,  [sp, #16]",
-                "ldp x4,  x5,  [sp, #32]",
-                "ldp x6,  x7,  [sp, #48]",
-                "ldp x8,  x9,  [sp, #64]",
-                "ldp x10, x11, [sp, #80]",
-                "ldp x12, x13, [sp, #96]",
-                "ldp x14, x15, [sp, #112]",
-                "ldp x16, x17, [sp, #128]",
-                "ldp x18, x19, [sp, #144]",
-                "ldp x20, x21, [sp, #160]",
-                "ldp x22, x23, [sp, #176]",
-                "ldp x24, x25, [sp, #192]",
-                "ldp x26, x27, [sp, #208]",
-                "ldp x28, x29, [sp, #224]",
-                "ldr x30, [sp, #240]",
-
-                "add sp, sp, #{frame_size}",
-                "eret",
+                "b   {exception_return}",
 
                 frame_size = const core::mem::size_of::<ExceptionFrame>(),
                 kind       = const ($kind),
                 handler    = sym exception_handler,
+                exception_return = sym exception_return,
             );
         }
     };

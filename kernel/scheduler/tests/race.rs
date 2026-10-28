@@ -16,6 +16,7 @@ use std::{
     thread,
 };
 
+use capability::KernelRuntime;
 use scheduler::{
     CpuEntry, CpuId, Scheduler, SchedulerConfig, SchedulerHandle, SchedulerServiceExt, SpawnConfig,
     ThreadId, Uninit,
@@ -57,12 +58,18 @@ impl Contention {
     fn tick(&self) {
         let now_ns = self.now_ns.fetch_add(TICK_NS, Ordering::Relaxed) + TICK_NS;
         self.timer.advance_to(now_ns);
-        with_simulated_irq(|| self.handle.on_timer_tick(now_ns));
+        with_simulated_irq(|| {
+            self.handle.on_timer_tick(now_ns);
+            KernelRuntime::exit_if_requested(&self.handle);
+        });
     }
 
     fn reschedule(&self) {
         // Перевыбор по чужой просьбе идёт тем же путём, что обработчик SGI.
-        with_simulated_irq(|| self.handle.on_reschedule());
+        with_simulated_irq(|| {
+            self.handle.on_reschedule();
+            KernelRuntime::exit_if_requested(&self.handle);
+        });
     }
 
     fn spawn_worker(&self) {
@@ -153,7 +160,8 @@ fn race_terminating_a_thread_while_cpus_tick_never_loses_its_slot() {
         })
         .collect();
 
-    // Boot CPU терминирует пул, пока соседи вытесняют и переселяют его потоки.
+    // Boot CPU снимает пул, пока соседи вытесняют и переселяют его потоки, а потоки
+    // доходят до границы возврата в EL0 на тех CPU, где их застал запрос.
     set_current_cpu(CpuId::ZERO);
     contention.start.wait();
     for (index, object) in objects.iter().enumerate() {
